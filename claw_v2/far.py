@@ -121,56 +121,72 @@ def assess_far(
     )
 
     for claim in claims:
-        if claim.claim_type == "fact" and not any(ref.kind in VERIFICATION_EVIDENCE_KINDS for ref in claim.evidence_refs):
-            flags.append(_flag(
-                "missing_tool_evidence",
-                "medium",
-                f"Claim {claim.claim_id} is factual without tool evidence.",
-                "Attach tool_call, file_read, or external_api evidence.",
-            ))
+        if claim.claim_type == "fact" and not any(
+            ref.kind in VERIFICATION_EVIDENCE_KINDS for ref in claim.evidence_refs
+        ):
+            flags.append(
+                _flag(
+                    "missing_tool_evidence",
+                    "medium",
+                    f"Claim {claim.claim_id} is factual without tool evidence.",
+                    "Attach tool_call, file_read, or external_api evidence.",
+                )
+            )
         if claim.verification_status == "stale":
-            flags.append(_flag(
-                "stale_evidence",
-                "medium",
-                f"Claim {claim.claim_id} is stale.",
-                "Refresh the evidence before relying on this claim.",
-            ))
+            flags.append(
+                _flag(
+                    "stale_evidence",
+                    "medium",
+                    f"Claim {claim.claim_id} is stale.",
+                    "Refresh the evidence before relying on this claim.",
+                )
+            )
         if claim.verification_status == "contradicted":
-            flags.append(_flag(
-                "conflicting_claims",
-                "high",
-                f"Claim {claim.claim_id} is contradicted.",
-                "Resolve the contradiction or downgrade the decision.",
-            ))
+            flags.append(
+                _flag(
+                    "conflicting_claims",
+                    "high",
+                    f"Claim {claim.claim_id} is contradicted.",
+                    "Resolve the contradiction or downgrade the decision.",
+                )
+            )
         if claim.claim_type == "assumption":
-            flags.append(_flag(
-                "assumption_required",
-                "low",
-                f"Claim {claim.claim_id} is an assumption.",
-                "Confirm the assumption or keep it out of factual confidence.",
-            ))
+            flags.append(
+                _flag(
+                    "assumption_required",
+                    "low",
+                    f"Claim {claim.claim_id} is an assumption.",
+                    "Confirm the assumption or keep it out of factual confidence.",
+                )
+            )
 
     if action_tier in {"tier_2_5", "tier_3"} and not external_state_verified:
-        flags.append(_flag(
-            "external_state_unknown",
-            "high" if action_tier == "tier_3" else "medium",
-            "Sensitive action lacks fresh external-state verification.",
-            "Verify external state with a tool before proceeding.",
-        ))
+        flags.append(
+            _flag(
+                "external_state_unknown",
+                "high" if action_tier == "tier_3" else "medium",
+                "Sensitive action lacks fresh external-state verification.",
+                "Verify external state with a tool before proceeding.",
+            )
+        )
     if not tool_evidence_refs and claims:
-        flags.append(_flag(
-            "low_observability",
-            "medium",
-            "Claims do not leave enough tool-grounded evidence.",
-            "Capture verifiable evidence or reduce confidence.",
-        ))
+        flags.append(
+            _flag(
+                "low_observability",
+                "medium",
+                "Claims do not leave enough tool-grounded evidence.",
+                "Capture verifiable evidence or reduce confidence.",
+            )
+        )
     if action_tier == "tier_3" and not user_confirmation_present:
-        flags.append(_flag(
-            "user_confirmation_needed",
-            "critical",
-            "Tier-3 action requires explicit human confirmation.",
-            "Ask the human before proceeding.",
-        ))
+        flags.append(
+            _flag(
+                "user_confirmation_needed",
+                "critical",
+                "Tier-3 action requires explicit human confirmation.",
+                "Ask the human before proceeding.",
+            )
+        )
 
     basis = ConfidenceBasis(
         verified_claims=verified_claims,
@@ -202,11 +218,14 @@ def record_far_assessment(
     if observe is not None:
         observe.emit("far_assessment", payload=payload)
         if any(flag.severity == "critical" for flag in assessment.doubt_flags):
-            observe.emit("risk_escalated", payload={
-                "goal_id": assessment.goal_id,
-                "assessment_id": assessment.assessment_id,
-                "reason": "critical_far_doubt_flag",
-            })
+            observe.emit(
+                "risk_escalated",
+                payload={
+                    "goal_id": assessment.goal_id,
+                    "assessment_id": assessment.assessment_id,
+                    "reason": "critical_far_doubt_flag",
+                },
+            )
     return assessment
 
 
@@ -244,9 +263,11 @@ def _confidence(basis: ConfidenceBasis, flags: list[DoubtFlag], *, total_claims:
 def _recommended_decision(flags: list[DoubtFlag]) -> RecommendedDecision:
     if any(flag.flag == "user_confirmation_needed" for flag in flags):
         return "ask_human"
-    if any(flag.flag == "conflicting_claims" and flag.severity in {"high", "critical"} for flag in flags):
+    if any(
+        flag.flag == "conflicting_claims" and flag.severity in {"high", "critical"}
+        for flag in flags
+    ):
         return "block"
     if any(flag.severity in {"medium", "high", "critical"} for flag in flags):
         return "revise"
     return "continue"
-

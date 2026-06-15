@@ -5,6 +5,7 @@ asks SkillRegistry to generate a skill for any cluster that meets the
 minimum size threshold. Each candidate can be gated through Evaluator
 before adoption — bad clusters don't ship bad skills.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -80,7 +81,10 @@ class AutoExpandSkillsTests(unittest.TestCase):
         _, memory, loop = self._setup(observe)
         _seed_failures(memory, tag="chrome_cdp_login", count=5)
         skill_registry = MagicMock()
-        skill_registry.generate_skill.return_value = {"success": True, "name": "chrome_login_handler"}
+        skill_registry.generate_skill.return_value = {
+            "success": True,
+            "name": "chrome_login_handler",
+        }
 
         result = loop.auto_expand_skills(skill_registry=skill_registry)
 
@@ -112,7 +116,10 @@ class AutoExpandSkillsTests(unittest.TestCase):
         _, memory, loop = self._setup()
         _seed_failures(memory, tag="unstable_provider", count=5)
         skill_registry = MagicMock()
-        skill_registry.generate_skill.return_value = {"success": False, "error": "router_unavailable"}
+        skill_registry.generate_skill.return_value = {
+            "success": False,
+            "error": "router_unavailable",
+        }
 
         result = loop.auto_expand_skills(skill_registry=skill_registry)
 

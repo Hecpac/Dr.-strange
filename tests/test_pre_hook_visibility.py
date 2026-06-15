@@ -53,6 +53,7 @@ class PreHookVisibilityTests(unittest.TestCase):
             events.append(event)
 
         from claw_v2.config import AppConfig
+
         config = AppConfig.from_env()
         router = LLMRouter(
             config=config,
@@ -65,6 +66,7 @@ class PreHookVisibilityTests(unittest.TestCase):
     def test_pre_hook_blocked_returns_reason_not_opaque(self) -> None:
         def cost_gate(request: LLMRequest):
             return None
+
         cost_gate.block_reason = "daily_cost_limit_exceeded"
 
         router, events = self._make_router(cost_gate)
@@ -132,7 +134,10 @@ class PreHookVisibilityTests(unittest.TestCase):
                 payload = json.loads(response)
                 self.assertIn("pre_hook_blocks", payload)
                 self.assertEqual(payload["pre_hook_blocks"]["count"], 4)
-                top = {entry["hook"]: entry["count"] for entry in payload["pre_hook_blocks"]["top_hooks"]}
+                top = {
+                    entry["hook"]: entry["count"]
+                    for entry in payload["pre_hook_blocks"]["top_hooks"]
+                }
                 self.assertEqual(top.get("cost_gate"), 3)
                 self.assertEqual(top.get("rate_limit"), 1)
 
@@ -206,6 +211,7 @@ class PreHookVisibilityTests(unittest.TestCase):
         def cost_gate(request: LLMRequest):
             invocations["count"] += 1
             return None
+
         cost_gate.block_reason = "test_reason"
 
         router, _ = self._make_router(cost_gate)

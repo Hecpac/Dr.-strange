@@ -88,10 +88,7 @@ def _drive_with_brain_content(content: str) -> tuple[str | None, list[str]]:
                 text=F3B2_PLAN_REQUEST,
                 runtime_channel="telegram",
             )
-            events = [
-                event["event_type"]
-                for event in runtime.observe.recent_events(limit=60)
-            ]
+            events = [event["event_type"] for event in runtime.observe.recent_events(limit=60)]
             return result, events
 
 
@@ -150,10 +147,7 @@ def test_plan_request_still_blocks_explicit_unverified_execution_report() -> Non
                 text="arregla el bug del ledger",
                 runtime_channel="telegram",
             )
-            events = [
-                event["event_type"]
-                for event in runtime.observe.recent_events(limit=60)
-            ]
+            events = [event["event_type"] for event in runtime.observe.recent_events(limit=60)]
 
     assert response is not None
     assert "Decime qué disparo" in response

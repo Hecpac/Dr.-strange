@@ -5,13 +5,24 @@ from typing import Any
 
 _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b\d{8,12}:[A-Za-z0-9_\-]{30,}\b"), "<REDACTED:telegram_token>"),
-    (re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"), "[REDACTED]"),
-    (re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.(?:\[REDACTED\]|<REDACTED(?::[^>]+)?>|[A-Za-z0-9_\-]{10,})\.[A-Za-z0-9_\-]{10,}\b"), "[REDACTED]"),
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
+        "[REDACTED]",
+    ),
+    (
+        re.compile(
+            r"\beyJ[A-Za-z0-9_\-]{10,}\.(?:\[REDACTED\]|<REDACTED(?::[^>]+)?>|[A-Za-z0-9_\-]{10,})\.[A-Za-z0-9_\-]{10,}\b"
+        ),
+        "[REDACTED]",
+    ),
     # Truncated/2-segment JWT fallback: a header.payload prefix whose 3rd
     # segment was cut off (e.g. text sliced to 80 chars before redaction)
     # still leaks a usable token, so redact header.payload with an optional
     # 3rd segment. Header alone (no dot) is not a credential and is left.
-    (re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}(?:\.[A-Za-z0-9_\-]+)?"), "[REDACTED]"),
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}(?:\.[A-Za-z0-9_\-]+)?"),
+        "[REDACTED]",
+    ),
     (re.compile(r"\+1[\s.-]?\d{10}\b"), "[REDACTED:phone]"),
     (re.compile(r"\b(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b"), "[REDACTED:phone]"),
     # Generic high-entropy catcher. Hardened 2026-05-11 after adversarial
@@ -20,13 +31,21 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # AND >=8 digits AND mixed case. This avoids matching camelCase
     # identifiers and mixed-case UUIDs while still catching long monolithic
     # API keys. Prefix-based patterns below handle shorter tokens.
-    (re.compile(r"\b(?=[A-Za-z0-9_]{32,}\b)(?=(?:[A-Za-z_]*\d){8,})(?=[A-Z0-9_]*[a-z])(?=[a-z0-9_]*[A-Z])[A-Za-z0-9_]+\b"), "[REDACTED]"),
+    (
+        re.compile(
+            r"\b(?=[A-Za-z0-9_]{32,}\b)(?=(?:[A-Za-z_]*\d){8,})(?=[A-Z0-9_]*[a-z])(?=[a-z0-9_]*[A-Z])[A-Za-z0-9_]+\b"
+        ),
+        "[REDACTED]",
+    ),
     (re.compile(r"sk-[A-Za-z0-9_\-]{20,}"), "[REDACTED]"),
     (re.compile(r"ghp_[A-Za-z0-9_]{20,}"), "[REDACTED]"),
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED]"),
     (re.compile(r"AIza[0-9A-Za-z_\-]{20,}"), "[REDACTED]"),
     (re.compile(r"Bearer\s+[A-Za-z0-9._\-]{16,}"), "[REDACTED]"),
-    (re.compile(r"(?i)([?&](?:token|key|api_key|access_token|approval_token)=)[^&\s]+"), "[REDACTED]"),
+    (
+        re.compile(r"(?i)([?&](?:token|key|api_key|access_token|approval_token)=)[^&\s]+"),
+        "[REDACTED]",
+    ),
     (re.compile(r"(?i)approval_token['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{8,}['\"]?"), "[REDACTED]"),
     (re.compile(r"/approve\s+[A-Za-z0-9_\-]+\s+[A-Za-z0-9_\-]+"), "[REDACTED]"),
     (re.compile(r"/social_approve\s+[A-Za-z0-9_\-]+\s+[A-Za-z0-9_\-]+"), "[REDACTED]"),
@@ -34,19 +53,31 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"/pipeline_approve\s+[A-Za-z0-9_\-]+\s+[A-Za-z0-9_\-]+"), "[REDACTED]"),
     (re.compile(r"xoxb-[A-Za-z0-9\-]{20,}"), "[REDACTED]"),
     (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED]"),
-    (re.compile(r"(?i)(OPENAI|ANTHROPIC|GOOGLE|SLACK_BOT|LINEAR|HEYGEN|FIRECRAWL)_API_KEY\s*[:=]\s*\S+"), "[REDACTED]"),
-    (re.compile(r"(?i)(secret|password|api_key|access_token)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{8,}['\"]?"), "[REDACTED]"),
+    (
+        re.compile(
+            r"(?i)(OPENAI|ANTHROPIC|GOOGLE|SLACK_BOT|LINEAR|HEYGEN|FIRECRAWL)_API_KEY\s*[:=]\s*\S+"
+        ),
+        "[REDACTED]",
+    ),
+    (
+        re.compile(
+            r"(?i)(secret|password|api_key|access_token)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{8,}['\"]?"
+        ),
+        "[REDACTED]",
+    ),
 )
 
-_REDACTED_FIELDS = frozenset({
-    "approval_token",
-    "token",
-    "secret",
-    "password",
-    "api_key",
-    "access_token",
-    "bearer",
-})
+_REDACTED_FIELDS = frozenset(
+    {
+        "approval_token",
+        "token",
+        "secret",
+        "password",
+        "api_key",
+        "access_token",
+        "bearer",
+    }
+)
 
 _REDACTED_FIELD_FRAGMENTS = (
     "token",

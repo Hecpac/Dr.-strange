@@ -1,10 +1,13 @@
 """Tests for the PlaybookLoader system."""
+
 from pathlib import Path
 
 from claw_v2.playbook_loader import PlaybookLoader, _parse_playbook
 
 
-def _write_playbook(directory: Path, name: str, triggers: list[str], body: str, priority: int = 0) -> Path:
+def _write_playbook(
+    directory: Path, name: str, triggers: list[str], body: str, priority: int = 0
+) -> Path:
     lines = ["---", f"name: {name}", "triggers:"]
     for t in triggers:
         lines.append(f"  - {t}")

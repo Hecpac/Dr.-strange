@@ -46,22 +46,38 @@ class ActiveRecallTests(unittest.TestCase):
         result = RecallResult(
             request_id=request.request_id,
             goal_id="g_1",
-            hits=search_recall_hits("telemetry redaction", [
-                {"memory_id": "m_1", "summary": "Telemetry redaction must hide tokens", "source": "MEMORY.md"}
-            ]),
+            hits=search_recall_hits(
+                "telemetry redaction",
+                [
+                    {
+                        "memory_id": "m_1",
+                        "summary": "Telemetry redaction must hide tokens",
+                        "source": "MEMORY.md",
+                    }
+                ],
+            ),
         )
         record_recall_result(self.root, result, observe=observe)
 
         records = load_recall_records(self.root)
         self.assertEqual(records[0]["schema_version"], RECALL_REQUEST_SCHEMA_VERSION)
         self.assertEqual(records[1]["schema_version"], RECALL_RESULT_SCHEMA_VERSION)
-        self.assertEqual([event[0] for event in observe.events], ["recall_requested", "recall_result_recorded"])
+        self.assertEqual(
+            [event[0] for event in observe.events], ["recall_requested", "recall_result_recorded"]
+        )
 
     def test_search_orders_relevant_hits(self) -> None:
-        hits = search_recall_hits("deploy verification telemetry", [
-            {"memory_id": "m_low", "summary": "Only deploy notes", "source": "MEMORY.md"},
-            {"memory_id": "m_high", "summary": "Deploy verification telemetry evidence", "source": "MEMORY.md"},
-        ])
+        hits = search_recall_hits(
+            "deploy verification telemetry",
+            [
+                {"memory_id": "m_low", "summary": "Only deploy notes", "source": "MEMORY.md"},
+                {
+                    "memory_id": "m_high",
+                    "summary": "Deploy verification telemetry evidence",
+                    "source": "MEMORY.md",
+                },
+            ],
+        )
 
         self.assertEqual(hits[0].memory_id, "m_high")
 
@@ -98,4 +114,3 @@ class ActiveRecallTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -148,7 +148,14 @@ _PATH_KEYS = frozenset(
 )
 _URL_KEYS = frozenset({"url", "target", "endpoint", "base_url", "callback_url", "image_url"})
 _URL_LIST_KEYS = frozenset({"urls", "redirect_chain"})
-_SYSTEM_ROOTS = [Path("/usr"), Path("/bin"), Path("/sbin"), Path("/opt"), Path("/tmp"), Path("/private/tmp")]
+_SYSTEM_ROOTS = [
+    Path("/usr"),
+    Path("/bin"),
+    Path("/sbin"),
+    Path("/opt"),
+    Path("/tmp"),
+    Path("/private/tmp"),
+]
 _DEFAULT_TOOL_URLS = {
     "HeyGenVideo": ("https://api.heygen.com/",),
     "heygen.video.generate": ("https://api.heygen.com/",),
@@ -231,7 +238,9 @@ class RuntimePolicyEngine:
         tool_args = dict(args or {})
         policy = self.policies.get(tool_name)
         if policy is None:
-            raise RuntimePolicyViolation(f"Tool '{tool_name}' is not declared in tool_policies.json")
+            raise RuntimePolicyViolation(
+                f"Tool '{tool_name}' is not declared in tool_policies.json"
+            )
 
         contexts = _context_candidates(context)
         if not contexts.intersection(policy.allowed_contexts):
@@ -242,7 +251,9 @@ class RuntimePolicyEngine:
 
         action_mutates = bool(mutates_state)
         if policy.read_only and action_mutates:
-            raise RuntimePolicyViolation(f"Tool '{tool_name}' is read-only by policy but requested mutation")
+            raise RuntimePolicyViolation(
+                f"Tool '{tool_name}' is read-only by policy but requested mutation"
+            )
 
         if tool_name == "Bash":
             self._enforce_command(str(tool_args.get("command") or ""))
@@ -277,7 +288,9 @@ class RuntimePolicyEngine:
             )
             gate(definition, tool_args)
 
-        return RuntimePolicyDecision(tool_name=tool_name, policy=policy, approval_required=approval_required)
+        return RuntimePolicyDecision(
+            tool_name=tool_name, policy=policy, approval_required=approval_required
+        )
 
     def _enforce_command(self, command: str) -> None:
         if self.sandbox_policy is None:
@@ -300,7 +313,10 @@ class RuntimePolicyEngine:
             if not _is_path_token(path_token, self.sandbox_policy):
                 continue
             normalized = _resolve_path_for_policy(Path(path_token), self.sandbox_policy)
-            roots = [root.expanduser().resolve(strict=False) for root in _path_roots(self.sandbox_policy, _SYSTEM_ROOTS)]
+            roots = [
+                root.expanduser().resolve(strict=False)
+                for root in _path_roots(self.sandbox_policy, _SYSTEM_ROOTS)
+            ]
             if not any(_is_relative_to(normalized, root) for root in roots):
                 raise RuntimePolicyViolation("command references path outside allowed boundaries")
             if path_is_secret(normalized) or path_is_secret(path_token):
@@ -310,7 +326,9 @@ class RuntimePolicyEngine:
         for key, raw_path in _iter_path_values(args):
             self._validate_path_value(tool_name, key, raw_path, policy)
 
-    def _validate_path_value(self, tool_name: str, key: str, raw_path: str, policy: ToolPolicy) -> Path:
+    def _validate_path_value(
+        self, tool_name: str, key: str, raw_path: str, policy: ToolPolicy
+    ) -> Path:
         if not raw_path.strip():
             return self.workspace_root
         decoded_path = _decode_path_text(raw_path)
@@ -325,17 +343,27 @@ class RuntimePolicyEngine:
         if not candidate.is_absolute():
             candidate = self.workspace_root / candidate
         resolved = candidate.resolve(strict=False)
-        if path_is_secret(decoded_path) or path_is_secret(resolved) or _blocked_by_policy(decoded_path, resolved, policy):
-            raise RuntimePolicyViolation(f"Tool '{tool_name}' may not access secret path in '{key}'")
+        if (
+            path_is_secret(decoded_path)
+            or path_is_secret(resolved)
+            or _blocked_by_policy(decoded_path, resolved, policy)
+        ):
+            raise RuntimePolicyViolation(
+                f"Tool '{tool_name}' may not access secret path in '{key}'"
+            )
 
         allowed_roots = self._allowed_roots_for_policy(policy)
         if not any(_is_relative_to(resolved, root) for root in allowed_roots):
-            raise RuntimePolicyViolation(f"Tool '{tool_name}' path '{key}' is outside allowed roots")
+            raise RuntimePolicyViolation(
+                f"Tool '{tool_name}' path '{key}' is outside allowed roots"
+            )
         return resolved
 
     def _allowed_roots_for_policy(self, policy: ToolPolicy) -> list[Path]:
         if policy.allowed_paths:
-            roots = [_expand_policy_root(value, self.workspace_root) for value in policy.allowed_paths]
+            roots = [
+                _expand_policy_root(value, self.workspace_root) for value in policy.allowed_paths
+            ]
         elif self.sandbox_policy is not None:
             roots = _path_roots(self.sandbox_policy)
         else:
@@ -368,7 +396,9 @@ class RuntimePolicyEngine:
         for url in urls:
             decision = enforcer.enforce_url(url, policy=network_policy, actor=context)
             if not decision.allowed:
-                raise RuntimePolicyViolation(f"Tool '{tool_name}' network target blocked: {decision.reason}")
+                raise RuntimePolicyViolation(
+                    f"Tool '{tool_name}' network target blocked: {decision.reason}"
+                )
 
 
 def _tier_for_policy(policy: ToolPolicy) -> int:
@@ -452,7 +482,11 @@ def _blocked_by_policy(raw_path: str, resolved: Path, policy: ToolPolicy) -> boo
     if not policy.blocked_path_patterns:
         return False
     candidates = (raw_path, str(resolved), resolved.name)
-    return any(fnmatch.fnmatch(candidate, pattern) for pattern in policy.blocked_path_patterns for candidate in candidates)
+    return any(
+        fnmatch.fnmatch(candidate, pattern)
+        for pattern in policy.blocked_path_patterns
+        for candidate in candidates
+    )
 
 
 def _expand_policy_root(value: str, workspace_root: Path) -> Path:
@@ -474,7 +508,12 @@ def _expand_policy_root(value: str, workspace_root: Path) -> Path:
 
 
 def _path_roots(policy: SandboxPolicy, system_roots: list[Path] | None = None) -> list[Path]:
-    return [policy.workspace_root, *policy.allowed_paths, *policy.writable_paths, *(system_roots or [])]
+    return [
+        policy.workspace_root,
+        *policy.allowed_paths,
+        *policy.writable_paths,
+        *(system_roots or []),
+    ]
 
 
 def _resolve_path_for_policy(path: Path, policy: SandboxPolicy) -> Path:

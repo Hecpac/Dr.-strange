@@ -117,7 +117,8 @@ class P0RuntimeWiringTests(unittest.TestCase):
             self.assertEqual(result["ok"], True)
             kinds = [name for name, _ in captured]
             self.assertIn(
-                "p0_telemetry_failed", kinds,
+                "p0_telemetry_failed",
+                kinds,
                 f"Expected p0_telemetry_failed in {kinds}",
             )
 
@@ -151,7 +152,8 @@ class P0RuntimeWiringTests(unittest.TestCase):
             self.assertEqual(result["ok"], True)
             kinds = [name for name, _ in captured]
             self.assertIn(
-                "p0_telemetry_failed", kinds,
+                "p0_telemetry_failed",
+                kinds,
                 f"Expected p0_telemetry_failed in {kinds}",
             )
 

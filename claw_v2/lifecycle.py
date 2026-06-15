@@ -241,7 +241,9 @@ async def run() -> int:
                 default_user_id=runtime.config.telegram_allowed_user_id,
                 auth_token=runtime.config.web_chat_token,
             ),
-            observability_dashboard=ObservabilityDashboard(runtime.observation_window) if runtime.observation_window is not None else None,
+            observability_dashboard=ObservabilityDashboard(runtime.observation_window)
+            if runtime.observation_window is not None
+            else None,
             host=runtime.config.web_chat_host,
             port=runtime.config.web_chat_port,
         )
@@ -272,7 +274,9 @@ async def run() -> int:
                 raise RuntimeError("Telegram owner message was not delivered")
 
         def _send_observability_telegram_message(message: str) -> None:
-            chat_id_raw = _normalize_chat_id(getattr(runtime.config, "observability_telegram_chat_id", None))
+            chat_id_raw = _normalize_chat_id(
+                getattr(runtime.config, "observability_telegram_chat_id", None)
+            )
             if not chat_id_raw or not transport._app:
                 raise RuntimeError("Telegram observability chat is not available")
             future = asyncio.run_coroutine_threadsafe(
@@ -283,7 +287,9 @@ async def run() -> int:
                 raise RuntimeError("Telegram observability message was not delivered")
 
         def _send_observability_stream_message(message: str) -> None:
-            chat_id_raw = _normalize_chat_id(getattr(runtime.config, "observability_telegram_chat_id", None))
+            chat_id_raw = _normalize_chat_id(
+                getattr(runtime.config, "observability_telegram_chat_id", None)
+            )
             if not chat_id_raw or not transport._app:
                 return
             future = asyncio.run_coroutine_threadsafe(
@@ -291,9 +297,7 @@ async def run() -> int:
                 _loop,
             )
             if not future.result(timeout=20):
-                raise RuntimeError(
-                    "Telegram observability stream message was not delivered"
-                )
+                raise RuntimeError("Telegram observability stream message was not delivered")
 
         if runtime.observation_window is not None and observability_telegram_enabled:
             runtime.observation_window.set_alert_notifier(_send_observability_telegram_message)
@@ -420,19 +424,26 @@ async def run() -> int:
         )
 
         from claw_v2.cron import ScheduledJob as _SJ
-        runtime.scheduler.register(_SJ(
-            name="morning_brief",
-            interval_seconds=300,
-            handler=morning_brief.run_if_due,
-        ))
-        runtime.scheduler.register(_SJ(
-            name="evening_brief",
-            interval_seconds=300,
-            handler=evening_brief.run_if_due,
-        ))
+
+        runtime.scheduler.register(
+            _SJ(
+                name="morning_brief",
+                interval_seconds=300,
+                handler=morning_brief.run_if_due,
+            )
+        )
+        runtime.scheduler.register(
+            _SJ(
+                name="evening_brief",
+                interval_seconds=300,
+                handler=evening_brief.run_if_due,
+            )
+        )
 
         if observability_telegram_enabled:
-            install_operational_alerts(observe=runtime.observe, notify=_send_observability_telegram_message)
+            install_operational_alerts(
+                observe=runtime.observe, notify=_send_observability_telegram_message
+            )
 
         def _nlm_research_fallback(query: str) -> str | None:
             wiki = runtime.bot.wiki
@@ -470,47 +481,63 @@ async def run() -> int:
         )
         runtime.bot.notebooklm = nlm_service
 
-        runtime.scheduler.register(_SJ(
-            name="notebooklm_orchestration_poll",
-            interval_seconds=60,
-            handler=lambda: nlm_service.poll_orchestrations(limit=3),
-        ))
+        runtime.scheduler.register(
+            _SJ(
+                name="notebooklm_orchestration_poll",
+                interval_seconds=60,
+                handler=lambda: nlm_service.poll_orchestrations(limit=3),
+            )
+        )
 
         # NotebookLM → Wiki sync (every 12h)
         if runtime.bot.wiki is not None:
             from claw_v2.cron import ScheduledJob
+
             _wiki_ref = runtime.bot.wiki
             _nlm_ref = nlm_service
-            runtime.scheduler.register(ScheduledJob(
-                name="nlm_wiki_sync",
-                interval_seconds=43200,
-                handler=lambda: _wiki_ref.ingest_from_notebooklm(_nlm_ref),
-            ))
+            runtime.scheduler.register(
+                ScheduledJob(
+                    name="nlm_wiki_sync",
+                    interval_seconds=43200,
+                    handler=lambda: _wiki_ref.ingest_from_notebooklm(_nlm_ref),
+                )
+            )
             # Also let Kairos trigger it on demand
             runtime.kairos.nlm_service = _nlm_ref
 
         # Daily fitness reminder at ~5 AM
         import random as _rnd
+
         _ROUTINES = {
-            0: ("Pecho / Hombro / Tríceps",
+            0: (
+                "Pecho / Hombro / Tríceps",
                 "Bench Press 4x6-8 | Incline DB Press 3x8-10 | Cable Fly 3x12-15 | "
                 "Seated DB Press 4x8-10 | Lateral Raise 4x12-15 | "
-                "Overhead Cable Ext 3x12-15 | Tricep Pushdown 3x15"),
-            1: ("Espalda / Bíceps",
+                "Overhead Cable Ext 3x12-15 | Tricep Pushdown 3x15",
+            ),
+            1: (
+                "Espalda / Bíceps",
                 "Deadlift 4x5-6 | Pull-ups 4x6-10 | Barbell Row 3x8-10 | "
                 "Seated Cable Row 3x10-12 | Face Pull 3x15 | "
-                "Barbell Curl 3x10-12 | Hammer Curl 3x12-15"),
-            2: ("Piernas",
+                "Barbell Curl 3x10-12 | Hammer Curl 3x12-15",
+            ),
+            2: (
+                "Piernas",
                 "Squat 4x6-8 | Romanian Deadlift 3x8-10 | Leg Press 3x10-12 | "
-                "Walking Lunges 3x12/pierna | Leg Curl 3x12-15 | Calf Raise 4x15-20"),
-            3: ("Upper Body (volumen)",
+                "Walking Lunges 3x12/pierna | Leg Curl 3x12-15 | Calf Raise 4x15-20",
+            ),
+            3: (
+                "Upper Body (volumen)",
                 "Incline BB Press 4x8-10 | DB Row 3x10-12 | Dips 3xfallo | "
                 "Lat Pulldown 3x10-12 | Lateral Raise cable 4x15 | "
-                "Reverse Pec Deck 3x15 | Superset Curl+Pushdown 3x12"),
-            4: ("Piernas + Core",
+                "Reverse Pec Deck 3x15 | Superset Curl+Pushdown 3x12",
+            ),
+            4: (
+                "Piernas + Core",
                 "Front Squat 4x8-10 | Bulgarian Split 3x10/pierna | Hip Thrust 4x10-12 | "
                 "Leg Extension 3x15 | Seated Calf 4x15-20 | "
-                "Hanging Leg Raise 3x15 | Cable Woodchop 3x12/lado"),
+                "Hanging Leg Raise 3x15 | Cable Woodchop 3x12/lado",
+            ),
         }
         _QUOTES = [
             "El dolor es temporal. Rendirse es para siempre.",
@@ -551,11 +578,13 @@ async def run() -> int:
             except Exception:
                 logger.debug("Fitness reminder Telegram send skipped", exc_info=True)
 
-        runtime.scheduler.register(_SJ(
-            name="fitness_reminder",
-            interval_seconds=300,
-            handler=_fitness_reminder,
-        ))
+        runtime.scheduler.register(
+            _SJ(
+                name="fitness_reminder",
+                interval_seconds=300,
+                handler=_fitness_reminder,
+            )
+        )
 
         # Daemon health check at 20:58 local — Observer Pattern.
         # Kairos emits daemon_health_check_notification; this consumer only
@@ -578,9 +607,7 @@ async def run() -> int:
             except Exception:
                 logger.exception("daemon health consumer failed to enqueue telegram send")
 
-        runtime.observe.subscribe(
-            "daemon_health_check_notification", _daemon_health_consumer
-        )
+        runtime.observe.subscribe("daemon_health_check_notification", _daemon_health_consumer)
 
         # AH5 (2026-06-11): the 20:58 guard and its off-tick runner are
         # registered in main.build_runtime (next to kairos_tick), so the
@@ -588,11 +615,7 @@ async def run() -> int:
         # consumer lives here.
 
         def _emit_daemon_heartbeat() -> None:
-            web_serving = (
-                web_transport.is_serving()
-                if runtime.config.web_chat_enabled
-                else None
-            )
+            web_serving = web_transport.is_serving() if runtime.config.web_chat_enabled else None
             runtime.observe.emit(
                 "daemon_heartbeat",
                 payload={
@@ -602,21 +625,28 @@ async def run() -> int:
                 },
             )
 
-        runtime.scheduler.register(_SJ(
-            name="daemon_heartbeat",
-            interval_seconds=60,
-            handler=_emit_daemon_heartbeat,
-        ))
+        runtime.scheduler.register(
+            _SJ(
+                name="daemon_heartbeat",
+                interval_seconds=60,
+                handler=_emit_daemon_heartbeat,
+            )
+        )
 
         # Wire ManagedChrome
         managed_chrome = None
-        if runtime.config.chrome_cdp_enabled and runtime.config.browse_backend in {"auto", "chrome_cdp"}:
+        if runtime.config.chrome_cdp_enabled and runtime.config.browse_backend in {
+            "auto",
+            "chrome_cdp",
+        }:
             try:
                 managed_chrome = ManagedChrome(port=runtime.config.claw_chrome_port)
                 managed_chrome.start()
                 runtime.bot.set_capability_status("chrome_cdp", available=True)
             except Exception:
-                logger.warning("ManagedChrome failed to start, CDP features disabled", exc_info=True)
+                logger.warning(
+                    "ManagedChrome failed to start, CDP features disabled", exc_info=True
+                )
                 runtime.bot.set_capability_status(
                     "chrome_cdp",
                     available=False,
@@ -631,6 +661,7 @@ async def run() -> int:
         # Re-wire BrowserUseService with managed CDP URL
         if managed_chrome is not None:
             from claw_v2.computer import BrowserUseService
+
             runtime.bot.browser_use = BrowserUseService(cdp_url=managed_chrome.cdp_url)
 
         try:

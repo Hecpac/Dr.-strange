@@ -7,6 +7,7 @@
 3. B10 — the provider circuit breaker decays failures outside the rolling
    window and ignores user-content/budget errors.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -101,9 +102,7 @@ class CircuitBreakerHardeningTests(unittest.TestCase):
     def test_non_provider_faults_are_classified(self) -> None:
         budget = AdapterError("aborted", metadata={"reason": "budget_exceeded"})
         self.assertEqual(_non_provider_fault_reason(budget), "budget_exceeded")
-        image = AdapterError(
-            "API Error: an image in the conversation could not be processed"
-        )
+        image = AdapterError("API Error: an image in the conversation could not be processed")
         self.assertEqual(_non_provider_fault_reason(image), "user_content_image")
         provider = AdapterError("rate limit exceeded")
         record_tools_executed(provider, ["Bash"])

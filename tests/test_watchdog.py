@@ -43,14 +43,10 @@ class IsRestartableTests(unittest.TestCase):
         self.assertTrue(is_restartable(_critical(process_running=False)))
 
     def test_critical_and_port_down(self) -> None:
-        self.assertTrue(
-            is_restartable(_critical(process_running=True, port_listening=False))
-        )
+        self.assertTrue(is_restartable(_critical(process_running=True, port_listening=False)))
 
     def test_critical_and_heartbeat_stale(self) -> None:
-        self.assertTrue(
-            is_restartable(_critical(process_running=True, heartbeat_stale=True))
-        )
+        self.assertTrue(is_restartable(_critical(process_running=True, heartbeat_stale=True)))
 
     def test_critical_and_web_dead(self) -> None:
         self.assertTrue(
@@ -185,9 +181,7 @@ class WatchdogStatePersistenceTests(unittest.TestCase):
 
     def test_missing_file_is_zero(self) -> None:
         with TemporaryDirectory() as d:
-            self.assertEqual(
-                load_state(Path(d) / "nope.json").consecutive_restartable, 0
-            )
+            self.assertEqual(load_state(Path(d) / "nope.json").consecutive_restartable, 0)
 
     def test_corrupt_file_is_zero(self) -> None:
         with TemporaryDirectory() as d:
@@ -201,9 +195,7 @@ class WatchdogStatePersistenceTests(unittest.TestCase):
             with TemporaryDirectory() as d:
                 p = Path(d) / "watchdog_state.json"
                 p.write_text(payload)
-                self.assertEqual(
-                    load_state(p).consecutive_restartable, 0, f"payload={payload!r}"
-                )
+                self.assertEqual(load_state(p).consecutive_restartable, 0, f"payload={payload!r}")
 
 
 class RunCyclePersistenceTests(unittest.TestCase):
@@ -304,9 +296,7 @@ class MainTests(unittest.TestCase):
     def test_unparseable_stdin_is_ok_not_restart(self) -> None:
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = main(
-                ["--uptime", "05:00"], stdin=io.StringIO("{bad json"), env=self.env
-            )
+            rc = main(["--uptime", "05:00"], stdin=io.StringIO("{bad json"), env=self.env)
         self.assertEqual(rc, 0)
         self.assertEqual(buf.getvalue().strip(), "ok")
 
@@ -322,9 +312,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(self._run(report, "05:00"), "hold")  # strike 1, not restart
 
     def test_attention_prints_ok(self) -> None:
-        self.assertEqual(
-            self._run({"checks": _critical(status="attention")}, "05:00"), "ok"
-        )
+        self.assertEqual(self._run({"checks": _critical(status="attention")}, "05:00"), "ok")
 
 
 if __name__ == "__main__":

@@ -83,9 +83,7 @@ class NotebookTaskCoordinatorContractTests(unittest.TestCase):
     def test_failure_during_dispatch_records_failed_task(self) -> None:
         handler, ledger, _ = _build_handler(raise_on="create_notebook")
 
-        response = handler.natural_language_response(
-            "tg-1", "creame un cuaderno sobre cosas"
-        )
+        response = handler.natural_language_response("tg-1", "creame un cuaderno sobre cosas")
 
         self.assertIsNotNone(response)
         self.assertTrue(response.startswith("Error"))
@@ -108,9 +106,7 @@ class NotebookTaskCoordinatorContractTests(unittest.TestCase):
         handler = NlmHandler()
         handler.notebooklm = _StubNotebookLM()
 
-        response = handler.natural_language_response(
-            "tg-1", "creame un cuaderno sobre nada"
-        )
+        response = handler.natural_language_response("tg-1", "creame un cuaderno sobre nada")
 
         self.assertIsNotNone(response)
 

@@ -5,6 +5,7 @@ Persistencia MVP (sin migración DB): anida bajo
 `session_state.active_object["_mission"]`. NO pisa el contrato
 `{kind:"notebook", id, title}` que NlmHandler usa.
 """
+
 from __future__ import annotations
 
 import time
@@ -86,9 +87,7 @@ class MissionController:
             return {}
         return dict(active)
 
-    def _persist_mission(
-        self, session_id: str, mission: MissionRecord | None
-    ) -> None:
+    def _persist_mission(self, session_id: str, mission: MissionRecord | None) -> None:
         active = self._read_active_object(session_id)
         if mission is None:
             active.pop("_mission", None)
@@ -123,9 +122,7 @@ class MissionController:
         if existing is not None and existing.task_kind == task_kind:
             existing.objective = objective or existing.objective
             existing.route = route or existing.route
-            existing.status = (
-                "executing" if existing.status == "interrupted" else existing.status
-            )
+            existing.status = "executing" if existing.status == "interrupted" else existing.status
             existing.updated_at = self._clock()
             self._persist_mission(session_id, existing)
             return existing
@@ -208,9 +205,7 @@ class MissionController:
         if mission is None or mission.mission_id != mission_id:
             return None
         missing = [
-            key
-            for key in mission.evidence_required
-            if key not in mission.evidence_collected
+            key for key in mission.evidence_required if key not in mission.evidence_collected
         ]
         if missing:
             return mission  # not complete yet

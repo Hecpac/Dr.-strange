@@ -137,7 +137,10 @@ class OllamaAdapter(ProviderAdapter):
                             images.append(b64)
                 elif isinstance(block, str):
                     text_parts.append(block)
-            msg: dict[str, Any] = {"role": "user", "content": "\n".join(text_parts) or "Describe this image."}
+            msg: dict[str, Any] = {
+                "role": "user",
+                "content": "\n".join(text_parts) or "Describe this image.",
+            }
             if images:
                 msg["images"] = images
             return msg
@@ -167,10 +170,15 @@ class OllamaAdapter(ProviderAdapter):
         with tempfile.TemporaryDirectory(prefix="claw-video-") as tmp:
             out_pattern = str(Path(tmp) / "frame-%03d.png")
             cmd = [
-                "ffmpeg", "-i", str(p),
-                "-vf", f"fps={fps}",
-                "-frames:v", str(max_frames),
-                out_pattern, "-y",
+                "ffmpeg",
+                "-i",
+                str(p),
+                "-vf",
+                f"fps={fps}",
+                "-frames:v",
+                str(max_frames),
+                out_pattern,
+                "-y",
             ]
             try:
                 subprocess.run(cmd, capture_output=True, timeout=30, check=False)
@@ -293,23 +301,27 @@ class OllamaAdapter(ProviderAdapter):
                 tools.append(tool)
             elif tool in cls._KNOWN_TOOL_SCHEMAS:
                 schema = cls._KNOWN_TOOL_SCHEMAS[tool]
-                tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool,
-                        "description": schema["description"],
-                        "parameters": schema["parameters"],
-                    },
-                })
+                tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool,
+                            "description": schema["description"],
+                            "parameters": schema["parameters"],
+                        },
+                    }
+                )
             else:
-                tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool,
-                        "description": f"Execute {tool}",
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                })
+                tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool,
+                            "description": f"Execute {tool}",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                )
         return tools
 
     # --- Response extraction ---
@@ -352,10 +364,12 @@ class OllamaAdapter(ProviderAdapter):
             else:
                 fn = getattr(tc, "function", None)
                 if fn:
-                    calls.append({
-                        "name": getattr(fn, "name", ""),
-                        "arguments": getattr(fn, "arguments", {}),
-                    })
+                    calls.append(
+                        {
+                            "name": getattr(fn, "name", ""),
+                            "arguments": getattr(fn, "arguments", {}),
+                        }
+                    )
         return calls
 
     @staticmethod

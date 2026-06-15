@@ -195,7 +195,9 @@ def test_brain_first_new_task_ignores_unrelated_pending_approval_and_waits_for_p
             runtime = build_runtime(anthropic_executor=_fake_anthropic)
             runtime.bot.coordinator = None
             runtime.bot.computer = None
-            unrelated = runtime.approvals.create("deploy_prod", "high risk deploy from another flow")
+            unrelated = runtime.approvals.create(
+                "deploy_prod", "high risk deploy from another flow"
+            )
 
             response, traces = _drive(
                 runtime.bot,
@@ -231,7 +233,10 @@ def test_brain_first_new_task_ignores_unrelated_pending_approval_and_waits_for_p
             assert "audit-continuation-smoke" in records[0].objective
             state = runtime.memory.get_session_state("tg-smoke")
             assert state["pending_action"].startswith("Crea una misión durable")
-            assert state["active_object"]["active_mission"]["active_target"] == "audit-continuation-smoke"
+            assert (
+                state["active_object"]["active_mission"]["active_target"]
+                == "audit-continuation-smoke"
+            )
 
 
 def test_unscoped_pending_approval_does_not_hijack_continuation() -> None:
@@ -287,7 +292,7 @@ def test_reply_context_dime_y_lo_armo_resolves_armalo_without_generic_loop() -> 
             runtime = build_runtime(anthropic_executor=_fake_anthropic)
             runtime.bot.coordinator = None
             reply_text = (
-                "Si quieres, convierto el bloque \"skills are the prompts + loop engineering\" "
+                'Si quieres, convierto el bloque "skills are the prompts + loop engineering" '
                 "en el primer post de tu cadena semanal. Dime y lo armo."
             )
 

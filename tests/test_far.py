@@ -95,9 +95,10 @@ class FaRTests(unittest.TestCase):
 
         loaded = load_far_assessments(self.root)
         self.assertEqual(loaded[0].assessment_id, assessment.assessment_id)
-        self.assertEqual([event[0] for event in observe.events], ["far_assessment", "risk_escalated"])
+        self.assertEqual(
+            [event[0] for event in observe.events], ["far_assessment", "risk_escalated"]
+        )
 
 
 if __name__ == "__main__":
     unittest.main()
-

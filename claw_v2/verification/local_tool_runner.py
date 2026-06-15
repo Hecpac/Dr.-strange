@@ -18,6 +18,7 @@ Privacy / size constraints (per Hector §11):
   - tool_args["content"] is stripped before serialisation (already done in
     build_local_tool_artifact).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -161,6 +162,7 @@ def attach_artifact_to_result(
         # F3a-ext.1 — pass workspace_root so SkillGenerate (et al.) can pin
         # allowed_path_roots and reject artifacts that escape the workspace.
         import tempfile
+
         roots: tuple[str, ...] = ()
         if workspace_root:
             roots = (str(workspace_root), tempfile.gettempdir())
@@ -170,6 +172,7 @@ def attach_artifact_to_result(
             run_external_observation,
             run_preflight,
         )
+
         external_obs = run_external_observation(tool_name, args, result)
         preflight_passed, preflight_reason = run_preflight(tool_name, args)
         if preflight_reason and preflight_reason != "no_provider":

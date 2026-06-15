@@ -40,7 +40,9 @@ if TYPE_CHECKING:  # avoid circular at runtime
 # Default is the interactive Telegram mode; daemon/Kairos code paths flip
 # this to "system" via `system_approval_mode(reason=...)` context manager.
 _DAEMON_REASON: ContextVar[str | None] = ContextVar("claw_daemon_reason", default=None)
-_APPROVED_TOOL_CONTEXT: ContextVar[dict | None] = ContextVar("claw_approved_tool_context", default=None)
+_APPROVED_TOOL_CONTEXT: ContextVar[dict | None] = ContextVar(
+    "claw_approved_tool_context", default=None
+)
 
 
 def approval_args_hash(args: dict[str, Any] | None) -> str:
@@ -175,9 +177,7 @@ def build_telegram_approval_gate(
             try:
                 notifier(pending)
             except Exception:
-                logger.exception(
-                    "approval notifier failed for %s", pending.approval_id
-                )
+                logger.exception("approval notifier failed for %s", pending.approval_id)
         raise ApprovalPending(
             approval_id=pending.approval_id,
             token=pending.token,

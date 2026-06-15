@@ -148,13 +148,19 @@ class StartupHealthReport:
     failed: list[HealthcheckResult] = field(default_factory=list)
 
     def add_ok(self, name: str, detail: str = "", *, capability: str | None = None) -> None:
-        self.ok.append(HealthcheckResult(name=name, status="ok", detail=detail, capability=capability))
+        self.ok.append(
+            HealthcheckResult(name=name, status="ok", detail=detail, capability=capability)
+        )
 
     def add_degraded(self, name: str, detail: str, *, capability: str | None = None) -> None:
-        self.degraded.append(HealthcheckResult(name=name, status="degraded", detail=detail, capability=capability))
+        self.degraded.append(
+            HealthcheckResult(name=name, status="degraded", detail=detail, capability=capability)
+        )
 
     def add_failed(self, name: str, detail: str, *, capability: str | None = None) -> None:
-        self.failed.append(HealthcheckResult(name=name, status="failed", detail=detail, capability=capability))
+        self.failed.append(
+            HealthcheckResult(name=name, status="failed", detail=detail, capability=capability)
+        )
 
     def failed_summary(self) -> str:
         return "; ".join(f"{item.name}: {item.detail}" for item in self.failed)
@@ -216,7 +222,9 @@ def build_runtime_approval_gate(approvals: ApprovalManager) -> Callable[[object,
     return gate
 
 
-def build_runtime_policy_engine(config: AppConfig, approvals: ApprovalManager) -> RuntimePolicyEngine:
+def build_runtime_policy_engine(
+    config: AppConfig, approvals: ApprovalManager
+) -> RuntimePolicyEngine:
     sandbox_policy = SandboxPolicy(
         workspace_root=config.workspace_root,
         allowed_paths=[
@@ -378,7 +386,9 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
         if config.runtime_config_path.exists():
             report.add_ok("runtime_config", f"loaded: {config.runtime_config_path}")
         else:
-            report.add_failed("runtime_config", f"missing runtime config file: {config.runtime_config_path}")
+            report.add_failed(
+                "runtime_config", f"missing runtime config file: {config.runtime_config_path}"
+            )
     else:
         report.add_ok("runtime_config", "using built-in runtime scheduling defaults")
 
@@ -386,14 +396,20 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
     if needs_git:
         git_path = shutil.which("git")
         if git_path is None:
-            report.add_degraded("git", "git is not installed; self-improve and git-backed flows will be skipped", capability="git")
+            report.add_degraded(
+                "git",
+                "git is not installed; self-improve and git-backed flows will be skipped",
+                capability="git",
+            )
         else:
             report.add_ok("git", git_path, capability="git")
 
     if config.eval_on_self_improve:
         _, pytest_path = _resolve_pytest_command(config.pipeline_repo_root or config.workspace_root)
         if pytest_path is None:
-            report.add_degraded("pytest", "pytest is unavailable; self-improve will be skipped", capability="pytest")
+            report.add_degraded(
+                "pytest", "pytest is unavailable; self-improve will be skipped", capability="pytest"
+            )
         else:
             report.add_ok("pytest", pytest_path, capability="pytest")
 
@@ -435,7 +451,9 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
                 )
                 degrade_or_fail_computer("computer_display", detail)
             except Exception as exc:
-                degrade_or_fail_computer("computer_display", f"pyautogui display probe failed: {exc}")
+                degrade_or_fail_computer(
+                    "computer_display", f"pyautogui display probe failed: {exc}"
+                )
             else:
                 if display_width <= 0 or display_height <= 0:
                     degrade_or_fail_computer(
@@ -488,8 +506,14 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
                 computer_required_failed("openai_api_key", detail)
             else:
                 report.add_degraded("openai_api_key", detail)
-        if config.computer_use_enabled and not sys.modules.get("openai") and importlib.util.find_spec("openai") is None:
-            detail = "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado"
+        if (
+            config.computer_use_enabled
+            and not sys.modules.get("openai")
+            and importlib.util.find_spec("openai") is None
+        ):
+            detail = (
+                "OpenAI SDK no está instalado; el control de escritorio asistido quedará degradado"
+            )
             if config.computer_use_required:
                 computer_required_failed("openai_sdk", detail)
             else:
@@ -499,9 +523,13 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
                     capability="computer_control",
                 )
         else:
-            report.add_ok("computer_control", config.computer_use_backend, capability="computer_control")
+            report.add_ok(
+                "computer_control", config.computer_use_backend, capability="computer_control"
+            )
     else:
-        report.add_ok("computer_control", config.computer_use_backend, capability="computer_control")
+        report.add_ok(
+            "computer_control", config.computer_use_backend, capability="computer_control"
+        )
 
     if importlib.util.find_spec("browser_use") is None:
         report.add_degraded(
@@ -515,10 +543,15 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
     for item in report.ok:
         observe.emit("startup_healthcheck_ok", payload={"name": item.name, "detail": item.detail})
     for item in report.degraded:
-        observe.emit("startup_healthcheck_degraded", payload={"name": item.name, "detail": item.detail, "capability": item.capability})
+        observe.emit(
+            "startup_healthcheck_degraded",
+            payload={"name": item.name, "detail": item.detail, "capability": item.capability},
+        )
     if report.failed:
         for item in report.failed:
-            observe.emit("startup_healthcheck_failed", payload={"name": item.name, "detail": item.detail})
+            observe.emit(
+                "startup_healthcheck_failed", payload={"name": item.name, "detail": item.detail}
+            )
         raise RuntimeError(f"startup healthchecks failed: {report.failed_summary()}")
     return report
 
@@ -547,7 +580,9 @@ def _wrap_job_handler(
     return wrapped
 
 
-def _setup_core_state(config: AppConfig) -> tuple[MemoryStore, ObserveStream, MetricsTracker, ApprovalManager, AgentBus, FileAgentStore]:
+def _setup_core_state(
+    config: AppConfig,
+) -> tuple[MemoryStore, ObserveStream, MetricsTracker, ApprovalManager, AgentBus, FileAgentStore]:
     memory = MemoryStore(config.db_path)
     observe = ObserveStream(config.db_path)
     # F5.1: lets build_context report identity_block_truncated.
@@ -610,7 +645,9 @@ def _setup_llm_stack(
 
     injected_anthropic_executor = anthropic_executor is not None
     if anthropic_executor is None:
-        anthropic_executor = create_claude_sdk_executor(config, observe=observe, approvals=approvals)
+        anthropic_executor = create_claude_sdk_executor(
+            config, observe=observe, approvals=approvals
+        )
     elif injected_anthropic_executor:
         openai_transport = openai_transport or anthropic_executor
         google_transport = google_transport or anthropic_executor
@@ -739,7 +776,15 @@ def _setup_agent_services(
     agent_store: FileAgentStore,
     metrics: MetricsTracker,
     brain: BrainService,
-) -> tuple[AutoResearchAgentService, SubAgentService, CoordinatorService, TaskBoard, HeartbeatService, KairosService, BuddyService]:
+) -> tuple[
+    AutoResearchAgentService,
+    SubAgentService,
+    CoordinatorService,
+    TaskBoard,
+    HeartbeatService,
+    KairosService,
+    BuddyService,
+]:
     experiment_runner: Callable[[str, int, dict], object] = _noop_experiment_runner
     if _is_git_repo(str(config.workspace_root)):
         experiment_runner = GitWorktreeExperimentRunner(
@@ -774,7 +819,9 @@ def _setup_agent_services(
         default_worker_timeout_seconds=config.timeout_for_role("coordinator_worker"),
         default_research_timeout_seconds=config.timeout_for_role("coordinator_research"),
         default_verification_timeout_seconds=config.timeout_for_role("coordinator_verification"),
-        default_implementation_timeout_seconds=config.timeout_for_role("coordinator_implementation"),
+        default_implementation_timeout_seconds=config.timeout_for_role(
+            "coordinator_implementation"
+        ),
     )
     task_board = TaskBoard(board_root=config.agent_state_root / "_board")
     registry_path = config.agent_state_root / "AGENTS.md"
@@ -786,7 +833,9 @@ def _setup_agent_services(
         registry_path=registry_path,
         sub_agents=sub_agents,
         default_agent_model=config.worker_model,
-        default_daily_budget=(config.daily_cost_limit if config.daily_cost_limit is not None else 10.0),
+        default_daily_budget=(
+            config.daily_cost_limit if config.daily_cost_limit is not None else 10.0
+        ),
     )
     kairos = KairosService(
         router=router,
@@ -860,8 +909,12 @@ def _build_kairos_agent_loop_factory(
         def verifier(result, observation: str):
             status_tag = str(getattr(result, "status", "")).lower()
             if status_tag in {"succeeded", "passed", "ok"}:
-                return VerifierVerdict(status="passed", reason=str(getattr(result, "summary", ""))[:160])
-            return VerifierVerdict(status="failed", reason=str(getattr(result, "summary", ""))[:160])
+                return VerifierVerdict(
+                    status="passed", reason=str(getattr(result, "summary", ""))[:160]
+                )
+            return VerifierVerdict(
+                status="failed", reason=str(getattr(result, "summary", ""))[:160]
+            )
 
         def critic(history) -> str:
             last = history[-1]
@@ -922,7 +975,14 @@ def _setup_operational_services(
     kairos: KairosService,
     startup_health: StartupHealthReport,
     observation_window: ObservationWindowState | None,
-) -> tuple[ClawDaemon, BotService, PipelineService, DevBrowserService, BrowserUseService, ComputerUseService | None]:
+) -> tuple[
+    ClawDaemon,
+    BotService,
+    PipelineService,
+    DevBrowserService,
+    BrowserUseService,
+    ComputerUseService | None,
+]:
     daemon = ClawDaemon(
         scheduler=CronScheduler(),
         heartbeat=heartbeat,
@@ -956,6 +1016,7 @@ def _setup_operational_services(
         )
     browser_use = BrowserUseService(cdp_url=f"http://localhost:{config.claw_chrome_port}")
     from claw_v2.stop_notifier import build_stop_notifier
+
     stop_notifier = build_stop_notifier(config=config)
     bot = BotService(
         brain=brain,
@@ -980,9 +1041,15 @@ def _setup_operational_services(
     for capability, reason in startup_health.degraded_capabilities().items():
         bot.set_capability_status(capability, available=False, reason=reason)
     if not config.chrome_cdp_enabled:
-        bot.set_capability_status("chrome_cdp", available=False, reason="Chrome CDP está desactivado en la configuración.")
+        bot.set_capability_status(
+            "chrome_cdp", available=False, reason="Chrome CDP está desactivado en la configuración."
+        )
     if not config.computer_use_enabled:
-        bot.set_capability_status("computer_use", available=False, reason="Computer Use está desactivado en la configuración.")
+        bot.set_capability_status(
+            "computer_use",
+            available=False,
+            reason="Computer Use está desactivado en la configuración.",
+        )
 
     if config.linear_api_key:
         linear = LinearService(mcp_caller=build_linear_api_caller(config.linear_api_key))
@@ -1038,7 +1105,12 @@ def _register_site_monitor_jobs(
         url = str(payload.get("url") or "")
         try:
             response = httpx.get(url, timeout=15, follow_redirects=True)
-            result = {"site": site_name, "url": url, "status": response.status_code, "ok": response.status_code < 400}
+            result = {
+                "site": site_name,
+                "url": url,
+                "status": response.status_code,
+                "ok": response.status_code < 400,
+            }
             if result["ok"]:
                 observe.emit("site_monitor_ok", payload=result)
                 logger.info("site monitor %s ok (%s)", site_name, response.status_code)
@@ -1103,7 +1175,10 @@ def _register_sub_agent_jobs(
 ) -> None:
     def _sub_agent_handler(agent: str, skill: str, lane: str) -> dict[str, Any]:
         result = sub_agents.run_skill(agent, skill, lane=lane)
-        observe.emit("sub_agent_skill", payload={"agent": agent, "skill": skill, "lane": lane, "result": result})
+        observe.emit(
+            "sub_agent_skill",
+            payload={"agent": agent, "skill": skill, "lane": lane, "result": result},
+        )
         return {"agent": agent, "skill": skill, "lane": lane}
 
     # All scheduled sub-agent skills share one durable job kind + off-tick
@@ -1151,13 +1226,15 @@ def _register_sub_agent_jobs(
                 handler=_wrap_job_handler(
                     name=job_name,
                     observe=observe,
-                    handler=lambda a=job.agent, s=job.skill, l=job.lane, jn=job_name: enqueue_scheduled_background_job(
-                        job_name=jn,
-                        job_kind=SUB_AGENT_JOB_KIND,
-                        resume_key=f"scheduler:sub_agent:{a}:{s}",
-                        job_service=job_service,
-                        observe=observe,
-                        payload={"agent": a, "skill": s, "lane": l},
+                    handler=lambda a=job.agent, s=job.skill, l=job.lane, jn=job_name: (
+                        enqueue_scheduled_background_job(
+                            job_name=jn,
+                            job_kind=SUB_AGENT_JOB_KIND,
+                            resume_key=f"scheduler:sub_agent:{a}:{s}",
+                            job_service=job_service,
+                            observe=observe,
+                            payload={"agent": a, "skill": s, "lane": l},
+                        )
                     ),
                     skip_if=_skip_reason,
                 ),
@@ -1248,7 +1325,10 @@ def _setup_scheduler(
             )
             return
         if test_result.returncode != 0:
-            observe.emit("self_improve_blocked", payload={"reason": "tests_failed", "output": (test_result.stdout or "")[-500:]})
+            observe.emit(
+                "self_improve_blocked",
+                payload={"reason": "tests_failed", "output": (test_result.stdout or "")[-500:]},
+            )
             return
 
         default_name = "self-improve"
@@ -1281,9 +1361,7 @@ def _setup_scheduler(
             # P0-G: skip experiments when this agent's promote_* backlog is
             # already saturated; spamming Hector with duplicate proposals
             # turns the approval queue into noise.
-            paused_for_backlog, pending_count = should_pause_self_improve(
-                approvals, agent_name
-            )
+            paused_for_backlog, pending_count = should_pause_self_improve(approvals, agent_name)
             if paused_for_backlog:
                 agents_paused_for_backlog += 1
                 observe.emit(
@@ -1381,10 +1459,10 @@ def _setup_scheduler(
                     "promote_on_improvement": True,
                     "commit_on_promotion": True,
                     "metric_command": (
-                        f"PYTHONPATH=. {sys.executable} -c \""
+                        f'PYTHONPATH=. {sys.executable} -c "'
                         "from claw_v2.wiki import WikiService; from claw_v2.llm import LLMRouter; "
                         "w=WikiService(router=LLMRouter.__new__(LLMRouter)); "
-                        "e=w._embeddings; print(len(e))\""
+                        'e=w._embeddings; print(len(e))"'
                     ),
                 },
             )
@@ -1465,6 +1543,7 @@ def _setup_scheduler(
             name="self_improve",
             handler=lambda: self_improve_runner.run_available(limit=1),
         )
+
         def _approval_sweep(_payload: dict) -> int:
             expired = approvals.expire_due()
             # AM-APPRSCAN (2026-06-12): keep the hot list_pending glob small.
@@ -1513,8 +1592,18 @@ def _setup_scheduler(
                 interval=300.0,
             )
 
-    scheduler.register(ScheduledJob(name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit))
-    scheduler.register(ScheduledJob(name="task_lifecycle_watchdog", interval_seconds=300, handler=_task_lifecycle_watchdog_handler))
+    scheduler.register(
+        ScheduledJob(
+            name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit
+        )
+    )
+    scheduler.register(
+        ScheduledJob(
+            name="task_lifecycle_watchdog",
+            interval_seconds=300,
+            handler=_task_lifecycle_watchdog_handler,
+        )
+    )
     scheduler.register(
         ScheduledJob(
             name="kairos_tick",
@@ -1559,9 +1648,7 @@ def _setup_scheduler(
     _daemon_health_state = {"last_fire_day_key": ""}
 
     def _daemon_health_guard() -> None:
-        day_key = daemon_health_check_due(
-            datetime.now(), _daemon_health_state["last_fire_day_key"]
-        )
+        day_key = daemon_health_check_due(datetime.now(), _daemon_health_state["last_fire_day_key"])
         if day_key is None:
             return
         _daemon_health_state["last_fire_day_key"] = day_key
@@ -1585,7 +1672,9 @@ def _setup_scheduler(
             ),
         )
     )
-    scheduler.register(ScheduledJob(name="buddy_tick", interval_seconds=600, handler=lambda: buddy.tick(observe)))
+    scheduler.register(
+        ScheduledJob(name="buddy_tick", interval_seconds=600, handler=lambda: buddy.tick(observe))
+    )
     if config.eval_on_self_improve:
         scheduler.register(
             ScheduledJob(
@@ -1605,8 +1694,12 @@ def _setup_scheduler(
                 ),
             )
         )
-    scheduler.register(ScheduledJob(name="morning_brief", interval_seconds=86400, handler=_morning_brief_handler))
-    scheduler.register(ScheduledJob(name="daily_metrics", interval_seconds=86400, handler=_daily_metrics_handler))
+    scheduler.register(
+        ScheduledJob(name="morning_brief", interval_seconds=86400, handler=_morning_brief_handler)
+    )
+    scheduler.register(
+        ScheduledJob(name="daily_metrics", interval_seconds=86400, handler=_daily_metrics_handler)
+    )
 
     def _observe_prune_handler() -> None:
         import os
@@ -1617,7 +1710,9 @@ def _setup_scheduler(
             retention_days = 30
         # Age sweep + absolute row-count cap (no VACUUM here — that is the
         # blocking off-tick maintenance runner's job).
-        deleted = observe.prune(retention_days=retention_days, max_total_rows=OBSERVE_MAX_TOTAL_ROWS)
+        deleted = observe.prune(
+            retention_days=retention_days, max_total_rows=OBSERVE_MAX_TOTAL_ROWS
+        )
         if deleted:
             observe.emit(
                 "observe_stream_pruned",
@@ -1625,7 +1720,9 @@ def _setup_scheduler(
             )
 
     # Bounded local DELETE (no provider/subprocess work): safe to run inline.
-    scheduler.register(ScheduledJob(name="observe_prune", interval_seconds=3600, handler=_observe_prune_handler))
+    scheduler.register(
+        ScheduledJob(name="observe_prune", interval_seconds=3600, handler=_observe_prune_handler)
+    )
 
     dream = AutoDreamService(memory=memory, observe=observe, router=router)
     if daemon is not None and job_service is not None:
@@ -1681,7 +1778,9 @@ def _setup_scheduler(
             job_name="learning_soul_suggestions",
             job_kind=LEARNING_SOUL_SUGGESTIONS_JOB_KIND,
             job_service=job_service,
-            handler=lambda _payload: learning.suggest_soul_updates(observe=observe, soul_text=system_prompt),
+            handler=lambda _payload: learning.suggest_soul_updates(
+                observe=observe, soul_text=system_prompt
+            ),
             observe=observe,
             worker_id="learning-soul-suggestions-runner",
         )
@@ -2098,16 +2197,18 @@ def build_runtime(
         codex_transport=codex_transport,
         observation_window=observation_window,
     )
-    auto_research, sub_agents, coordinator, task_board, heartbeat, kairos, buddy = _setup_agent_services(
-        config=config,
-        router=router,
-        memory=memory,
-        observe=observe,
-        approvals=approvals,
-        bus=bus,
-        agent_store=agent_store,
-        metrics=metrics,
-        brain=brain,
+    auto_research, sub_agents, coordinator, task_board, heartbeat, kairos, buddy = (
+        _setup_agent_services(
+            config=config,
+            router=router,
+            memory=memory,
+            observe=observe,
+            approvals=approvals,
+            bus=bus,
+            agent_store=agent_store,
+            metrics=metrics,
+            brain=brain,
+        )
     )
     daemon, bot, pipeline, _, _, _ = _setup_operational_services(
         config=config,

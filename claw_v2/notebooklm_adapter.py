@@ -192,7 +192,9 @@ class JacobNotebookLMCLIAdapter:
         if artifact_type is None:
             raise NotebookLMAdapterError(f"Unsupported artifact kind: {kind}")
 
-        before_ids = {artifact["id"] for artifact in self._list_artifacts(notebook_id) if artifact.get("id")}
+        before_ids = {
+            artifact["id"] for artifact in self._list_artifacts(notebook_id) if artifact.get("id")
+        }
         command = {
             "podcast": ["audio", "create", notebook_id, "--confirm"],
             "infographic": ["infographic", "create", notebook_id, "--confirm"],
@@ -224,7 +226,9 @@ class JacobNotebookLMCLIAdapter:
                 if status == "failed":
                     raise NotebookLMAdapterError(f"nlm {artifact_type} generation failed")
             time.sleep(max(1.0, self.poll_interval_seconds))
-        raise TimeoutError(f"nlm {artifact_type} generation did not complete; last_status={last_status}")
+        raise TimeoutError(
+            f"nlm {artifact_type} generation did not complete; last_status={last_status}"
+        )
 
     def _notebook_details(self, notebook_id: str) -> dict[str, Any]:
         completed = self._run(["notebook", "get", notebook_id, "--json"])

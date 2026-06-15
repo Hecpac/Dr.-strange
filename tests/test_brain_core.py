@@ -1,4 +1,5 @@
 """Tests for brain.py core: handle_message flow, JSON parser, recommendation normalizer."""
+
 from __future__ import annotations
 
 import tempfile
@@ -25,6 +26,7 @@ from claw_v2.types import LLMResponse
 # ---------------------------------------------------------------------------
 # _first_json_object — the parser we hardened (rfind → raw_decode)
 # ---------------------------------------------------------------------------
+
 
 class FirstJsonObjectTests(unittest.TestCase):
     def test_simple_object(self) -> None:
@@ -62,6 +64,7 @@ class FirstJsonObjectTests(unittest.TestCase):
 # _try_parse_json_object — handles markdown fences
 # ---------------------------------------------------------------------------
 
+
 class TryParseJsonObjectTests(unittest.TestCase):
     def test_plain_json(self) -> None:
         result = _try_parse_json_object('{"key": "val"}')
@@ -81,6 +84,7 @@ class TryParseJsonObjectTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # _normalize_recommendation
 # ---------------------------------------------------------------------------
+
 
 class NormalizeRecommendationTests(unittest.TestCase):
     def test_approve_variants(self) -> None:
@@ -118,6 +122,7 @@ class NormalizeRiskLevelTests(unittest.TestCase):
 # BrainService.handle_message — basic flow
 # ---------------------------------------------------------------------------
 
+
 class HandleMessageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.db_path = Path(tempfile.mkdtemp()) / "test.db"
@@ -129,7 +134,9 @@ class HandleMessageTests(unittest.TestCase):
             system_prompt="You are Claw.",
         )
 
-    def test_handle_message_passes_delegation_handler_and_contract_only_when_factory_present(self) -> None:
+    def test_handle_message_passes_delegation_handler_and_contract_only_when_factory_present(
+        self,
+    ) -> None:
         self.router.ask.return_value = LLMResponse(
             content="<response>ok</response>",
             lane="brain",
@@ -168,7 +175,10 @@ class HandleMessageTests(unittest.TestCase):
 
     def test_passes_system_prompt_to_router(self) -> None:
         self.router.ask.return_value = LLMResponse(
-            content="<response>ok</response>", lane="brain", provider="anthropic", model="test",
+            content="<response>ok</response>",
+            lane="brain",
+            provider="anthropic",
+            model="test",
         )
         self.brain.handle_message("s1", "test")
         call_kwargs = self.router.ask.call_args
@@ -176,7 +186,9 @@ class HandleMessageTests(unittest.TestCase):
         self.assertIn("<response>", call_kwargs.kwargs["system_prompt"])
         self.assertIn("Self-healing loop", call_kwargs.kwargs["system_prompt"])
 
-    def test_passes_session_model_override_to_router_without_reusing_other_provider_session(self) -> None:
+    def test_passes_session_model_override_to_router_without_reusing_other_provider_session(
+        self,
+    ) -> None:
         self.memory.link_provider_session("s1", "anthropic", "anthropic-session")
         self.memory.update_session_state(
             "s1",
@@ -192,7 +204,10 @@ class HandleMessageTests(unittest.TestCase):
             },
         )
         self.router.ask.return_value = LLMResponse(
-            content="<response>ok</response>", lane="brain", provider="codex", model="gpt-5.5",
+            content="<response>ok</response>",
+            lane="brain",
+            provider="codex",
+            model="gpt-5.5",
         )
 
         self.brain.handle_message("s1", "test")
@@ -234,7 +249,10 @@ class HandleMessageTests(unittest.TestCase):
         # not pass a hardcoded literal that overrides operator-set caps.
         self.router.config.max_budget_usd = 0.42
         self.router.ask.return_value = LLMResponse(
-            content="<response>ok</response>", lane="brain", provider="anthropic", model="test",
+            content="<response>ok</response>",
+            lane="brain",
+            provider="anthropic",
+            model="test",
         )
         self.brain.handle_message("s1", "input")
         call_kwargs = self.router.ask.call_args.kwargs
@@ -269,7 +287,10 @@ class HandleMessageTests(unittest.TestCase):
 
     def test_returns_llm_response(self) -> None:
         expected = LLMResponse(
-            content="<response>response</response>", lane="brain", provider="anthropic", model="test",
+            content="<response>response</response>",
+            lane="brain",
+            provider="anthropic",
+            model="test",
         )
         self.router.ask.return_value = expected
         result = self.brain.handle_message("s1", "input")
@@ -277,7 +298,10 @@ class HandleMessageTests(unittest.TestCase):
 
     def test_links_provider_session_when_returned(self) -> None:
         resp = LLMResponse(
-            content="<response>hi</response>", lane="brain", provider="anthropic", model="test",
+            content="<response>hi</response>",
+            lane="brain",
+            provider="anthropic",
+            model="test",
         )
         resp.artifacts["session_id"] = "sdk-abc-123"
         self.router.ask.return_value = resp
@@ -291,7 +315,10 @@ class HandleMessageTests(unittest.TestCase):
         self.memory.link_provider_session("s1", "anthropic", "sdk-old")
         self.memory.compact_session_messages("s1", max_messages=4, preserve_recent=2)
         resp = LLMResponse(
-            content="<response>fresh</response>", lane="brain", provider="anthropic", model="test",
+            content="<response>fresh</response>",
+            lane="brain",
+            provider="anthropic",
+            model="test",
         )
         resp.artifacts["session_id"] = "sdk-new"
         self.router.ask.return_value = resp
@@ -311,7 +338,10 @@ class HandleMessageTests(unittest.TestCase):
             self.memory.store_message("s1", "user", f"history-{idx}")
         self.memory.link_provider_session("s1", "anthropic", "sdk-old")
         resp = LLMResponse(
-            content="<response>compacted</response>", lane="brain", provider="anthropic", model="test",
+            content="<response>compacted</response>",
+            lane="brain",
+            provider="anthropic",
+            model="test",
         )
         resp.artifacts["session_id"] = "sdk-old-returned"
         self.router.ask.return_value = resp
@@ -403,8 +433,8 @@ class HandleMessageTests(unittest.TestCase):
             content=(
                 "# Critical instructions\n"
                 "- USE conversational, fluid Spanish — your default channel persona, not a status board.\n"
-                "- AVOID rigid templates (\"Estado:\", \"Modo:\", checkpoint blocks) unless Hector asks.\n"
-                "- Do NOT identify as Claude, Claude Code, Anthropic CLI, or \"the model\" — you are Dr. Strange.\n"
+                '- AVOID rigid templates ("Estado:", "Modo:", checkpoint blocks) unless Hector asks.\n'
+                '- Do NOT identify as Claude, Claude Code, Anthropic CLI, or "the model" — you are Dr. Strange.\n'
             ),
             lane="brain",
             provider="anthropic",
@@ -548,6 +578,7 @@ class HandleMessageTests(unittest.TestCase):
 # _strip_trace_tags
 # ---------------------------------------------------------------------------
 
+
 class StripTraceTagsTests(unittest.TestCase):
     def test_removes_trace_tags(self) -> None:
         self.assertEqual(_strip_trace_tags('<trace>reasoning</trace>{"a":1}'), '{"a":1}')
@@ -566,9 +597,13 @@ class StripTraceTagsTests(unittest.TestCase):
 # _validate_schema_keys
 # ---------------------------------------------------------------------------
 
+
 class ValidateSchemaKeysTests(unittest.TestCase):
     def test_valid_data(self) -> None:
-        schema = {"required": ["name"], "properties": {"name": {"type": "string"}, "age": {"type": "integer"}}}
+        schema = {
+            "required": ["name"],
+            "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+        }
         self.assertEqual(_validate_schema_keys({"name": "Hector", "age": 30}, schema), [])
 
     def test_missing_required(self) -> None:
@@ -590,6 +625,7 @@ class ValidateSchemaKeysTests(unittest.TestCase):
 # BrainService.handle_structured
 # ---------------------------------------------------------------------------
 
+
 class HandleStructuredTests(unittest.TestCase):
     def setUp(self) -> None:
         self.db_path = Path(tempfile.mkdtemp()) / "test.db"
@@ -604,46 +640,75 @@ class HandleStructuredTests(unittest.TestCase):
     def test_parses_clean_json(self) -> None:
         self.router.ask.return_value = LLMResponse(
             content='<response>{"name": "test", "value": 42}</response>',
-            lane="brain", provider="anthropic", model="test",
+            lane="brain",
+            provider="anthropic",
+            model="test",
         )
-        result = self.brain.handle_structured("s1", "extract data", schema={
-            "properties": {"name": {"type": "string"}, "value": {"type": "integer"}},
-            "required": ["name"],
-        })
+        result = self.brain.handle_structured(
+            "s1",
+            "extract data",
+            schema={
+                "properties": {"name": {"type": "string"}, "value": {"type": "integer"}},
+                "required": ["name"],
+            },
+        )
         self.assertEqual(result["name"], "test")
         self.assertEqual(result["value"], 42)
 
     def test_strips_trace_before_parsing(self) -> None:
         self.router.ask.return_value = LLMResponse(
             content='<trace>thinking</trace><response>{"status": "ok"}</response>',
-            lane="brain", provider="anthropic", model="test",
+            lane="brain",
+            provider="anthropic",
+            model="test",
         )
-        result = self.brain.handle_structured("s1", "check", schema={
-            "properties": {"status": {"type": "string"}},
-        })
+        result = self.brain.handle_structured(
+            "s1",
+            "check",
+            schema={
+                "properties": {"status": {"type": "string"}},
+            },
+        )
         self.assertEqual(result["status"], "ok")
 
     def test_retries_on_bad_json(self) -> None:
         self.router.ask.side_effect = [
-            LLMResponse(content="not json at all", lane="brain", provider="anthropic", model="test"),
-            LLMResponse(content='<response>{"fixed": true}</response>', lane="brain", provider="anthropic", model="test"),
+            LLMResponse(
+                content="not json at all", lane="brain", provider="anthropic", model="test"
+            ),
+            LLMResponse(
+                content='<response>{"fixed": true}</response>',
+                lane="brain",
+                provider="anthropic",
+                model="test",
+            ),
         ]
-        result = self.brain.handle_structured("s1", "retry test", schema={
-            "properties": {"fixed": {"type": "boolean"}},
-        })
+        result = self.brain.handle_structured(
+            "s1",
+            "retry test",
+            schema={
+                "properties": {"fixed": {"type": "boolean"}},
+            },
+        )
         self.assertTrue(result["fixed"])
         self.assertEqual(self.router.ask.call_count, 2)
 
     def test_returns_raw_after_all_retries_fail(self) -> None:
         self.router.ask.return_value = LLMResponse(
-            content="still not json", lane="brain", provider="anthropic", model="test",
+            content="still not json",
+            lane="brain",
+            provider="anthropic",
+            model="test",
         )
         result = self.brain.handle_structured("s1", "fail test", schema={}, max_retries=0)
         self.assertIn("raw", result)
 
     def test_store_history_false_deletes_messages(self) -> None:
         self.router.ask.return_value = LLMResponse(
-            content='<response>{"ok": true}</response>', lane="brain", provider="anthropic", model="test",
+            content='<response>{"ok": true}</response>',
+            lane="brain",
+            provider="anthropic",
+            model="test",
         )
         self.brain.handle_structured("s1", "ephemeral", schema={}, store_history=False)
         msgs = self.memory.get_recent_messages("s1")
@@ -655,7 +720,8 @@ class ExperienceReplayObserveTests(unittest.TestCase):
         self.memory = MemoryStore(Path(tempfile.mkdtemp()) / "test.db")
         self.observe = ObserveStream(Path(tempfile.mkdtemp()) / "events.db")
         self.memory.store_task_outcome_with_embedding(
-            task_type="self_heal", task_id="seed",
+            task_type="self_heal",
+            task_id="seed",
             description="pytest missing",
             approach="install pytest",
             outcome="success",
@@ -665,12 +731,15 @@ class ExperienceReplayObserveTests(unittest.TestCase):
 
     def test_emits_event_when_lessons_retrieved(self) -> None:
         from claw_v2.learning import LearningLoop
+
         loop = LearningLoop(memory=self.memory)
         router = MagicMock()
         brain = BrainService(
-            router=router, memory=self.memory,
+            router=router,
+            memory=self.memory,
             system_prompt="You are Claw.",
-            learning=loop, observe=self.observe,
+            learning=loop,
+            observe=self.observe,
         )
         brain._build_prompt(
             session_id="s1",
@@ -687,13 +756,16 @@ class ExperienceReplayObserveTests(unittest.TestCase):
 
     def test_no_event_when_no_lessons_found(self) -> None:
         from claw_v2.learning import LearningLoop
+
         empty_memory = MemoryStore(Path(tempfile.mkdtemp()) / "empty.db")
         loop = LearningLoop(memory=empty_memory)
         router = MagicMock()
         brain = BrainService(
-            router=router, memory=empty_memory,
+            router=router,
+            memory=empty_memory,
             system_prompt="You are Claw.",
-            learning=loop, observe=self.observe,
+            learning=loop,
+            observe=self.observe,
         )
         brain._build_prompt(
             session_id="s1",

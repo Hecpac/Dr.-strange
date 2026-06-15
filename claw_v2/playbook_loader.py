@@ -5,6 +5,7 @@ Playbooks are declarative markdown instructions stored in claw_v2/playbooks/.
 Each has YAML frontmatter with triggers (keywords that activate the playbook).
 Only matched playbooks are loaded, keeping the system prompt lean.
 """
+
 from __future__ import annotations
 
 import logging
@@ -74,7 +75,7 @@ def _parse_playbook(path: Path) -> Playbook | None:
     if not fm_match:
         return None
     frontmatter = fm_match.group(1)
-    body = text[fm_match.end():]
+    body = text[fm_match.end() :]
     name = path.stem
     triggers: list[str] = []
     priority = 0

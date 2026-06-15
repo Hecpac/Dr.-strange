@@ -50,9 +50,15 @@ def build_test_router(
     return LLMRouter(
         config=config,
         adapters={
-            "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
-            "openai": StaticAdapter("openai", tool_capable=False, responder=echo_response("openai")),
-            "google": StaticAdapter("google", tool_capable=False, responder=echo_response("google")),
+            "anthropic": StaticAdapter(
+                "anthropic", tool_capable=True, responder=echo_response("anthropic")
+            ),
+            "openai": StaticAdapter(
+                "openai", tool_capable=False, responder=echo_response("openai")
+            ),
+            "google": StaticAdapter(
+                "google", tool_capable=False, responder=echo_response("google")
+            ),
         },
         audit_sink=audit_sink,
         pre_hooks=pre_hooks,
@@ -60,7 +66,9 @@ def build_test_router(
     )
 
 
-def scripted_experiment_runner(records: list[ExperimentRecord]) -> Callable[[str, int, dict], ExperimentRecord]:
+def scripted_experiment_runner(
+    records: list[ExperimentRecord],
+) -> Callable[[str, int, dict], ExperimentRecord]:
     queue = deque(records)
 
     def runner(agent_name: str, experiment_number: int, state: dict) -> ExperimentRecord:

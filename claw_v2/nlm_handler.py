@@ -83,10 +83,17 @@ class NlmHandler:
             if response is None:
                 recorder.skip()
                 return None
-            if response.startswith("Error") or response.startswith("No hay cuaderno activo") or response.startswith("¿De qué tema") or response.startswith("¿De cuál tema"):
+            if (
+                response.startswith("Error")
+                or response.startswith("No hay cuaderno activo")
+                or response.startswith("¿De qué tema")
+                or response.startswith("¿De cuál tema")
+            ):
                 recorder.fail(response)
             else:
-                recorder.succeed(response, evidence=self._evidence_for_intent(session_id, intent, response))
+                recorder.succeed(
+                    response, evidence=self._evidence_for_intent(session_id, intent, response)
+                )
             return response
 
     def _evidence_for_intent(self, session_id: str, intent: str, response: str) -> dict[str, Any]:
@@ -233,7 +240,7 @@ class NlmHandler:
                 title_and_content = rest[2]
                 pipe_idx = title_and_content.index("|")
                 title = title_and_content[:pipe_idx].strip()
-                content = title_and_content[pipe_idx + 1:].strip()
+                content = title_and_content[pipe_idx + 1 :].strip()
                 return self._text_response(nb_id, title, content)
             if command == "/nlm_text":
                 return "usage: /nlm_text <notebook_id> <titulo> | <contenido>"
@@ -349,7 +356,9 @@ class NlmHandler:
     def _chat_response(self, notebook_id: str, question: str) -> str:
         return self.notebooklm.chat(notebook_id, question)
 
-    def _set_active_notebook(self, session_id: str, notebook_id: str, title: str | None = None) -> None:
+    def _set_active_notebook(
+        self, session_id: str, notebook_id: str, title: str | None = None
+    ) -> None:
         current = self._active_notebooks.get(session_id, {})
         notebook = {
             "id": notebook_id,
@@ -407,7 +416,9 @@ class NlmHandler:
             for key in ("topic", "title", "summary"):
                 value = str(active.get(key) or "").strip()
                 if value and active.get("kind") not in {"channel_route"}:
-                    return _ResolvedTopic(status="resolved", topic=_clean_topic(value), candidates=[value])
+                    return _ResolvedTopic(
+                        status="resolved", topic=_clean_topic(value), candidates=[value]
+                    )
         messages = self._safe_recent_messages(session_id)
         candidates = []
         for message in reversed(messages):
@@ -421,10 +432,14 @@ class NlmHandler:
                 break
         unique_candidates = _unique_topics(candidates)
         if unique_candidates:
-            return _ResolvedTopic(status="resolved", topic=unique_candidates[0], candidates=unique_candidates)
+            return _ResolvedTopic(
+                status="resolved", topic=unique_candidates[0], candidates=unique_candidates
+            )
         current_goal = str(state.get("current_goal") or "").strip()
         if current_goal and not _contains_contextual_topic_reference(current_goal):
-            return _ResolvedTopic(status="resolved", topic=_clean_topic(current_goal), candidates=[current_goal])
+            return _ResolvedTopic(
+                status="resolved", topic=_clean_topic(current_goal), candidates=[current_goal]
+            )
         return _ResolvedTopic(status="missing")
 
     def _safe_session_state(self, session_id: str) -> dict[str, Any]:
@@ -463,9 +478,15 @@ def _looks_like_contextual_notebook_topic_request(text: str) -> bool:
     normalized = _normalize_nlm_text(text)
     if _looks_like_nlm_meta_discussion_local(normalized):
         return False
-    if not any(token in normalized for token in ("notebooklm", "notebook lm", "notebook.lm", "cuaderno", "notebook")):
+    if not any(
+        token in normalized
+        for token in ("notebooklm", "notebook lm", "notebook.lm", "cuaderno", "notebook")
+    ):
         return False
-    if not any(token in normalized for token in ("deep research", "research", "podcast", "cuaderno", "notebook")):
+    if not any(
+        token in normalized
+        for token in ("deep research", "research", "podcast", "cuaderno", "notebook")
+    ):
         return False
     return _contains_contextual_topic_reference(normalized)
 
@@ -474,7 +495,9 @@ def _looks_like_notebooklm_orchestration_request(text: str) -> bool:
     normalized = _normalize_nlm_text(text)
     if _looks_like_nlm_meta_discussion_local(normalized):
         return False
-    if not any(token in normalized for token in ("notebooklm", "notebook lm", "cuaderno", "notebook")):
+    if not any(
+        token in normalized for token in ("notebooklm", "notebook lm", "cuaderno", "notebook")
+    ):
         return False
     wants_monitor = any(
         token in normalized

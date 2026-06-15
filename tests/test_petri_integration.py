@@ -7,6 +7,7 @@ Covers the MVP wiring landed in feat/petri-integration-mvp:
 - judge exceptions fall back to the legacy verifier result
 - judge session_id is isolated from the target task session
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -32,9 +33,7 @@ def _build_handler(
     state: dict = {
         "verification_status": "passed",
         "last_checkpoint": {"summary": "fixed the bug"},
-        "active_object": {
-            "active_task": {"task_id": "task-1", "status": "running"}
-        },
+        "active_object": {"active_task": {"task_id": "task-1", "status": "running"}},
     }
 
     def get_state(_sid: str) -> dict:
@@ -56,9 +55,11 @@ def _build_handler(
 
     router = MagicMock()
     if judge_fn is not None:
+
         def _ask(prompt, **kwargs):  # noqa: ARG001
             raw = judge_fn(prompt)
             return SimpleNamespace(content=f"SCORE: {raw.score}\nREASON: {raw.reason}")
+
         router.ask.side_effect = _ask
 
     handler = TaskHandler(
@@ -337,7 +338,8 @@ class PetriWorkerResultEventTests(unittest.TestCase):
             # Concrete invariant: implementation worker_result must carry the
             # commit hash that the judge will look for under verification_drift.
             impl_events = [
-                r for r in target
+                r
+                for r in target
                 if r.event_type == "worker_result" and r.payload.get("phase") == "implementation"
             ]
             self.assertEqual(len(impl_events), 1)
@@ -378,9 +380,7 @@ class PetriWorkerResultEventTests(unittest.TestCase):
         )
 
         # Should not raise.
-        handler._run_coordinated_task(
-            "s1", "x", mode="coding", forced=False, task_id="task-1"
-        )
+        handler._run_coordinated_task("s1", "x", mode="coding", forced=False, task_id="task-1")
 
 
 class PetriVerifyKwargTests(unittest.TestCase):

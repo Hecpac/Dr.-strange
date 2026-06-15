@@ -27,7 +27,9 @@ class RuntimeSqliteTests(unittest.TestCase):
 
             self.assertTrue(path.exists())
             with sqlite3.connect(path) as check:
-                self.assertIsNotNone(check.execute("SELECT name FROM sqlite_master WHERE name = 'smoke'").fetchone())
+                self.assertIsNotNone(
+                    check.execute("SELECT name FROM sqlite_master WHERE name = 'smoke'").fetchone()
+                )
 
     def test_connect_configures_durable_runtime_pragmas(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

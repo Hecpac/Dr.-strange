@@ -90,9 +90,13 @@ class ConsolidateTests(unittest.TestCase):
 
     def test_consolidate_parses_actions(self) -> None:
         svc, memory, _, router = _make_service()
-        router.ask.return_value = MagicMock(content='[{"action": "delete", "key": "old_fact"}, {"action": "create", "key": "new_fact", "value": "hello"}]')
+        router.ask.return_value = MagicMock(
+            content='[{"action": "delete", "key": "old_fact"}, {"action": "create", "key": "new_fact", "value": "hello"}]'
+        )
         # search_facts must return the existing fact so the verified delete path finds it
-        memory.search_facts.return_value = [{"key": "old_fact", "value": "stale", "confidence": 0.5, "source": "user"}]
+        memory.search_facts.return_value = [
+            {"key": "old_fact", "value": "stale", "confidence": 0.5, "source": "user"}
+        ]
         facts = [{"key": "old_fact", "value": "stale", "confidence": 0.5, "source": "user"}]
         result = svc._consolidate(facts, [])
         self.assertEqual(result, 2)
@@ -121,7 +125,9 @@ class ConsolidateTests(unittest.TestCase):
 class PruneTests(unittest.TestCase):
     def test_prune_under_limit_does_nothing(self) -> None:
         svc, memory, *_ = _make_service(max_facts=10)
-        memory.search_facts.return_value = [{"key": f"k{i}", "value": "v", "confidence": 0.5} for i in range(5)]
+        memory.search_facts.return_value = [
+            {"key": f"k{i}", "value": "v", "confidence": 0.5} for i in range(5)
+        ]
         pruned = svc._prune()
         self.assertEqual(pruned, 0)
 
@@ -167,7 +173,9 @@ class RunTests(unittest.TestCase):
     @patch("claw_v2.dream._acquire_lock", return_value=True)
     def test_run_full_cycle(self, _mock_lock, _mock_release) -> None:
         svc, memory, observe, router = _make_service(min_hours_between_dreams=0.0)
-        memory.search_facts.return_value = [{"key": "a", "value": "b", "confidence": 0.5, "source": "user"}]
+        memory.search_facts.return_value = [
+            {"key": "a", "value": "b", "confidence": 0.5, "source": "user"}
+        ]
         observe.recent_events.return_value = []
         router.ask.return_value = MagicMock(content="[]")
 
@@ -195,6 +203,7 @@ class ExportSharedTests(unittest.TestCase):
     def test_exports_high_confidence_facts(self) -> None:
         import json
         import tempfile
+
         svc, memory, observe, _ = _make_service()
         svc.agent_name = "rook"
         svc.shared_memory_root = Path(tempfile.mkdtemp())
@@ -217,8 +226,16 @@ class ImportSharedTests(unittest.TestCase):
     def test_imports_matching_tags(self) -> None:
         import json
         import tempfile
+
         shared_root = Path(tempfile.mkdtemp())
-        export = {"key": "cron.issue", "value": "conflict", "source_agent": "rook", "confidence": 0.8, "timestamp": 1000, "tags": ["infra", "cron"]}
+        export = {
+            "key": "cron.issue",
+            "value": "conflict",
+            "source_agent": "rook",
+            "confidence": 0.8,
+            "timestamp": 1000,
+            "tags": ["infra", "cron"],
+        }
         (shared_root / "rook_exports.jsonl").write_text(json.dumps(export) + "\n")
         svc, memory, _, _ = _make_service()
         svc.agent_name = "hex"
@@ -232,8 +249,16 @@ class ImportSharedTests(unittest.TestCase):
     def test_skips_personal_tags_for_non_alma(self) -> None:
         import json
         import tempfile
+
         shared_root = Path(tempfile.mkdtemp())
-        export = {"key": "personal.pref", "value": "morning meetings", "source_agent": "alma", "confidence": 0.9, "timestamp": 1000, "tags": ["personal"]}
+        export = {
+            "key": "personal.pref",
+            "value": "morning meetings",
+            "source_agent": "alma",
+            "confidence": 0.9,
+            "timestamp": 1000,
+            "tags": ["personal"],
+        }
         (shared_root / "alma_exports.jsonl").write_text(json.dumps(export) + "\n")
         svc, memory, _, _ = _make_service()
         svc.agent_name = "hex"
@@ -246,8 +271,16 @@ class ImportSharedTests(unittest.TestCase):
     def test_alma_can_import_personal(self) -> None:
         import json
         import tempfile
+
         shared_root = Path(tempfile.mkdtemp())
-        export = {"key": "personal.pref", "value": "morning meetings", "source_agent": "rook", "confidence": 0.9, "timestamp": 1000, "tags": ["personal"]}
+        export = {
+            "key": "personal.pref",
+            "value": "morning meetings",
+            "source_agent": "rook",
+            "confidence": 0.9,
+            "timestamp": 1000,
+            "tags": ["personal"],
+        }
         (shared_root / "rook_exports.jsonl").write_text(json.dumps(export) + "\n")
         svc, memory, _, _ = _make_service()
         svc.agent_name = "alma"
@@ -260,8 +293,16 @@ class ImportSharedTests(unittest.TestCase):
     def test_skips_own_exports(self) -> None:
         import json
         import tempfile
+
         shared_root = Path(tempfile.mkdtemp())
-        export = {"key": "self.fact", "value": "mine", "source_agent": "hex", "confidence": 0.9, "timestamp": 1000, "tags": ["code"]}
+        export = {
+            "key": "self.fact",
+            "value": "mine",
+            "source_agent": "hex",
+            "confidence": 0.9,
+            "timestamp": 1000,
+            "tags": ["code"],
+        }
         (shared_root / "hex_exports.jsonl").write_text(json.dumps(export) + "\n")
         svc, memory, _, _ = _make_service()
         svc.agent_name = "hex"

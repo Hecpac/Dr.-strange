@@ -53,7 +53,9 @@ class _Observe:
 class _IdleStartTaskHandler:
     def __init__(self, response: str | None = None) -> None:
         self.calls: list[dict] = []
-        self.response = response or "Voy con eso.\nTarea autónoma iniciada: `tg-wave0:idle`\nModo: research"
+        self.response = (
+            response or "Voy con eso.\nTarea autónoma iniciada: `tg-wave0:idle`\nModo: research"
+        )
 
     def start_autonomous_task(self, session_id: str, objective: str, **kwargs):
         self.calls.append({"session_id": session_id, "objective": objective, **kwargs})
@@ -129,17 +131,13 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 intent=_execution_intent(),
             )
 
-            self.assertEqual(
-                resolution.objective, "generar reporte local de tareas pendientes"
-            )
+            self.assertEqual(resolution.objective, "generar reporte local de tareas pendientes")
             self.assertFalse(resolution.is_risky)
             self.assertEqual(resolution.resolution_source, "session_state.pending_action")
 
     def test_owner_delegation_false_positive_stays_chat(self) -> None:
         self.assertIsNone(detect_owner_delegation("¿debería hacerlo tú o yo?"))
-        self.assertIsNone(
-            detect_owner_delegation("antes de que hagas algo, dime si decide tú")
-        )
+        self.assertIsNone(detect_owner_delegation("antes de que hagas algo, dime si decide tú"))
         self.assertIsNone(detect_owner_delegation("what would happen if you decide?"))
 
     def test_implicit_approval_fresh_pending_action_executes_shortcut(self) -> None:
@@ -161,9 +159,7 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 },
             )
 
-            response = handler.maybe_resolve_stateful_followup(
-                "dale", session_id="tg-wave0"
-            )
+            response = handler.maybe_resolve_stateful_followup("dale", session_id="tg-wave0")
 
             self.assertNotIsInstance(response, str)
             self.assertIn("Continúa con esta acción pendiente", response.text)  # type: ignore[union-attr]
@@ -187,9 +183,7 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 },
             )
 
-            response = handler.maybe_resolve_stateful_followup(
-                "dale", session_id="tg-wave0"
-            )
+            response = handler.maybe_resolve_stateful_followup("dale", session_id="tg-wave0")
 
             self.assertIsInstance(response, str)
             self.assertEqual(response.count("?"), 0)
@@ -214,9 +208,7 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 },
             )
 
-            response = handler.maybe_resolve_stateful_followup(
-                "ok", session_id="tg-wave0"
-            )
+            response = handler.maybe_resolve_stateful_followup("ok", session_id="tg-wave0")
 
             self.assertIsInstance(response, str)
             self.assertIn("No la ejecuto con un ok corto", response)
@@ -383,8 +375,12 @@ class Wave0GoldenTraceTests(unittest.TestCase):
 
             self.assertFalse(result.telemetry_only)
             self.assertTrue(result.advanced)
-            self.assertEqual(result.event_names, ("idle_executor_would_advance", "idle_executor_did_advance"))
-            self.assertEqual(task_handler.calls[0]["objective"], "generar reporte local de pendientes")
+            self.assertEqual(
+                result.event_names, ("idle_executor_would_advance", "idle_executor_did_advance")
+            )
+            self.assertEqual(
+                task_handler.calls[0]["objective"], "generar reporte local de pendientes"
+            )
             self.assertEqual(task_handler.calls[0]["task_kind"], "idle_executor_advance")
             state = memory.get_session_state("tg-wave0")
             self.assertTrue(state["active_object"]["idle_executor"]["advanced"])
@@ -423,7 +419,9 @@ class Wave0GoldenTraceTests(unittest.TestCase):
             self.assertTrue(result.advanced)
             self.assertEqual(task_handler.calls, [("tg-wave0", "tg-wave0:durable")])
             self.assertIn("idle_executor_did_advance", result.event_names)
-            self.assertTrue(memory.get_session_state("tg-wave0")["active_object"]["idle_executor"]["advanced"])
+            self.assertTrue(
+                memory.get_session_state("tg-wave0")["active_object"]["idle_executor"]["advanced"]
+            )
 
     def test_idle_executor_does_not_duplicate_in_progress_queue_without_durable_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -454,7 +452,9 @@ class Wave0GoldenTraceTests(unittest.TestCase):
             self.assertFalse(result.advanced)
             self.assertEqual(task_handler.calls, [])
             self.assertIn("idle_executor_blocked", result.event_names)
-            event_payloads = [payload for name, payload in observe.events if name == "idle_executor_blocked"]
+            event_payloads = [
+                payload for name, payload in observe.events if name == "idle_executor_blocked"
+            ]
             self.assertEqual(event_payloads[-1]["reason"], "non_durable_in_progress_queue_item")
 
     def test_idle_executor_already_running_noop_does_not_increment_stall(self) -> None:
@@ -555,7 +555,9 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 trace_id=trace_id,
                 payload={
                     "tool_name": "Bash",
-                    "tool_input": {"command": "osascript -e 'tell application \"Google Chrome\" to activate'"},
+                    "tool_input": {
+                        "command": "osascript -e 'tell application \"Google Chrome\" to activate'"
+                    },
                     "tool_response": {"stdout": "Google Chrome"},
                 },
             )
@@ -574,16 +576,26 @@ class Wave0GoldenTraceTests(unittest.TestCase):
                 runtime_channel="telegram",
             )
 
-            self.assertNotIn("active_task", runtime.memory.get_session_state(session_id)["active_object"])
+            self.assertNotIn(
+                "active_task", runtime.memory.get_session_state(session_id)["active_object"]
+            )
             records = runtime.task_ledger.list(session_id=session_id, limit=10)
-            self.assertTrue(any(record.task_id.startswith(f"brain-tooluse:{session_id}:") for record in records))
+            self.assertTrue(
+                any(record.task_id.startswith(f"brain-tooluse:{session_id}:") for record in records)
+            )
             attached_events = runtime.observe.recent_events(
                 limit=20,
                 event_type="brain_tooluse_ledger_attached_existing",
             )
-            self.assertFalse(any(event["payload"].get("trace_id") == trace_id for event in attached_events))
-            cleared_events = runtime.observe.recent_events(limit=20, event_type="stale_active_task_cleared")
-            self.assertTrue(any(event["payload"].get("task_id") == task_id for event in cleared_events))
+            self.assertFalse(
+                any(event["payload"].get("trace_id") == trace_id for event in attached_events)
+            )
+            cleared_events = runtime.observe.recent_events(
+                limit=20, event_type="stale_active_task_cleared"
+            )
+            self.assertTrue(
+                any(event["payload"].get("task_id") == task_id for event in cleared_events)
+            )
 
     def test_introspection_routing_does_not_start_coding_coordinator(self) -> None:
         def reflective(request: LLMRequest) -> LLMResponse:

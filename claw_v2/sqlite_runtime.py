@@ -263,9 +263,7 @@ class StoreWalHealHandle:
         if store is None:
             return
         with self._lock_ctx(store):
-            new_conn = connect_runtime_sqlite(
-                store.db_path, row_factory=self._row_factory
-            )
+            new_conn = connect_runtime_sqlite(store.db_path, row_factory=self._row_factory)
             store._conn = new_conn
 
     def mark_degraded(self, error: RuntimeDatabaseError) -> None:
@@ -516,7 +514,9 @@ def check_runtime_sqlite_health(db_path: Path | str, *, thorough: bool = False) 
     if not path.exists() or path.stat().st_size == 0:
         return
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=SQLITE_CONNECT_TIMEOUT_SECONDS)
+        conn = sqlite3.connect(
+            f"file:{path}?mode=ro", uri=True, timeout=SQLITE_CONNECT_TIMEOUT_SECONDS
+        )
         try:
             _run_sqlite_health_pragma(conn, path, "quick_check")
             if thorough:

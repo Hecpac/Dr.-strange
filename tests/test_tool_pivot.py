@@ -6,6 +6,7 @@ violation, hard denylist match, agent-class mismatch). Systemic blocks
 (observation window frozen, rate-limit breaker) abort immediately because
 retrying with another tool would hit the same window.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -49,7 +50,14 @@ class ToolPivotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = _RecordingObserve()
             registry = _build_registry(Path(tmpdir), observe=observe)
-            registry.register(_tool("BlockedA", lambda args: (_ for _ in ()).throw(PermissionError("sandbox: path /etc/x denied"))))
+            registry.register(
+                _tool(
+                    "BlockedA",
+                    lambda args: (_ for _ in ()).throw(
+                        PermissionError("sandbox: path /etc/x denied")
+                    ),
+                )
+            )
             registry.register(_tool("WorkingB", lambda args: {"ok": True, "from": "B"}))
 
             result = registry.execute_with_pivot(
@@ -67,8 +75,12 @@ class ToolPivotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = _RecordingObserve()
             registry = _build_registry(Path(tmpdir), observe=observe)
-            registry.register(_tool("BlockedA", lambda args: (_ for _ in ()).throw(PermissionError("a"))))
-            registry.register(_tool("BlockedB", lambda args: (_ for _ in ()).throw(PermissionError("b"))))
+            registry.register(
+                _tool("BlockedA", lambda args: (_ for _ in ()).throw(PermissionError("a")))
+            )
+            registry.register(
+                _tool("BlockedB", lambda args: (_ for _ in ()).throw(PermissionError("b")))
+            )
 
             with self.assertRaises(PermissionError):
                 registry.execute_with_pivot(
@@ -85,7 +97,9 @@ class ToolPivotTests(unittest.TestCase):
             registry = _build_registry(Path(tmpdir), observe=observe)
 
             def systemic_block(args):
-                raise ObservationWindowBlocked("observation window frozen: circuit_breaker:cost_per_hour")
+                raise ObservationWindowBlocked(
+                    "observation window frozen: circuit_breaker:cost_per_hour"
+                )
 
             registry.register(_tool("BlockedSystemic", systemic_block))
             registry.register(_tool("Alt", lambda args: {"ok": True}))
@@ -120,11 +134,15 @@ class ToolPivotTests(unittest.TestCase):
 
             self.assertFalse(any(name == "tool_pivot" for name, _ in observe.events))
 
-    def test_execute_with_pivot_picks_up_policy_fallback_tools_when_no_explicit_alternatives(self) -> None:
+    def test_execute_with_pivot_picks_up_policy_fallback_tools_when_no_explicit_alternatives(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = _RecordingObserve()
             registry = _build_registry(Path(tmpdir), observe=observe)
-            registry.register(_tool("BlockedA", lambda args: (_ for _ in ()).throw(PermissionError("blocked"))))
+            registry.register(
+                _tool("BlockedA", lambda args: (_ for _ in ()).throw(PermissionError("blocked")))
+            )
             registry.register(_tool("PolicyFallback", lambda args: {"ok": True, "via": "policy"}))
 
             from claw_v2.tool_policy import TOOL_POLICIES, ToolPolicy
@@ -137,9 +155,7 @@ class ToolPivotTests(unittest.TestCase):
                 fallback_tools=("PolicyFallback",),
             )
             try:
-                result = registry.execute_with_pivot(
-                    "BlockedA", {}, agent_class="operator"
-                )
+                result = registry.execute_with_pivot("BlockedA", {}, agent_class="operator")
                 self.assertEqual(result["via"], "policy")
             finally:
                 del TOOL_POLICIES["BlockedA"]
@@ -148,7 +164,9 @@ class ToolPivotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = _RecordingObserve()
             registry = _build_registry(Path(tmpdir), observe=observe)
-            registry.register(_tool("BlockedA", lambda args: (_ for _ in ()).throw(PermissionError("blocked"))))
+            registry.register(
+                _tool("BlockedA", lambda args: (_ for _ in ()).throw(PermissionError("blocked")))
+            )
             registry.register(_tool("ExplicitB", lambda args: {"ok": True, "via": "explicit"}))
             registry.register(_tool("PolicyC", lambda args: {"ok": True, "via": "policy"}))
 

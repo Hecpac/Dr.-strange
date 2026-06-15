@@ -156,7 +156,9 @@ class ApprovalManager:
             action=action,
             summary=str(payload["summary"]),
             token=token,
-            risk_code=redacted_metadata.get("risk_code") if isinstance(redacted_metadata, dict) else None,
+            risk_code=redacted_metadata.get("risk_code")
+            if isinstance(redacted_metadata, dict)
+            else None,
             required_confirmation=redacted_metadata.get("required_confirmation")
             if isinstance(redacted_metadata, dict)
             else None,
@@ -194,6 +196,7 @@ class ApprovalManager:
             payload["resolved_by"] = RESOLVED_BY_HUMAN
             payload["resolved_at"] = now
             payload["_result"] = valid
+
         result = self._locked_update(approval_id, _do_approve)
         approved = result.pop("_result", False)
         self._emit_resolution_event(result, resolved_at=now)
@@ -452,7 +455,10 @@ class ApprovalManager:
             if payload.get("status") not in TERMINAL_APPROVAL_STATES:
                 continue
             resolved_at = _coerce_timestamp(
-                payload.get("resolved_at") or payload.get("archived_at") or payload.get("created_at") or 0
+                payload.get("resolved_at")
+                or payload.get("archived_at")
+                or payload.get("created_at")
+                or 0
             )
             if resolved_at > cutoff:
                 continue

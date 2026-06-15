@@ -53,7 +53,9 @@ class ExtractPageTextTests(unittest.TestCase):
 
 class TestDevBrowserService(unittest.TestCase):
     def test_browse_parses_json_output(self) -> None:
-        payload = json.dumps({"url": "https://example.com/", "title": "Example", "content": "- heading"})
+        payload = json.dumps(
+            {"url": "https://example.com/", "title": "Example", "content": "- heading"}
+        )
         runner, _ = _make_runner(stdout=payload)
         svc = DevBrowserService(command_runner=runner)
         result = svc.browse("https://example.com")
@@ -100,12 +102,14 @@ class TestDevBrowserService(unittest.TestCase):
         self.assertEqual(_js_escape("back\\slash"), "back\\\\slash")
 
     def test_screenshot_returns_path(self) -> None:
-        payload = json.dumps({
-            "url": "https://example.com/",
-            "title": "Example",
-            "content": "snapshot",
-            "screenshot_path": "/tmp/screenshot.png",
-        })
+        payload = json.dumps(
+            {
+                "url": "https://example.com/",
+                "title": "Example",
+                "content": "snapshot",
+                "screenshot_path": "/tmp/screenshot.png",
+            }
+        )
         runner, _ = _make_runner(stdout=payload)
         svc = DevBrowserService(command_runner=runner)
         result = svc.screenshot("https://example.com")
@@ -118,12 +122,14 @@ class TestDevBrowserService(unittest.TestCase):
         self.assertNotIn("--headless", calls[0]["cmd"])
 
     def test_interact_runs_structured_actions(self) -> None:
-        payload = json.dumps({
-            "url": "https://example.com/login",
-            "title": "Login",
-            "content": "form snapshot",
-            "screenshot_path": "/tmp/form.png",
-        })
+        payload = json.dumps(
+            {
+                "url": "https://example.com/login",
+                "title": "Login",
+                "content": "form snapshot",
+                "screenshot_path": "/tmp/form.png",
+            }
+        )
         runner, calls = _make_runner(stdout=payload)
         svc = DevBrowserService(command_runner=runner)
         result = svc.interact(
@@ -138,7 +144,7 @@ class TestDevBrowserService(unittest.TestCase):
         self.assertEqual(result.screenshot_path, "/tmp/form.png")
         self.assertEqual(len(calls), 1)
         script = calls[0]["stdin"]
-        self.assertIn('const actions = JSON.parse(', script)
+        self.assertIn("const actions = JSON.parse(", script)
         self.assertIn('\\"type\\": \\"fill\\"', script)
         self.assertIn('\\"label\\": \\"Email\\"', script)
         self.assertIn('\\"type\\": \\"click\\"', script)
@@ -156,12 +162,16 @@ class TestBrowserCli(unittest.TestCase):
                 screenshot_path="/tmp/example.png",
             )
             with mock.patch("sys.stdout.write") as mock_stdout:
-                exit_code = browser_cli.main([
-                    json.dumps({
-                        "url": "https://example.com/form",
-                        "actions": [{"type": "click", "selector": "button"}],
-                    })
-                ])
+                exit_code = browser_cli.main(
+                    [
+                        json.dumps(
+                            {
+                                "url": "https://example.com/form",
+                                "actions": [{"type": "click", "selector": "button"}],
+                            }
+                        )
+                    ]
+                )
         self.assertEqual(exit_code, 0)
         mock_service.interact.assert_called_once()
         written = "".join(call.args[0] for call in mock_stdout.call_args_list)
@@ -225,7 +235,9 @@ class TestChromeCDP(unittest.TestCase):
 
         self.assertEqual(result.url, "https://ads.google.com/campaigns")
         self.assertEqual(result.title, "Google Ads")
-        mock_new_page.goto.assert_called_once_with("https://ads.google.com", wait_until="domcontentloaded", timeout=30_000)
+        mock_new_page.goto.assert_called_once_with(
+            "https://ads.google.com", wait_until="domcontentloaded", timeout=30_000
+        )
 
     def test_chrome_navigate_matches_existing_tab_by_url_pattern(self) -> None:
         mock_existing = mock.MagicMock()
@@ -252,7 +264,9 @@ class TestChromeCDP(unittest.TestCase):
             )
 
         self.assertEqual(result.url, "https://ads.google.com/campaigns")
-        mock_existing.goto.assert_called_once_with("https://ads.google.com", wait_until="domcontentloaded", timeout=30_000)
+        mock_existing.goto.assert_called_once_with(
+            "https://ads.google.com", wait_until="domcontentloaded", timeout=30_000
+        )
 
     def test_chrome_screenshot_returns_path(self) -> None:
         mock_page = mock.MagicMock()

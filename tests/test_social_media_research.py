@@ -5,6 +5,7 @@ subprocess. We don't drive a real browser here — instead we intercept the
 script body before subprocess.run and assert it contains the correct JS
 selector logic.
 """
+
 from __future__ import annotations
 
 import unittest
@@ -32,9 +33,7 @@ class ResearchCompetitorScriptTests(unittest.TestCase):
             with patch.object(
                 social_media.subprocess,
                 "run",
-                return_value=SimpleNamespace(
-                    stdout='{"found": false}', stderr="", returncode=0
-                ),
+                return_value=SimpleNamespace(stdout='{"found": false}', stderr="", returncode=0),
             ):
                 social_media.research_competitor(handle="anyone", recent_post_count=3)
 
@@ -56,6 +55,7 @@ class SocialCompetitorResearchToolTests(unittest.TestCase):
     def _get_tool(self):
         from pathlib import Path
         from claw_v2.tools import ToolRegistry
+
         registry = ToolRegistry.default(workspace_root=Path("/tmp"))
         return registry.get("SocialCompetitorResearch")
 
@@ -74,14 +74,17 @@ class SocialCompetitorResearchToolTests(unittest.TestCase):
             captured["recent_post_count"] = recent_post_count
             captured["cdp_url"] = cdp_url
             from claw_v2.social_media import CompetitorResearch
+
             return CompetitorResearch(handle=handle, url="x", found=False)
 
         with patch("claw_v2.social_media.research_competitor", _fake_research):
-            tool.handler({
-                "handle": "garyvee",
-                "recent_post_count": 4,
-                "cdp_url": "http://localhost:9333",
-            })
+            tool.handler(
+                {
+                    "handle": "garyvee",
+                    "recent_post_count": 4,
+                    "cdp_url": "http://localhost:9333",
+                }
+            )
 
         self.assertEqual(captured["handle"], "garyvee")
         self.assertEqual(captured["recent_post_count"], 4)
@@ -95,6 +98,7 @@ class SocialCompetitorResearchToolTests(unittest.TestCase):
         def _fake_research(handle, recent_post_count=6, cdp_url="http://localhost:9250"):
             captured["cdp_url"] = cdp_url
             from claw_v2.social_media import CompetitorResearch
+
             return CompetitorResearch(handle=handle, url="x", found=False)
 
         with patch("claw_v2.social_media.research_competitor", _fake_research):

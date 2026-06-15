@@ -31,8 +31,12 @@ class JobServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = JobService(Path(tmpdir) / "claw.db")
 
-            first = service.enqueue(kind="notebooklm.research", payload={"notebook_id": "nb1"}, resume_key="nlm:nb1")
-            second = service.enqueue(kind="notebooklm.research", payload={"notebook_id": "nb1"}, resume_key="nlm:nb1")
+            first = service.enqueue(
+                kind="notebooklm.research", payload={"notebook_id": "nb1"}, resume_key="nlm:nb1"
+            )
+            second = service.enqueue(
+                kind="notebooklm.research", payload={"notebook_id": "nb1"}, resume_key="nlm:nb1"
+            )
 
             self.assertEqual(second.job_id, first.job_id)
             self.assertEqual(service.summary(), {"queued": 1})
@@ -117,7 +121,9 @@ class JobServiceTests(unittest.TestCase):
             service = JobService(Path(tmpdir) / "claw.db")
             created = service.enqueue(kind="pipeline.issue", payload={"issue_id": "HEC-1"})
 
-            claimed = service.claim_next(worker_id="worker-1", kinds=["pipeline.issue"], now=time.time())
+            claimed = service.claim_next(
+                worker_id="worker-1", kinds=["pipeline.issue"], now=time.time()
+            )
             self.assertEqual(claimed.job_id, created.job_id)
             self.assertEqual(claimed.status, "running")
             self.assertEqual(claimed.attempts, 1)

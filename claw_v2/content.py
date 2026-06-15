@@ -33,15 +33,21 @@ class ContentEngine:
                 drafts.append(self._generate(account, platform, strategy))
         return drafts
 
-    def generate_single(self, account: str, platform: str, *, topic: str | None = None) -> PostDraft:
+    def generate_single(
+        self, account: str, platform: str, *, topic: str | None = None
+    ) -> PostDraft:
         strategy = self._load_strategy(account)
         return self._generate(account, platform, strategy, topic=topic)
 
-    def _generate(self, account: str, platform: str, strategy: dict, *, topic: str | None = None) -> PostDraft:
+    def _generate(
+        self, account: str, platform: str, strategy: dict, *, topic: str | None = None
+    ) -> PostDraft:
         limit = CHAR_LIMITS.get(platform, 2200)
         hashtag_limit = HASHTAG_LIMITS.get(platform, 5)
         prompt = self._build_prompt(account, platform, strategy, limit, hashtag_limit, topic)
-        response = self.router.ask(prompt, lane="worker", evidence_pack={"account": account, "platform": platform})
+        response = self.router.ask(
+            prompt, lane="worker", evidence_pack={"account": account, "platform": platform}
+        )
         text = response.content.strip()
         hashtags = _extract_hashtags(text)[:hashtag_limit]
         text_clean = _strip_hashtags(text)[:limit]
@@ -49,11 +55,22 @@ class ContentEngine:
         if platform == "instagram":
             media_prompt = f"Social media image for: {text_clean[:100]}"
         return PostDraft(
-            account=account, platform=platform, text=text_clean,
-            hashtags=hashtags, media_prompt=media_prompt,
+            account=account,
+            platform=platform,
+            text=text_clean,
+            hashtags=hashtags,
+            media_prompt=media_prompt,
         )
 
-    def _build_prompt(self, account: str, platform: str, strategy: dict, limit: int, hashtag_limit: int, topic: str | None) -> str:
+    def _build_prompt(
+        self,
+        account: str,
+        platform: str,
+        strategy: dict,
+        limit: int,
+        hashtag_limit: int,
+        topic: str | None,
+    ) -> str:
         pillars = "\n".join(f"- {p}" for p in strategy.get("pillars", []))
         tone = strategy.get("tone", "professional")
         parts = [

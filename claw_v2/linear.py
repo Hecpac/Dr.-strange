@@ -159,18 +159,26 @@ def _mutate_save_issue(client: Any, kwargs: dict) -> None:
     state = kwargs.get("state")
     links = kwargs.get("links")
     if state:
-        _gql(client, """
+        _gql(
+            client,
+            """
             mutation($id: String!, $stateName: String!) {
                 issueUpdate(id: $id, input: { stateName: $stateName }) { success }
             }
-        """, {"id": issue_id, "stateName": state})
+        """,
+            {"id": issue_id, "stateName": state},
+        )
     if links:
         for link in links:
-            _gql(client, """
+            _gql(
+                client,
+                """
                 mutation($issueId: String!, $url: String!, $title: String!) {
                     attachmentCreate(input: { issueId: $issueId, url: $url, title: $title }) { success }
                 }
-            """, {"issueId": issue_id, "url": link["url"], "title": link["title"]})
+            """,
+                {"issueId": issue_id, "url": link["url"], "title": link["title"]},
+            )
 
 
 def _mutate_save_comment(client: Any, issue_id: str, body: str) -> None:

@@ -1,4 +1,5 @@
 """Wave 3.2: TrustCalibrator tier adjustments based on track record."""
+
 from __future__ import annotations
 
 import unittest
@@ -25,13 +26,17 @@ class _FakeEvaluator:
         self._passed = passed
         self.calls: list[dict] = []
 
-    def run_self_improvement_gate(self, *, plan: str, diff: str, test_output: str) -> _FakeEvalResult:
+    def run_self_improvement_gate(
+        self, *, plan: str, diff: str, test_output: str
+    ) -> _FakeEvalResult:
         self.calls.append({"plan": plan, "diff": diff, "test_output": test_output})
         return _FakeEvalResult(self._passed)
 
 
 class TrustCalibratorTests(unittest.TestCase):
-    def _record_n(self, calibrator: TrustCalibrator, agent: str, kind: str, *, n: int, success: bool) -> None:
+    def _record_n(
+        self, calibrator: TrustCalibrator, agent: str, kind: str, *, n: int, success: bool
+    ) -> None:
         for _ in range(n):
             calibrator.record_outcome(agent, kind, success=success)
 

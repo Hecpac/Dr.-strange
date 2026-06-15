@@ -79,10 +79,14 @@ class CodexAdapter(ProviderAdapter):
 
         sandbox = _sandbox_for_request(request)
         cmd = [
-            resolved, "exec",
-            "--model", model,
-            "--sandbox", sandbox,
-            "--color", "never",
+            resolved,
+            "exec",
+            "--model",
+            model,
+            "--sandbox",
+            sandbox,
+            "--color",
+            "never",
         ]
         if request.lane in ADVISORY_LANES:
             cmd.append("--ephemeral")
@@ -100,13 +104,9 @@ class CodexAdapter(ProviderAdapter):
                     timeout=request.timeout,
                 )
             except FileNotFoundError as exc:
-                raise AdapterUnavailableError(
-                    f"Codex CLI not found at '{self.cli_path}'."
-                ) from exc
+                raise AdapterUnavailableError(f"Codex CLI not found at '{self.cli_path}'.") from exc
             except subprocess.TimeoutExpired as exc:
-                raise AdapterError(
-                    f"Codex CLI timed out after {request.timeout}s"
-                ) from exc
+                raise AdapterError(f"Codex CLI timed out after {request.timeout}s") from exc
 
             if result.returncode == 0:
                 break
@@ -217,7 +217,19 @@ def _codex_confidence(content: str) -> float:
     if not content:
         return 0.3
     structured = sum(
-        1 for marker in ("```", "\n## ", "\n# ", "\n- ", "\n* ", "/", "diff --git", "## Edits", "## Build/Verify", "## Evidence")
+        1
+        for marker in (
+            "```",
+            "\n## ",
+            "\n# ",
+            "\n- ",
+            "\n* ",
+            "/",
+            "diff --git",
+            "## Edits",
+            "## Build/Verify",
+            "## Evidence",
+        )
         if marker in content
     )
     if structured >= 3 and len(content) >= 200:

@@ -10,7 +10,9 @@ from claw_v2.notebooklm import NotebookLMService
 from claw_v2.notebooklm_adapter import JacobNotebookLMCLIAdapter
 
 
-def _completed(cmd: list[str], stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
+def _completed(
+    cmd: list[str], stdout: str = "", returncode: int = 0
+) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr="")
 
 
@@ -54,7 +56,9 @@ class JacobNotebookLMCLIAdapterTests(unittest.TestCase):
         def runner(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
             nonlocal research_command
             if cmd[1:4] == ["notebook", "get", "nb-1"]:
-                return _completed(cmd, f'{{"notebook_id":"nb-1","title":"One","source_count":{next(counts)}}}')
+                return _completed(
+                    cmd, f'{{"notebook_id":"nb-1","title":"One","source_count":{next(counts)}}}'
+                )
             if cmd[1:3] == ["research", "start"]:
                 research_command = cmd
                 return _completed(cmd, "✓ 3 source(s) imported.")
@@ -157,7 +161,10 @@ class _StubExternalBackend:
 
     def status(self, notebook_id: str) -> dict[str, Any]:
         self.calls.append(("status", (notebook_id,)))
-        return {"notebook": {"id": notebook_id, "title": "External", "sources_count": 1}, "sources": []}
+        return {
+            "notebook": {"id": notebook_id, "title": "External", "sources_count": 1},
+            "sources": [],
+        }
 
     def chat(self, notebook_id: str, question: str) -> str:
         self.calls.append(("chat", (notebook_id, question)))

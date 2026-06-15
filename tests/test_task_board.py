@@ -5,6 +5,7 @@ coordination object grouping tasks toward one outcome, plus parent_task_id /
 project_id / milestone_id on BoardTask so callers can reason about
 multi-task progress.
 """
+
 from __future__ import annotations
 
 import tempfile

@@ -327,7 +327,9 @@ class OrchestrationStore:
                 created_at=now,
             )
             self._conn.commit()
-        self._emit("orchestration_run_started", run_id=run_id, payload={"task_id": task_id, "kind": kind})
+        self._emit(
+            "orchestration_run_started", run_id=run_id, payload={"task_id": task_id, "kind": kind}
+        )
         return self.get_run(run_id)  # type: ignore[return-value]
 
     def begin_phase(
@@ -416,8 +418,7 @@ class OrchestrationStore:
                     },
                 )
                 raise OrchestrationGateError(
-                    "final gate rejected success; missing artifacts: "
-                    + ",".join(missing)
+                    "final gate rejected success; missing artifacts: " + ",".join(missing)
                 )
         return self._transition_run(
             run_id,
@@ -580,7 +581,9 @@ class OrchestrationStore:
                 event_type="artifact_acknowledged",
                 phase=artifact.phase,
                 version=version,
-                trace_context=artifact.envelope.get("trace") if isinstance(artifact.envelope, dict) else None,
+                trace_context=artifact.envelope.get("trace")
+                if isinstance(artifact.envelope, dict)
+                else None,
                 payload={
                     "ack_id": ack_id,
                     "consumer_role": consumer_role,
@@ -618,7 +621,7 @@ class OrchestrationStore:
                 f"""
                 SELECT *
                 FROM orchestration_acks
-                WHERE {' AND '.join(clauses)}
+                WHERE {" AND ".join(clauses)}
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
@@ -680,7 +683,11 @@ class OrchestrationStore:
                 created_at=now,
             )
             self._conn.commit()
-        self._emit("orchestration_checkpoint_created", run_id=run_id, payload={"checkpoint_id": checkpoint_id})
+        self._emit(
+            "orchestration_checkpoint_created",
+            run_id=run_id,
+            payload={"checkpoint_id": checkpoint_id},
+        )
         return checkpoint_id
 
     def alarm_run(
@@ -795,7 +802,9 @@ class OrchestrationStore:
                     {
                         "from_event": previous["event_type"],
                         "to_event": event["event_type"],
-                        "gap_seconds": round(float(event["created_at"]) - float(previous["created_at"]), 3),
+                        "gap_seconds": round(
+                            float(event["created_at"]) - float(previous["created_at"]), 3
+                        ),
                     }
                 )
             previous = event
@@ -859,8 +868,7 @@ class OrchestrationStore:
             )
             self._conn.commit()
         emit_event_type = (
-            event_type if event_type.startswith("orchestration_")
-            else f"orchestration_{event_type}"
+            event_type if event_type.startswith("orchestration_") else f"orchestration_{event_type}"
         )
         self._emit(emit_event_type, run_id=run_id, payload=payload)
         return self.get_run(run_id)  # type: ignore[return-value]

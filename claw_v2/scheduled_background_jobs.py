@@ -283,7 +283,9 @@ def wiki_research_result_summary(result: object) -> dict[str, Any]:
 
 
 def kairos_tick_result_summary(result: object) -> dict[str, Any]:
-    action = _safe_text_preview(str(getattr(result, "action", "") or ""), limit=_RESULT_STRING_LIMIT)
+    action = _safe_text_preview(
+        str(getattr(result, "action", "") or ""), limit=_RESULT_STRING_LIMIT
+    )
     summary: dict[str, Any] = {
         "action": action or "unknown",
         "duration_seconds": _safe_float(getattr(result, "duration_seconds", 0.0)),

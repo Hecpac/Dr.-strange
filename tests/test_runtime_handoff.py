@@ -27,9 +27,7 @@ class ExecutionEnvironmentTests(unittest.TestCase):
             self.assertTrue(env.is_sandboxed)
 
     def test_claw_production_marker_detected(self) -> None:
-        with patch.dict(
-            os.environ, {"CLAW_RUNTIME_MODE": "production"}, clear=False
-        ):
+        with patch.dict(os.environ, {"CLAW_RUNTIME_MODE": "production"}, clear=False):
             env = detect_execution_environment()
             self.assertEqual(env.kind, "claw_production")
             self.assertTrue(env.can_restart_launchd)
@@ -103,7 +101,9 @@ class RuntimeHandoffTests(unittest.TestCase):
                 signing_secret="test-secret",
             )
 
-            loaded = load_runtime_handoff(Path(handoff.queue_path or ""), signing_secret="test-secret")
+            loaded = load_runtime_handoff(
+                Path(handoff.queue_path or ""), signing_secret="test-secret"
+            )
 
         self.assertEqual(loaded.handoff_id, handoff.handoff_id)
         self.assertEqual(loaded.goal, "x")

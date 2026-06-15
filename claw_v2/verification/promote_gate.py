@@ -11,6 +11,7 @@ NEVER enough to land `succeeded`.
 This module is pure-function. No I/O, no external calls. Callers in F3+F5
 pre-fetch any external observations and pass them in via the artifact.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -33,11 +34,11 @@ from claw_v2.verification.success_contract import (
 class GateOutcome:
     """Result of running the promote gate on a candidate terminal status."""
 
-    terminal_status: str            # "succeeded" | "failed" | "" (blocked-by-input handled upstream)
-    verification_status: str        # "passed" | "pending_verification" | "failed" | "blocked"
+    terminal_status: str  # "succeeded" | "failed" | "" (blocked-by-input handled upstream)
+    verification_status: str  # "passed" | "pending_verification" | "failed" | "blocked"
     envelope: VerificationResult | None
-    degraded: bool                  # True if the gate downgraded from succeeded
-    reason: str                     # short code describing the degrade, "" if not degraded
+    degraded: bool  # True if the gate downgraded from succeeded
+    reason: str  # short code describing the degrade, "" if not degraded
 
 
 _ARTIFACT_KEY = "success_condition_artifact"
@@ -202,8 +203,12 @@ def gate_terminal_status(
     errors = validate_success_condition(
         tool_result=tool_result,
         condition=condition,
-        external_observation=external_observation if isinstance(external_observation, Mapping) else None,
-        state_delta_observation=state_delta_observation if isinstance(state_delta_observation, Mapping) else None,
+        external_observation=external_observation
+        if isinstance(external_observation, Mapping)
+        else None,
+        state_delta_observation=state_delta_observation
+        if isinstance(state_delta_observation, Mapping)
+        else None,
     )
 
     # Tier-3 specific gating: preflight + evidence + SOME form of post-hoc
@@ -228,7 +233,9 @@ def gate_terminal_status(
         condition=condition,
         errors=errors,
         evidence_uri=evidence_uri if isinstance(evidence_uri, str) else None,
-        external_observation=external_observation if isinstance(external_observation, Mapping) else None,
+        external_observation=external_observation
+        if isinstance(external_observation, Mapping)
+        else None,
     )
 
     # Tier-3 blocked reasons collapse to verification_status="blocked"

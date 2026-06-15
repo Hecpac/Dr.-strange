@@ -52,7 +52,9 @@ def _runtime_env(root: Path) -> dict[str, str]:
     }
 
 
-def _drive(bot, text: str, *, session_id: str = "tg-smoke") -> tuple[str | None, list[tuple[str, dict]]]:
+def _drive(
+    bot, text: str, *, session_id: str = "tg-smoke"
+) -> tuple[str | None, list[tuple[str, dict]]]:
     """Run handle_text and capture every observe event emitted during the turn."""
     captured: list[tuple[str, dict]] = []
     real_emit = bot.observe.emit
@@ -86,9 +88,7 @@ def test_complaint_no_evidence_gate_task() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         with patch.dict(os.environ, _runtime_env(root), clear=False):
-            runtime = build_runtime(
-                anthropic_executor=_fake_anthropic_returning_start_claim
-            )
+            runtime = build_runtime(anthropic_executor=_fake_anthropic_returning_start_claim)
             runtime.bot.coordinator = None
 
             response, events = _drive(runtime.bot, complaint)
@@ -144,9 +144,7 @@ def test_non_meta_operator_request_still_trips_evidence_gate() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         with patch.dict(os.environ, _runtime_env(root), clear=False):
-            runtime = build_runtime(
-                anthropic_executor=_fake_anthropic_returning_start_claim
-            )
+            runtime = build_runtime(anthropic_executor=_fake_anthropic_returning_start_claim)
             runtime.bot.coordinator = None
 
             response, events = _drive(runtime.bot, operative)
@@ -223,9 +221,7 @@ def test_complaint_no_evidence_gate_task_via_asyncio_to_thread() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         with patch.dict(os.environ, _runtime_env(root), clear=False):
-            runtime = build_runtime(
-                anthropic_executor=_fake_anthropic_returning_start_claim
-            )
+            runtime = build_runtime(anthropic_executor=_fake_anthropic_returning_start_claim)
             runtime.bot.coordinator = None
 
             response, events = _drive_via_asyncio_to_thread(runtime.bot, complaint)
@@ -277,9 +273,7 @@ def test_non_meta_operator_request_still_trips_evidence_gate_via_asyncio_to_thre
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         with patch.dict(os.environ, _runtime_env(root), clear=False):
-            runtime = build_runtime(
-                anthropic_executor=_fake_anthropic_returning_start_claim
-            )
+            runtime = build_runtime(anthropic_executor=_fake_anthropic_returning_start_claim)
             runtime.bot.coordinator = None
 
             response, events = _drive_via_asyncio_to_thread(runtime.bot, operative)

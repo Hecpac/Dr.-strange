@@ -5,6 +5,7 @@ beta_api_shape_disabled for every voice note on 2026-05-24. Each call
 paid a websocket round-trip before falling back to batch — disable the
 backend for 24h so the bot stops re-burning that round-trip.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -36,7 +37,9 @@ class _StateIsolated(unittest.TestCase):
 class BetaShapeDetectionTests(unittest.TestCase):
     def test_detects_beta_api_shape_disabled_phrase(self) -> None:
         self.assertTrue(
-            is_realtime_beta_shape_error(RuntimeError("invalid_request_error.beta_api_shape_disabled"))
+            is_realtime_beta_shape_error(
+                RuntimeError("invalid_request_error.beta_api_shape_disabled")
+            )
         )
 
     def test_detects_ws_4000_invalid_request_error(self) -> None:
@@ -74,7 +77,9 @@ class RealtimeBetaShapeAutoDisableOnErrorTests(_StateIsolated):
         events: list[tuple[str, dict]] = []
 
         async def fake_realtime(*_, **__):
-            raise RuntimeError("received 4000 (private use) invalid_request_error.beta_api_shape_disabled")
+            raise RuntimeError(
+                "received 4000 (private use) invalid_request_error.beta_api_shape_disabled"
+            )
 
         async def fake_batch_chain(*_, **__):
             tmp = Path(tempfile.mkstemp(suffix=".ogg")[1])
@@ -83,8 +88,13 @@ class RealtimeBetaShapeAutoDisableOnErrorTests(_StateIsolated):
 
         with (
             patch("claw_v2.voice._synthesize_realtime", side_effect=fake_realtime),
-            patch("claw_v2.voice._synthesize_xai", side_effect=AsyncMock(side_effect=NotImplementedError)),
-            patch("claw_v2.voice.synthesize", side_effect=AsyncMock(side_effect=NotImplementedError)),
+            patch(
+                "claw_v2.voice._synthesize_xai",
+                side_effect=AsyncMock(side_effect=NotImplementedError),
+            ),
+            patch(
+                "claw_v2.voice.synthesize", side_effect=AsyncMock(side_effect=NotImplementedError)
+            ),
             patch("claw_v2.voice._synthesize_edge", new=AsyncMock(side_effect=fake_batch_chain)),
             patch("claw_v2.voice._mp3_to_ogg", new=AsyncMock(side_effect=lambda p: p)),
         ):
@@ -128,7 +138,10 @@ class VoiceNoteUsesBatchWhenRealtimeDisabledTests(_StateIsolated):
 
         with (
             patch("claw_v2.voice._synthesize_realtime", side_effect=fake_realtime),
-            patch("claw_v2.voice.synthesize", side_effect=AsyncMock(side_effect=RuntimeError("openai down"))),
+            patch(
+                "claw_v2.voice.synthesize",
+                side_effect=AsyncMock(side_effect=RuntimeError("openai down")),
+            ),
             patch("claw_v2.voice._synthesize_edge", new=AsyncMock(side_effect=fake_edge)),
             patch("claw_v2.voice._mp3_to_ogg", new=AsyncMock(side_effect=fake_mp3_to_ogg)),
         ):

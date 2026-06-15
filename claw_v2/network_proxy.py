@@ -25,7 +25,9 @@ class DomainAllowlistEnforcer:
         self._timestamps: dict[str, list[float]] = defaultdict(list)
         self._resolver = resolver or _resolve_host_ips
 
-    def enforce_url(self, url: str, *, policy: NetworkPolicy, actor: str = "default") -> SandboxDecision:
+    def enforce_url(
+        self, url: str, *, policy: NetworkPolicy, actor: str = "default"
+    ) -> SandboxDecision:
         if len(url) > policy.max_url_length:
             return SandboxDecision(False, "URL too long")
         parsed = urlparse(url)
@@ -36,7 +38,9 @@ class DomainAllowlistEnforcer:
             return SandboxDecision(False, "Missing domain")
         if any(self._matches(host, blocked) for blocked in policy.blocked_domains):
             return SandboxDecision(False, "Blocked domain")
-        if policy.allowed_domains and not any(self._matches(host, allowed) for allowed in policy.allowed_domains):
+        if policy.allowed_domains and not any(
+            self._matches(host, allowed) for allowed in policy.allowed_domains
+        ):
             return SandboxDecision(False, "Domain not in allowlist")
         ip_decision = self._enforce_resolved_ips(host)
         if not ip_decision.allowed:
@@ -61,7 +65,9 @@ class DomainAllowlistEnforcer:
         for url in urls:
             decision = self.enforce_url(url, policy=policy, actor=actor)
             if not decision.allowed:
-                return SandboxDecision(False, f"Redirect target blocked: {decision.reason}", decision.metadata)
+                return SandboxDecision(
+                    False, f"Redirect target blocked: {decision.reason}", decision.metadata
+                )
         return SandboxDecision(True)
 
     def _enforce_resolved_ips(self, host: str) -> SandboxDecision:
@@ -73,7 +79,9 @@ class DomainAllowlistEnforcer:
             return SandboxDecision(False, "Host DNS resolution returned no addresses")
         blocked = [ip for ip in ips if not ipaddress.ip_address(ip).is_global]
         if blocked:
-            return SandboxDecision(False, "Host resolves to a non-public IP address", {"resolved_ips": ips})
+            return SandboxDecision(
+                False, "Host resolves to a non-public IP address", {"resolved_ips": ips}
+            )
         return SandboxDecision(True, metadata={"resolved_ips": ips})
 
     @staticmethod

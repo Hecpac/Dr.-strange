@@ -9,6 +9,7 @@ HeyGen, GitHub remote, Telegram, or any external service. The verification
 module is a pure evaluator; memory_revalidation validators are pure functions
 fed stubbed observations.
 """
+
 from __future__ import annotations
 
 
@@ -74,21 +75,19 @@ def test_tool_ok_alone_does_not_pass_when_external_check_fails():
             kind="cdp_phrase",
             target="https://x.com/HectorPach71777",
             expected_phrases=(
-                "Singapur acaba de poner número",     # T1 opening
-                "5 cosas cambian cuando un gobierno", # T2
-                "El mercado votó por routing",        # T3
-                "esos son los nuevos logs",           # T4
-                "Es la capa de política alrededor",   # T5
-                "deja de sonar absurdo",              # T6
-                "Es un número de planificación",      # T7
-                "cuando hay 219 más",                 # T8
+                "Singapur acaba de poner número",  # T1 opening
+                "5 cosas cambian cuando un gobierno",  # T2
+                "El mercado votó por routing",  # T3
+                "esos son los nuevos logs",  # T4
+                "Es la capa de política alrededor",  # T5
+                "deja de sonar absurdo",  # T6
+                "Es un número de planificación",  # T7
+                "cuando hay 219 más",  # T8
             ),
         ),
     )
     tool_result = {"ok": True, "tweets_intended": 8, "tweets_posted_count": 1, "reason": ""}
-    observed_body_text = (
-        "Dejó de ser \"¿puede funcionar?\". Ahora es: \"cuando hay 219 más\""
-    )
+    observed_body_text = 'Dejó de ser "¿puede funcionar?". Ahora es: "cuando hay 219 más"'
     errors = validate_success_condition(
         tool_result=tool_result,
         condition=sc,

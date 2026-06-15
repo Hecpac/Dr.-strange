@@ -34,23 +34,19 @@ class _AutoResearchStub:
 
 class _PipelineStub:
     def list_active(self) -> list[object]:
-        return [SimpleNamespace(issue_id="HEC-1", status="awaiting_approval", branch_name="feat/hec-1")]
+        return [
+            SimpleNamespace(issue_id="HEC-1", status="awaiting_approval", branch_name="feat/hec-1")
+        ]
 
 
 class MorningBriefTests(unittest.TestCase):
     def test_should_send_only_in_configured_hour_once_per_day(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             stamp = Path(tmpdir) / "sent.txt"
-            self.assertFalse(
-                should_send_morning_brief(datetime(2026, 4, 27, 4, 59), stamp, hour=5)
-            )
-            self.assertTrue(
-                should_send_morning_brief(datetime(2026, 4, 27, 5, 0), stamp, hour=5)
-            )
+            self.assertFalse(should_send_morning_brief(datetime(2026, 4, 27, 4, 59), stamp, hour=5))
+            self.assertTrue(should_send_morning_brief(datetime(2026, 4, 27, 5, 0), stamp, hour=5))
             stamp.write_text("2026-04-27", encoding="utf-8")
-            self.assertFalse(
-                should_send_morning_brief(datetime(2026, 4, 27, 5, 30), stamp, hour=5)
-            )
+            self.assertFalse(should_send_morning_brief(datetime(2026, 4, 27, 5, 30), stamp, hour=5))
 
     def test_formats_spanish_date_without_locale_dependency(self) -> None:
         self.assertEqual(
@@ -67,7 +63,9 @@ class MorningBriefTests(unittest.TestCase):
             jobs = JobService(root / "claw.db")
             board = TaskBoard(root / "board")
             metrics = MetricsTracker()
-            metrics.record(lane="brain", provider="anthropic", model="test", cost=0.25, degraded_mode=False)
+            metrics.record(
+                lane="brain", provider="anthropic", model="test", cost=0.25, degraded_mode=False
+            )
             ledger.create(
                 task_id="task-1",
                 session_id="tg-123",
@@ -76,7 +74,9 @@ class MorningBriefTests(unittest.TestCase):
                 status="running",
             )
             jobs.enqueue(kind="notebooklm.research", job_id="job-1")
-            board.publish("Revisar propuesta", "verificar alcance", created_by="kairos", priority=10)
+            board.publish(
+                "Revisar propuesta", "verificar alcance", created_by="kairos", priority=10
+            )
 
             service = MorningBriefService(
                 settings=MorningBriefSettings(
@@ -156,7 +156,9 @@ class MorningBriefTests(unittest.TestCase):
                 verification_status="pending",
             )
             observe.emit("brain_tooluse_ledger_failed", payload={"task_id": "task-failed"})
-            observe.emit("telegram_actionable_no_match", payload={"candidate_action": "paste_prompt"})
+            observe.emit(
+                "telegram_actionable_no_match", payload={"candidate_action": "paste_prompt"}
+            )
 
             service = MorningBriefService(
                 settings=MorningBriefSettings(stamp_path=root / "morning.txt"),
@@ -209,7 +211,9 @@ class MorningBriefTests(unittest.TestCase):
             self.assertIn("agenda=empty", message)
             self.assertIn("correo=empty", message)
             self.assertIn("baja senal", message)
-            self.assertEqual(observe.recent_events(limit=1)[0]["event_type"], "morning_brief_low_signal")
+            self.assertEqual(
+                observe.recent_events(limit=1)[0]["event_type"], "morning_brief_low_signal"
+            )
 
     def test_missing_connectors_are_omitted_from_message_and_recorded_in_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -218,7 +222,9 @@ class MorningBriefTests(unittest.TestCase):
                 notify=lambda _: None,
                 clock=lambda: datetime(2026, 4, 27, 8, 0),
                 weather_fetcher=lambda location, timeout: "auto: 70F",
-                calendar_fetcher=lambda timeout: (_ for _ in ()).throw(RuntimeError("calendar denied")),
+                calendar_fetcher=lambda timeout: (_ for _ in ()).throw(
+                    RuntimeError("calendar denied")
+                ),
                 email_fetcher=lambda timeout: (_ for _ in ()).throw(RuntimeError("mail denied")),
             )
 
@@ -230,7 +236,9 @@ class MorningBriefTests(unittest.TestCase):
             self.assertIn("agenda=unavailable", message)
             self.assertIn("correo=unavailable", message)
 
-    def test_calendar_and_email_collectors_are_automatic_when_no_command_is_configured(self) -> None:
+    def test_calendar_and_email_collectors_are_automatic_when_no_command_is_configured(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service = MorningBriefService(
                 settings=MorningBriefSettings(stamp_path=Path(tmpdir) / "morning.txt"),

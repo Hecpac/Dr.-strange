@@ -166,7 +166,11 @@ def model_overrides_from_state(state: dict[str, Any]) -> dict[str, ModelOverride
         provider = payload.get("provider")
         model = payload.get("model")
         billing = payload.get("billing")
-        if not isinstance(provider, str) or not isinstance(model, str) or not isinstance(billing, str):
+        if (
+            not isinstance(provider, str)
+            or not isinstance(model, str)
+            or not isinstance(billing, str)
+        ):
             continue
         effort = payload.get("effort")
         result[str(lane)] = ModelOverride(

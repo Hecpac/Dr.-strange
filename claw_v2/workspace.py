@@ -258,7 +258,9 @@ class AgentWorkspace:
 
     def __init__(self, root: Path | str, *, template_root: Path | str | None = None) -> None:
         self.root = Path(root)
-        self.template_root = Path(template_root) if template_root is not None else Path(__file__).parent
+        self.template_root = (
+            Path(template_root) if template_root is not None else Path(__file__).parent
+        )
 
     def ensure(self) -> WorkspaceBootstrapResult:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -476,7 +478,9 @@ class AgentWorkspace:
                 boot_protocol_version=report.boot_protocol_version,
             )
             return "", report
-        context_before_total_truncation = _CONTEXT_PREFIX + "\n\n".join(sections) if sections else ""
+        context_before_total_truncation = (
+            _CONTEXT_PREFIX + "\n\n".join(sections) if sections else ""
+        )
         context = context_before_total_truncation
         context = context.replace(
             "boot_protocol_loaded=pending",
@@ -500,7 +504,10 @@ class AgentWorkspace:
         )
         return context, report
 
-    def system_prompt(self, fallback: str = "You are Dr. Strange, the autonomous personal agent for Hector Pachano.") -> str:
+    def system_prompt(
+        self,
+        fallback: str = "You are Dr. Strange, the autonomous personal agent for Hector Pachano.",
+    ) -> str:
         context, _ = self.startup_context()
         if not context:
             return fallback
@@ -515,6 +522,7 @@ class AgentWorkspace:
         from datetime import datetime, timezone
         import os
         import tempfile
+
         path = self.root / "MEMORY.md"
         try:
             existing = path.read_text(encoding="utf-8") if path.exists() else "# MEMORY.md\n\n"
@@ -523,7 +531,9 @@ class AgentWorkspace:
             if line in existing:
                 return True
             new_content = existing.rstrip() + "\n" + line
-            fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".MEMORY.md.", suffix=".tmp")
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(path.parent), prefix=".MEMORY.md.", suffix=".tmp"
+            )
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     fh.write(new_content)
@@ -592,7 +602,9 @@ class AgentWorkspace:
         if not files:
             return ["# Daily Working Notes\nNo dated memory files found."]
         report.daily_memory_loaded = True
-        sections = ["# Daily Working Notes\nDated temporary context. Treat dates as authoritative for temporal references."]
+        sections = [
+            "# Daily Working Notes\nDated temporary context. Treat dates as authoritative for temporal references."
+        ]
         for path in files:
             content, source_status = self._read_context_source(
                 f"memory/{path.name}",
@@ -616,7 +628,9 @@ class AgentWorkspace:
             return ""
         report.configuration_loaded = True
         active_channels: list[str] = []
-        if getattr(config, "telegram_bot_token", None) and getattr(config, "telegram_allowed_user_id", None):
+        if getattr(config, "telegram_bot_token", None) and getattr(
+            config, "telegram_allowed_user_id", None
+        ):
             active_channels.append("telegram")
         if getattr(config, "web_chat_enabled", False):
             active_channels.append("web_chat")
@@ -775,13 +789,18 @@ class AgentWorkspace:
                 if state.get("current_goal"):
                     pieces.append(f"current_goal={_safe_startup_text(state.get('current_goal'))}")
                 if state.get("pending_action"):
-                    pieces.append(f"pending_action={_safe_startup_text(state.get('pending_action'))}")
+                    pieces.append(
+                        f"pending_action={_safe_startup_text(state.get('pending_action'))}"
+                    )
                 task_queue = state.get("task_queue") or []
                 if task_queue:
                     pieces.append(f"task_queue_count={len(task_queue)}")
                 active_keys = state.get("active_object_keys") or []
                 if active_keys:
-                    pieces.append("active_object_keys=" + ",".join(_safe_startup_text(k, limit=80) for k in active_keys[:12]))
+                    pieces.append(
+                        "active_object_keys="
+                        + ",".join(_safe_startup_text(k, limit=80) for k in active_keys[:12])
+                    )
                 lines.append("- " + " | ".join(pieces))
             sections.append("\n".join(lines))
         return sections
@@ -803,7 +822,8 @@ class AgentWorkspace:
         report.task_ledger_counts = {str(k): int(v) for k, v in summary.items()}
         report.task_ledger_open_count = len(open_tasks)
         attention = [
-            task for task in recent
+            task
+            for task in recent
             if getattr(task, "status", "") in {"failed", "timed_out", "lost"}
             and getattr(task, "verification_status", "") not in {"passed", "cancelled"}
         ][:5]
@@ -861,8 +881,12 @@ def _build_prompt_manifest(
         "boot_protocol_loaded=pending": f"boot_protocol_loaded={str(boot_protocol_loaded).lower()}",
         "boot_protocol_version=pending": f"boot_protocol_version={boot_protocol_version or 'unknown'}",
     }
-    source_texts = [_apply_prompt_manifest_replacements(draft.text, replacements) for draft in drafts]
-    untruncated_context = _apply_prompt_manifest_replacements(context_before_total_truncation, replacements)
+    source_texts = [
+        _apply_prompt_manifest_replacements(draft.text, replacements) for draft in drafts
+    ]
+    untruncated_context = _apply_prompt_manifest_replacements(
+        context_before_total_truncation, replacements
+    )
     included_source_limit = (
         min(len(untruncated_context), _MAX_STARTUP_CONTEXT_CHARS)
         if context_truncated
@@ -1028,7 +1052,9 @@ def _recent_session_states(memory: Any, *, limit: int = 5) -> list[dict[str, Any
                 "pending_action": row["pending_action"],
                 "verification_status": row["verification_status"],
                 "task_queue": task_queue if isinstance(task_queue, list) else [],
-                "active_object_keys": sorted(active_object.keys()) if isinstance(active_object, dict) else [],
+                "active_object_keys": sorted(active_object.keys())
+                if isinstance(active_object, dict)
+                else [],
                 "updated_at": row["updated_at"],
             }
         )

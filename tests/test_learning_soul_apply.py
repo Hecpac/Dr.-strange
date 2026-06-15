@@ -4,6 +4,7 @@ Closes the self-improvement loop: proposals are no longer parked as facts —
 high-priority suggestions can be applied to SOUL.md after passing
 Evaluator.run_self_improvement_gate, with a backup written for clean revert.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -26,7 +27,9 @@ class _FakeEvaluator:
         self._failures = failures or []
         self.calls: list[dict] = []
 
-    def run_self_improvement_gate(self, *, plan: str, diff: str, test_output: str) -> _FakeEvalResult:
+    def run_self_improvement_gate(
+        self, *, plan: str, diff: str, test_output: str
+    ) -> _FakeEvalResult:
         self.calls.append({"plan": plan, "diff": diff, "test_output": test_output})
         return _FakeEvalResult(self._passed, self._failures)
 
@@ -151,9 +154,7 @@ class ApplySoulUpdatesTests(unittest.TestCase):
                 backup_path.read_text(encoding="utf-8"),
                 "# Soul\n\nOriginal content.\n",
             )
-            updated_events = [
-                payload for name, payload in observe.events if name == "soul_updated"
-            ]
+            updated_events = [payload for name, payload in observe.events if name == "soul_updated"]
             self.assertEqual(len(updated_events), 1)
             event = updated_events[0]["payload"]
             self.assertEqual(event["agent_name"], "rook")

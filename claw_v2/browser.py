@@ -94,7 +94,9 @@ class DevBrowserService:
 
     _SAFE_BROWSER_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
-    def run_script(self, script: str, *, timeout: int | None = None, browser_name: str = "default") -> ScriptResult:
+    def run_script(
+        self, script: str, *, timeout: int | None = None, browser_name: str = "default"
+    ) -> ScriptResult:
         if not self._SAFE_BROWSER_RE.match(browser_name):
             raise BrowserError(f"Unsupported browser name: {browser_name!r}")
         t = timeout or self._timeout
@@ -236,7 +238,12 @@ console.log(JSON.stringify({{
         with _require_sync_playwright() as pw:
             browser = _cdp_connect(pw, cdp_url)
             context = browser.contexts[0]
-            page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
+            page = _select_cdp_page(
+                context,
+                page_index=page_index,
+                page_title=page_title,
+                page_url_pattern=page_url_pattern,
+            )
             _try_set_viewport(page, 1280, 900)
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             _wait_for_dynamic_content(page, url)
@@ -260,7 +267,12 @@ console.log(JSON.stringify({{
         with _require_sync_playwright() as pw:
             browser = _cdp_connect(pw, cdp_url)
             context = browser.contexts[0]
-            page = _select_cdp_page(context, page_index=page_index, page_title=page_title, page_url_pattern=page_url_pattern)
+            page = _select_cdp_page(
+                context,
+                page_index=page_index,
+                page_title=page_title,
+                page_url_pattern=page_url_pattern,
+            )
             _try_set_viewport(page, 1280, 900)
             _wait_for_dynamic_content(page, page.url)
             screenshot_path = f"/tmp/claw-{safe_name}"
@@ -306,7 +318,8 @@ console.log(JSON.stringify({{
                 except OSError:
                     continue
                 new_files = [
-                    p for p in current
+                    p
+                    for p in current
                     if p.name not in before[str(d)]
                     and not p.name.endswith(".crdownload")
                     and not p.name.endswith(".tmp")
@@ -382,7 +395,9 @@ console.log(JSON.stringify({{
         result = self.run_script(script)
         return _parse_browse_result(result, action_name="browse")
 
-    def screenshot(self, url: str, *, name: str = "screenshot.png", page_name: str = "main") -> BrowseResult:
+    def screenshot(
+        self, url: str, *, name: str = "screenshot.png", page_name: str = "main"
+    ) -> BrowseResult:
         safe_url = _js_escape(url)
         safe_page = _js_escape(page_name)
         safe_name = _js_escape(name)
@@ -407,7 +422,14 @@ _CDP_MAX_RETRIES = 2
 _CDP_DOWNLOAD_DIR = "/tmp/claw-downloads"
 
 # Domains that rely heavily on JS rendering and need extra wait time.
-_JS_HEAVY_DOMAINS = ("x.com", "twitter.com", "instagram.com", "facebook.com", "linkedin.com", "reddit.com")
+_JS_HEAVY_DOMAINS = (
+    "x.com",
+    "twitter.com",
+    "instagram.com",
+    "facebook.com",
+    "linkedin.com",
+    "reddit.com",
+)
 
 _CONTENT_LIMIT = 8000
 
@@ -420,7 +442,9 @@ def _require_sync_playwright():
     return sync_playwright()
 
 
-def _cdp_connect(pw, cdp_url: str, *, retries: int = _CDP_MAX_RETRIES, enable_downloads: bool = True):
+def _cdp_connect(
+    pw, cdp_url: str, *, retries: int = _CDP_MAX_RETRIES, enable_downloads: bool = True
+):
     """Connect to Chrome via CDP with retry logic."""
     import time
 
@@ -435,7 +459,9 @@ def _cdp_connect(pw, cdp_url: str, *, retries: int = _CDP_MAX_RETRIES, enable_do
             last_exc = exc
             if attempt < retries:
                 time.sleep(1)
-    raise BrowserError(f"CDP connection failed after {retries + 1} attempts: {last_exc}") from last_exc
+    raise BrowserError(
+        f"CDP connection failed after {retries + 1} attempts: {last_exc}"
+    ) from last_exc
 
 
 def _enable_cdp_downloads(browser) -> None:
@@ -456,14 +482,20 @@ def _enable_page_downloads(context, page) -> None:
     """Enable downloads for a specific page via CDP session."""
     try:
         cdp = context.new_cdp_session(page)
-        cdp.send("Browser.setDownloadBehavior", {
-            "behavior": "allow",
-            "downloadPath": _CDP_DOWNLOAD_DIR,
-        })
-        cdp.send("Page.setDownloadBehavior", {
-            "behavior": "allow",
-            "downloadPath": _CDP_DOWNLOAD_DIR,
-        })
+        cdp.send(
+            "Browser.setDownloadBehavior",
+            {
+                "behavior": "allow",
+                "downloadPath": _CDP_DOWNLOAD_DIR,
+            },
+        )
+        cdp.send(
+            "Page.setDownloadBehavior",
+            {
+                "behavior": "allow",
+                "downloadPath": _CDP_DOWNLOAD_DIR,
+            },
+        )
         cdp.detach()
     except Exception as exc:
         _pool_logger.debug("Download enable failed for page %s: %s", getattr(page, "url", "?"), exc)
@@ -603,6 +635,7 @@ def _browserbase_release_session(
 # BrowserPool — isolated browser contexts for parallel workers
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class BrowserSession:
     """An isolated browser context with its own page, cookies, and storage."""
@@ -692,9 +725,7 @@ class BrowserPool:
             if session_id in self._active:
                 return self._active[session_id]
             if len(self._active) >= self._max_sessions:
-                raise BrowserError(
-                    f"BrowserPool limit reached ({self._max_sessions} sessions)"
-                )
+                raise BrowserError(f"BrowserPool limit reached ({self._max_sessions} sessions)")
             self._ensure_connected()
             context = self._browser.new_context(
                 viewport={"width": 1280, "height": 900},

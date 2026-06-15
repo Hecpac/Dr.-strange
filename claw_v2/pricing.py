@@ -7,6 +7,7 @@ versioned, offline price table. A model that is NOT in the table yields
 unknown=True (never a silent 0): callers must surface/gate it so invisible
 billable spend can never accumulate.
 """
+
 from __future__ import annotations
 
 import json
@@ -33,8 +34,13 @@ class CostEstimate:
 def _load_prices() -> dict[str, Any]:
     try:
         return json.loads(_PRICES_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:  # missing / malformed -> everything is unknown (fail-closed)
-        logger.warning("model_prices.json unreadable (%s); billable models will be cost_unknown", exc)
+    except (
+        OSError,
+        ValueError,
+    ) as exc:  # missing / malformed -> everything is unknown (fail-closed)
+        logger.warning(
+            "model_prices.json unreadable (%s); billable models will be cost_unknown", exc
+        )
         return {}
 
 

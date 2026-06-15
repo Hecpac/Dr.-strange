@@ -108,7 +108,6 @@ class SyncMethodTests(unittest.TestCase):
         self.assertEqual(result["notebook"]["id"], "abc-full")
         self.assertEqual(len(result["sources"]), 1)
 
-
     def test_add_sources(self) -> None:
         client = AsyncMock()
         client.notebooks.list.return_value = [_mock_notebook("abc-full", "NB")]
@@ -292,7 +291,9 @@ class BackgroundTests(unittest.TestCase):
             self.assertTrue(jobs[0].result["degraded"])
             self.assertEqual(jobs[0].result["failure_kind"], "timeout")
             self.assertTrue(jobs[0].result["fallback_used"])
-            self.assertTrue(any("fallback local" in str(c.args).lower() for c in notify.call_args_list))
+            self.assertTrue(
+                any("fallback local" in str(c.args).lower() for c in notify.call_args_list)
+            )
 
     def test_one_operation_per_notebook(self) -> None:
         client = AsyncMock()
@@ -319,7 +320,6 @@ class BackgroundTests(unittest.TestCase):
                 break
             time.sleep(0.01)
         self.assertNotIn("abc-full", svc._running)
-
 
 
 from tests.helpers import make_config
@@ -373,7 +373,9 @@ class BotCommandTests(unittest.TestCase):
         nlm = MagicMock(spec=NotebookLMService)
         nlm.start_research.return_value = "Deep Research iniciado..."
         bot = _make_bot_with_nlm(nlm)
-        result = bot.handle_text(user_id="123", session_id="s1", text="/nlm_research abc AI trends April")
+        result = bot.handle_text(
+            user_id="123", session_id="s1", text="/nlm_research abc AI trends April"
+        )
         nlm.start_research.assert_called_once_with("abc", "AI trends April")
         self.assertIn("Deep Research iniciado", result)
 
@@ -580,7 +582,9 @@ class CdpResearchTests(unittest.TestCase):
         self.assertEqual(captured["notebook_id"], "nb-cdp-full-id")
         self.assertEqual(captured["query"], "buenas prácticas blender")
         # Notify fires once on completion with the URL.
-        self.assertTrue(any("Deep Research completado" in str(c.args) for c in notify.call_args_list))
+        self.assertTrue(
+            any("Deep Research completado" in str(c.args) for c in notify.call_args_list)
+        )
 
     def test_start_research_records_job_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -670,7 +674,9 @@ class CdpArtifactTests(unittest.TestCase):
             time.sleep(0.01)
 
         self.assertEqual(captured, {"notebook_id": "nb-cdp-id", "kind": "podcast"})
-        self.assertTrue(any("podcast generado" in str(c.args).lower() for c in notify.call_args_list))
+        self.assertTrue(
+            any("podcast generado" in str(c.args).lower() for c in notify.call_args_list)
+        )
 
     def test_start_artifact_records_job_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -727,7 +733,9 @@ class NotebookLMOrchestrationTests(unittest.TestCase):
             svc = NotebookLMService(job_service=job_service)
             seen_outputs: list[tuple[str, ...]] = []
 
-            def fake_step(notebook_id: str, checkpoint: dict[str, object], outputs: tuple[str, ...]) -> dict[str, object]:
+            def fake_step(
+                notebook_id: str, checkpoint: dict[str, object], outputs: tuple[str, ...]
+            ) -> dict[str, object]:
                 seen_outputs.append(outputs)
                 return {
                     "status": "pending",
@@ -753,7 +761,9 @@ class NotebookLMOrchestrationTests(unittest.TestCase):
             job_service = JobService(Path(tmpdir) / "claw.db")
             svc = NotebookLMService(job_service=job_service)
 
-            def fake_step(notebook_id: str, checkpoint: dict[str, object], outputs: tuple[str, ...]) -> dict[str, object]:
+            def fake_step(
+                notebook_id: str, checkpoint: dict[str, object], outputs: tuple[str, ...]
+            ) -> dict[str, object]:
                 return {
                     "status": "pending",
                     "stage": "outputs_generating",
@@ -781,7 +791,9 @@ class NotebookLMOrchestrationTests(unittest.TestCase):
             svc._cdp_download_fn = lambda nb, kind: None
             svc._cdp_report_blocks_fn = lambda nb: None
 
-            def fake_step(notebook_id: str, checkpoint: dict[str, object], outputs: tuple[str, ...]) -> dict[str, object]:
+            def fake_step(
+                notebook_id: str, checkpoint: dict[str, object], outputs: tuple[str, ...]
+            ) -> dict[str, object]:
                 return {
                     "status": "completed",
                     "stage": "outputs_ready",
@@ -852,7 +864,7 @@ class NotebookLMOrchestrationStateTests(unittest.TestCase):
 
     def test_ready_outputs_are_detected(self) -> None:
         state = notebooklm_cdp.classify_orchestration_state(
-            "45 fuentes\nResumen en audio \"Dignidad humana\" está listo.\n"
+            '45 fuentes\nResumen en audio "Dignidad humana" está listo.\n'
             "¿El fin de la autoría humana?\nBlog Post · 45 fuentes · Hace 12 min"
         )
 

@@ -44,6 +44,7 @@ class WikiHandler:
     def maybe_ingest(self, title: str, content: str, *, source_type: str = "article") -> None:
         if self.wiki is None or not content or len(content) < 100:
             return
+
         def _do_ingest():
             try:
                 result = self.wiki.ingest(title, content, source_type=source_type)
@@ -52,6 +53,7 @@ class WikiHandler:
                 )
             except Exception:
                 logger.debug("Wiki auto-ingest failed for '%s'", title, exc_info=True)
+
         self._ingest_pool.submit(_do_ingest)
 
     def _stats_response(self) -> str:

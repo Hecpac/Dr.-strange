@@ -56,10 +56,7 @@ class SchedulerSelfImproveWiringTests(unittest.TestCase):
         Post-fix it captures ``approvals`` from the enclosing scope."""
         handler_code: types.CodeType | None = None
         for const in _setup_scheduler.__code__.co_consts:
-            if (
-                isinstance(const, types.CodeType)
-                and const.co_name == "_self_improve_handler"
-            ):
+            if isinstance(const, types.CodeType) and const.co_name == "_self_improve_handler":
                 handler_code = const
                 break
         self.assertIsNotNone(handler_code, "_self_improve_handler nested code not found")
@@ -100,10 +97,14 @@ class SchedulerSelfImproveWiringTests(unittest.TestCase):
 
             # Patch CronScheduler so we can capture registered jobs without
             # bringing up persistence threads.
-            with patch("claw_v2.main.CronScheduler", _FakeScheduler), patch(
-                "claw_v2.main._resolve_pytest_command",
-                return_value=(["true"], None),
-            ), patch("claw_v2.main.subprocess.run") as mock_run:
+            with (
+                patch("claw_v2.main.CronScheduler", _FakeScheduler),
+                patch(
+                    "claw_v2.main._resolve_pytest_command",
+                    return_value=(["true"], None),
+                ),
+                patch("claw_v2.main.subprocess.run") as mock_run,
+            ):
                 mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
                 config = MagicMock()
@@ -170,9 +171,7 @@ class SchedulerSelfImproveWiringTests(unittest.TestCase):
                 job.handler()  # type: ignore[attr-defined]
 
             errors = [
-                payload
-                for event_type, payload in emits
-                if event_type == "scheduled_job_error"
+                payload for event_type, payload in emits if event_type == "scheduled_job_error"
             ]
             offending = [e for e in errors if "NameError" in str(e) or "approvals" in str(e)]
             self.assertEqual(

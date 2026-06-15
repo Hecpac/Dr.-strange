@@ -12,6 +12,7 @@ choice, prompt engineering, or evidence persistence — those belong to the
 injected callables and to the surrounding services (SubAgentService,
 TaskLedger, EvidenceVerifier).
 """
+
 from __future__ import annotations
 
 import time
@@ -80,9 +81,7 @@ class AgentLoop:
     planner: Callable[[str, tuple[IterationTrace, ...]], Plan]
     executor: Callable[[Plan], SubAgentResult]
     verifier: Callable[[SubAgentResult, Observation], VerifierVerdict]
-    observer: Callable[[SubAgentResult], Observation] = field(
-        default=lambda result: result.summary
-    )
+    observer: Callable[[SubAgentResult], Observation] = field(default=lambda result: result.summary)
     critic: Callable[[tuple[IterationTrace, ...]], str] | None = None
     max_iterations: int = 3
     # Wave 2.2: budget guards alongside max_iterations. Iteration count is a

@@ -47,7 +47,9 @@ class GitHubPullRequestService:
         base_branch: str | None = None,
         draft: bool = True,
     ) -> PullRequestResult:
-        self.command_runner([self.git_path, "-C", str(self.repo_root), "push", "-u", self.remote_name, branch_name])
+        self.command_runner(
+            [self.git_path, "-C", str(self.repo_root), "push", "-u", self.remote_name, branch_name]
+        )
 
         command = [
             self.gh_path,
@@ -78,27 +80,48 @@ class GitHubPullRequestService:
 
     def merge_pull_request(self, pr_number: int) -> str:
         """Merge a PR by number. Returns merge status string."""
-        output = self.command_runner([
-            self.gh_path, "pr", "merge", str(pr_number),
-            "--merge", "--repo", self._repo_nwo(),
-        ])
+        output = self.command_runner(
+            [
+                self.gh_path,
+                "pr",
+                "merge",
+                str(pr_number),
+                "--merge",
+                "--repo",
+                self._repo_nwo(),
+            ]
+        )
         return output
 
     def get_pr_state(self, pr_number: int) -> str:
         """Return PR state: 'OPEN', 'CLOSED', or 'MERGED'."""
-        output = self.command_runner([
-            self.gh_path, "pr", "view", str(pr_number),
-            "--json", "state", "--repo", self._repo_nwo(),
-        ])
+        output = self.command_runner(
+            [
+                self.gh_path,
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "state",
+                "--repo",
+                self._repo_nwo(),
+            ]
+        )
         data = json.loads(output)
         return data.get("state", "UNKNOWN")
 
     def _repo_nwo(self) -> str:
         """Get owner/repo from git remote."""
-        output = self.command_runner([
-            self.git_path, "-C", str(self.repo_root),
-            "remote", "get-url", self.remote_name,
-        ])
+        output = self.command_runner(
+            [
+                self.git_path,
+                "-C",
+                str(self.repo_root),
+                "remote",
+                "get-url",
+                self.remote_name,
+            ]
+        )
         return _parse_nwo(output)
 
     @staticmethod

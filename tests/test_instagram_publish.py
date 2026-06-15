@@ -9,6 +9,7 @@ exercised in CI, so these tests:
 
 No real network, browser, or Instagram calls happen here.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,6 +24,7 @@ from claw_v2.instagram_publish import (
 
 
 # --- pure detector ---------------------------------------------------------
+
 
 def test_is_share_success_matches_capitalized_modal():
     # The live modal capitalizes "Se compartió tu reel" — the original bug
@@ -45,9 +47,11 @@ def test_publish_result_to_dict_keys():
 
 # --- faked Playwright page -------------------------------------------------
 
+
 class _FakeKeyboard:
     def __init__(self):
         self.inserted = []
+
     def insert_text(self, text):
         self.inserted.append(text)
 
@@ -56,12 +60,15 @@ class _FakeLoc:
     def __init__(self, count=1, fail=False):
         self._count = count
         self._fail = fail
+
     @property
     def first(self):
         return self
+
     def click(self, timeout=None):
         if self._fail:
             raise RuntimeError("not clickable")
+
     def count(self):
         return self._count
 
@@ -74,6 +81,7 @@ class _FakeElement:
 class _FakeFC:
     def __init__(self, sink):
         self._sink = sink
+
     def set_files(self, path):
         self._sink.append(path)
 
@@ -100,10 +108,13 @@ class _FakePage:
         self.shots = []
         self.clicked_roles = []
         self.evaluated_scripts = []
+
     def goto(self, *a, **k):
         pass
+
     def wait_for_timeout(self, *a, **k):
         pass
+
     def evaluate(self, js, *a):
         self.evaluated_scripts.append(js)
         if "name=username" in js or "name=password" in js:
@@ -125,27 +136,37 @@ class _FakePage:
                 return self._post_counts.pop(0)
             return None
         return None
+
     def get_by_role(self, role, name=None):
         self.clicked_roles.append((role, name))
         if self._icon_only_create and name in ("Crear", "Create"):
             return _FakeLoc(fail=True)
         return _FakeLoc()
+
     def get_by_text(self, text, exact=False):
         return _FakeLoc()
+
     def locator(self, sel):
         return _FakeLoc(count=1)
+
     def wait_for_selector(self, sel, timeout=None, state=None):
         return _FakeElement()
+
     def expect_file_chooser(self, timeout=None):
         page = self
+
         class _Ctx:
             def __enter__(self_inner):
                 class _V:
                     value = _FakeFC(page.files_set)
+
                 return _V
+
             def __exit__(self_inner, *a):
                 return False
+
         return _Ctx()
+
     def screenshot(self, path=None):
         self.shots.append(path)
 
@@ -153,9 +174,11 @@ class _FakePage:
 class _FakeBrowser:
     def __init__(self, page):
         self.contexts = [self._Ctx(page)]
+
     class _Ctx:
         def __init__(self, page):
             self._page = page
+
         def new_page(self):
             return self._page
 
@@ -168,9 +191,12 @@ def _install_fake_playwright(monkeypatch, page):
                     @staticmethod
                     def connect_over_cdp(url):
                         return _FakeBrowser(page)
+
             return _Inst()
+
         def __exit__(self_inner, *a):
             return False
+
     monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: _PW())
 
 
@@ -255,7 +281,9 @@ def test_share_success_is_accent_insensitive():
     assert is_share_success("Se compartio tu publicacion") is True
 
 
-def test_publish_photo_icon_only_create_requires_modal_and_profile_verification(svc, tmp_path, monkeypatch):
+def test_publish_photo_icon_only_create_requires_modal_and_profile_verification(
+    svc, tmp_path, monkeypatch
+):
     photo = tmp_path / "hero.jpg"
     photo.write_bytes(b"x" * 1024)
     page = _FakePage(
@@ -341,7 +369,9 @@ def test_brain_tool_registered_with_schema():
     assert tool.mutates_state is True
     assert tool.requires_network is True
     props = tool.parameter_schema.get("properties", {})
-    assert {"video_path", "photo_path", "media_path", "media_type", "caption", "account"}.issubset(props)
+    assert {"video_path", "photo_path", "media_path", "media_type", "caption", "account"}.issubset(
+        props
+    )
     assert tool.parameter_schema.get("required", []) == []
     assert tool.success_condition is not None
     assert tool.preflight is not None

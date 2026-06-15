@@ -79,7 +79,9 @@ def classify_sensitive_change(
             required_confirmation=None,
             risk_basis=None,
         )
-    risk_code = _risk_code(action=action, summary=summary, paths=sensitive_paths, categories=ordered_categories)
+    risk_code = _risk_code(
+        action=action, summary=summary, paths=sensitive_paths, categories=ordered_categories
+    )
     return SensitiveChangeClassification(
         sensitive=True,
         categories=ordered_categories,
@@ -100,7 +102,9 @@ def approval_metadata_for_change(
     paths: Iterable[str] | None = None,
 ) -> tuple[dict, SensitiveChangeClassification]:
     merged = dict(metadata or {})
-    explicit_paths = merged.get("changed_paths") or merged.get("paths") or merged.get("sensitive_paths") or ()
+    explicit_paths = (
+        merged.get("changed_paths") or merged.get("paths") or merged.get("sensitive_paths") or ()
+    )
     if isinstance(explicit_paths, str):
         explicit_paths = (explicit_paths,)
     classification = classify_sensitive_change(
@@ -175,7 +179,10 @@ def _categories_for_path(path: str) -> set[str]:
     if name in LOCKFILES:
         categories.add("lockfile")
         categories.add("deps")
-    if re.search(r"(^|/)(auth|oauth|login|session|credential|credentials|permission|permissions)(/|_|-|\.|$)", lowered):
+    if re.search(
+        r"(^|/)(auth|oauth|login|session|credential|credentials|permission|permissions)(/|_|-|\.|$)",
+        lowered,
+    ):
         categories.add("auth")
     if re.search(r"(^|/)(crypto|cryptography|cipher|tls|ssl|hmac|jwt)(/|_|-|\.|$)", lowered):
         categories.add("crypto")
@@ -189,7 +196,11 @@ def _categories_for_path(path: str) -> set[str]:
         categories.add("telegram_routing")
     if name in {"bot.py", "bot_helpers.py"}:
         categories.add("telegram_routing")
-    if name in {"config.py", "settings.py"} or "/config/" in lowered or lowered.endswith((".toml", ".yaml", ".yml", ".ini")):
+    if (
+        name in {"config.py", "settings.py"}
+        or "/config/" in lowered
+        or lowered.endswith((".toml", ".yaml", ".yml", ".ini"))
+    ):
         categories.add("config")
     return categories
 
@@ -198,7 +209,9 @@ def _looks_like_requirements_file(name: str) -> bool:
     return name.startswith("requirements") and name.endswith(".txt")
 
 
-def _risk_code(*, action: str, summary: str, paths: tuple[str, ...], categories: tuple[str, ...]) -> str:
+def _risk_code(
+    *, action: str, summary: str, paths: tuple[str, ...], categories: tuple[str, ...]
+) -> str:
     material = "\n".join([action, summary, *categories, *paths])
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:8].upper()
     return f"RISK-{digest}"

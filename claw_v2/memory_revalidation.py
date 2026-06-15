@@ -11,6 +11,7 @@ are pure-function (accept observations passed in by callers / tests).
 Real CDP / gh / API integrations land in F5 and will live in a *separate*
 runner module so this registry itself stays mockable.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
@@ -23,7 +24,7 @@ class MemoryClaimValidation:
 
     claim_key: str
     valid: bool
-    reason: str                          # short code, e.g. "ok", "account_does_not_exist"
+    reason: str  # short code, e.g. "ok", "account_does_not_exist"
     evidence: dict[str, Any] = field(default_factory=dict)
     proposed_patch: dict[str, Any] | None = None  # suggested correction for human review
 
@@ -38,7 +39,7 @@ class RevalidationOutcome:
     all_valid: bool
     valid: dict[str, MemoryClaimValidation]
     invalid: dict[str, MemoryClaimValidation]
-    block_action: bool                    # True if any invalid claim → Tier 3 must abort
+    block_action: bool  # True if any invalid claim → Tier 3 must abort
     proposed_patches: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -94,7 +95,9 @@ def validate_x_handle(claimed_handle: Any, observation: Mapping[str, Any]) -> Me
     )
 
 
-def validate_github_repo(claimed_repo: Any, observation: Mapping[str, Any]) -> MemoryClaimValidation:
+def validate_github_repo(
+    claimed_repo: Any, observation: Mapping[str, Any]
+) -> MemoryClaimValidation:
     """observation: {'repo_exists': bool, 'default_branch': str | None}"""
     repo = str(claimed_repo or "")
     if "/" not in repo:

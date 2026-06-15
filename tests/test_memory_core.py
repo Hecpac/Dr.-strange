@@ -1,4 +1,5 @@
 """Tests for core MemoryStore operations: messages, facts, delete, build_context with history."""
+
 from __future__ import annotations
 
 import tempfile
@@ -211,16 +212,24 @@ class BuildContextTests(unittest.TestCase):
         self.assertIn("profile.uncertain_preference", keys)
         self.assertNotIn("profile.public_preference", keys)
         self.assertNotIn("profile.api_key", keys)
-        uncertain = next(match for match in matches if match["key"] == "profile.uncertain_preference")
+        uncertain = next(
+            match for match in matches if match["key"] == "profile.uncertain_preference"
+        )
         self.assertEqual(uncertain["prompt_residency"], "retrieval_on_demand")
         self.assertEqual(uncertain["retention_reason"], "low_confidence")
 
     def test_profile_facts_return_latest_version_per_key(self) -> None:
         # AM-FACTDUP (2026-06-12): append-only fact versions must not appear
         # as duplicates in the prompt — only the newest row per key counts.
-        self.store.store_fact("profile.city", "Caracas", source="test", source_trust="trusted", confidence=0.9)
-        self.store.store_fact("profile.city", "Dallas", source="test", source_trust="trusted", confidence=0.9)
-        self.store.store_fact("profile.role", "PM", source="test", source_trust="trusted", confidence=0.8)
+        self.store.store_fact(
+            "profile.city", "Caracas", source="test", source_trust="trusted", confidence=0.9
+        )
+        self.store.store_fact(
+            "profile.city", "Dallas", source="test", source_trust="trusted", confidence=0.9
+        )
+        self.store.store_fact(
+            "profile.role", "PM", source="test", source_trust="trusted", confidence=0.8
+        )
 
         facts = self.store.get_profile_facts()
         keys = [f["key"] for f in facts]
@@ -334,8 +343,10 @@ class NormalizeTagsTests(unittest.TestCase):
         self.assertEqual(_normalize_tags(["error", "failure", "task"]), [])
 
     def test_drops_length_outliers(self) -> None:
-        self.assertEqual(_normalize_tags(["ab", "x" * 50, "pip_dependency_conflict"]),
-                         ["pip_dependency_conflict"])
+        self.assertEqual(
+            _normalize_tags(["ab", "x" * 50, "pip_dependency_conflict"]),
+            ["pip_dependency_conflict"],
+        )
 
     def test_dedupes(self) -> None:
         self.assertEqual(
@@ -358,13 +369,17 @@ class LearningLoopTagSupplyTests(unittest.TestCase):
     def test_record_with_explicit_tags_indexes_graph_edges(self) -> None:
         loop = LearningLoop(self.store)
         oid = loop.record(
-            task_type="coding", task_id="t-1",
-            description="install dep", approach="pip install",
-            outcome="failure", lesson="resolve version conflict first",
+            task_type="coding",
+            task_id="t-1",
+            description="install dep",
+            approach="pip install",
+            outcome="failure",
+            lesson="resolve version conflict first",
             tags=["pip_dependency_conflict", "version_resolution"],
         )
         rows = self.store._conn.execute(
-            "SELECT entity_tag FROM outcome_entity_edges WHERE outcome_id = ?", (oid,),
+            "SELECT entity_tag FROM outcome_entity_edges WHERE outcome_id = ?",
+            (oid,),
         ).fetchall()
         self.assertEqual(
             sorted(r[0] for r in rows),
@@ -374,13 +389,18 @@ class LearningLoopTagSupplyTests(unittest.TestCase):
     def test_record_without_router_has_empty_tags(self) -> None:
         loop = LearningLoop(self.store, router=None)
         oid = loop.record(
-            task_type="coding", task_id="t-2",
-            description="x", approach="y", outcome="failure",
+            task_type="coding",
+            task_id="t-2",
+            description="x",
+            approach="y",
+            outcome="failure",
         )
         row = self.store._conn.execute(
-            "SELECT tags FROM task_outcomes WHERE id = ?", (oid,),
+            "SELECT tags FROM task_outcomes WHERE id = ?",
+            (oid,),
         ).fetchone()
         import json as _json
+
         self.assertEqual(_json.loads(row[0]), [])
 
 
@@ -443,7 +463,10 @@ class OutcomeEmbeddingsSchemaTests(unittest.TestCase):
         self.assertIsNotNone(row)
 
     def test_outcome_embeddings_columns(self) -> None:
-        cols = {r[1] for r in self.store._conn.execute("PRAGMA table_info(outcome_embeddings)").fetchall()}
+        cols = {
+            r[1]
+            for r in self.store._conn.execute("PRAGMA table_info(outcome_embeddings)").fetchall()
+        }
         self.assertEqual(cols, {"outcome_id", "embedding"})
 
     def test_migration_is_idempotent(self) -> None:
@@ -475,9 +498,11 @@ class OutcomeEmbeddingStoreTests(unittest.TestCase):
 
     def test_embedding_fn_is_used_when_provided(self) -> None:
         captured: list[str] = []
+
         def fake_embed(text: str) -> list[float]:
             captured.append(text)
             return [0.1, 0.2, 0.3]
+
         _oid = self.store.store_task_outcome_with_embedding(
             task_type="self_heal",
             task_id="cycle-2",
@@ -495,15 +520,22 @@ class OutcomeEmbeddingStoreTests(unittest.TestCase):
     def test_embedder_failure_leaves_no_orphan_outcome(self) -> None:
         def boom(text: str) -> list[float]:
             raise RuntimeError("embedder down")
+
         with self.assertRaises(RuntimeError):
             self.store.store_task_outcome_with_embedding(
-                task_type="self_heal", task_id="cycle-X",
-                description="d", approach="a", outcome="success", lesson="l",
+                task_type="self_heal",
+                task_id="cycle-X",
+                description="d",
+                approach="a",
+                outcome="success",
+                lesson="l",
                 embed_fn=boom,
             )
         count = self.store._conn.execute("SELECT COUNT(*) AS c FROM task_outcomes").fetchone()["c"]
         self.assertEqual(count, 0)
-        emb_count = self.store._conn.execute("SELECT COUNT(*) AS c FROM outcome_embeddings").fetchone()["c"]
+        emb_count = self.store._conn.execute(
+            "SELECT COUNT(*) AS c FROM outcome_embeddings"
+        ).fetchone()["c"]
         self.assertEqual(emb_count, 0)
 
 
@@ -518,8 +550,10 @@ class OutcomeSemanticSearchTests(unittest.TestCase):
             if "browser" in text.lower():
                 return [0.0, 1.0, 0.0]
             return [0.0, 0.0, 1.0]
+
         self.store.store_task_outcome_with_embedding(
-            task_type="self_heal", task_id="t1",
+            task_type="self_heal",
+            task_id="t1",
             description="No module named pytest",
             approach="install pytest",
             outcome="success",
@@ -527,7 +561,8 @@ class OutcomeSemanticSearchTests(unittest.TestCase):
             embed_fn=embed,
         )
         self.store.store_task_outcome_with_embedding(
-            task_type="self_heal", task_id="t2",
+            task_type="self_heal",
+            task_id="t2",
             description="Chrome CDP disconnect",
             approach="relaunch headed chrome",
             outcome="success",
@@ -535,7 +570,9 @@ class OutcomeSemanticSearchTests(unittest.TestCase):
             embed_fn=embed,
         )
         hits = self.store.search_outcomes_semantic(
-            "pytest module missing in venv", limit=3, embed_fn=embed,
+            "pytest module missing in venv",
+            limit=3,
+            embed_fn=embed,
         )
         self.assertGreater(len(hits), 0)
         self.assertEqual(hits[0]["task_id"], "t1")
@@ -544,23 +581,35 @@ class OutcomeSemanticSearchTests(unittest.TestCase):
     def test_returns_empty_when_no_outcomes(self) -> None:
         def embed(text: str) -> list[float]:
             return [1.0, 0.0, 0.0]
+
         self.assertEqual(self.store.search_outcomes_semantic("anything", embed_fn=embed), [])
 
     def test_filters_by_task_type(self) -> None:
         def embed(text: str) -> list[float]:
             return [1.0, 0.0, 0.0]
+
         self.store.store_task_outcome_with_embedding(
-            task_type="self_heal", task_id="a",
-            description="x", approach="y", outcome="success", lesson="z",
+            task_type="self_heal",
+            task_id="a",
+            description="x",
+            approach="y",
+            outcome="success",
+            lesson="z",
             embed_fn=embed,
         )
         self.store.store_task_outcome_with_embedding(
-            task_type="user_task", task_id="b",
-            description="x", approach="y", outcome="success", lesson="z",
+            task_type="user_task",
+            task_id="b",
+            description="x",
+            approach="y",
+            outcome="success",
+            lesson="z",
             embed_fn=embed,
         )
         hits = self.store.search_outcomes_semantic(
-            "x", task_type="self_heal", embed_fn=embed,
+            "x",
+            task_type="self_heal",
+            embed_fn=embed,
         )
         self.assertEqual([h["task_id"] for h in hits], ["a"])
 
@@ -571,8 +620,11 @@ class OutcomeBackfillTests(unittest.TestCase):
 
     def test_backfills_missing_embeddings(self) -> None:
         oid = self.store.store_task_outcome(
-            task_type="self_heal", task_id="legacy",
-            description="legacy row", approach="legacy", outcome="success",
+            task_type="self_heal",
+            task_id="legacy",
+            description="legacy row",
+            approach="legacy",
+            outcome="success",
             lesson="ok",
         )
         before = self.store._conn.execute(
@@ -588,8 +640,12 @@ class OutcomeBackfillTests(unittest.TestCase):
 
     def test_backfill_is_idempotent(self) -> None:
         self.store.store_task_outcome_with_embedding(
-            task_type="t", task_id="a",
-            description="d", approach="a", outcome="success", lesson="l",
+            task_type="t",
+            task_id="a",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
             embed_fn=lambda t: [1.0, 0.0],
         )
         filled = self.store.backfill_outcome_embeddings(embed_fn=lambda t: [1.0, 0.0])
@@ -601,8 +657,12 @@ class MigrationBackfillsOutcomeEmbeddingsTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp()) / "test.db"
         store = MemoryStore(tmp)
         oid = store.store_task_outcome(
-            task_type="self_heal", task_id="legacy",
-            description="legacy row", approach="legacy", outcome="success", lesson="ok",
+            task_type="self_heal",
+            task_id="legacy",
+            description="legacy row",
+            approach="legacy",
+            outcome="success",
+            lesson="ok",
         )
         store._conn.execute("DELETE FROM outcome_embeddings WHERE outcome_id = ?", (oid,))
         store._conn.commit()
@@ -624,24 +684,33 @@ class CheckpointsTableSchemaTests(unittest.TestCase):
         self.assertIsNotNone(row)
 
     def test_checkpoints_columns(self) -> None:
-        cols = {r[1] for r in self.store._conn.execute(
-            "PRAGMA table_info(checkpoints)").fetchall()}
-        expected = {"id", "ckpt_id", "created_at", "trigger_reason",
-                    "session_id", "consecutive_failures", "file_path",
-                    "pending_restore", "restored_at"}
+        cols = {r[1] for r in self.store._conn.execute("PRAGMA table_info(checkpoints)").fetchall()}
+        expected = {
+            "id",
+            "ckpt_id",
+            "created_at",
+            "trigger_reason",
+            "session_id",
+            "consecutive_failures",
+            "file_path",
+            "pending_restore",
+            "restored_at",
+        }
         self.assertEqual(cols, expected)
 
     def test_checkpoints_indices_exist(self) -> None:
-        indices = {r[1] for r in self.store._conn.execute(
-            "SELECT * FROM sqlite_master WHERE type='index' AND tbl_name='checkpoints'"
-        ).fetchall()}
+        indices = {
+            r[1]
+            for r in self.store._conn.execute(
+                "SELECT * FROM sqlite_master WHERE type='index' AND tbl_name='checkpoints'"
+            ).fetchall()
+        }
         self.assertIn("idx_checkpoints_created_at", indices)
         self.assertIn("idx_checkpoints_pending_restore", indices)
 
     def test_migration_idempotent(self) -> None:
         MemoryStore(self.store.db_path)
         MemoryStore(self.store.db_path)
-
 
 
 from claw_v2.checkpoint import CheckpointService, apply_pending_restore_if_any
@@ -666,7 +735,7 @@ class ApplyPendingRestoreOnInitTests(unittest.TestCase):
         store.store_fact("seed", "A", source="test")
         service = CheckpointService(memory=store, snapshots_dir=self.snapshots_dir)
         ckpt_id = service.create(trigger_reason="seed")
-        store.store_fact("seed", "B", source="test")   # mutation post-snapshot
+        store.store_fact("seed", "B", source="test")  # mutation post-snapshot
         service.schedule_restore(ckpt_id)
         store._conn.close()
 
@@ -729,23 +798,28 @@ class ApplyPendingRestoreOnInitTests(unittest.TestCase):
 class BM25HelperTests(unittest.TestCase):
     def test_tokenize_lowercases_and_splits(self) -> None:
         from claw_v2.memory import _tokenize
+
         self.assertEqual(_tokenize("Hello World-Foo"), ["hello", "world-foo"])
 
     def test_tokenize_drops_punctuation(self) -> None:
         from claw_v2.memory import _tokenize
+
         self.assertEqual(_tokenize("foo, bar! baz?"), ["foo", "bar", "baz"])
 
     def test_bm25_empty_query_returns_zeros(self) -> None:
         from claw_v2.memory import _bm25_scores
+
         scores = _bm25_scores([], [["doc", "one"], ["doc", "two"]])
         self.assertEqual(scores, [0.0, 0.0])
 
     def test_bm25_empty_corpus_returns_empty(self) -> None:
         from claw_v2.memory import _bm25_scores
+
         self.assertEqual(_bm25_scores(["q"], []), [])
 
     def test_bm25_ranks_matching_doc_higher(self) -> None:
         from claw_v2.memory import _bm25_scores
+
         # Need >=3 docs: at N=2/df=1, BM25Okapi IDF = log(1) = 0, so all scores collapse to 0.
         corpus = [
             ["python", "import", "error"],
@@ -764,12 +838,16 @@ class HybridFactSearchTests(unittest.TestCase):
     def test_keyword_overlap_boosts_score(self) -> None:
         # Both facts get an embedding, but the second has the exact query token in its key.
         self.store.store_fact_with_embedding(
-            "general.preference", "user likes dark interfaces and minimal UI",
-            source="profile", confidence=0.5,
+            "general.preference",
+            "user likes dark interfaces and minimal UI",
+            source="profile",
+            confidence=0.5,
         )
         self.store.store_fact_with_embedding(
-            "tradingview.session", "TradingView session id renews every 24h",
-            source="profile", confidence=0.5,
+            "tradingview.session",
+            "TradingView session id renews every 24h",
+            source="profile",
+            confidence=0.5,
         )
         results = self.store.search_facts_semantic("tradingview", limit=2)
         self.assertGreaterEqual(len(results), 1)
@@ -779,8 +857,10 @@ class HybridFactSearchTests(unittest.TestCase):
 
     def test_pure_semantic_match_still_works(self) -> None:
         self.store.store_fact_with_embedding(
-            "weather.note", "It rained heavily yesterday",
-            source="user", confidence=0.5,
+            "weather.note",
+            "It rained heavily yesterday",
+            source="user",
+            confidence=0.5,
         )
         results = self.store.search_facts_semantic("storm", limit=1)
         # Semantic similarity should still catch this even with no keyword overlap.
@@ -793,19 +873,26 @@ class HybridFactSearchTests(unittest.TestCase):
         # outrank B. Under hybrid, BM25's exact-token boost on B must win.
         # Note: BM25Okapi IDF collapses to 0 at N=2/df=1, so we add a third
         # filler doc to keep IDF > 0 (same trick used in BM25HelperTests).
-        long_fluff = "x" * 200 + " " + " ".join(
-            "alpha beta gamma delta epsilon zeta eta theta iota".split()
+        long_fluff = (
+            "x" * 200 + " " + " ".join("alpha beta gamma delta epsilon zeta eta theta iota".split())
         )
         self.store.store_fact_with_embedding(
-            "fluff.long", long_fluff, source="profile", confidence=0.5,
+            "fluff.long",
+            long_fluff,
+            source="profile",
+            confidence=0.5,
         )
         self.store.store_fact_with_embedding(
-            "exact.firecrawl", "firecrawl",
-            source="profile", confidence=0.5,
+            "exact.firecrawl",
+            "firecrawl",
+            source="profile",
+            confidence=0.5,
         )
         self.store.store_fact_with_embedding(
-            "filler.unrelated", "another unrelated filler document",
-            source="profile", confidence=0.5,
+            "filler.unrelated",
+            "another unrelated filler document",
+            source="profile",
+            confidence=0.5,
         )
         results = self.store.search_facts_semantic("firecrawl", limit=3)
         self.assertEqual(results[0]["key"], "exact.firecrawl")
@@ -819,9 +906,12 @@ class HybridOutcomeSearchTests(unittest.TestCase):
 
     def test_results_include_hybrid_score_field(self) -> None:
         self.store.store_task_outcome_with_embedding(
-            task_type="browse", task_id="s1:1",
-            description="Search the web", approach="firecrawl",
-            outcome="success", lesson="Firecrawl is reliable for static pages",
+            task_type="browse",
+            task_id="s1:1",
+            description="Search the web",
+            approach="firecrawl",
+            outcome="success",
+            lesson="Firecrawl is reliable for static pages",
         )
         results = self.store.search_outcomes_semantic("firecrawl", limit=1)
         self.assertEqual(len(results), 1)
@@ -834,23 +924,32 @@ class HybridOutcomeSearchTests(unittest.TestCase):
         # Long fluff outcome whose char-bag drifts toward the query, vs. a short outcome
         # containing the exact query token. With BM25 active, the exact match must win.
         # Third filler outcome keeps BM25Okapi IDF > 0 (df=1, N=2 collapses to log(1)=0).
-        long_fluff = "x" * 200 + " " + " ".join(
-            "alpha beta gamma delta epsilon zeta eta theta iota".split()
+        long_fluff = (
+            "x" * 200 + " " + " ".join("alpha beta gamma delta epsilon zeta eta theta iota".split())
         )
         self.store.store_task_outcome_with_embedding(
-            task_type="browse", task_id="s1:fluff",
-            description=long_fluff, approach="some approach",
-            outcome="failure", lesson="generic lesson text",
+            task_type="browse",
+            task_id="s1:fluff",
+            description=long_fluff,
+            approach="some approach",
+            outcome="failure",
+            lesson="generic lesson text",
         )
         self.store.store_task_outcome_with_embedding(
-            task_type="browse", task_id="s1:exact",
-            description="firecrawl", approach="firecrawl",
-            outcome="success", lesson="firecrawl",
+            task_type="browse",
+            task_id="s1:exact",
+            description="firecrawl",
+            approach="firecrawl",
+            outcome="success",
+            lesson="firecrawl",
         )
         self.store.store_task_outcome_with_embedding(
-            task_type="browse", task_id="s1:filler",
+            task_type="browse",
+            task_id="s1:filler",
             description="another unrelated filler",
-            approach="another", outcome="success", lesson="filler",
+            approach="another",
+            outcome="success",
+            lesson="filler",
         )
         results = self.store.search_outcomes_semantic("firecrawl", limit=3)
         self.assertEqual(results[0]["task_id"], "s1:exact")
@@ -910,31 +1009,47 @@ class EdgePopulationTests(unittest.TestCase):
 
     def test_store_outcome_with_tags_creates_edges(self) -> None:
         oid = self.store.store_task_outcome(
-            task_type="browse", task_id="s1:1",
-            description="d", approach="a", outcome="success", lesson="l",
+            task_type="browse",
+            task_id="s1:1",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
             tags=["tradingview", "cdp"],
         )
         self.assertEqual(self._edges_for(oid), {"tradingview", "cdp"})
 
     def test_store_outcome_without_tags_creates_no_edges(self) -> None:
         oid = self.store.store_task_outcome(
-            task_type="browse", task_id="s1:1",
-            description="d", approach="a", outcome="success", lesson="l",
+            task_type="browse",
+            task_id="s1:1",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
         )
         self.assertEqual(self._edges_for(oid), set())
 
     def test_store_outcome_with_embedding_also_indexes_tags(self) -> None:
         oid = self.store.store_task_outcome_with_embedding(
-            task_type="browse", task_id="s1:2",
-            description="d", approach="a", outcome="failure", lesson="l",
+            task_type="browse",
+            task_id="s1:2",
+            description="d",
+            approach="a",
+            outcome="failure",
+            lesson="l",
             tags=["firecrawl"],
         )
         self.assertEqual(self._edges_for(oid), {"firecrawl"})
 
     def test_duplicate_tags_ignored(self) -> None:
         oid = self.store.store_task_outcome(
-            task_type="browse", task_id="s1:3",
-            description="d", approach="a", outcome="success", lesson="l",
+            task_type="browse",
+            task_id="s1:3",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
             tags=["x", "x", "y"],
         )
         self.assertEqual(self._edges_for(oid), {"x", "y"})
@@ -942,8 +1057,12 @@ class EdgePopulationTests(unittest.TestCase):
     def test_tags_normalized_to_lowercase(self) -> None:
         # The helper lowercases and strips. Mixed case + whitespace must dedupe.
         oid = self.store.store_task_outcome(
-            task_type="browse", task_id="s1:4",
-            description="d", approach="a", outcome="success", lesson="l",
+            task_type="browse",
+            task_id="s1:4",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
             tags=["TradingView", "tradingview", " cdp "],
         )
         self.assertEqual(self._edges_for(oid), {"tradingview", "cdp"})
@@ -986,16 +1105,18 @@ class EdgeBackfillTests(unittest.TestCase):
         self.store._conn.commit()
         # Re-open the DB — the new MemoryStore should backfill on init.
         store2 = MemoryStore(self.db_path)
-        rows = store2._conn.execute(
-            "SELECT entity_tag FROM outcome_entity_edges"
-        ).fetchall()
+        rows = store2._conn.execute("SELECT entity_tag FROM outcome_entity_edges").fetchall()
         self.assertEqual({r[0] for r in rows}, {"legacy"})
 
     def test_backfill_skips_already_indexed(self) -> None:
         # Insert with new write path (auto-indexes).
         self.store.store_task_outcome(
-            task_type="browse", task_id="s1:1",
-            description="d", approach="a", outcome="success", lesson="l",
+            task_type="browse",
+            task_id="s1:1",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
             tags=["alpha"],
         )
         # Backfill should report 0 — nothing left to index.
@@ -1007,7 +1128,7 @@ class EdgeBackfillTests(unittest.TestCase):
         self.store._conn.execute(
             "INSERT INTO task_outcomes (task_type, task_id, description, approach, "
             "outcome, lesson, tags) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("browse", "s1:bad", "d", "a", "success", "l", 'not-json'),
+            ("browse", "s1:bad", "d", "a", "success", "l", "not-json"),
         )
         self.store._conn.commit()
         # Should not raise; should skip the malformed row and return 0.
@@ -1021,16 +1142,31 @@ class OutcomeGraphNeighborsTests(unittest.TestCase):
 
     def test_neighbors_share_at_least_one_tag(self) -> None:
         a = self.store.store_task_outcome(
-            task_type="browse", task_id="s1:1", description="d", approach="a",
-            outcome="success", lesson="l", tags=["tradingview", "cdp"],
+            task_type="browse",
+            task_id="s1:1",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
+            tags=["tradingview", "cdp"],
         )
         b = self.store.store_task_outcome(
-            task_type="browse", task_id="s1:2", description="d", approach="a",
-            outcome="failure", lesson="l", tags=["tradingview"],
+            task_type="browse",
+            task_id="s1:2",
+            description="d",
+            approach="a",
+            outcome="failure",
+            lesson="l",
+            tags=["tradingview"],
         )
         c = self.store.store_task_outcome(
-            task_type="browse", task_id="s1:3", description="d", approach="a",
-            outcome="success", lesson="l", tags=["unrelated"],
+            task_type="browse",
+            task_id="s1:3",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
+            tags=["unrelated"],
         )
         neighbors = self.store._outcome_graph_neighbors([a])
         self.assertIn(b, neighbors)
@@ -1039,27 +1175,51 @@ class OutcomeGraphNeighborsTests(unittest.TestCase):
 
     def test_no_neighbors_when_no_tags(self) -> None:
         a = self.store.store_task_outcome(
-            task_type="browse", task_id="s1:1", description="d", approach="a",
-            outcome="success", lesson="l",
+            task_type="browse",
+            task_id="s1:1",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
         )
         self.assertEqual(self.store._outcome_graph_neighbors([a]), [])
 
     def test_multiple_seeds_combined(self) -> None:
         a = self.store.store_task_outcome(
-            task_type="t", task_id="i:1", description="d", approach="a",
-            outcome="success", lesson="l", tags=["alpha"],
+            task_type="t",
+            task_id="i:1",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
+            tags=["alpha"],
         )
         b = self.store.store_task_outcome(
-            task_type="t", task_id="i:2", description="d", approach="a",
-            outcome="failure", lesson="l", tags=["beta"],
+            task_type="t",
+            task_id="i:2",
+            description="d",
+            approach="a",
+            outcome="failure",
+            lesson="l",
+            tags=["beta"],
         )
         n_a = self.store.store_task_outcome(
-            task_type="t", task_id="i:3", description="d", approach="a",
-            outcome="success", lesson="l", tags=["alpha"],
+            task_type="t",
+            task_id="i:3",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
+            tags=["alpha"],
         )
         n_b = self.store.store_task_outcome(
-            task_type="t", task_id="i:4", description="d", approach="a",
-            outcome="failure", lesson="l", tags=["beta"],
+            task_type="t",
+            task_id="i:4",
+            description="d",
+            approach="a",
+            outcome="failure",
+            lesson="l",
+            tags=["beta"],
         )
         neighbors = set(self.store._outcome_graph_neighbors([a, b]))
         self.assertEqual(neighbors, {n_a, n_b})
@@ -1073,8 +1233,12 @@ class OutcomeGraphNeighborsTests(unittest.TestCase):
         # Outcome exists but was stored without tags, so it has no rows in
         # outcome_entity_edges. _outcome_graph_neighbors should return [], not raise.
         a = self.store.store_task_outcome(
-            task_type="t", task_id="solo", description="d", approach="a",
-            outcome="success", lesson="l",
+            task_type="t",
+            task_id="solo",
+            description="d",
+            approach="a",
+            outcome="success",
+            lesson="l",
         )
         self.assertEqual(self.store._outcome_graph_neighbors([a]), [])
 
@@ -1085,36 +1249,50 @@ class SearchOutcomesWithGraphTests(unittest.TestCase):
 
     def _store(self, **kw):
         return self.store.store_task_outcome_with_embedding(
-            embed_fn=strict_token_embed, **kw,
+            embed_fn=strict_token_embed,
+            **kw,
         )
 
     def _search_plain(self, q, **kw):
         return self.store.search_outcomes_semantic(
-            q, embed_fn=strict_token_embed, **kw,
+            q,
+            embed_fn=strict_token_embed,
+            **kw,
         )
 
     def _search_graph(self, q, **kw):
         return self.store.search_outcomes_with_graph(
-            q, embed_fn=strict_token_embed, **kw,
+            q,
+            embed_fn=strict_token_embed,
+            **kw,
         )
 
     def test_graph_expansion_surfaces_unrelated_text_neighbor(self) -> None:
         self._store(
-            task_type="browse", task_id="s1:1",
-            description="Tradingview chart capture", approach="cdp",
-            outcome="failure", lesson="cdp needs user-data-dir",
+            task_type="browse",
+            task_id="s1:1",
+            description="Tradingview chart capture",
+            approach="cdp",
+            outcome="failure",
+            lesson="cdp needs user-data-dir",
             tags=["tradingview", "cdp"],
         )
         self._store(
-            task_type="browse", task_id="s1:2",
-            description="Generic page failed", approach="default browser",
-            outcome="failure", lesson="Pages with auth need persistent profile",
+            task_type="browse",
+            task_id="s1:2",
+            description="Generic page failed",
+            approach="default browser",
+            outcome="failure",
+            lesson="Pages with auth need persistent profile",
             tags=["cdp", "auth"],
         )
         self._store(
-            task_type="browse", task_id="s1:3",
-            description="Random other failure", approach="x",
-            outcome="failure", lesson="totally unrelated",
+            task_type="browse",
+            task_id="s1:3",
+            description="Random other failure",
+            approach="x",
+            outcome="failure",
+            lesson="totally unrelated",
             tags=["other"],
         )
         plain = {r["task_id"] for r in self._search_plain("tradingview", limit=5)}
@@ -1126,14 +1304,22 @@ class SearchOutcomesWithGraphTests(unittest.TestCase):
 
     def test_graph_results_marked_via_graph(self) -> None:
         self._store(
-            task_type="t", task_id="i:1",
-            description="Tradingview snapshot", approach="a",
-            outcome="success", lesson="l", tags=["tradingview"],
+            task_type="t",
+            task_id="i:1",
+            description="Tradingview snapshot",
+            approach="a",
+            outcome="success",
+            lesson="l",
+            tags=["tradingview"],
         )
         self._store(
-            task_type="t", task_id="i:2",
-            description="Other thing entirely", approach="a",
-            outcome="failure", lesson="l", tags=["tradingview"],
+            task_type="t",
+            task_id="i:2",
+            description="Other thing entirely",
+            approach="a",
+            outcome="failure",
+            lesson="l",
+            tags=["tradingview"],
         )
         results = self._search_graph("tradingview", limit=5)
         by_task = {r["task_id"]: r for r in results}
@@ -1142,14 +1328,22 @@ class SearchOutcomesWithGraphTests(unittest.TestCase):
 
     def test_graph_score_below_seed_score(self) -> None:
         self._store(
-            task_type="t", task_id="i:1",
-            description="firecrawl tradingview", approach="a",
-            outcome="success", lesson="l", tags=["alpha"],
+            task_type="t",
+            task_id="i:1",
+            description="firecrawl tradingview",
+            approach="a",
+            outcome="success",
+            lesson="l",
+            tags=["alpha"],
         )
         self._store(
-            task_type="t", task_id="i:2",
-            description="unrelated text content", approach="a",
-            outcome="failure", lesson="l", tags=["alpha"],
+            task_type="t",
+            task_id="i:2",
+            description="unrelated text content",
+            approach="a",
+            outcome="failure",
+            lesson="l",
+            tags=["alpha"],
         )
         results = self._search_graph("firecrawl tradingview", limit=5)
         by_task = {r["task_id"]: r for r in results}
@@ -1161,9 +1355,13 @@ class SearchOutcomesWithGraphTests(unittest.TestCase):
 
     def test_seeds_with_no_neighbors_pass_through(self) -> None:
         self._store(
-            task_type="t", task_id="i:1",
-            description="lonely outcome", approach="a",
-            outcome="success", lesson="l", tags=["unique-tag"],
+            task_type="t",
+            task_id="i:1",
+            description="lonely outcome",
+            approach="a",
+            outcome="success",
+            lesson="l",
+            tags=["unique-tag"],
         )
         results = self._search_graph("lonely", limit=5)
         self.assertEqual(len(results), 1)

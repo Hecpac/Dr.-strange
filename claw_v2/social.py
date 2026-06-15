@@ -47,6 +47,7 @@ class XAdapter:
         if self._client is not None:
             return self._client
         import httpx
+
         return httpx.Client(timeout=30)
 
     def _write_session(self) -> Any:
@@ -73,8 +74,11 @@ class XAdapter:
         response.raise_for_status()
         data = response.json().get("data", {})
         return PublishResult(
-            platform="x", account=self.handle, post_id=data.get("id", ""),
-            url=f"https://x.com/i/status/{data.get('id', '')}", published_at=datetime.now(UTC).isoformat(),
+            platform="x",
+            account=self.handle,
+            post_id=data.get("id", ""),
+            url=f"https://x.com/i/status/{data.get('id', '')}",
+            published_at=datetime.now(UTC).isoformat(),
         )
 
     def get_engagement(self, post_id: str) -> dict:
@@ -87,7 +91,6 @@ class XAdapter:
         return response.json().get("data", {}).get("public_metrics", {})
 
 
-
 class LinkedInAdapter:
     def __init__(self, access_token: str, org_id: str, client: Any | None = None) -> None:
         self.access_token = access_token
@@ -98,24 +101,32 @@ class LinkedInAdapter:
         payload = {
             "author": f"urn:li:organization:{self.org_id}",
             "lifecycleState": "PUBLISHED",
-            "specificContent": {"com.linkedin.ugc.ShareContent": {
-                "shareCommentary": {"text": text},
-                "shareMediaCategory": "NONE",
-            }},
+            "specificContent": {
+                "com.linkedin.ugc.ShareContent": {
+                    "shareCommentary": {"text": text},
+                    "shareMediaCategory": "NONE",
+                }
+            },
             "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
         }
         response = self.client.post(
             "https://api.linkedin.com/v2/ugcPosts",
             json=payload,
-            headers={"Authorization": f"Bearer {self.access_token}", "X-Restli-Protocol-Version": "2.0.0"},
+            headers={
+                "Authorization": f"Bearer {self.access_token}",
+                "X-Restli-Protocol-Version": "2.0.0",
+            },
         )
         response.raise_for_status()
         post_id = response.headers.get("x-restli-id", "")
         if not post_id:
             raise RuntimeError(f"linkedin publish returned no post id: {response.text[:200]}")
         return PublishResult(
-            platform="linkedin", account=self.org_id, post_id=post_id,
-            url=f"https://www.linkedin.com/feed/update/{post_id}", published_at=datetime.now(UTC).isoformat(),
+            platform="linkedin",
+            account=self.org_id,
+            post_id=post_id,
+            url=f"https://www.linkedin.com/feed/update/{post_id}",
+            published_at=datetime.now(UTC).isoformat(),
         )
 
     def get_engagement(self, post_id: str) -> dict:
@@ -128,6 +139,7 @@ class LinkedInAdapter:
     @staticmethod
     def _default_client() -> Any:
         import httpx
+
         return httpx.Client(timeout=30)
 
 
@@ -149,8 +161,11 @@ class InstagramAdapter:
         if not post_id:
             raise RuntimeError(f"instagram publish returned no post id: {response.text[:200]}")
         return PublishResult(
-            platform="instagram", account=self.ig_user_id, post_id=post_id,
-            url=f"https://www.instagram.com/p/{post_id}", published_at=datetime.now(UTC).isoformat(),
+            platform="instagram",
+            account=self.ig_user_id,
+            post_id=post_id,
+            url=f"https://www.instagram.com/p/{post_id}",
+            published_at=datetime.now(UTC).isoformat(),
         )
 
     def get_engagement(self, post_id: str) -> dict:
@@ -163,6 +178,7 @@ class InstagramAdapter:
     @staticmethod
     def _default_client() -> Any:
         import httpx
+
         return httpx.Client(timeout=30)
 
 

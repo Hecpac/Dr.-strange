@@ -33,9 +33,7 @@ class TelegramApprovalGateTests(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.approvals = ApprovalManager(self.root / "approvals", secret="test-secret")
         self.observe = _FakeObserve()
-        self.registry = ToolRegistry.default(
-            workspace_root=self.root / "workspace", memory=None
-        )
+        self.registry = ToolRegistry.default(workspace_root=self.root / "workspace", memory=None)
         (self.root / "workspace").mkdir(parents=True, exist_ok=True)
         self.registry.observe = self.observe
 
@@ -161,9 +159,7 @@ class SystemAutoApproveGateTests(unittest.TestCase):
                 )
             )
             gate = build_system_auto_approve_gate(approvals, reason="heartbeat")
-            result = registry.execute(
-                "CronJob", {}, agent_class="operator", approval_gate=gate
-            )
+            result = registry.execute("CronJob", {}, agent_class="operator", approval_gate=gate)
             self.assertEqual(result, {"ok": True})
             self.assertEqual(ran, [True])
             # Approval record exists and is approved (not pending).
@@ -249,9 +245,7 @@ class DaemonContextModeTests(unittest.TestCase):
                     if reason is not None
                     else telegram_gate
                 )
-                return registry.execute(
-                    name, args, agent_class="operator", approval_gate=gate
-                )
+                return registry.execute(name, args, agent_class="operator", approval_gate=gate)
 
             # Without daemon mode -> ApprovalPending (Telegram path).
             self.assertIsNone(current_daemon_reason())
@@ -270,8 +264,10 @@ class DaemonContextModeTests(unittest.TestCase):
             self.assertIsNone(current_daemon_reason())
 
             # Audit trail: one approved record exists with the daemon reason.
-            records = [ApprovalManager(root / "approvals", secret="s").read(p.stem)
-                       for p in sorted((root / "approvals").glob("*.json"))]
+            records = [
+                ApprovalManager(root / "approvals", secret="s").read(p.stem)
+                for p in sorted((root / "approvals").glob("*.json"))
+            ]
             approved = [r for r in records if r["status"] == "approved"]
             self.assertEqual(len(approved), 1)
             self.assertEqual(
@@ -298,9 +294,7 @@ class GoldenPathTests(unittest.TestCase):
                     name="DeploySite",
                     description="tier3 deploy",
                     parameter_schema={"type": "object", "properties": {}},
-                    handler=lambda args: (
-                        executed_args.append(args) or {"deployed": True}
-                    ),
+                    handler=lambda args: executed_args.append(args) or {"deployed": True},
                     allowed_agent_classes=("operator",),
                     tier=TIER_REQUIRES_APPROVAL,
                 )
@@ -308,9 +302,7 @@ class GoldenPathTests(unittest.TestCase):
             gate = build_telegram_approval_gate(approvals)
 
             def shared_executor(name, args):
-                return registry.execute(
-                    name, args, agent_class="operator", approval_gate=gate
-                )
+                return registry.execute(name, args, agent_class="operator", approval_gate=gate)
 
             adapter = OpenAIAdapter(
                 transport=None,
@@ -398,9 +390,7 @@ class SubAgentPropagationTests(unittest.TestCase):
 
             # Closure the Brain shares with sub-agents (same shape as main.py).
             def shared_tool_executor(name, args):  # type: ignore[no-untyped-def]
-                return registry.execute(
-                    name, args, agent_class="operator", approval_gate=gate
-                )
+                return registry.execute(name, args, agent_class="operator", approval_gate=gate)
 
             adapter = OpenAIAdapter(
                 transport=None,

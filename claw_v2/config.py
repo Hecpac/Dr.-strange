@@ -148,14 +148,20 @@ class ScheduledSubAgentConfig:
 
 def _default_monitored_sites() -> list[MonitoredSiteConfig]:
     return [
-        MonitoredSiteConfig(name="premiumhome.design", url="https://premiumhome.design", interval_seconds=3600),
-        MonitoredSiteConfig(name="pachanodesign.com", url="https://www.pachanodesign.com", interval_seconds=3600),
+        MonitoredSiteConfig(
+            name="premiumhome.design", url="https://premiumhome.design", interval_seconds=3600
+        ),
+        MonitoredSiteConfig(
+            name="pachanodesign.com", url="https://www.pachanodesign.com", interval_seconds=3600
+        ),
     ]
 
 
 def _default_scheduled_sub_agents() -> list[ScheduledSubAgentConfig]:
     return [
-        ScheduledSubAgentConfig(agent="alma", skill="daily-brief", interval_seconds=86400, lane="worker"),
+        ScheduledSubAgentConfig(
+            agent="alma", skill="daily-brief", interval_seconds=86400, lane="worker"
+        ),
         ScheduledSubAgentConfig(
             agent="alma",
             skill="ai-news-daily",
@@ -163,9 +169,15 @@ def _default_scheduled_sub_agents() -> list[ScheduledSubAgentConfig]:
             timezone="America/Chicago",
             lane="worker",
         ),
-        ScheduledSubAgentConfig(agent="alma", skill="content-radar", interval_seconds=43200, lane="worker"),
-        ScheduledSubAgentConfig(agent="hex", skill="bug-triage", interval_seconds=86400, lane="worker"),
-        ScheduledSubAgentConfig(agent="rook", skill="health-audit", interval_seconds=21600, lane="worker"),
+        ScheduledSubAgentConfig(
+            agent="alma", skill="content-radar", interval_seconds=43200, lane="worker"
+        ),
+        ScheduledSubAgentConfig(
+            agent="hex", skill="bug-triage", interval_seconds=86400, lane="worker"
+        ),
+        ScheduledSubAgentConfig(
+            agent="rook", skill="health-audit", interval_seconds=21600, lane="worker"
+        ),
         ScheduledSubAgentConfig(
             agent="echo",
             skill="engagement-audit",
@@ -193,7 +205,9 @@ def _coerce_yaml_scalar(raw: str) -> str | int | bool:
     value = raw.strip()
     if not value:
         return ""
-    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+    if (value.startswith('"') and value.endswith('"')) or (
+        value.startswith("'") and value.endswith("'")
+    ):
         return value[1:-1]
     lowered = value.lower()
     if lowered in {"true", "false"}:
@@ -471,20 +485,36 @@ class AppConfig:
     provider_timeout_brain_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["brain"]
     provider_timeout_worker_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["worker"]
     provider_timeout_heavy_coding_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["heavy_coding"]
-    provider_timeout_research_synthesis_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["research_synthesis"]
+    provider_timeout_research_synthesis_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS[
+        "research_synthesis"
+    ]
     provider_timeout_control_judge_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["control_judge"]
-    provider_timeout_control_verifier_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["control_verifier"]
-    provider_timeout_critical_verifier_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["critical_verifier"]
-    provider_timeout_coordinator_worker_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_worker"]
-    provider_timeout_coordinator_research_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_research"]
-    provider_timeout_coordinator_verification_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_verification"]
-    provider_timeout_coordinator_implementation_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_implementation"]
+    provider_timeout_control_verifier_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS[
+        "control_verifier"
+    ]
+    provider_timeout_critical_verifier_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS[
+        "critical_verifier"
+    ]
+    provider_timeout_coordinator_worker_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS[
+        "coordinator_worker"
+    ]
+    provider_timeout_coordinator_research_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS[
+        "coordinator_research"
+    ]
+    provider_timeout_coordinator_verification_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS[
+        "coordinator_verification"
+    ]
+    provider_timeout_coordinator_implementation_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS[
+        "coordinator_implementation"
+    ]
 
     @classmethod
     def from_env(cls) -> "AppConfig":
         home = Path.home()
         cwd = Path.cwd().resolve()
-        runtime_config_path = Path(rc).expanduser() if (rc := os.getenv("RUNTIME_CONFIG_PATH")) else None
+        runtime_config_path = (
+            Path(rc).expanduser() if (rc := os.getenv("RUNTIME_CONFIG_PATH")) else None
+        )
         if runtime_config_path is not None and not runtime_config_path.is_absolute():
             runtime_config_path = (cwd / runtime_config_path).resolve()
         runtime_config = _load_runtime_config_file(runtime_config_path)
@@ -499,7 +529,9 @@ class AppConfig:
         worker_provider = os.getenv("WORKER_PROVIDER", "anthropic")
         worker_model = os.getenv("WORKER_MODEL", "claude-sonnet-4-6")
         worker_heavy_provider = os.getenv("WORKER_HEAVY_PROVIDER", "codex")
-        worker_heavy_model = os.getenv("WORKER_HEAVY_MODEL") or _SECONDARY_PROVIDER_DEFAULT_MODELS.get(
+        worker_heavy_model = os.getenv(
+            "WORKER_HEAVY_MODEL"
+        ) or _SECONDARY_PROVIDER_DEFAULT_MODELS.get(
             worker_heavy_provider,
             worker_model,
         )
@@ -548,7 +580,9 @@ class AppConfig:
             workspace_root=Path(os.getenv("WORKSPACE_ROOT", str(cwd))),
             agent_state_root=Path(os.getenv("AGENT_STATE_ROOT", str(home / ".claw" / "agents"))),
             agent_definitions_root=Path(os.getenv("AGENT_DEFINITIONS_ROOT", str(cwd / "agents"))),
-            eval_artifacts_root=Path(os.getenv("EVAL_ARTIFACTS_ROOT", str(home / ".claw" / "evals"))),
+            eval_artifacts_root=Path(
+                os.getenv("EVAL_ARTIFACTS_ROOT", str(home / ".claw" / "evals"))
+            ),
             eval_on_self_improve=_env_bool("EVAL_ON_SELF_IMPROVE", True),
             self_improve_test_timeout_seconds=_env_int("SELF_IMPROVE_TEST_TIMEOUT_SECONDS", 600),
             autonomous_maintenance_enabled=_autonomous_maintenance_from_env(),
@@ -556,13 +590,22 @@ class AppConfig:
             brain_tooluse_verify=_env_bool("BRAIN_TOOLUSE_VERIFY", False),
             cache_prefix_ttl=_env_int("CACHE_PREFIX_TTL", 3600),
             allowed_paths=[Path(p) for p in os.getenv("ALLOWED_PATHS", "").split(":") if p],
-            approvals_root=Path(os.getenv("APPROVALS_ROOT", str(home / ".claw" / "pending_approvals"))),
+            approvals_root=Path(
+                os.getenv("APPROVALS_ROOT", str(home / ".claw" / "pending_approvals"))
+            ),
             pipeline_repo_root=Path(pr) if (pr := os.getenv("PIPELINE_REPO_ROOT")) else None,
             pipeline_label=os.getenv("PIPELINE_LABEL", "claw-auto"),
             pipeline_max_retries=_env_int("PIPELINE_MAX_RETRIES", 3),
-            pipeline_state_root=Path(os.getenv("PIPELINE_STATE_ROOT", str(home / ".claw" / "pipeline"))),
+            pipeline_state_root=Path(
+                os.getenv("PIPELINE_STATE_ROOT", str(home / ".claw" / "pipeline"))
+            ),
             runtime_config_path=runtime_config_path,
-            social_accounts_root=Path(os.getenv("SOCIAL_ACCOUNTS_ROOT", str(Path(__file__).parent / "agents" / "social" / "accounts"))),
+            social_accounts_root=Path(
+                os.getenv(
+                    "SOCIAL_ACCOUNTS_ROOT",
+                    str(Path(__file__).parent / "agents" / "social" / "accounts"),
+                )
+            ),
             social_keychain_prefix=os.getenv("SOCIAL_KEYCHAIN_PREFIX", "com.pachano.claw.social"),
             allowed_read_paths=[
                 Path(p)
@@ -572,9 +615,13 @@ class AppConfig:
                 ).split(":")
                 if p.strip()
             ],
-            extra_workspace_roots=[Path(p) for p in os.getenv("EXTRA_WORKSPACE_ROOTS", "").split(":") if p.strip()],
+            extra_workspace_roots=[
+                Path(p) for p in os.getenv("EXTRA_WORKSPACE_ROOTS", "").split(":") if p.strip()
+            ],
             monitored_sites=_coerce_monitored_sites(runtime_config.get("monitored_sites")),
-            scheduled_sub_agents=_coerce_scheduled_sub_agents(runtime_config.get("scheduled_sub_agents")),
+            scheduled_sub_agents=_coerce_scheduled_sub_agents(
+                runtime_config.get("scheduled_sub_agents")
+            ),
             brain_context_window=_env_int("BRAIN_CONTEXT_WINDOW", 1000000),
             brain_max_output=_env_int("BRAIN_MAX_OUTPUT", 128000),
             worker_context_window=_env_int("WORKER_CONTEXT_WINDOW", 1000000),
@@ -594,20 +641,39 @@ class AppConfig:
             tier_autoexec_max=_env_tier("CLAW_TIER_AUTOEXEC_MAX", 2),
             observability_telegram_chat_id=os.getenv("CLAW_OBSERVABILITY_TELEGRAM_CHAT_ID") or None,
             observation_cost_per_hour_threshold=_env_float("CLAW_OBSERVATION_COST_PER_HOUR", 10.00),
-            observation_tool_calls_per_minute_threshold=_env_int("CLAW_OBSERVATION_TOOL_CALLS_PER_MINUTE", 10),
-            token_window_seconds=_env_int("CLAW_TOKEN_WINDOW_SECONDS", _env_int("TOKEN_WINDOW_SECONDS", 18_000)),
-            token_window_cap=_env_int("CLAW_TOKEN_WINDOW_CAP", _env_int("TOKEN_WINDOW_CAP", 1_000_000)),
-            token_soft_limit_ratio=_env_float("CLAW_TOKEN_SOFT_LIMIT_RATIO", _env_float("TOKEN_SOFT_LIMIT_RATIO", 0.8)),
-            token_hard_limit_ratio=_env_float("CLAW_TOKEN_HARD_LIMIT_RATIO", _env_float("TOKEN_HARD_LIMIT_RATIO", 1.0)),
-            command_isolation_mode=os.getenv("CLAW_COMMAND_ISOLATION_MODE", os.getenv("COMMAND_ISOLATION_MODE", "docker_ephemeral")),
-            enable_trivial_automerge=_env_bool("CLAW_ENABLE_TRIVIAL_AUTOMERGE", _env_bool("ENABLE_TRIVIAL_AUTOMERGE", False)),
+            observation_tool_calls_per_minute_threshold=_env_int(
+                "CLAW_OBSERVATION_TOOL_CALLS_PER_MINUTE", 10
+            ),
+            token_window_seconds=_env_int(
+                "CLAW_TOKEN_WINDOW_SECONDS", _env_int("TOKEN_WINDOW_SECONDS", 18_000)
+            ),
+            token_window_cap=_env_int(
+                "CLAW_TOKEN_WINDOW_CAP", _env_int("TOKEN_WINDOW_CAP", 1_000_000)
+            ),
+            token_soft_limit_ratio=_env_float(
+                "CLAW_TOKEN_SOFT_LIMIT_RATIO", _env_float("TOKEN_SOFT_LIMIT_RATIO", 0.8)
+            ),
+            token_hard_limit_ratio=_env_float(
+                "CLAW_TOKEN_HARD_LIMIT_RATIO", _env_float("TOKEN_HARD_LIMIT_RATIO", 1.0)
+            ),
+            command_isolation_mode=os.getenv(
+                "CLAW_COMMAND_ISOLATION_MODE",
+                os.getenv("COMMAND_ISOLATION_MODE", "docker_ephemeral"),
+            ),
+            enable_trivial_automerge=_env_bool(
+                "CLAW_ENABLE_TRIVIAL_AUTOMERGE", _env_bool("ENABLE_TRIVIAL_AUTOMERGE", False)
+            ),
             chrome_cdp_enabled=_env_bool("CHROME_CDP_ENABLED", True),
             claw_chrome_port=_env_int("CLAW_CHROME_PORT", 9250),
-            notebooklm_backend=_normalize_notebooklm_backend(os.getenv("NOTEBOOKLM_BACKEND", "cdp")),
+            notebooklm_backend=_normalize_notebooklm_backend(
+                os.getenv("NOTEBOOKLM_BACKEND", "cdp")
+            ),
             notebooklm_cli_path=os.getenv("NOTEBOOKLM_CLI_PATH") or shutil.which("nlm") or "nlm",
             notebooklm_cli_profile=os.getenv("NOTEBOOKLM_CLI_PROFILE") or None,
             notebooklm_cli_timeout_seconds=_env_float("NOTEBOOKLM_CLI_TIMEOUT_SECONDS", 120.0),
-            notebooklm_cli_long_timeout_seconds=_env_float("NOTEBOOKLM_CLI_LONG_TIMEOUT_SECONDS", 1200.0),
+            notebooklm_cli_long_timeout_seconds=_env_float(
+                "NOTEBOOKLM_CLI_LONG_TIMEOUT_SECONDS", 1200.0
+            ),
             computer_use_enabled=_env_bool("COMPUTER_USE_ENABLED", True),
             computer_use_required=_env_bool("COMPUTER_USE_REQUIRED", False),
             # When true, browser_use_task and desktop/CDP actions auto-execute
@@ -621,15 +687,26 @@ class AppConfig:
             # caps long renders mid-task. Configurable, default 7 min.
             computer_browser_use_timeout_seconds=_env_int("CLAW_BROWSER_USE_TIMEOUT", 420),
             ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-            sensitive_urls=[u for u in os.getenv("SENSITIVE_URLS", "ads.google.com:polymarket.com:robinhood.com:binance.com:stripe.com:paypal.com").split(":") if u.strip()],
+            sensitive_urls=[
+                u
+                for u in os.getenv(
+                    "SENSITIVE_URLS",
+                    "ads.google.com:polymarket.com:robinhood.com:binance.com:stripe.com:paypal.com",
+                ).split(":")
+                if u.strip()
+            ],
             codex_cli_path=os.getenv("CODEX_CLI_PATH") or shutil.which("codex") or "codex",
             codex_model=os.getenv("CODEX_MODEL", "codex-mini-latest"),
             computer_use_backend=os.getenv("COMPUTER_USE_BACKEND", "openai"),
             computer_browser_use_model=os.getenv("CLAW_BROWSER_USE_MODEL", "claude-sonnet-4-6"),
             morning_brief_enabled=_env_bool("MORNING_BRIEF_ENABLED", True),
             morning_brief_hour=_env_int("MORNING_BRIEF_HOUR", 5),
-            morning_brief_timezone=os.getenv("MORNING_BRIEF_TIMEZONE", os.getenv("TZ", "America/Chicago")),
-            morning_brief_weather_location=os.getenv("MORNING_BRIEF_LOCATION", os.getenv("WEATHER_LOCATION", "")),
+            morning_brief_timezone=os.getenv(
+                "MORNING_BRIEF_TIMEZONE", os.getenv("TZ", "America/Chicago")
+            ),
+            morning_brief_weather_location=os.getenv(
+                "MORNING_BRIEF_LOCATION", os.getenv("WEATHER_LOCATION", "")
+            ),
             morning_brief_email_command=os.getenv("MORNING_BRIEF_EMAIL_COMMAND") or None,
             morning_brief_calendar_command=os.getenv("MORNING_BRIEF_CALENDAR_COMMAND") or None,
             evening_brief_enabled=_env_bool("EVENING_BRIEF_ENABLED", True),
@@ -638,23 +715,60 @@ class AppConfig:
             telemetry_root=Path(os.getenv("TELEMETRY_ROOT", str(home / ".claw" / "telemetry"))),
             claw_worker_summary_limit=_env_int("CLAW_WORKER_SUMMARY_LIMIT", 16_000),
             claw_phase_input_limit=_env_int("CLAW_PHASE_INPUT_LIMIT", 48_000),
-            control_judge_provider=os.getenv("CLAW_CONTROL_JUDGE_PROVIDER") or os.getenv("CONTROL_JUDGE_PROVIDER"),
-            control_judge_model=os.getenv("CLAW_CONTROL_JUDGE_MODEL") or os.getenv("CONTROL_JUDGE_MODEL"),
-            control_verifier_provider=os.getenv("CLAW_CONTROL_VERIFIER_PROVIDER") or os.getenv("CONTROL_VERIFIER_PROVIDER"),
-            control_verifier_model=os.getenv("CLAW_CONTROL_VERIFIER_MODEL") or os.getenv("CONTROL_VERIFIER_MODEL"),
-            critical_verifier_provider=os.getenv("CLAW_CRITICAL_VERIFIER_PROVIDER") or os.getenv("CRITICAL_VERIFIER_PROVIDER"),
-            critical_verifier_model=os.getenv("CLAW_CRITICAL_VERIFIER_MODEL") or os.getenv("CRITICAL_VERIFIER_MODEL"),
-            provider_timeout_brain_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_BRAIN_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["brain"]),
-            provider_timeout_worker_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_WORKER_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["worker"]),
-            provider_timeout_heavy_coding_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_HEAVY_CODING_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["heavy_coding"]),
-            provider_timeout_research_synthesis_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_RESEARCH_SYNTHESIS_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["research_synthesis"]),
-            provider_timeout_control_judge_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_CONTROL_JUDGE_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["control_judge"]),
-            provider_timeout_control_verifier_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_CONTROL_VERIFIER_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["control_verifier"]),
-            provider_timeout_critical_verifier_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_CRITICAL_VERIFIER_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["critical_verifier"]),
-            provider_timeout_coordinator_worker_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_COORDINATOR_WORKER_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_worker"]),
-            provider_timeout_coordinator_research_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_COORDINATOR_RESEARCH_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_research"]),
-            provider_timeout_coordinator_verification_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_COORDINATOR_VERIFICATION_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_verification"]),
-            provider_timeout_coordinator_implementation_seconds=_env_float("CLAW_PROVIDER_TIMEOUT_COORDINATOR_IMPLEMENTATION_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_implementation"]),
+            control_judge_provider=os.getenv("CLAW_CONTROL_JUDGE_PROVIDER")
+            or os.getenv("CONTROL_JUDGE_PROVIDER"),
+            control_judge_model=os.getenv("CLAW_CONTROL_JUDGE_MODEL")
+            or os.getenv("CONTROL_JUDGE_MODEL"),
+            control_verifier_provider=os.getenv("CLAW_CONTROL_VERIFIER_PROVIDER")
+            or os.getenv("CONTROL_VERIFIER_PROVIDER"),
+            control_verifier_model=os.getenv("CLAW_CONTROL_VERIFIER_MODEL")
+            or os.getenv("CONTROL_VERIFIER_MODEL"),
+            critical_verifier_provider=os.getenv("CLAW_CRITICAL_VERIFIER_PROVIDER")
+            or os.getenv("CRITICAL_VERIFIER_PROVIDER"),
+            critical_verifier_model=os.getenv("CLAW_CRITICAL_VERIFIER_MODEL")
+            or os.getenv("CRITICAL_VERIFIER_MODEL"),
+            provider_timeout_brain_seconds=_env_float(
+                "CLAW_PROVIDER_TIMEOUT_BRAIN_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["brain"]
+            ),
+            provider_timeout_worker_seconds=_env_float(
+                "CLAW_PROVIDER_TIMEOUT_WORKER_SECONDS", _PROVIDER_ROLE_TIMEOUT_DEFAULTS["worker"]
+            ),
+            provider_timeout_heavy_coding_seconds=_env_float(
+                "CLAW_PROVIDER_TIMEOUT_HEAVY_CODING_SECONDS",
+                _PROVIDER_ROLE_TIMEOUT_DEFAULTS["heavy_coding"],
+            ),
+            provider_timeout_research_synthesis_seconds=_env_float(
+                "CLAW_PROVIDER_TIMEOUT_RESEARCH_SYNTHESIS_SECONDS",
+                _PROVIDER_ROLE_TIMEOUT_DEFAULTS["research_synthesis"],
+            ),
+            provider_timeout_control_judge_seconds=_env_float(
+                "CLAW_PROVIDER_TIMEOUT_CONTROL_JUDGE_SECONDS",
+                _PROVIDER_ROLE_TIMEOUT_DEFAULTS["control_judge"],
+            ),
+            provider_timeout_control_verifier_seconds=_env_float(
+                "CLAW_PROVIDER_TIMEOUT_CONTROL_VERIFIER_SECONDS",
+                _PROVIDER_ROLE_TIMEOUT_DEFAULTS["control_verifier"],
+            ),
+            provider_timeout_critical_verifier_seconds=_env_float(
+                "CLAW_PROVIDER_TIMEOUT_CRITICAL_VERIFIER_SECONDS",
+                _PROVIDER_ROLE_TIMEOUT_DEFAULTS["critical_verifier"],
+            ),
+            provider_timeout_coordinator_worker_seconds=_env_float(
+                "CLAW_PROVIDER_TIMEOUT_COORDINATOR_WORKER_SECONDS",
+                _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_worker"],
+            ),
+            provider_timeout_coordinator_research_seconds=_env_float(
+                "CLAW_PROVIDER_TIMEOUT_COORDINATOR_RESEARCH_SECONDS",
+                _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_research"],
+            ),
+            provider_timeout_coordinator_verification_seconds=_env_float(
+                "CLAW_PROVIDER_TIMEOUT_COORDINATOR_VERIFICATION_SECONDS",
+                _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_verification"],
+            ),
+            provider_timeout_coordinator_implementation_seconds=_env_float(
+                "CLAW_PROVIDER_TIMEOUT_COORDINATOR_IMPLEMENTATION_SECONDS",
+                _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_implementation"],
+            ),
         )
 
     def ensure_directories(self) -> None:
@@ -688,7 +802,9 @@ class AppConfig:
             if value is not None and value not in supported:
                 raise ValueError(f"{field_name} must be one of {sorted(supported)}.")
         for lane in ("brain", "worker", "worker_heavy", "verifier", "research", "judge"):
-            _validate_provider_model_pair(self.provider_for_lane(lane), self.model_for_lane(lane), lane=lane)
+            _validate_provider_model_pair(
+                self.provider_for_lane(lane), self.model_for_lane(lane), lane=lane
+            )
         for role in _PROVIDER_ROLE_TIMEOUT_DEFAULTS:
             timeout = self.timeout_for_role(role)
             provider = self.provider_for_role(role)
@@ -698,7 +814,9 @@ class AppConfig:
         if self.browse_backend not in supported_browse_backends:
             raise ValueError(f"browse_backend must be one of {sorted(supported_browse_backends)}.")
         if self.sandbox_capability_profile not in {"surgical", "engineer", "admin"}:
-            raise ValueError("sandbox_capability_profile must be one of: surgical, engineer, admin.")
+            raise ValueError(
+                "sandbox_capability_profile must be one of: surgical, engineer, admin."
+            )
         if self.computer_use_backend not in {"openai", "codex"}:
             raise ValueError("computer_use_backend must be 'openai' or 'codex'.")
         if self.computer_browser_use_timeout_seconds <= 0:
@@ -710,7 +828,9 @@ class AppConfig:
         try:
             ZoneInfo(self.morning_brief_timezone)
         except ZoneInfoNotFoundError as exc:
-            raise ValueError(f"morning_brief_timezone is invalid: {self.morning_brief_timezone}") from exc
+            raise ValueError(
+                f"morning_brief_timezone is invalid: {self.morning_brief_timezone}"
+            ) from exc
         if self.web_chat_port <= 0:
             raise ValueError("web_chat_port must be positive.")
         if self.tier_autoexec_max <= 0:
@@ -726,7 +846,9 @@ class AppConfig:
         if not 0 < self.token_soft_limit_ratio <= self.token_hard_limit_ratio:
             raise ValueError("token limit ratios must satisfy 0 < soft <= hard.")
         if self.command_isolation_mode not in {"host_sanitized", "docker_ephemeral"}:
-            raise ValueError("command_isolation_mode must be one of: host_sanitized, docker_ephemeral.")
+            raise ValueError(
+                "command_isolation_mode must be one of: host_sanitized, docker_ephemeral."
+            )
         if self.notebooklm_backend not in {"cdp", "jacob"}:
             raise ValueError("notebooklm_backend must be one of: cdp, jacob.")
         if not self.notebooklm_cli_path:
@@ -948,11 +1070,7 @@ class AppConfig:
 
     def billable_cost_providers(self) -> set[str]:
         providers = {"anthropic", "openai", "google"}
-        return {
-            provider
-            for provider in providers
-            if self.provider_billing_mode(provider) == "api"
-        }
+        return {provider for provider in providers if self.provider_billing_mode(provider) == "api"}
 
     def notional_cost_providers(self) -> set[str]:
         providers = {"anthropic", "codex", "ollama"}

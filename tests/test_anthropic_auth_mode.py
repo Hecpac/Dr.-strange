@@ -92,9 +92,7 @@ class EnvOnlyKeyResolutionTests(unittest.TestCase):
                 (home / dotfile).write_text(
                     'export ANTHROPIC_API_KEY="sk-from-dotfile"\n', encoding="utf-8"
                 )
-            with patch.dict(
-                os.environ, {"HOME": str(home), "ANTHROPIC_API_KEY": ""}, clear=False
-            ):
+            with patch.dict(os.environ, {"HOME": str(home), "ANTHROPIC_API_KEY": ""}, clear=False):
                 self.assertIsNone(resolve_anthropic_api_key())
 
     def test_claw_env_file_key_resolves(self) -> None:
@@ -105,20 +103,14 @@ class EnvOnlyKeyResolutionTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False):
-                self.assertEqual(
-                    resolve_anthropic_api_key(env_file=env_file), "sk-from-claw-env"
-                )
+                self.assertEqual(resolve_anthropic_api_key(env_file=env_file), "sk-from-claw-env")
 
     def test_process_env_wins_over_claw_env_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = Path(tmpdir) / "env"
             env_file.write_text("ANTHROPIC_API_KEY=sk-from-file\n", encoding="utf-8")
-            with patch.dict(
-                os.environ, {"ANTHROPIC_API_KEY": "sk-from-env"}, clear=False
-            ):
-                self.assertEqual(
-                    resolve_anthropic_api_key(env_file=env_file), "sk-from-env"
-                )
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-from-env"}, clear=False):
+                self.assertEqual(resolve_anthropic_api_key(env_file=env_file), "sk-from-env")
 
     def test_default_env_file_is_claw_env_under_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -128,9 +120,7 @@ class EnvOnlyKeyResolutionTests(unittest.TestCase):
             (claw_dir / "env").write_text(
                 "export ANTHROPIC_API_KEY=sk-home-claw\n", encoding="utf-8"
             )
-            with patch.dict(
-                os.environ, {"HOME": str(home), "ANTHROPIC_API_KEY": ""}, clear=False
-            ):
+            with patch.dict(os.environ, {"HOME": str(home), "ANTHROPIC_API_KEY": ""}, clear=False):
                 self.assertEqual(resolve_anthropic_api_key(), "sk-home-claw")
 
     def test_api_key_mode_without_key_raises_actionable_error(self) -> None:
@@ -155,9 +145,7 @@ class EnvOnlyKeyResolutionTests(unittest.TestCase):
             request.effort = "high"
             request.evidence_pack = {}
             request.thinking_tokens = 0
-            with patch.dict(
-                os.environ, {"HOME": str(home), "ANTHROPIC_API_KEY": ""}, clear=False
-            ):
+            with patch.dict(os.environ, {"HOME": str(home), "ANTHROPIC_API_KEY": ""}, clear=False):
                 with self.assertRaises(AdapterUnavailableError) as ctx:
                     executor._build_options(fake_sdk, request)
             self.assertIn("~/.claw/env", str(ctx.exception))

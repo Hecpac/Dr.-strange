@@ -132,9 +132,7 @@ class ResolveContextTests(unittest.TestCase):
 class NlmHandlerWithResolverTests(unittest.TestCase):
     def test_active_notebook_id_falls_back_to_state(self) -> None:
         def get_state(_: str) -> dict[str, Any]:
-            return {
-                "active_object": {"kind": "notebook", "id": "nb-99", "title": "Z"}
-            }
+            return {"active_object": {"kind": "notebook", "id": "nb-99", "title": "Z"}}
 
         handler = NlmHandler(get_session_state=get_state)
         self.assertEqual(handler._active_notebook_id("s1"), "nb-99")

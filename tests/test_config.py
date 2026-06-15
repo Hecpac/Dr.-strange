@@ -65,15 +65,21 @@ class AppConfigDefaultsTests(unittest.TestCase):
         )
         # ~/.claw agent state -> allowed
         self.assertTrue(
-            sandbox_hook("Read", {"file_path": str(home / ".claw" / "state.json")}, policy=policy).allowed
+            sandbox_hook(
+                "Read", {"file_path": str(home / ".claw" / "state.json")}, policy=policy
+            ).allowed
         )
         # workspace_root -> allowed
         self.assertTrue(
-            sandbox_hook("Read", {"file_path": str(config.workspace_root / "README.md")}, policy=policy).allowed
+            sandbox_hook(
+                "Read", {"file_path": str(config.workspace_root / "README.md")}, policy=policy
+            ).allowed
         )
         # arbitrary private HOME file -> blocked
         self.assertFalse(
-            sandbox_hook("Read", {"file_path": str(home / "Documents" / "private.txt")}, policy=policy).allowed
+            sandbox_hook(
+                "Read", {"file_path": str(home / "Documents" / "private.txt")}, policy=policy
+            ).allowed
         )
 
     def test_allowed_read_paths_env_override_intact(self) -> None:
@@ -429,6 +435,7 @@ class AppConfigDefaultsTests(unittest.TestCase):
     def test_control_role_policy_rejects_codex_and_slow_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config
+
             config = make_config(Path(tmpdir))
 
         with self.assertRaisesRegex(ProviderRolePolicyError, "codex"):
@@ -436,9 +443,12 @@ class AppConfigDefaultsTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderRolePolicyError, "<= 30s"):
             config.validate_provider_role_policy("critical_verifier", "anthropic", timeout=31.0)
 
-    def test_coordinator_verification_ignores_verifier_model_without_verifier_provider(self) -> None:
+    def test_coordinator_verification_ignores_verifier_model_without_verifier_provider(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config
+
             config = make_config(Path(tmpdir))
             config.brain_provider = "anthropic"
             config.verifier_provider = None
@@ -452,6 +462,7 @@ class AppConfigDefaultsTests(unittest.TestCase):
     def test_coordinator_verification_uses_verifier_model_with_verifier_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config
+
             config = make_config(Path(tmpdir))
             config.verifier_provider = "openai"
             config.verifier_model = "gpt-5.4-mini"
@@ -482,6 +493,7 @@ class AppConfigDefaultsTests(unittest.TestCase):
     def test_subscription_budget_floor_prevents_tiny_brain_caps(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config
+
             config = make_config(Path(tmpdir))
             config.claude_auth_mode = "subscription"
             self.assertEqual(
@@ -504,6 +516,7 @@ class AppConfigDefaultsTests(unittest.TestCase):
     def test_api_budget_caps_are_not_raised_by_subscription_floor(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config
+
             config = make_config(Path(tmpdir))
             config.claude_auth_mode = "api_key"
             self.assertEqual(
@@ -518,6 +531,7 @@ class AppConfigDefaultsTests(unittest.TestCase):
     def test_invalid_morning_brief_timezone_fails_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config
+
             config = make_config(Path(tmpdir))
             config.morning_brief_timezone = "Mars/Olympus"
             with self.assertRaisesRegex(ValueError, "morning_brief_timezone"):
@@ -526,6 +540,7 @@ class AppConfigDefaultsTests(unittest.TestCase):
     def test_invalid_evening_brief_hour_fails_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config
+
             config = make_config(Path(tmpdir))
             config.evening_brief_hour = 24
             with self.assertRaisesRegex(ValueError, "evening_brief_hour"):
@@ -549,7 +564,9 @@ class AppConfigDefaultsTests(unittest.TestCase):
                     "    lane: worker\n",
                     encoding="utf-8",
                 )
-                with patch.dict(os.environ, {"RUNTIME_CONFIG_PATH": str(runtime_config)}, clear=True):
+                with patch.dict(
+                    os.environ, {"RUNTIME_CONFIG_PATH": str(runtime_config)}, clear=True
+                ):
                     config = AppConfig.from_env()
             finally:
                 os.chdir(previous_cwd)
@@ -567,6 +584,7 @@ class CodexConfigTests(unittest.TestCase):
     def test_codex_worker_provider_passes_validate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config
+
             config = make_config(Path(tmpdir))
             config.worker_provider = "codex"
             config.worker_model = "codex-mini-latest"
@@ -575,6 +593,7 @@ class CodexConfigTests(unittest.TestCase):
 
     def test_codex_fields_have_defaults_from_env(self) -> None:
         import os
+
         previous_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmpdir:
             os.chdir(tmpdir)
@@ -590,6 +609,7 @@ class CodexConfigTests(unittest.TestCase):
     def test_computer_use_backend_codex_passes_validate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config
+
             config = make_config(Path(tmpdir))
             config.computer_use_backend = "codex"
             config.validate()
@@ -597,6 +617,7 @@ class CodexConfigTests(unittest.TestCase):
     def test_anthropic_advisory_model_does_not_reuse_codex_worker_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config
+
             config = make_config(Path(tmpdir))
             config.worker_provider = "codex"
             config.worker_model = "codex-mini-latest"
@@ -608,6 +629,7 @@ class CodexConfigTests(unittest.TestCase):
     def test_validate_rejects_incompatible_provider_model_pairs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             from tests.helpers import make_config
+
             config = make_config(Path(tmpdir))
             config.verifier_provider = "anthropic"
             config.verifier_model = "gpt-5.5"
@@ -635,12 +657,14 @@ class PerLaneThinkingAndEffortTests(unittest.TestCase):
             self.assertEqual(config.thinking_tokens_for_lane(lane), 0, lane)
 
     def test_thinking_tokens_env_overrides_per_lane(self) -> None:
-        config = self._from_env({
-            "HOME": str(Path.home()),
-            "BRAIN_THINKING_TOKENS": "8000",
-            "WORKER_HEAVY_THINKING_TOKENS": "6000",
-            "VERIFIER_THINKING_TOKENS": "4000",
-        })
+        config = self._from_env(
+            {
+                "HOME": str(Path.home()),
+                "BRAIN_THINKING_TOKENS": "8000",
+                "WORKER_HEAVY_THINKING_TOKENS": "6000",
+                "VERIFIER_THINKING_TOKENS": "4000",
+            }
+        )
         self.assertEqual(config.thinking_tokens_for_lane("brain"), 8000)
         self.assertEqual(config.thinking_tokens_for_lane("worker_heavy"), 6000)
         self.assertEqual(config.thinking_tokens_for_lane("verifier"), 4000)
@@ -649,21 +673,25 @@ class PerLaneThinkingAndEffortTests(unittest.TestCase):
         self.assertEqual(config.thinking_tokens_for_lane("judge"), 0)
 
     def test_verifier_and_research_effort_fall_back_to_judge_effort(self) -> None:
-        config = self._from_env({
-            "HOME": str(Path.home()),
-            "JUDGE_EFFORT": "high",
-        })
+        config = self._from_env(
+            {
+                "HOME": str(Path.home()),
+                "JUDGE_EFFORT": "high",
+            }
+        )
         self.assertEqual(config.effort_for_lane("verifier"), "high")
         self.assertEqual(config.effort_for_lane("research"), "high")
         self.assertEqual(config.effort_for_lane("judge"), "high")
 
     def test_verifier_and_research_effort_take_explicit_overrides(self) -> None:
-        config = self._from_env({
-            "HOME": str(Path.home()),
-            "JUDGE_EFFORT": "medium",
-            "VERIFIER_EFFORT": "high",
-            "RESEARCH_EFFORT": "low",
-        })
+        config = self._from_env(
+            {
+                "HOME": str(Path.home()),
+                "JUDGE_EFFORT": "medium",
+                "VERIFIER_EFFORT": "high",
+                "RESEARCH_EFFORT": "low",
+            }
+        )
         self.assertEqual(config.effort_for_lane("verifier"), "high")
         self.assertEqual(config.effort_for_lane("research"), "low")
         self.assertEqual(config.effort_for_lane("judge"), "medium")
@@ -675,7 +703,9 @@ class BrowserUseModelConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {"HOME": home}, clear=True):
             config = AppConfig.from_env()
         self.assertEqual(config.computer_browser_use_model, "claude-sonnet-4-6")
-        with patch.dict(os.environ, {"HOME": home, "CLAW_BROWSER_USE_MODEL": "gpt-5.5"}, clear=True):
+        with patch.dict(
+            os.environ, {"HOME": home, "CLAW_BROWSER_USE_MODEL": "gpt-5.5"}, clear=True
+        ):
             configured = AppConfig.from_env()
         self.assertEqual(configured.computer_browser_use_model, "gpt-5.5")
 

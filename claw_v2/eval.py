@@ -55,7 +55,9 @@ class EvalHarness:
         )
         lowered = response.content.lower()
         failures: list[str] = []
-        if case.expected_response is not None and _normalize_text(response.content) != _normalize_text(case.expected_response):
+        if case.expected_response is not None and _normalize_text(
+            response.content
+        ) != _normalize_text(case.expected_response):
             failures.append("response did not match expected_response")
         for expected in case.expected_substrings:
             if expected.lower() not in lowered:
@@ -82,14 +84,22 @@ class EvalHarness:
         return self.run_case(case)
 
     @staticmethod
-    def capture_trace_case(observe: ObserveStream, trace_id: str, *, name: str | None = None) -> EvalCase:
+    def capture_trace_case(
+        observe: ObserveStream, trace_id: str, *, name: str | None = None
+    ) -> EvalCase:
         events = observe.trace_events(trace_id)
         if not events:
             raise ValueError(f"trace not found: {trace_id}")
-        decision_event = next((event for event in events if event["event_type"] == "llm_decision"), None)
-        response_event = next((event for event in reversed(events) if event["event_type"] == "llm_response"), None)
+        decision_event = next(
+            (event for event in events if event["event_type"] == "llm_decision"), None
+        )
+        response_event = next(
+            (event for event in reversed(events) if event["event_type"] == "llm_response"), None
+        )
         if decision_event is None or response_event is None:
-            raise ValueError(f"trace {trace_id} does not contain a replayable llm decision/response pair")
+            raise ValueError(
+                f"trace {trace_id} does not contain a replayable llm decision/response pair"
+            )
         payload = decision_event["payload"]
         prompt_snapshot = payload.get("prompt_snapshot")
         if prompt_snapshot is None:
@@ -100,7 +110,9 @@ class EvalHarness:
             lane=decision_event["lane"] or "judge",
             evidence_pack=payload.get("evidence_pack_snapshot") or {},
             system_prompt=payload.get("system_prompt_snapshot"),
-            expected_response=response_event["payload"].get("response_text") or response_event["payload"].get("content") or None,
+            expected_response=response_event["payload"].get("response_text")
+            or response_event["payload"].get("content")
+            or None,
             metadata={
                 "trace_id": trace_id,
                 "provider": decision_event.get("provider"),

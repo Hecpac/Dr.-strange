@@ -4,6 +4,7 @@ State_handler resolves "proceed/dale/sí" by selecting the next pending task
 from `task_queue`. Stale pending entries should not be selected just because
 they appear earlier in iteration order.
 """
+
 from __future__ import annotations
 
 import unittest

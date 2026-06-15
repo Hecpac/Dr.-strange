@@ -110,7 +110,9 @@ def calculate_gdi_snapshot(
         constraint_hit = _constraint_contradiction(goal.constraints, action)
         if constraint_hit:
             signals.append(GDISignal("constraint_contradiction", constraint_hit, 0.3))
-        if workspace_root is not None and _has_workspace_escape(action.args_redacted, Path(workspace_root)):
+        if workspace_root is not None and _has_workspace_escape(
+            action.args_redacted, Path(workspace_root)
+        ):
             signals.append(GDISignal("workspace_escape", True, 0.35))
 
     failures = _consecutive_failures(events)
@@ -122,8 +124,10 @@ def calculate_gdi_snapshot(
         signals.append(GDISignal("risk_escalations", escalations, min(0.2, escalations * 0.1)))
 
     unverified = [
-        claim for claim in claim_rows
-        if claim.claim_type in {"fact", "inference", "risk_signal"} and claim.verification_status != "verified"
+        claim
+        for claim in claim_rows
+        if claim.claim_type in {"fact", "inference", "risk_signal"}
+        and claim.verification_status != "verified"
     ]
     if claim_rows and unverified:
         ratio = len(unverified) / max(len(claim_rows), 1)
@@ -178,13 +182,27 @@ def gate_gdi_action(
             reason="GDI is running in log-only calibration mode.",
             snapshot_id=snapshot.snapshot_id,
         )
-    tier_sensitive = action_tier in {"tier_2", "tier_2_5", "tier_3"} or risk_level in {"high", "critical"}
+    tier_sensitive = action_tier in {"tier_2", "tier_2_5", "tier_3"} or risk_level in {
+        "high",
+        "critical",
+    }
     if snapshot.band == "stop":
-        return GDIGateDecision("block", False, "GDI stop band requires human review.", snapshot.snapshot_id)
+        return GDIGateDecision(
+            "block", False, "GDI stop band requires human review.", snapshot.snapshot_id
+        )
     if snapshot.band == "critic_required" and tier_sensitive:
-        return GDIGateDecision("critic_required", False, "GDI requires Critic review before this action.", snapshot.snapshot_id)
-    if snapshot.band == "caution" and (action_tier in {"tier_2_5", "tier_3"} or risk_level == "critical"):
-        return GDIGateDecision("recall_recommended", True, "Run Active Recall before proceeding.", snapshot.snapshot_id)
+        return GDIGateDecision(
+            "critic_required",
+            False,
+            "GDI requires Critic review before this action.",
+            snapshot.snapshot_id,
+        )
+    if snapshot.band == "caution" and (
+        action_tier in {"tier_2_5", "tier_3"} or risk_level == "critical"
+    ):
+        return GDIGateDecision(
+            "recall_recommended", True, "Run Active Recall before proceeding.", snapshot.snapshot_id
+        )
     return GDIGateDecision("allow", True, "GDI band allows the action.", snapshot.snapshot_id)
 
 
@@ -270,6 +288,7 @@ def _iter_string_values(value: Any) -> list[str]:
 def _reason_summary(signals: list[GDISignal], band: GDIBand) -> str:
     if not signals:
         return "No drift signals detected."
-    names = ", ".join(signal.name for signal in sorted(signals, key=lambda item: item.weight, reverse=True)[:4])
+    names = ", ".join(
+        signal.name for signal in sorted(signals, key=lambda item: item.weight, reverse=True)[:4]
+    )
     return f"{band}: {names}"[:240]
-

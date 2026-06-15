@@ -7,13 +7,7 @@ from claw_v2.trivial_patch import TrivialPatchClassifier
 
 def _diff(path: str, *changed_lines: str) -> str:
     body = "\n".join(changed_lines)
-    return (
-        f"diff --git a/{path} b/{path}\n"
-        f"--- a/{path}\n"
-        f"+++ b/{path}\n"
-        "@@ -1,1 +1,1 @@\n"
-        f"{body}\n"
-    )
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,1 +1,1 @@\n{body}\n"
 
 
 class TrivialPatchClassifierTests(unittest.TestCase):

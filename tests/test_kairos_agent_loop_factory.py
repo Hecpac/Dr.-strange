@@ -8,6 +8,7 @@ Verifies the integration end-to-end without booting the full runtime:
 - Loop's max_cost_usd / max_iterations are populated
 - KairosService._handle_run_agent_loop drives factory + emits outcome event
 """
+
 from __future__ import annotations
 
 import json
@@ -79,7 +80,11 @@ class KairosAgentLoopFactoryTests(unittest.TestCase):
         # Second call should pass the critique-derived plan, NOT the original goal,
         # because critic is wired and history[-1].critique is non-empty.
         second_args = sub_agents.dispatch_typed.call_args_list[1]
-        plan_arg = second_args.args[1] if len(second_args.args) > 1 else second_args.kwargs.get("instruction")
+        plan_arg = (
+            second_args.args[1]
+            if len(second_args.args) > 1
+            else second_args.kwargs.get("instruction")
+        )
         self.assertIn("Iter 1", plan_arg)
         self.assertIn("Try a different angle", plan_arg)
 
@@ -135,7 +140,8 @@ class KairosAgentLoopFactoryTests(unittest.TestCase):
 
         sub_agents.dispatch_typed.assert_called_once_with("rook", "Ship hero copy", lane="worker")
         emit_calls = [
-            call for call in observe.emit.call_args_list
+            call
+            for call in observe.emit.call_args_list
             if call.args[0] == "kairos_agent_loop_complete"
         ]
         self.assertEqual(len(emit_calls), 1)

@@ -69,7 +69,9 @@ class DaemonTickTests(unittest.TestCase):
                 for c in observe.emit.call_args_list
                 if c.args[0] == "daemon_tick"
             ]
-            self.assertEqual(tick_payloads[0]["pending_verification_reconciliation_job_id"], job.job_id)
+            self.assertEqual(
+                tick_payloads[0]["pending_verification_reconciliation_job_id"], job.job_id
+            )
             self.assertNotIn("pending_verification_unverified", tick_payloads[0])
 
     def _make_daemon_with_ledger(self, ledger: MagicMock, **kwargs) -> tuple[ClawDaemon, MagicMock]:
@@ -100,13 +102,14 @@ class DaemonTickTests(unittest.TestCase):
                 job_service=jobs,
                 pending_verification_interval=900,
             )
-            daemon.tick(now=1_000_000)   # enqueue runs
-            daemon.tick(now=1_000_030)   # within interval -> skipped
+            daemon.tick(now=1_000_000)  # enqueue runs
+            daemon.tick(now=1_000_030)  # within interval -> skipped
 
             queued = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)
             self.assertEqual(len(queued), 1)
             enqueued = [
-                c for c in observe.emit.call_args_list
+                c
+                for c in observe.emit.call_args_list
                 if c.args[0] == "pending_verification_reconciliation_enqueued"
             ]
             self.assertEqual(len(enqueued), 1)
@@ -165,7 +168,8 @@ class DaemonTickTests(unittest.TestCase):
         ledger.list.assert_not_called()
         ledger.mark_terminal.assert_not_called()
         errors = [
-            c for c in observe.emit.call_args_list
+            c
+            for c in observe.emit.call_args_list
             if c.args[0] == "pending_verification_reconciliation_enqueue_error"
         ]
         self.assertEqual(len(errors), 1)
@@ -338,7 +342,9 @@ class DaemonTickTests(unittest.TestCase):
             runner.run_available(limit=10)
 
             self.assertEqual(ledger.drain_reconcilable_unverified.call_count, 1)
-            jobs_for_kind = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)
+            jobs_for_kind = jobs.list(
+                kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10
+            )
             self.assertEqual(len(jobs_for_kind), 1)
 
     def test_reconciliation_job_failure_retries_without_crashing_runner(self) -> None:
@@ -371,7 +377,9 @@ class DaemonTickTests(unittest.TestCase):
             self.assertEqual(failed_events[0]["error_type"], "RuntimeError")
             self.assertEqual(failed_events[0]["error_preview"], "boom")
             probe = MagicMock()
-            daemon.scheduler.register(ScheduledJob(name="probe", interval_seconds=60, handler=probe))
+            daemon.scheduler.register(
+                ScheduledJob(name="probe", interval_seconds=60, handler=probe)
+            )
 
             result = daemon.tick(now=1_001_000)
 
@@ -398,7 +406,9 @@ class DaemonTickTests(unittest.TestCase):
     def test_tick_runs_scheduled_jobs(self) -> None:
         daemon, _, _ = self._make_daemon()
         handler = MagicMock()
-        daemon.scheduler.register(ScheduledJob(name="test_job", interval_seconds=60, handler=handler))
+        daemon.scheduler.register(
+            ScheduledJob(name="test_job", interval_seconds=60, handler=handler)
+        )
         result = daemon.tick(now=1000)
         self.assertIn("test_job", result.executed_jobs)
         handler.assert_called_once()
@@ -542,9 +552,7 @@ class RecoveryJobDrainRunnerTests(unittest.TestCase):
                 failure_reason="x",
                 original_request_sanitized=f"r{i}",
             )
-        self.assertEqual(
-            len(store.list_pending_recovery_jobs(older_than_seconds=0.0, limit=2)), 2
-        )
+        self.assertEqual(len(store.list_pending_recovery_jobs(older_than_seconds=0.0, limit=2)), 2)
 
     def test_clamps_negative_inter_message_delay(self) -> None:
         # PR #90 review round 2 (gemini): a misconfigured negative delay would
@@ -569,9 +577,7 @@ class RecoveryJobDrainRunnerTests(unittest.TestCase):
             original_request_sanitized="pedido reciente",
         )
         sent: list[str] = []
-        drainer = RecoveryJobDrainRunner(
-            memory=store, notifier=sent.append, min_age_seconds=3600.0
-        )
+        drainer = RecoveryJobDrainRunner(memory=store, notifier=sent.append, min_age_seconds=3600.0)
         self.assertEqual(drainer.run_once(), 0)
         self.assertEqual(sent, [])
         self.assertEqual(len(store.list_pending_recovery_jobs()), 1)
@@ -644,7 +650,11 @@ class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):
         scheduler = CronScheduler()
         heartbeat = MagicMock()
         heartbeat.collect.return_value = HeartbeatSnapshot(
-            timestamp="t", pending_approvals=0, pending_approval_ids=[], agents={}, lane_metrics={},
+            timestamp="t",
+            pending_approvals=0,
+            pending_approval_ids=[],
+            agents={},
+            lane_metrics={},
         )
         daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat)
         shutdown = asyncio.Event()
@@ -656,7 +666,11 @@ class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):
         tick_count = 0
         heartbeat = MagicMock()
         heartbeat.collect.return_value = HeartbeatSnapshot(
-            timestamp="t", pending_approvals=0, pending_approval_ids=[], agents={}, lane_metrics={},
+            timestamp="t",
+            pending_approvals=0,
+            pending_approval_ids=[],
+            agents={},
+            lane_metrics={},
         )
         daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat)
         shutdown = asyncio.Event()
@@ -679,7 +693,11 @@ class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):
         scheduler = CronScheduler()
         heartbeat = MagicMock()
         heartbeat.collect.return_value = HeartbeatSnapshot(
-            timestamp="t", pending_approvals=0, pending_approval_ids=[], agents={}, lane_metrics={},
+            timestamp="t",
+            pending_approvals=0,
+            pending_approval_ids=[],
+            agents={},
+            lane_metrics={},
         )
         observe = MagicMock()
         daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
@@ -703,7 +721,11 @@ class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):
         scheduler = CronScheduler()
         heartbeat = MagicMock()
         heartbeat.collect.return_value = HeartbeatSnapshot(
-            timestamp="t", pending_approvals=0, pending_approval_ids=[], agents={}, lane_metrics={},
+            timestamp="t",
+            pending_approvals=0,
+            pending_approval_ids=[],
+            agents={},
+            lane_metrics={},
         )
         observe = MagicMock()
         daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)

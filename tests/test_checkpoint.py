@@ -1,4 +1,5 @@
 """Tests for CheckpointService — DB snapshot primitive."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -17,7 +18,8 @@ class CheckpointCreateTests(unittest.TestCase):
         self.store = MemoryStore(tmp / "test.db")
         self.snapshots_dir = tmp / "snapshots"
         self.service = CheckpointService(
-            memory=self.store, snapshots_dir=self.snapshots_dir,
+            memory=self.store,
+            snapshots_dir=self.snapshots_dir,
         )
 
     def test_create_returns_ckpt_id_with_expected_format(self) -> None:
@@ -43,9 +45,7 @@ class CheckpointCreateTests(unittest.TestCase):
 
             snap_conn = sqlite3.connect(tmp / "snaps" / f"{ckpt_id}.db")
             try:
-                row = snap_conn.execute(
-                    "SELECT value FROM facts WHERE key = 'marker'"
-                ).fetchone()
+                row = snap_conn.execute("SELECT value FROM facts WHERE key = 'marker'").fetchone()
                 self.assertIsNotNone(row, "snapshot copied the wrong/empty database")
                 self.assertEqual(row[0], "live-data")
             finally:
@@ -126,9 +126,7 @@ class CheckpointCreateTests(unittest.TestCase):
         snap_path = self.snapshots_dir / f"{ckpt_id}.db"
         snap_conn = sqlite3.connect(snap_path)
         try:
-            row = snap_conn.execute(
-                "SELECT value FROM facts WHERE key = 'my_key'"
-            ).fetchone()
+            row = snap_conn.execute("SELECT value FROM facts WHERE key = 'my_key'").fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(row[0], "my_value")
         finally:
@@ -172,7 +170,9 @@ class CheckpointCreateTests(unittest.TestCase):
         import threading
 
         service = CheckpointService(
-            memory=self.store, snapshots_dir=self.snapshots_dir, ring_size=1,
+            memory=self.store,
+            snapshots_dir=self.snapshots_dir,
+            ring_size=1,
         )
         errors: list[Exception] = []
 
@@ -206,9 +206,7 @@ class CheckpointCreateTests(unittest.TestCase):
             with self.assertRaises(sqlite3.OperationalError):
                 self.service.create(trigger_reason="test")
         self.assertEqual(list(self.snapshots_dir.glob("ckpt_*.db")), [])
-        count = self.store._conn.execute(
-            "SELECT COUNT(*) AS c FROM checkpoints"
-        ).fetchone()["c"]
+        count = self.store._conn.execute("SELECT COUNT(*) AS c FROM checkpoints").fetchone()["c"]
         self.assertEqual(count, 0)
 
 
@@ -218,7 +216,9 @@ class CheckpointRotationTests(unittest.TestCase):
         self.store = MemoryStore(tmp / "test.db")
         self.snapshots_dir = tmp / "snapshots"
         self.service = CheckpointService(
-            memory=self.store, snapshots_dir=self.snapshots_dir, ring_size=10,
+            memory=self.store,
+            snapshots_dir=self.snapshots_dir,
+            ring_size=10,
         )
 
     def test_ring_keeps_exactly_N_snapshots(self) -> None:
@@ -227,9 +227,7 @@ class CheckpointRotationTests(unittest.TestCase):
             created.append(self.service.create(trigger_reason=f"ckpt-{i}"))
         files = sorted(self.snapshots_dir.glob("ckpt_*.db"))
         self.assertEqual(len(files), 10)
-        count = self.store._conn.execute(
-            "SELECT COUNT(*) AS c FROM checkpoints"
-        ).fetchone()["c"]
+        count = self.store._conn.execute("SELECT COUNT(*) AS c FROM checkpoints").fetchone()["c"]
         self.assertEqual(count, 10)
 
     def test_oldest_snapshot_is_purged_first(self) -> None:
@@ -255,9 +253,7 @@ class CheckpointRotationTests(unittest.TestCase):
         )
         for i in range(5):
             svc.create(trigger_reason=f"t-{i}")
-        count = self.store._conn.execute(
-            "SELECT COUNT(*) AS c FROM checkpoints"
-        ).fetchone()["c"]
+        count = self.store._conn.execute("SELECT COUNT(*) AS c FROM checkpoints").fetchone()["c"]
         self.assertEqual(count, 3)
 
     def test_rotation_failure_does_not_rollback_new_snapshot(self) -> None:
@@ -266,15 +262,18 @@ class CheckpointRotationTests(unittest.TestCase):
             self.service.create(trigger_reason=f"base-{i}")
         # Force Path.unlink to fail on the next rotation attempt (the oldest file).
         original_unlink = Path.unlink
+
         def fail_on_unlink(self, *args, **kwargs):
             if self.name.startswith("ckpt_") and self.suffix == ".db":
                 raise OSError("simulated rotation failure")
             return original_unlink(self, *args, **kwargs)
+
         with patch.object(Path, "unlink", fail_on_unlink):
             new_ckpt = self.service.create(trigger_reason="new")
         # The new ckpt must still exist in the DB (rotation failure is non-fatal).
         row = self.store._conn.execute(
-            "SELECT ckpt_id FROM checkpoints WHERE ckpt_id = ?", (new_ckpt,),
+            "SELECT ckpt_id FROM checkpoints WHERE ckpt_id = ?",
+            (new_ckpt,),
         ).fetchone()
         self.assertIsNotNone(row)
 
@@ -284,7 +283,8 @@ class CheckpointListTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         self.store = MemoryStore(tmp / "test.db")
         self.service = CheckpointService(
-            memory=self.store, snapshots_dir=tmp / "snapshots",
+            memory=self.store,
+            snapshots_dir=tmp / "snapshots",
         )
 
     def test_list_empty(self) -> None:
@@ -304,14 +304,23 @@ class CheckpointListTests(unittest.TestCase):
 
     def test_list_exposes_expected_fields(self) -> None:
         self.service.create(
-            trigger_reason="t", session_id="s1", consecutive_failures=2,
+            trigger_reason="t",
+            session_id="s1",
+            consecutive_failures=2,
         )
         rows = self.service.list()
         self.assertEqual(len(rows), 1)
         keys = set(rows[0].keys())
-        for expected in ("ckpt_id", "created_at", "trigger_reason",
-                         "session_id", "consecutive_failures",
-                         "file_path", "pending_restore", "restored_at"):
+        for expected in (
+            "ckpt_id",
+            "created_at",
+            "trigger_reason",
+            "session_id",
+            "consecutive_failures",
+            "file_path",
+            "pending_restore",
+            "restored_at",
+        ):
             self.assertIn(expected, keys)
 
 
@@ -321,7 +330,8 @@ class CheckpointScheduleRestoreTests(unittest.TestCase):
         self.store = MemoryStore(tmp / "test.db")
         self.snapshots_dir = tmp / "snapshots"
         self.service = CheckpointService(
-            memory=self.store, snapshots_dir=self.snapshots_dir,
+            memory=self.store,
+            snapshots_dir=self.snapshots_dir,
         )
 
     def test_schedule_restore_sets_flag(self) -> None:
@@ -343,7 +353,8 @@ class CheckpointScheduleRestoreTests(unittest.TestCase):
         ).fetchone()["c"]
         self.assertEqual(count, 1)
         row = self.store._conn.execute(
-            "SELECT pending_restore FROM checkpoints WHERE ckpt_id = ?", (a,),
+            "SELECT pending_restore FROM checkpoints WHERE ckpt_id = ?",
+            (a,),
         ).fetchone()
         self.assertEqual(row["pending_restore"], 0)
 
@@ -362,10 +373,12 @@ class CheckpointHandlerTests(unittest.TestCase):
     def setUp(self) -> None:
         from claw_v2.checkpoint_handler import CheckpointHandler
         from claw_v2.bot_commands import CommandContext
+
         tmp = Path(tempfile.mkdtemp())
         self.store = MemoryStore(tmp / "test.db")
         self.service = CheckpointService(
-            memory=self.store, snapshots_dir=tmp / "snapshots",
+            memory=self.store,
+            snapshots_dir=tmp / "snapshots",
         )
         self.handler = CheckpointHandler(checkpoint=self.service)
         self._Context = CommandContext
@@ -469,9 +482,8 @@ class CheckpointHandlerWiredInBotTests(unittest.TestCase):
         # (expensive; pulls in many dependencies). Instead, grep the source to
         # assert the handler is instantiated and its commands are registered.
         import pathlib
-        bot_src = pathlib.Path(
-            "/Users/hector/Projects/Dr.-strange/claw_v2/bot.py"
-        ).read_text()
+
+        bot_src = pathlib.Path("/Users/hector/Projects/Dr.-strange/claw_v2/bot.py").read_text()
         self.assertIn("from claw_v2.checkpoint_handler import CheckpointHandler", bot_src)
         self.assertIn("CheckpointHandler(", bot_src)
         self.assertIn("self._checkpoint_handler.commands()", bot_src)

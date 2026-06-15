@@ -92,8 +92,7 @@ _ADVERSARIAL_INPUTS = [
     pytest.param(
         # All drops + only-drop content → renderer returns its fallback copy.
         # Second pass must leave the fallback untouched (idempotent).
-        "approval_id: `abc123`\nApprove via: `/task_approve abc token`\n"
-        "/task_abort xyz",
+        "approval_id: `abc123`\nApprove via: `/task_approve abc token`\n/task_abort xyz",
         id="all_drops_triggers_fallback",
     ),
     pytest.param(
@@ -165,8 +164,7 @@ def test_final_render_is_idempotent_on_adversarial_inputs(raw: str) -> None:
             once = runtime.bot._final_render(session_id="tg-smoke", content=raw)
             twice = runtime.bot._final_render(session_id="tg-smoke", content=once)
     assert once == twice, (
-        f"_final_render must be idempotent on adversarial inputs; "
-        f"once={once!r} twice={twice!r}"
+        f"_final_render must be idempotent on adversarial inputs; once={once!r} twice={twice!r}"
     )
 
 

@@ -5,6 +5,7 @@ PIDs, the watchdog must kill ONLY those PIDs (never regular user Chrome
 running a different profile), retry the launch once, and never silently
 "proceed anyway" if CDP still does not come up.
 """
+
 from __future__ import annotations
 
 import unittest

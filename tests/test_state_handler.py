@@ -13,7 +13,9 @@ class _TaskHandler:
     def derive_task_dependencies(self, *_args, **_kwargs):
         return []
 
-    def upsert_task_queue_entry(self, queue, *, summary, mode, status, source, priority, depends_on):
+    def upsert_task_queue_entry(
+        self, queue, *, summary, mode, status, source, priority, depends_on
+    ):
         return [
             *queue,
             {

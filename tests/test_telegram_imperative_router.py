@@ -47,7 +47,9 @@ def bot():
             yield runtime.bot
 
 
-def _drive(bot, text: str, *, session_id: str = "tg-test") -> tuple[str | None, list[dict], list[str]]:
+def _drive(
+    bot, text: str, *, session_id: str = "tg-test"
+) -> tuple[str | None, list[dict], list[str]]:
     decisions: list[dict] = []
     events: list[str] = []
     real_emit = bot.observe.emit
@@ -194,8 +196,7 @@ def test_failure_summary_routes_to_operational_evidence_not_brain(bot) -> None:
     assert "[tarea interna omitida]" not in response
     assert "No digo `arrancando` sin haber creado" not in response
     assert any(
-        ev.get("handler") == "operational_failure_summary"
-        and ev.get("route") == "intercepted"
+        ev.get("handler") == "operational_failure_summary" and ev.get("route") == "intercepted"
         for ev in decisions
     ), decisions
     assert "evidence_gate_blocked_start_claim" not in events
@@ -219,8 +220,7 @@ def test_task_completion_complaint_routes_to_operational_evidence_not_brain(bot)
     assert "en curso / desconocida" in response
     assert "`tg-test:active`" not in response
     assert any(
-        ev.get("handler") == "operational_failure_summary"
-        and ev.get("route") == "intercepted"
+        ev.get("handler") == "operational_failure_summary" and ev.get("route") == "intercepted"
         for ev in decisions
     ), decisions
     _assert_not_brain_fallback(response, decisions)
@@ -234,13 +234,11 @@ def test_stop_due_to_role_fit_problem_does_not_match_failure_summary(bot) -> Non
 
     assert response == "BRAIN_FALLBACK_USED"
     assert any(
-        ev.get("handler") == "operational_failure_summary"
-        and ev.get("route") == "fall_through"
+        ev.get("handler") == "operational_failure_summary" and ev.get("route") == "fall_through"
         for ev in decisions
     ), decisions
     assert not any(
-        ev.get("handler") == "operational_failure_summary"
-        and ev.get("route") == "intercepted"
+        ev.get("handler") == "operational_failure_summary" and ev.get("route") == "intercepted"
         for ev in decisions
     ), decisions
 
@@ -283,13 +281,11 @@ Si el grant está expirado:
 
     assert response == "BRAIN_FALLBACK_USED"
     assert any(
-        ev.get("handler") == "operational_failure_summary"
-        and ev.get("route") == "fall_through"
+        ev.get("handler") == "operational_failure_summary" and ev.get("route") == "fall_through"
         for ev in decisions
     ), decisions
     assert not any(
-        ev.get("handler") == "operational_failure_summary"
-        and ev.get("route") == "intercepted"
+        ev.get("handler") == "operational_failure_summary" and ev.get("route") == "intercepted"
         for ev in decisions
     ), decisions
 
@@ -311,15 +307,16 @@ def test_task_status_overview_routes_to_deterministic_summary_not_brain(bot) -> 
         verification_status="failed",
     )
 
-    with patch.object(type(bot.brain), "handle_message", side_effect=AssertionError("brain should not run")):
+    with patch.object(
+        type(bot.brain), "handle_message", side_effect=AssertionError("brain should not run")
+    ):
         response, decisions, _events = _drive(bot, "Estatus de las tareas")
 
     assert response
     assert "Ahora mismo no tengo tareas corriendo ni en cola" in response
     assert "¿Voy ahora" not in response
     assert any(
-        ev.get("handler") == "pending_tasks"
-        and ev.get("route") == "intercepted"
+        ev.get("handler") == "pending_tasks" and ev.get("route") == "intercepted"
         for ev in decisions
     ), decisions
     state = bot.brain.memory.get_session_state("tg-test")
@@ -347,8 +344,7 @@ def test_task_status_summary_hides_stale_assistant_choice_pending_action(bot) ->
     assert response
     assert "Tambien tengo una accion pendiente" not in response
     assert any(
-        ev.get("handler") == "pending_tasks"
-        and ev.get("route") == "intercepted"
+        ev.get("handler") == "pending_tasks" and ev.get("route") == "intercepted"
         for ev in decisions
     ), decisions
     _assert_not_brain_fallback(response, decisions)
@@ -364,7 +360,9 @@ def test_multimodal_task_completion_complaint_routes_to_operational_evidence_not
         status="running",
     )
 
-    with patch.object(type(bot.brain), "handle_message", side_effect=AssertionError("brain should not run")):
+    with patch.object(
+        type(bot.brain), "handle_message", side_effect=AssertionError("brain should not run")
+    ):
         response = bot.handle_multimodal(
             user_id="123",
             session_id="tg-test",
@@ -450,7 +448,9 @@ def test_contextual_cleanup_archives_stale_and_duplicate_approvals_not_brain(bot
         ("Revisa Codex", "ui.inspect_app"),
     ],
 )
-def test_clear_app_imperatives_route_to_result_not_brain(bot, text: str, expected_intent: str) -> None:
+def test_clear_app_imperatives_route_to_result_not_brain(
+    bot, text: str, expected_intent: str
+) -> None:
     _seed_codex_mission(bot)
 
     response, decisions, events = _drive(bot, text)
@@ -475,13 +475,19 @@ def test_give_instructions_resolves_active_mission(bot, text: str) -> None:
 
     assert response
     assert "Codex" in response
-    assert "prompt" in response.lower() or "instructions" in response.lower() or "instrucciones" in response.lower()
+    assert (
+        "prompt" in response.lower()
+        or "instructions" in response.lower()
+        or "instrucciones" in response.lower()
+    )
     assert "active_mission_resolution_success" in events
     _assert_not_brain_fallback(response, decisions)
 
 
 @pytest.mark.parametrize("text", ["Pégale el prompt", "Pega el prompt", "Paste the prompt"])
-def test_paste_prompt_is_paste_only_and_does_not_claim_clipboard_as_full_success(bot, text: str) -> None:
+def test_paste_prompt_is_paste_only_and_does_not_claim_clipboard_as_full_success(
+    bot, text: str
+) -> None:
     _seed_codex_mission(bot)
 
     response, decisions, events = _drive(bot, text)
@@ -631,8 +637,8 @@ def test_continue_uses_recent_contextual_proposal_in_telegram(bot) -> None:
         (
             "**Estado del check-list:**\n"
             "- ✅ #3 dispatch_typed migration → `606d648`\n"
-            "- 🟡 #4 política \"default=brain\" en SOUL/AGENTS → siguiente\n"
-            "- 🟡 #6 \"Procede\" / continuation imperative router bounce → bot.py audit\n\n"
+            '- 🟡 #4 política "default=brain" en SOUL/AGENTS → siguiente\n'
+            '- 🟡 #6 "Procede" / continuation imperative router bounce → bot.py audit\n\n'
             "¿Sigo con #4 (política en SOUL/AGENTS) o querés que en su lugar arregle #6?"
         ),
     )
@@ -687,7 +693,7 @@ def test_continue_uses_reply_context_markdown_pending_line(bot) -> None:
         "**Checkpoint:**\n"
         "- **Hecho:** inspeccion de observe_stream post-restart.\n"
         "- **Pendiente:** validacion de la rama nueva (`brain_shortcut`) "
-        "— requiere un \"Procede\"/\"Continua\" pelado de tu parte. Sigo activo esperando."
+        '— requiere un "Procede"/"Continua" pelado de tu parte. Sigo activo esperando.'
     )
 
     bot.brain.memory.update_session_state(
@@ -746,8 +752,7 @@ def test_unlock_notice_resumes_chatgpt_option_without_new_goal(bot) -> None:
     assert "pending_action_execution_started" in events
     assert "actionable_task_router_skipped_semantic_continuation" in events
     assert not any(
-        ev.get("handler") == "shortcut" and ev.get("route") == "intercepted"
-        for ev in decisions
+        ev.get("handler") == "shortcut" and ev.get("route") == "intercepted" for ev in decisions
     ), decisions
 
 
@@ -777,8 +782,7 @@ def test_nano_banana_textual_option_is_not_hijacked_by_pending_chatgpt(bot) -> N
     assert state["pending_action"] == '"Dale con nano banana" → arranco ahora mismo.'
     assert "last_options_textual_selected" in events
     assert not any(
-        ev.get("handler") == "shortcut" and ev.get("route") == "intercepted"
-        for ev in decisions
+        ev.get("handler") == "shortcut" and ev.get("route") == "intercepted" for ev in decisions
     ), decisions
 
 
@@ -870,7 +874,9 @@ def test_replay_pegalo_y_enviamelo_uses_active_prompt_or_blocks_explicitly(bot) 
     _assert_valid_continuation_output(response)
     assert "Texto pegado en `Claude` sin enviar." in response
     assert run.call_args_list[1].args[0] == ["pbcopy"]
-    assert run.call_args_list[1].kwargs["input"] == "Construye el prototipo y devuelve el resultado."
+    assert (
+        run.call_args_list[1].kwargs["input"] == "Construye el prototipo y devuelve el resultado."
+    )
     assert "telegram_imperative_executed" in events
     _assert_not_brain_fallback(response, decisions)
 
@@ -978,7 +984,9 @@ def test_open_app_imperative_uses_local_open_without_approval(bot) -> None:
     _assert_no_imperative_receipt(response)
     assert "Necesito tu autorización" not in response
     assert "`Claude` abierto/enfocado." in response
-    run.assert_called_once_with(["open", "-a", "Claude"], capture_output=True, text=True, timeout=10)
+    run.assert_called_once_with(
+        ["open", "-a", "Claude"], capture_output=True, text=True, timeout=10
+    )
     bot.computer.run_agent_loop.assert_not_called()
     assert bot.approvals.list_pending() == []
     assert "telegram_imperative_executed" in events
@@ -1077,7 +1085,9 @@ def test_pegalo_uses_reply_context_prompt_not_brain(bot) -> None:
         ) as run,
         patch("claw_v2.bot.time.sleep"),
     ):
-        response, decisions, events = _drive(bot, "Pégalo y veamos Que nos da y me lo envias Aqui en telegram")
+        response, decisions, events = _drive(
+            bot, "Pégalo y veamos Que nos da y me lo envias Aqui en telegram"
+        )
 
     assert response
     _assert_no_imperative_receipt(response)

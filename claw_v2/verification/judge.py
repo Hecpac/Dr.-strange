@@ -26,6 +26,7 @@ scratchpad. Spec section 4.4 makes that a hard requirement. The injected
 ``judge_fn`` is responsible for honoring it (e.g., spawning a fresh API
 session).
 """
+
 from __future__ import annotations
 
 import re

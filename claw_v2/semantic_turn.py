@@ -219,7 +219,9 @@ def classify_semantic_turn(text: str) -> SemanticTurn:
 
     if (
         explicit_continuation
-        or (telegram_intent is not None and telegram_intent.intent == "task.continue_active_mission")
+        or (
+            telegram_intent is not None and telegram_intent.intent == "task.continue_active_mission"
+        )
         or (owner_delegation is not None and owner_delegation.requires_resolution)
         or _looks_like_contextual_continuation(normalized)
     ):
@@ -258,7 +260,9 @@ def classify_semantic_turn(text: str) -> SemanticTurn:
             reasons=("behavior_instruction",),
         )
 
-    if _looks_like_question(stripped, normalized) or (meta_intent is not None and meta_intent.kind == "meta"):
+    if _looks_like_question(stripped, normalized) or (
+        meta_intent is not None and meta_intent.kind == "meta"
+    ):
         return SemanticTurn(
             intent="question",
             objective=stripped,
@@ -286,7 +290,11 @@ def _looks_like_new_task(normalized: str, original: str) -> bool:
     if not normalized or original.startswith("/"):
         return False
     normalized = re.sub(r"\s+", " ", normalized).strip()
-    if "mision durable" in normalized or "mission durable" in normalized or "durable mission" in normalized:
+    if (
+        "mision durable" in normalized
+        or "mission durable" in normalized
+        or "durable mission" in normalized
+    ):
         return True
     if has_explicit_implementation_request(original):
         return True

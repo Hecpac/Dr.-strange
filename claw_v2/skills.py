@@ -6,6 +6,7 @@ Pattern: agent identifies a gap → LLM generates a Python function → sandbox 
 
 Skills are stored as individual .py files under ~/.claw/skills/ with metadata.
 """
+
 from __future__ import annotations
 
 import ast
@@ -203,7 +204,9 @@ class CodeSkillGovernancePolicy:
         task_description: str,
         tags: list[str],
     ) -> CodeSkillGovernanceDecision:
-        if _contains_sensitive_target(task_description) or _contains_sensitive_target(" ".join(tags)):
+        if _contains_sensitive_target(task_description) or _contains_sensitive_target(
+            " ".join(tags)
+        ):
             return CodeSkillGovernanceDecision(
                 allowed=False,
                 reason="sensitive_generation_target_requires_approval",
@@ -318,8 +321,13 @@ class SkillRegistry:
         with self._lock:
             skills = list(self._registry.values())
         return [
-            {"name": s.name, "description": s.description, "use_count": s.use_count,
-             "status": s.status, "tags": s.tags}
+            {
+                "name": s.name,
+                "description": s.description,
+                "use_count": s.use_count,
+                "status": s.status,
+                "tags": s.tags,
+            }
             for s in skills
         ]
 
@@ -367,11 +375,17 @@ class SkillRegistry:
         """)
 
         try:
-            resp = self.router.ask(prompt, lane="worker", max_budget=0.15, timeout=60.0,
-                                   evidence_pack={"operation": "generate_skill"})
+            resp = self.router.ask(
+                prompt,
+                lane="worker",
+                max_budget=0.15,
+                timeout=60.0,
+                evidence_pack={"operation": "generate_skill"},
+            )
             content = resp.content.strip()
             if content.startswith("```"):
                 import re
+
                 content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
                 content = re.sub(r"\n?```$", "", content)
             start = content.find("{")
@@ -432,7 +446,10 @@ class SkillRegistry:
             test_result = self._test_skill(temp_skill_file, func_name)
             if not test_result["passed"]:
                 temp_skill_file.unlink(missing_ok=True)
-                return {"success": False, "error": f"Skill test failed: {test_result.get('error', 'unknown')}"}
+                return {
+                    "success": False,
+                    "error": f"Skill test failed: {test_result.get('error', 'unknown')}",
+                }
 
             size_bytes = temp_skill_file.stat().st_size
             sha256_hash = _sha256_file(temp_skill_file)
@@ -446,7 +463,10 @@ class SkillRegistry:
                     return {"success": False, "error": f"Skill '{name}' already exists"}
                 if skill_file.exists():
                     temp_skill_file.unlink(missing_ok=True)
-                    return {"success": False, "error": f"Skill source already exists: {skill_file.name}"}
+                    return {
+                        "success": False,
+                        "error": f"Skill source already exists: {skill_file.name}",
+                    }
                 temp_skill_file.rename(skill_file)
                 skill = Skill(
                     name=name,
@@ -491,7 +511,9 @@ class SkillRegistry:
         try:
             proc = subprocess.run(
                 [sys.executable, "-I", "-c", _SKILL_HARNESS, str(skill_file), func_name, "{}"],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
             if proc.returncode != 0:
                 return {"passed": False, "error": proc.stderr[:500]}
@@ -525,7 +547,9 @@ class SkillRegistry:
         skill_path = Path(skill.source_file)
         if not skill_path.exists():
             return {"success": False, "error": f"Skill source missing: {skill.source_file}"}
-        validation_error = self._validate_skill_code(skill_path.read_text(encoding="utf-8"), skill.function_name)
+        validation_error = self._validate_skill_code(
+            skill_path.read_text(encoding="utf-8"), skill.function_name
+        )
         if validation_error is not None:
             return {"success": False, "error": f"Skill validation failed: {validation_error}"}
 
@@ -547,12 +571,22 @@ class SkillRegistry:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def _run_skill_subprocess(self, skill_file: Path, func_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    def _run_skill_subprocess(
+        self, skill_file: Path, func_name: str, kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
         import subprocess
         import sys
 
         proc = subprocess.run(
-            [sys.executable, "-I", "-c", _SKILL_HARNESS, str(skill_file), func_name, json.dumps(kwargs)],
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                _SKILL_HARNESS,
+                str(skill_file),
+                func_name,
+                json.dumps(kwargs),
+            ],
             capture_output=True,
             text=True,
             timeout=15,
@@ -575,8 +609,13 @@ class SkillRegistry:
             return f"syntax error: {exc.msg}"
 
         top_level = [
-            node for node in tree.body
-            if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str))
+            node
+            for node in tree.body
+            if not (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            )
         ]
         function_defs = [node for node in top_level if isinstance(node, ast.FunctionDef)]
         if len(function_defs) != 1 or function_defs[0].name != func_name:
@@ -585,7 +624,17 @@ class SkillRegistry:
             return "top-level executable statements are not allowed"
 
         for node in ast.walk(tree):
-            if isinstance(node, (ast.AsyncFunctionDef, ast.Await, ast.ClassDef, ast.Global, ast.Nonlocal, ast.Lambda)):
+            if isinstance(
+                node,
+                (
+                    ast.AsyncFunctionDef,
+                    ast.Await,
+                    ast.ClassDef,
+                    ast.Global,
+                    ast.Nonlocal,
+                    ast.Lambda,
+                ),
+            ):
                 return f"unsupported syntax: {type(node).__name__}"
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -603,9 +652,21 @@ class SkillRegistry:
                     return f"call to '{node.func.id}' is not allowed"
                 if isinstance(node.func, ast.Attribute) and node.func.attr in _FORBIDDEN_ATTRS:
                     return f"attribute call '{node.func.attr}' is not allowed"
-            if isinstance(node, ast.Attribute) and node.attr.startswith("__") and node.attr.endswith("__"):
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr.startswith("__")
+                and node.attr.endswith("__")
+            ):
                 return f"dunder attribute access '{node.attr}' is not allowed"
-            if isinstance(node, ast.Name) and node.id in {"os", "subprocess", "socket", "sys", "httpx", "requests", "pathlib"}:
+            if isinstance(node, ast.Name) and node.id in {
+                "os",
+                "subprocess",
+                "socket",
+                "sys",
+                "httpx",
+                "requests",
+                "pathlib",
+            }:
                 return f"name '{node.id}' is not allowed in generated skills"
         return None
 
@@ -614,10 +675,14 @@ class SkillRegistry:
         if self.router is None:
             return {"gaps": [], "error": "No LLM router"}
 
-        existing = "\n".join(
-            f"- {s.name}: {s.description}" for s in self._registry.values()
-            if s.status == "active"
-        ) or "(no skills registered yet)"
+        existing = (
+            "\n".join(
+                f"- {s.name}: {s.description}"
+                for s in self._registry.values()
+                if s.status == "active"
+            )
+            or "(no skills registered yet)"
+        )
 
         prompt = textwrap.dedent(f"""\
             You are analyzing an autonomous AI agent called Claw that runs 24/7.
@@ -639,7 +704,9 @@ class SkillRegistry:
                 lane="judge",
                 evidence_pack={
                     "operation": "skill_gap_discovery",
-                    "active_skill_count": sum(1 for skill in self._registry.values() if skill.status == "active"),
+                    "active_skill_count": sum(
+                        1 for skill in self._registry.values() if skill.status == "active"
+                    ),
                     "active_skills": [
                         {"name": skill.name, "description": skill.description}
                         for skill in self._registry.values()
@@ -675,12 +742,18 @@ class SkillRegistry:
                 if result.get("status") == _GENERATED_SKILL_STATUS:
                     pending_review += 1
         logger.info("Skill auto_expand: gaps=%d generated=%d", len(gaps), generated)
-        return {"gaps_found": len(gaps), "skills_generated": generated, "skills_pending_review": pending_review}
+        return {
+            "gaps_found": len(gaps),
+            "skills_generated": generated,
+            "skills_pending_review": pending_review,
+        }
 
     def stats(self) -> dict:
         with self._lock:
             active = sum(1 for s in self._registry.values() if s.status == "active")
-            pending_review = sum(1 for s in self._registry.values() if s.status == _GENERATED_SKILL_STATUS)
+            pending_review = sum(
+                1 for s in self._registry.values() if s.status == _GENERATED_SKILL_STATUS
+            )
             total_uses = sum(s.use_count for s in self._registry.values())
             total_skills = len(self._registry)
         return {
@@ -717,8 +790,7 @@ class SkillRegistry:
             tag_values = [str(tag) for tag in tags[:20]]
             payload["tag_count"] = len(tags)
             payload["tag_sha256"] = [
-                hashlib.sha256(tag.encode("utf-8")).hexdigest()
-                for tag in tag_values
+                hashlib.sha256(tag.encode("utf-8")).hexdigest() for tag in tag_values
             ]
         if task_description is not None:
             payload["task_length"] = len(task_description)

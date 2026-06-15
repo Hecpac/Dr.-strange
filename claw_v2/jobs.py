@@ -184,6 +184,7 @@ class JobService:
         now: float | None = None,
     ) -> JobRecord | None:
         now = time.time() if now is None else now
+
         def claim_once() -> bool:
             with self._lock:
                 try:
@@ -242,6 +243,7 @@ class JobService:
             placeholders = ", ".join("?" for _ in kind_list)
             where += f" AND kind IN ({placeholders})"
             params.extend(kind_list)
+
         def claim_next_once() -> str | None:
             with self._lock:
                 try:
@@ -306,7 +308,9 @@ class JobService:
             self._emit("job_checkpointed", record)
         return record
 
-    def wait_for_approval(self, job_id: str, *, checkpoint: dict[str, Any] | None = None) -> JobRecord | None:
+    def wait_for_approval(
+        self, job_id: str, *, checkpoint: dict[str, Any] | None = None
+    ) -> JobRecord | None:
         return self._update(
             job_id,
             status="waiting_approval",
@@ -333,11 +337,14 @@ class JobService:
         checkpoint: dict[str, Any] | None = None,
     ) -> JobRecord | None:
         now = time.time()
+
         def fail_once() -> JobRecord | None:
             with self._lock:
                 try:
                     self._conn.execute("BEGIN IMMEDIATE")
-                    row = self._conn.execute("SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)).fetchone()
+                    row = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)
+                    ).fetchone()
                     if row is None:
                         self._conn.commit()
                         return None
@@ -347,10 +354,14 @@ class JobService:
                         # which would re-acquire the non-reentrant lock).
                         self._conn.commit()
                         return self._row_to_record(row)
-                    should_retry = retry and int(row["attempts"] or 0) < int(row["max_attempts"] or 1)
+                    should_retry = retry and int(row["attempts"] or 0) < int(
+                        row["max_attempts"] or 1
+                    )
                     status = "retrying" if should_retry else "failed"
                     completed_at = None if should_retry else now
-                    next_run_at = now + max(0.0, retry_delay_seconds) if should_retry else row["next_run_at"]
+                    next_run_at = (
+                        now + max(0.0, retry_delay_seconds) if should_retry else row["next_run_at"]
+                    )
                     checkpoint_json = (
                         json.dumps(dict(checkpoint), sort_keys=True)
                         if checkpoint is not None
@@ -421,7 +432,9 @@ class JobService:
 
     def get(self, job_id: str) -> JobRecord | None:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)).fetchone()
+            row = self._conn.execute(
+                "SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
         return self._row_to_record(row) if row is not None else None
 
     def get_by_resume_key(self, resume_key: str) -> JobRecord | None:
@@ -467,6 +480,7 @@ class JobService:
                 params.extend(kind_list)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(max(1, min(int(limit), 100)))
+
         def list_once() -> list[sqlite3.Row]:
             with self._lock:
                 return self._conn.execute(
@@ -488,7 +502,9 @@ class JobService:
         return {str(row["status"]): int(row["count"]) for row in rows}
 
     def resume_candidates(self, *, limit: int = 20) -> list[JobRecord]:
-        return self.list(statuses=("queued", "running", "waiting_approval", "retrying"), limit=limit)
+        return self.list(
+            statuses=("queued", "running", "waiting_approval", "retrying"), limit=limit
+        )
 
     def _update(
         self,
@@ -522,6 +538,7 @@ class JobService:
             assignments.append("completed_at = ?")
             params.append(completed_at)
         params.append(job_id)
+
         def update_once() -> JobRecord | sqlite3.Row | None:
             with self._lock:
                 try:
@@ -622,7 +639,9 @@ class JobService:
                 f"INSERT OR IGNORE INTO agent_jobs ({columns}) SELECT {columns} FROM {legacy_table}"
             )
             new_count = int(self._conn.execute("SELECT COUNT(*) FROM agent_jobs").fetchone()[0])
-            old_count = int(self._conn.execute(f"SELECT COUNT(*) FROM {legacy_table}").fetchone()[0])
+            old_count = int(
+                self._conn.execute(f"SELECT COUNT(*) FROM {legacy_table}").fetchone()[0]
+            )
             if new_count < old_count:
                 raise sqlite3.IntegrityError(
                     f"agent_jobs migration copied {new_count} of {old_count} rows"

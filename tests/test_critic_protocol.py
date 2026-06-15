@@ -41,7 +41,9 @@ class CriticProtocolTests(unittest.TestCase):
     def test_approves_aligned_action_with_verified_evidence(self) -> None:
         decision = evaluate_critic_decision(
             self.goal,
-            proposed_next_action=ProposedAction(tool="write_file", tier="tier_2", rationale_brief="edit telemetry"),
+            proposed_next_action=ProposedAction(
+                tool="write_file", tier="tier_2", rationale_brief="edit telemetry"
+            ),
             evidence_ledger_subset=[
                 Claim(
                     claim_id="c_1",
@@ -61,7 +63,9 @@ class CriticProtocolTests(unittest.TestCase):
     def test_blocks_disallowed_action(self) -> None:
         decision = evaluate_critic_decision(
             self.goal,
-            proposed_next_action=ProposedAction(tool="force_push", tier="tier_3", rationale_brief="force push"),
+            proposed_next_action=ProposedAction(
+                tool="force_push", tier="tier_3", rationale_brief="force push"
+            ),
             risk_level="critical",
         )
 
@@ -70,7 +74,9 @@ class CriticProtocolTests(unittest.TestCase):
     def test_revises_tier_two_with_evidence_gap(self) -> None:
         decision = evaluate_critic_decision(
             self.goal,
-            proposed_next_action=ProposedAction(tool="write_file", tier="tier_2", rationale_brief="edit"),
+            proposed_next_action=ProposedAction(
+                tool="write_file", tier="tier_2", rationale_brief="edit"
+            ),
             evidence_ledger_subset=[
                 Claim(
                     claim_id="c_gap",
@@ -89,7 +95,9 @@ class CriticProtocolTests(unittest.TestCase):
     def test_asks_human_for_tier_three_evidence_gap(self) -> None:
         decision = evaluate_critic_decision(
             self.goal,
-            proposed_next_action=ProposedAction(tool="git_push", tier="tier_3", rationale_brief="publish"),
+            proposed_next_action=ProposedAction(
+                tool="git_push", tier="tier_3", rationale_brief="publish"
+            ),
             evidence_ledger_subset=[
                 Claim(
                     claim_id="c_gap",
@@ -122,7 +130,9 @@ class CriticProtocolTests(unittest.TestCase):
     def test_gdi_stop_blocks(self) -> None:
         decision = evaluate_critic_decision(
             self.goal,
-            proposed_next_action=ProposedAction(tool="write_file", tier="tier_2", rationale_brief="edit"),
+            proposed_next_action=ProposedAction(
+                tool="write_file", tier="tier_2", rationale_brief="edit"
+            ),
             gdi_snapshot=GDISnapshot(
                 snapshot_id="gdi_1",
                 goal_id="g_1",
@@ -139,7 +149,9 @@ class CriticProtocolTests(unittest.TestCase):
         observe = FakeObserve()
         decision = evaluate_critic_decision(
             self.goal,
-            proposed_next_action=ProposedAction(tool="write_file", tier="tier_2", rationale_brief="edit"),
+            proposed_next_action=ProposedAction(
+                tool="write_file", tier="tier_2", rationale_brief="edit"
+            ),
         )
         record_critic_decision(self.root, decision, observe=observe)
 
@@ -150,4 +162,3 @@ class CriticProtocolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

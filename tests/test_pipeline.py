@@ -30,21 +30,19 @@ from claw_v2.types import LLMResponse
 
 def _make_issue(issue_id: str = "HEC-1", title: str = "Fix bug") -> LinearIssue:
     return LinearIssue(
-        id=issue_id, title=title, description="Fix the login bug",
-        state="Todo", labels=["claw-auto"], branch_name=f"feat/{issue_id.lower()}-fix-bug",
+        id=issue_id,
+        title=title,
+        description="Fix the login bug",
+        state="Todo",
+        labels=["claw-auto"],
+        branch_name=f"feat/{issue_id.lower()}-fix-bug",
         url=f"https://linear.app/issue/{issue_id}",
     )
 
 
 def _patch_diff(path: str, *changed_lines: str) -> str:
     body = "\n".join(changed_lines)
-    return (
-        f"diff --git a/{path} b/{path}\n"
-        f"--- a/{path}\n"
-        f"+++ b/{path}\n"
-        "@@ -1,1 +1,1 @@\n"
-        f"{body}\n"
-    )
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,1 +1,1 @@\n{body}\n"
 
 
 class ProcessIssueTests(unittest.TestCase):
@@ -59,9 +57,13 @@ class ProcessIssueTests(unittest.TestCase):
             approvals = ApprovalManager(root / "approvals", "secret")
             pr_svc = MagicMock()
             svc = PipelineService(
-                linear=linear, router=router, approvals=approvals,
-                pull_requests=pr_svc, observe=None,
-                default_repo_root=root, max_retries=3,
+                linear=linear,
+                router=router,
+                approvals=approvals,
+                pull_requests=pr_svc,
+                observe=None,
+                default_repo_root=root,
+                max_retries=3,
                 state_root=root / "pipeline",
             )
             with patch("claw_v2.pipeline._run_tests", return_value=(True, "5 passed")):
@@ -85,9 +87,13 @@ class ProcessIssueTests(unittest.TestCase):
             router.ask.return_value = MagicMock(content="fix attempt", cost_estimate=0.01)
             approvals = ApprovalManager(root / "approvals", "secret")
             svc = PipelineService(
-                linear=linear, router=router, approvals=approvals,
-                pull_requests=MagicMock(), observe=None,
-                default_repo_root=root, max_retries=3,
+                linear=linear,
+                router=router,
+                approvals=approvals,
+                pull_requests=MagicMock(),
+                observe=None,
+                default_repo_root=root,
+                max_retries=3,
                 state_root=root / "pipeline",
             )
             test_results = [(False, "FAILED"), (False, "FAILED"), (True, "5 passed")]
@@ -118,9 +124,13 @@ class ProcessIssueTests(unittest.TestCase):
             router.ask.return_value = MagicMock(content="fix", cost_estimate=0.01)
             approvals = ApprovalManager(root / "approvals", "secret")
             svc = PipelineService(
-                linear=linear, router=router, approvals=approvals,
-                pull_requests=MagicMock(), observe=None,
-                default_repo_root=root, max_retries=2,
+                linear=linear,
+                router=router,
+                approvals=approvals,
+                pull_requests=MagicMock(),
+                observe=None,
+                default_repo_root=root,
+                max_retries=2,
                 state_root=root / "pipeline",
             )
             with patch("claw_v2.pipeline._run_tests", return_value=(False, "FAILED")):
@@ -157,7 +167,10 @@ class ProcessIssueTests(unittest.TestCase):
         # #15: the configured isolation mode must reach ContainerPolicy instead
         # of silently defaulting to the weakest host_sanitized.
         mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="5 passed", stderr="",
+            args=[],
+            returncode=0,
+            stdout="5 passed",
+            stderr="",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             _run_tests(Path(tmpdir), timeout=17, isolation_mode="docker_ephemeral")
@@ -174,9 +187,13 @@ class ProcessIssueTests(unittest.TestCase):
             router.ask.return_value = MagicMock(content="implemented the fix", cost_estimate=0.01)
             approvals = ApprovalManager(root / "approvals", "secret")
             svc = PipelineService(
-                linear=linear, router=router, approvals=approvals,
-                pull_requests=MagicMock(), observe=None,
-                default_repo_root=root, state_root=root / "pipeline",
+                linear=linear,
+                router=router,
+                approvals=approvals,
+                pull_requests=MagicMock(),
+                observe=None,
+                default_repo_root=root,
+                state_root=root / "pipeline",
                 isolation_mode="docker_ephemeral",
             )
             with patch("claw_v2.pipeline._run_tests", return_value=(True, "5 passed")) as mock_rt:
@@ -211,7 +228,14 @@ class ProcessIssueTests(unittest.TestCase):
 
 class BranchValidationTests(unittest.TestCase):
     def test_validate_branch_name_rejects_git_unsafe_forms(self) -> None:
-        for branch in ("-bad", "feat//oops", "feat/oops.lock", "feat/@{bad}", "feat\\oops", "feat/end/"):
+        for branch in (
+            "-bad",
+            "feat//oops",
+            "feat/oops.lock",
+            "feat/@{bad}",
+            "feat\\oops",
+            "feat/end/",
+        ):
             with self.subTest(branch=branch):
                 with self.assertRaises(ValueError):
                     _validate_branch_name(branch)
@@ -264,19 +288,30 @@ class CompletePipelineTests(unittest.TestCase):
             approvals.approve(pending.approval_id, pending.token)
 
             run_data = {
-                "issue_id": "HEC-1", "branch_name": "feat/hec-1", "repo_root": str(root),
-                "status": "awaiting_approval", "approval_id": pending.approval_id,
-                "approval_token": pending.token, "diff": "some diff", "test_output": "5 passed",
+                "issue_id": "HEC-1",
+                "branch_name": "feat/hec-1",
+                "repo_root": str(root),
+                "status": "awaiting_approval",
+                "approval_id": pending.approval_id,
+                "approval_token": pending.token,
+                "diff": "some diff",
+                "test_output": "5 passed",
             }
             (state_root / "HEC-1.json").write_text(json.dumps(run_data))
 
             linear = MagicMock(spec=LinearService)
             pr_svc = MagicMock()
-            pr_svc.create_pull_request.return_value = MagicMock(url="https://github.com/pr/1", number=1)
+            pr_svc.create_pull_request.return_value = MagicMock(
+                url="https://github.com/pr/1", number=1
+            )
             svc = PipelineService(
-                linear=linear, router=MagicMock(), approvals=approvals,
-                pull_requests=pr_svc, observe=None,
-                default_repo_root=root, state_root=state_root,
+                linear=linear,
+                router=MagicMock(),
+                approvals=approvals,
+                pull_requests=pr_svc,
+                observe=None,
+                default_repo_root=root,
+                state_root=state_root,
             )
             result = svc.complete_pipeline("HEC-1")
             self.assertEqual(result.status, "pr_created")
@@ -651,13 +686,19 @@ class StatePersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state_root = Path(tmpdir)
             svc = PipelineService(
-                linear=MagicMock(), router=MagicMock(), approvals=MagicMock(),
-                pull_requests=MagicMock(), observe=None,
-                default_repo_root=Path("/tmp"), state_root=state_root,
+                linear=MagicMock(),
+                router=MagicMock(),
+                approvals=MagicMock(),
+                pull_requests=MagicMock(),
+                observe=None,
+                default_repo_root=Path("/tmp"),
+                state_root=state_root,
             )
             run = PipelineRun(
-                issue_id="HEC-1", branch_name="feat/hec-1",
-                repo_root="/tmp", status="awaiting_approval",
+                issue_id="HEC-1",
+                branch_name="feat/hec-1",
+                repo_root="/tmp",
+                status="awaiting_approval",
             )
             svc._save_run(run)
             loaded = svc._load_run("HEC-1")
@@ -668,12 +709,18 @@ class StatePersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state_root = Path(tmpdir)
             svc = PipelineService(
-                linear=MagicMock(), router=MagicMock(), approvals=MagicMock(),
-                pull_requests=MagicMock(), observe=None,
-                default_repo_root=Path("/tmp"), state_root=state_root,
+                linear=MagicMock(),
+                router=MagicMock(),
+                approvals=MagicMock(),
+                pull_requests=MagicMock(),
+                observe=None,
+                default_repo_root=Path("/tmp"),
+                state_root=state_root,
             )
             for status in ["awaiting_approval", "pr_created", "done", "failed"]:
-                run = PipelineRun(issue_id=f"HEC-{status}", branch_name="b", repo_root="/tmp", status=status)
+                run = PipelineRun(
+                    issue_id=f"HEC-{status}", branch_name="b", repo_root="/tmp", status=status
+                )
                 svc._save_run(run)
             active = svc.list_active()
             ids = [r.issue_id for r in active]
@@ -691,9 +738,13 @@ class MergeAndCloseTests(unittest.TestCase):
             root = Path(tmpdir)
 
             run_data = {
-                "issue_id": "HEC-1", "branch_name": "feat/hec-1", "repo_root": str(root),
-                "status": "pr_created", "pr_url": "https://github.com/owner/repo/pull/42",
-                "diff": "some diff", "test_output": "5 passed",
+                "issue_id": "HEC-1",
+                "branch_name": "feat/hec-1",
+                "repo_root": str(root),
+                "status": "pr_created",
+                "pr_url": "https://github.com/owner/repo/pull/42",
+                "diff": "some diff",
+                "test_output": "5 passed",
             }
             (state_root / "HEC-1.json").write_text(json.dumps(run_data))
 
@@ -701,9 +752,13 @@ class MergeAndCloseTests(unittest.TestCase):
             pr_svc = MagicMock()
             pr_svc.merge_pull_request.return_value = "merged"
             svc = PipelineService(
-                linear=linear, router=MagicMock(), approvals=MagicMock(),
-                pull_requests=pr_svc, observe=None,
-                default_repo_root=root, state_root=state_root,
+                linear=linear,
+                router=MagicMock(),
+                approvals=MagicMock(),
+                pull_requests=pr_svc,
+                observe=None,
+                default_repo_root=root,
+                state_root=state_root,
             )
             result = svc.merge_and_close("HEC-1")
             self.assertEqual(result.status, "done")
@@ -716,14 +771,20 @@ class MergeAndCloseTests(unittest.TestCase):
             state_root = Path(tmpdir) / "pipeline"
             state_root.mkdir(parents=True)
             run_data = {
-                "issue_id": "HEC-2", "branch_name": "feat/hec-2",
-                "repo_root": str(tmpdir), "status": "awaiting_approval",
+                "issue_id": "HEC-2",
+                "branch_name": "feat/hec-2",
+                "repo_root": str(tmpdir),
+                "status": "awaiting_approval",
             }
             (state_root / "HEC-2.json").write_text(json.dumps(run_data))
             svc = PipelineService(
-                linear=MagicMock(), router=MagicMock(), approvals=MagicMock(),
-                pull_requests=MagicMock(), observe=None,
-                default_repo_root=Path(tmpdir), state_root=state_root,
+                linear=MagicMock(),
+                router=MagicMock(),
+                approvals=MagicMock(),
+                pull_requests=MagicMock(),
+                observe=None,
+                default_repo_root=Path(tmpdir),
+                state_root=state_root,
             )
             result = svc.merge_and_close("HEC-2")
             self.assertEqual(result.status, "awaiting_approval")
@@ -764,7 +825,8 @@ class PollMergesTests(unittest.TestCase):
                 },
             )
             skipped_events = [
-                call for call in observe.emit.call_args_list
+                call
+                for call in observe.emit.call_args_list
                 if call.args and call.args[0] == "pipeline_poll_skipped"
             ]
             self.assertEqual(len(skipped_events), 1)
@@ -775,8 +837,10 @@ class PollMergesTests(unittest.TestCase):
             state_root = Path(tmpdir) / "pipeline"
             state_root.mkdir(parents=True)
             run_data = {
-                "issue_id": "HEC-3", "branch_name": "feat/hec-3",
-                "repo_root": str(tmpdir), "status": "pr_created",
+                "issue_id": "HEC-3",
+                "branch_name": "feat/hec-3",
+                "repo_root": str(tmpdir),
+                "status": "pr_created",
                 "pr_url": "https://github.com/owner/repo/pull/99",
             }
             (state_root / "HEC-3.json").write_text(json.dumps(run_data))
@@ -784,9 +848,13 @@ class PollMergesTests(unittest.TestCase):
             pr_svc = MagicMock()
             pr_svc.get_pr_state.return_value = "MERGED"
             svc = PipelineService(
-                linear=linear, router=MagicMock(), approvals=MagicMock(),
-                pull_requests=pr_svc, observe=None,
-                default_repo_root=Path(tmpdir), state_root=state_root,
+                linear=linear,
+                router=MagicMock(),
+                approvals=MagicMock(),
+                pull_requests=pr_svc,
+                observe=None,
+                default_repo_root=Path(tmpdir),
+                state_root=state_root,
             )
             closed = svc.poll_merges()
             self.assertEqual(len(closed), 1)
@@ -798,17 +866,23 @@ class PollMergesTests(unittest.TestCase):
             state_root = Path(tmpdir) / "pipeline"
             state_root.mkdir(parents=True)
             run_data = {
-                "issue_id": "HEC-4", "branch_name": "feat/hec-4",
-                "repo_root": str(tmpdir), "status": "pr_created",
+                "issue_id": "HEC-4",
+                "branch_name": "feat/hec-4",
+                "repo_root": str(tmpdir),
+                "status": "pr_created",
                 "pr_url": "https://github.com/owner/repo/pull/100",
             }
             (state_root / "HEC-4.json").write_text(json.dumps(run_data))
             pr_svc = MagicMock()
             pr_svc.get_pr_state.return_value = "OPEN"
             svc = PipelineService(
-                linear=MagicMock(), router=MagicMock(), approvals=MagicMock(),
-                pull_requests=pr_svc, observe=None,
-                default_repo_root=Path(tmpdir), state_root=state_root,
+                linear=MagicMock(),
+                router=MagicMock(),
+                approvals=MagicMock(),
+                pull_requests=pr_svc,
+                observe=None,
+                default_repo_root=Path(tmpdir),
+                state_root=state_root,
             )
             closed = svc.poll_merges()
             self.assertEqual(len(closed), 0)
@@ -820,9 +894,12 @@ class LearningLoopTests(unittest.TestCase):
             mem = MemoryStore(Path(tmpdir) / "test.db")
             issue = _make_issue()
             run = PipelineRun(
-                issue_id="HEC-1", branch_name="feat/hec-1",
-                repo_root="/tmp", status="failed",
-                test_output="AssertionError: expected 5 got 3", retries=3,
+                issue_id="HEC-1",
+                branch_name="feat/hec-1",
+                repo_root="/tmp",
+                status="failed",
+                test_output="AssertionError: expected 5 got 3",
+                retries=3,
             )
             _record_outcome(mem, issue, run, "failure")
             results = mem.search_past_outcomes("login", task_type="pipeline")
@@ -834,9 +911,11 @@ class LearningLoopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             mem = MemoryStore(Path(tmpdir) / "test.db")
             mem.store_task_outcome(
-                task_type="pipeline", task_id="HEC-0",
+                task_type="pipeline",
+                task_id="HEC-0",
                 description="Fix login bug",
-                approach="branch=feat/hec-0", outcome="failure",
+                approach="branch=feat/hec-0",
+                outcome="failure",
                 lesson="Check auth middleware first.",
                 error_snippet="401 Unauthorized",
             )
@@ -854,8 +933,12 @@ class LearningLoopTests(unittest.TestCase):
 
     def test_derive_lesson_import_error(self) -> None:
         run = PipelineRun(
-            issue_id="X", branch_name="b", repo_root="/tmp", status="failed",
-            test_output="ModuleNotFoundError: No module named 'foo'\nimport error", retries=2,
+            issue_id="X",
+            branch_name="b",
+            repo_root="/tmp",
+            status="failed",
+            test_output="ModuleNotFoundError: No module named 'foo'\nimport error",
+            retries=2,
         )
         self.assertIn("Import", _derive_lesson(run, "failure"))
 
@@ -863,12 +946,21 @@ class LearningLoopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             mem = MemoryStore(Path(tmpdir) / "test.db")
             mem.store_task_outcome(
-                task_type="pipeline", task_id="A", description="d", approach="a",
-                outcome="success", lesson="ok",
+                task_type="pipeline",
+                task_id="A",
+                description="d",
+                approach="a",
+                outcome="success",
+                lesson="ok",
             )
             mem.store_task_outcome(
-                task_type="pipeline", task_id="B", description="d", approach="a",
-                outcome="failure", lesson="bad", error_snippet="err",
+                task_type="pipeline",
+                task_id="B",
+                description="d",
+                approach="a",
+                outcome="failure",
+                lesson="bad",
+                error_snippet="err",
             )
             failures = mem.recent_failures(task_type="pipeline")
             self.assertEqual(len(failures), 1)
@@ -968,7 +1060,9 @@ class LearningLoopTests(unittest.TestCase):
             observe.emit("llm_decision", payload={"api_key": "sk-secret", "status": "failed"})
             observe.emit("kairos_notify_suppressed", payload={"message": "routine"})
 
-            proposal = loop.suggest_soul_updates(observe=observe, soul_text="# Claw\nSecurity Boundaries")
+            proposal = loop.suggest_soul_updates(
+                observe=observe, soul_text="# Claw\nSecurity Boundaries"
+            )
 
             self.assertIsNotNone(proposal)
             assert proposal is not None
@@ -977,7 +1071,9 @@ class LearningLoopTests(unittest.TestCase):
             self.assertEqual(len(facts), 1)
             self.assertIn("Before repeating a failed strategy", facts[0]["value"])
             events = observe.recent_events(limit=5)
-            self.assertTrue(any(event["event_type"] == "soul_update_suggestion" for event in events))
+            self.assertTrue(
+                any(event["event_type"] == "soul_update_suggestion" for event in events)
+            )
             prompt = router.ask.call_args.args[0]
             self.assertIn("<redacted>", prompt)
             self.assertNotIn("sk-secret", prompt)
@@ -992,9 +1088,11 @@ class LearningLoopTests(unittest.TestCase):
             (root / ".git").mkdir()
             mem = MemoryStore(root / "test.db")
             mem.store_task_outcome(
-                task_type="pipeline", task_id="HEC-0",
+                task_type="pipeline",
+                task_id="HEC-0",
                 description="Fix the login bug",
-                approach="branch=feat/hec-0", outcome="failure",
+                approach="branch=feat/hec-0",
+                outcome="failure",
                 lesson="Always validate JWT before checking permissions.",
                 error_snippet="401 Unauthorized",
             )
@@ -1004,10 +1102,15 @@ class LearningLoopTests(unittest.TestCase):
             router.ask.return_value = MagicMock(content="fix", cost_estimate=0.01)
             approvals = ApprovalManager(root / "approvals", "secret")
             svc = PipelineService(
-                linear=linear, router=router, approvals=approvals,
-                pull_requests=MagicMock(), observe=None,
-                default_repo_root=root, max_retries=3,
-                state_root=root / "pipeline", memory=mem,
+                linear=linear,
+                router=router,
+                approvals=approvals,
+                pull_requests=MagicMock(),
+                observe=None,
+                default_repo_root=root,
+                max_retries=3,
+                state_root=root / "pipeline",
+                memory=mem,
             )
             with patch("claw_v2.pipeline._run_tests", return_value=(True, "5 passed")):
                 with patch("claw_v2.pipeline._create_branch"):

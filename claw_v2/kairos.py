@@ -226,7 +226,11 @@ class KairosService:
                 "kairos_action_started",
                 trace_id=trace["trace_id"],
                 root_trace_id=trace["root_trace_id"],
-                payload={"action": decision.action, "action_key": action_key, "tick": self.state.ticks},
+                payload={
+                    "action": decision.action,
+                    "action_key": action_key,
+                    "tick": self.state.ticks,
+                },
             )
 
             decision = self._execute(decision, budget=remaining, trace_context=trace)
@@ -295,7 +299,9 @@ class KairosService:
           suppression — that is the at-least-once ambiguity being guarded.
         """
         try:
-            started_events = self.observe.recent_events(limit=20, event_type="kairos_action_started")
+            started_events = self.observe.recent_events(
+                limit=20, event_type="kairos_action_started"
+            )
             failed_events = self.observe.recent_events(limit=20, event_type="kairos_action_failed")
         except Exception:
             return False
@@ -342,7 +348,12 @@ class KairosService:
             span_id=trace["span_id"],
             parent_span_id=trace["parent_span_id"],
             artifact_id=trace["artifact_id"],
-            payload={"event_type": event_type, "action": decision.action, "reason": decision.reason, "error": decision.error},
+            payload={
+                "event_type": event_type,
+                "action": decision.action,
+                "reason": decision.reason,
+                "error": decision.error,
+            },
         )
         return decision
 
@@ -385,7 +396,9 @@ class KairosService:
                 if urgent:
                     parts.append(f"Urgent bus messages: {len(urgent)}")
                     for msg in urgent[:3]:
-                        parts.append(f"  [{msg.from_agent}->{msg.to_agent}] {msg.topic}: {str(msg.payload)[:100]}")
+                        parts.append(
+                            f"  [{msg.from_agent}->{msg.to_agent}] {msg.topic}: {str(msg.payload)[:100]}"
+                        )
                 expired = self.bus.scan_expired_requests()
                 if expired:
                     parts.append(f"Expired requests: {len(expired)}")
@@ -411,7 +424,10 @@ class KairosService:
                     parts.append(f"Task board: {summary}")
                 pending = self.task_board.pending()
                 if pending:
-                    task_lines = [f"  [{t.id}] {t.title} (lane={t.required_lane}, by={t.created_by})" for t in pending[:5]]
+                    task_lines = [
+                        f"  [{t.id}] {t.title} (lane={t.required_lane}, by={t.created_by})"
+                        for t in pending[:5]
+                    ]
                     parts.append("Pending tasks:\n" + "\n".join(task_lines))
             except Exception:
                 parts.append("Task board: unavailable")
@@ -422,7 +438,10 @@ class KairosService:
     def _decide(self, context: str, trace_context: dict[str, Any] | None = None) -> TickDecision:
         """Ask the LLM whether to act, given current context."""
         brevity = " Be extremely brief." if self.brief else ""
-        site_names = ", ".join(name for name, _ in self._monitored_site_pairs()) or "configured monitored sites"
+        site_names = (
+            ", ".join(name for name, _ in self._monitored_site_pairs())
+            or "configured monitored sites"
+        )
 
         prompt = (
             "You are KAIROS, a proactive always-on agent. You receive periodic ticks "
@@ -436,11 +455,11 @@ class KairosService:
             "run_skill, pause_agent, escalate_to_human, wiki_deep_lint, wiki_research, "
             "wiki_scrape, site_monitor, auto_publish_social, auto_deploy, gmail_digest, publish_task, claim_task, run_agent_loop.\n"
             "- run_agent_loop: drive an AgentLoop on a goal/project/milestone (only when agent_loop_factory is configured). "
-            "detail = JSON {\"goal_id\": \"...\", \"project_id\": \"?\", \"milestone_id\": \"?\", \"goal_text\": \"?\"}\n"
+            'detail = JSON {"goal_id": "...", "project_id": "?", "milestone_id": "?", "goal_text": "?"}\n'
             "- publish_task: add a task to the shared board for any agent to claim. "
-            "detail = JSON {\"title\": \"...\", \"instruction\": \"...\", \"required_lane\": \"worker\", \"tags\": [...]}\n"
+            'detail = JSON {"title": "...", "instruction": "...", "required_lane": "worker", "tags": [...]}\n'
             "- claim_task: claim and execute a pending task from the board. "
-            "detail = JSON {\"agent\": \"...\", \"lane\": \"worker\"}\n"
+            'detail = JSON {"agent": "...", "lane": "worker"}\n'
             "- wiki_deep_lint: run when wiki has accumulated changes since last audit.\n"
             "- wiki_research: proactively identify knowledge gaps and generate new wiki pages.\n"
             "- wiki_scrape: scrape watched sources for new content to ingest into wiki.\n"
@@ -453,7 +472,7 @@ class KairosService:
             "- nlm_wiki_sync: extract knowledge from NotebookLM notebooks and ingest into wiki.\n"
             "- morning_video_brief: generate daily workout/briefing video via HeyGen and notify user.\n"
             "- a2a_send: send a task to a registered A2A peer agent. "
-            "detail = JSON {\"to_agent\": \"...\", \"action\": \"...\", \"payload\": {...}}\n"
+            'detail = JSON {"to_agent": "...", "action": "...", "payload": {...}}\n'
             f"{brevity}\n\n"
             "## Examples\n"
             "Context: Pending approvals: 0; Recent events: [heartbeat] all services healthy; Ticks so far: 3, actions taken: 0\n"
@@ -510,7 +529,9 @@ class KairosService:
         except (json.JSONDecodeError, ValueError):
             return TickDecision(action="none")
 
-    def _execute(self, decision: TickDecision, *, budget: float, trace_context: dict[str, Any] | None = None) -> TickDecision:
+    def _execute(
+        self, decision: TickDecision, *, budget: float, trace_context: dict[str, Any] | None = None
+    ) -> TickDecision:
         """Execute the decided action within the remaining budget."""
         start = time.time()
         handlers = {
@@ -571,7 +592,9 @@ class KairosService:
         except Exception:
             logger.debug("kairos_action_budget_exceeded emit failed", exc_info=True)
 
-    def _handle_notify_user(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_notify_user(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         if not self._notification_is_important(decision):
             logger.info("KAIROS suppressed noisy notification: %s", decision.detail)
             self.observe.emit(
@@ -617,7 +640,7 @@ class KairosService:
             return True
         prompt = (
             "Decide whether this proactive notification should interrupt Hector.\n"
-            "Return JSON only: {\"important\": true|false, \"reason\": \"...\"}.\n"
+            'Return JSON only: {"important": true|false, "reason": "..."}.\n'
             "Important means the information changes a decision, requires action, or prevents risk. "
             "Noise should be logged but not sent.\n\n"
             f"Notification:\n{text[:1000]}"
@@ -642,9 +665,8 @@ class KairosService:
             return True
 
     def _looks_like_approval_backlog(self, lowered_text: str) -> bool:
-        return (
-            any(token in lowered_text for token in _APPROVAL_BACKLOG_TOKENS)
-            and any(token in lowered_text for token in _APPROVAL_BACKLOG_CONTEXT_TOKENS)
+        return any(token in lowered_text for token in _APPROVAL_BACKLOG_TOKENS) and any(
+            token in lowered_text for token in _APPROVAL_BACKLOG_CONTEXT_TOKENS
         )
 
     def _recent_duplicate_approval_notification(self, text: str) -> bool:
@@ -666,7 +688,9 @@ class KairosService:
             if self._approval_notification_fingerprint(prior_message) != fingerprint:
                 continue
             timestamp = str(event.get("timestamp") or "") if isinstance(event, dict) else ""
-            if not self._event_within_seconds(timestamp, now, APPROVAL_BACKLOG_NOTIFY_COOLDOWN_SECONDS):
+            if not self._event_within_seconds(
+                timestamp, now, APPROVAL_BACKLOG_NOTIFY_COOLDOWN_SECONDS
+            ):
                 continue
             return True
         return False
@@ -699,10 +723,13 @@ class KairosService:
         age = (now - parsed.astimezone(datetime.UTC)).total_seconds()
         return 0 <= age <= window_seconds
 
-    def _handle_dispatch_to_agent(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_dispatch_to_agent(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         if self.bus is None:
             raise RuntimeError("Bus not configured")
         from claw_v2.bus import _new_message
+
         data = json.loads(decision.detail)
         msg = _new_message(
             from_agent="kairos",
@@ -714,7 +741,9 @@ class KairosService:
         )
         self.bus.send(msg)
 
-    def _handle_approve_pending(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_approve_pending(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         if self.approvals is None:
             raise RuntimeError("Approvals not configured")
         data = json.loads(decision.detail)
@@ -729,7 +758,9 @@ class KairosService:
             raise RuntimeError(f"approval not pending, refusing auto-approve: {approval_id}")
         meta = payload.get("metadata") or {}
         tool_name = str(meta.get("tool") or "")
-        if meta.get("required_confirmation") or not (tool_name and daemon_can_auto_approve(tool_name)):
+        if meta.get("required_confirmation") or not (
+            tool_name and daemon_can_auto_approve(tool_name)
+        ):
             raise RuntimeError(
                 f"approval requires a human decision, daemon may not auto-approve: {approval_id}"
             )
@@ -747,12 +778,16 @@ class KairosService:
             payload={"approval_id": approval_id},
         )
 
-    def _handle_run_skill(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_run_skill(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         if self.sub_agents is None:
             raise RuntimeError("Sub-agent service not configured")
         data = json.loads(decision.detail)
         lane = data.get("lane", "worker")
-        result = self.sub_agents.run_skill(data["agent"], data["skill"], data.get("context", ""), lane=lane)
+        result = self.sub_agents.run_skill(
+            data["agent"], data["skill"], data.get("context", ""), lane=lane
+        )
         logger.info("KAIROS run_skill: agent=%s skill=%s", data["agent"], data["skill"])
         self.observe.emit(
             "kairos_run_skill",
@@ -765,7 +800,9 @@ class KairosService:
             payload={**data, "lane": lane, "result": result},
         )
 
-    def _handle_pause_agent(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_pause_agent(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         data = json.loads(decision.detail)
         agent_name = data["agent_name"]
         reason = data["reason"]
@@ -787,7 +824,9 @@ class KairosService:
         )
         logger.info("KAIROS paused agent %s: %s", agent_name, reason)
 
-    def _handle_escalate_to_human(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_escalate_to_human(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         logger.info("KAIROS escalate: %s", decision.detail)
         self.observe.emit(
             "kairos_escalate",
@@ -800,7 +839,9 @@ class KairosService:
             payload={"message": decision.detail},
         )
 
-    def _handle_publish_task(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_publish_task(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         if self.task_board is None:
             raise RuntimeError("TaskBoard not configured")
         data = json.loads(decision.detail)
@@ -823,7 +864,9 @@ class KairosService:
             payload={"task_id": task.id, "title": task.title},
         )
 
-    def _handle_claim_task(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_claim_task(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         if self.task_board is None:
             raise RuntimeError("TaskBoard not configured")
         if self.sub_agents is None:
@@ -846,7 +889,9 @@ class KairosService:
         if sub_result.failures:
             logger.warning(
                 "KAIROS claim_task agent=%s task=%s preferred-provider fallback: %s",
-                agent_name, task.id, list(sub_result.failures),
+                agent_name,
+                task.id,
+                list(sub_result.failures),
             )
         self.observe.emit(
             "kairos_claim_task",
@@ -866,7 +911,9 @@ class KairosService:
             },
         )
 
-    def _handle_wiki_deep_lint(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_wiki_deep_lint(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         if self.wiki is None:
             raise RuntimeError("WikiService not configured")
         result = self.wiki.deep_lint()
@@ -888,7 +935,9 @@ class KairosService:
             payload=result,
         )
 
-    def _handle_wiki_research(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_wiki_research(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         if self.wiki is None:
             raise RuntimeError("WikiService not configured")
         result = self.wiki.auto_research()
@@ -908,23 +957,33 @@ class KairosService:
             payload=result,
         )
 
-    def _handle_wiki_scrape(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_wiki_scrape(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         if self.wiki is None:
             raise RuntimeError("WikiService not configured")
         result = self.wiki.auto_scrape_sources()
-        logger.info("KAIROS wiki_scrape: scraped=%d ingested=%d",
-                     result.get("sources_scraped", 0), result.get("pages_ingested", 0))
-        self.observe.emit("kairos_wiki_scrape",
-                          trace_id=trace_context.get("trace_id") if trace_context else None,
-                          root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
-                          span_id=trace_context.get("span_id") if trace_context else None,
-                          parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
-                          job_id=trace_context.get("job_id") if trace_context else None,
-                          artifact_id=trace_context.get("artifact_id") if trace_context else None,
-                          payload=result)
+        logger.info(
+            "KAIROS wiki_scrape: scraped=%d ingested=%d",
+            result.get("sources_scraped", 0),
+            result.get("pages_ingested", 0),
+        )
+        self.observe.emit(
+            "kairos_wiki_scrape",
+            trace_id=trace_context.get("trace_id") if trace_context else None,
+            root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+            span_id=trace_context.get("span_id") if trace_context else None,
+            parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+            job_id=trace_context.get("job_id") if trace_context else None,
+            artifact_id=trace_context.get("artifact_id") if trace_context else None,
+            payload=result,
+        )
 
-    def _handle_site_monitor(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_site_monitor(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         import httpx
+
         sites = dict(self._monitored_site_pairs())
         results = {}
         for name, url in sites.items():
@@ -952,13 +1011,17 @@ class KairosService:
             ("pachanodesign.com", "https://www.pachanodesign.com"),
         ]
 
-    def _handle_auto_publish_social(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_auto_publish_social(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         """Draft a tweet from wiki insights. Default: pending human approval.
         Opt-in autonomous publish via env KAIROS_AUTO_PUBLISH_SOCIAL=1.
         """
         if self.wiki is None:
             raise RuntimeError("WikiService not configured")
-        pages = sorted(self.wiki.wiki_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+        pages = sorted(
+            self.wiki.wiki_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
         if not pages:
             decision.error = "No wiki pages to generate social content from"
             return
@@ -1016,19 +1079,27 @@ class KairosService:
             logger.info("KAIROS auto_publish_social: skipping duplicate tweet (already posted)")
             return
         from claw_v2.social import x_adapter_from_keychain
+
         adapter = x_adapter_from_keychain(handle="PachanoDesign")
         result = adapter.publish(tweet_text)
         # PublishResult has no `success` field; a returned post_id means the tweet shipped.
         success = bool(result.post_id)
         logger.info("KAIROS auto_publish_social: published=%s id=%s", success, result.post_id)
-        self.observe.emit("kairos_auto_publish_social",
-                          trace_id=trace_context.get("trace_id") if trace_context else None,
-                          root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
-                          span_id=trace_context.get("span_id") if trace_context else None,
-                          parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
-                          job_id=trace_context.get("job_id") if trace_context else None,
-                          artifact_id=trace_context.get("artifact_id") if trace_context else None,
-                          payload={"tweet": tweet_text, "success": success, "post_id": result.post_id, "source": page_source})
+        self.observe.emit(
+            "kairos_auto_publish_social",
+            trace_id=trace_context.get("trace_id") if trace_context else None,
+            root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+            span_id=trace_context.get("span_id") if trace_context else None,
+            parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+            job_id=trace_context.get("job_id") if trace_context else None,
+            artifact_id=trace_context.get("artifact_id") if trace_context else None,
+            payload={
+                "tweet": tweet_text,
+                "success": success,
+                "post_id": result.post_id,
+                "source": page_source,
+            },
+        )
 
     def _already_published_social(self, source: str) -> bool:
         """Idempotency guard: True if this wiki source article was already posted by a prior tick.
@@ -1052,18 +1123,24 @@ class KairosService:
                 return True
         return False
 
-    def _handle_auto_deploy(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_auto_deploy(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         """Trigger Vercel deploy via git push. Default: pending human approval.
         Opt-in autonomous push via env KAIROS_AUTO_DEPLOY=1.
         """
         result = subprocess.run(
             ["gh", "api", "repos/Hecpac/PHD-Web/deployments", "--jq", ".[0].sha"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         latest_deploy_sha = result.stdout.strip() if result.returncode == 0 else ""
         result2 = subprocess.run(
             ["git", "-C", str(Path.home() / "Projects" / "phd"), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         local_head = result2.stdout.strip() if result2.returncode == 0 else ""
         if not latest_deploy_sha or not local_head:
@@ -1108,67 +1185,91 @@ class KairosService:
 
         push = subprocess.run(
             ["git", "-C", str(Path.home() / "Projects" / "phd"), "push", "origin", "main"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         success = push.returncode == 0
         logger.info("KAIROS auto_deploy: pushed=%s", success)
-        self.observe.emit("kairos_auto_deploy",
-                          trace_id=trace_context.get("trace_id") if trace_context else None,
-                          root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
-                          span_id=trace_context.get("span_id") if trace_context else None,
-                          parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
-                          job_id=trace_context.get("job_id") if trace_context else None,
-                          artifact_id=trace_context.get("artifact_id") if trace_context else None,
-                          payload={"pushed": success, "local_head": local_head, "deploy_sha": latest_deploy_sha})
+        self.observe.emit(
+            "kairos_auto_deploy",
+            trace_id=trace_context.get("trace_id") if trace_context else None,
+            root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+            span_id=trace_context.get("span_id") if trace_context else None,
+            parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+            job_id=trace_context.get("job_id") if trace_context else None,
+            artifact_id=trace_context.get("artifact_id") if trace_context else None,
+            payload={"pushed": success, "local_head": local_head, "deploy_sha": latest_deploy_sha},
+        )
 
-    def _handle_gmail_digest(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_gmail_digest(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         """Gmail digest — requires active MCP session for full access."""
-        self.observe.emit("kairos_gmail_digest",
-                          trace_id=trace_context.get("trace_id") if trace_context else None,
-                          root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
-                          span_id=trace_context.get("span_id") if trace_context else None,
-                          parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
-                          job_id=trace_context.get("job_id") if trace_context else None,
-                          artifact_id=trace_context.get("artifact_id") if trace_context else None,
-                          payload={"status": "requires_session", "note": "Gmail MCP needs active Claude session"})
+        self.observe.emit(
+            "kairos_gmail_digest",
+            trace_id=trace_context.get("trace_id") if trace_context else None,
+            root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+            span_id=trace_context.get("span_id") if trace_context else None,
+            parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+            job_id=trace_context.get("job_id") if trace_context else None,
+            artifact_id=trace_context.get("artifact_id") if trace_context else None,
+            payload={"status": "requires_session", "note": "Gmail MCP needs active Claude session"},
+        )
         logger.info("KAIROS gmail_digest: emitted — requires active session for full access")
 
-    def _handle_nlm_wiki_sync(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_nlm_wiki_sync(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         """Extract knowledge from NotebookLM and ingest into wiki."""
         if self.wiki is None:
             raise RuntimeError("WikiService not configured")
         if self.nlm_service is None:
             raise RuntimeError("NotebookLM service not configured")
         result = self.wiki.ingest_from_notebooklm(self.nlm_service)
-        logger.info("KAIROS nlm_wiki_sync: notebooks=%d pages=%d",
-                     result.get("notebooks_scanned", 0), result.get("pages_written", 0))
-        self.observe.emit("kairos_nlm_wiki_sync",
-                          trace_id=trace_context.get("trace_id") if trace_context else None,
-                          root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
-                          span_id=trace_context.get("span_id") if trace_context else None,
-                          parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
-                          job_id=trace_context.get("job_id") if trace_context else None,
-                          artifact_id=trace_context.get("artifact_id") if trace_context else None,
-                          payload=result)
+        logger.info(
+            "KAIROS nlm_wiki_sync: notebooks=%d pages=%d",
+            result.get("notebooks_scanned", 0),
+            result.get("pages_written", 0),
+        )
+        self.observe.emit(
+            "kairos_nlm_wiki_sync",
+            trace_id=trace_context.get("trace_id") if trace_context else None,
+            root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+            span_id=trace_context.get("span_id") if trace_context else None,
+            parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+            job_id=trace_context.get("job_id") if trace_context else None,
+            artifact_id=trace_context.get("artifact_id") if trace_context else None,
+            payload=result,
+        )
 
-    def _handle_generate_skill(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_generate_skill(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         """Memento-Skills: generate a new skill from description."""
         if self.skill_registry is None:
             raise RuntimeError("SkillRegistry not configured")
         task_desc = decision.detail or "general utility skill"
         result = self.skill_registry.generate_skill(task_description=task_desc)
-        logger.info("KAIROS generate_skill: success=%s name=%s",
-                     result.get("success"), result.get("name", ""))
-        self.observe.emit("kairos_generate_skill",
-                          trace_id=trace_context.get("trace_id") if trace_context else None,
-                          root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
-                          span_id=trace_context.get("span_id") if trace_context else None,
-                          parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
-                          job_id=trace_context.get("job_id") if trace_context else None,
-                          artifact_id=trace_context.get("artifact_id") if trace_context else None,
-                          payload=result)
+        logger.info(
+            "KAIROS generate_skill: success=%s name=%s",
+            result.get("success"),
+            result.get("name", ""),
+        )
+        self.observe.emit(
+            "kairos_generate_skill",
+            trace_id=trace_context.get("trace_id") if trace_context else None,
+            root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+            span_id=trace_context.get("span_id") if trace_context else None,
+            parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+            job_id=trace_context.get("job_id") if trace_context else None,
+            artifact_id=trace_context.get("artifact_id") if trace_context else None,
+            payload=result,
+        )
 
-    def _handle_a2a_send(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_a2a_send(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         """A2A: send a task to a peer agent."""
         if self.a2a is None:
             raise RuntimeError("A2AService not configured")
@@ -1187,17 +1288,23 @@ class KairosService:
             action=params.get("action", ""),
             payload=params.get("payload", {}),
         )
-        logger.info("KAIROS a2a_send: success=%s to=%s", result.get("success"), params.get("to_agent"))
-        self.observe.emit("kairos_a2a_send",
-                          trace_id=trace_context.get("trace_id") if trace_context else None,
-                          root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
-                          span_id=trace_context.get("span_id") if trace_context else None,
-                          parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
-                          job_id=trace_context.get("job_id") if trace_context else None,
-                          artifact_id=trace_context.get("artifact_id") if trace_context else None,
-                          payload=result)
+        logger.info(
+            "KAIROS a2a_send: success=%s to=%s", result.get("success"), params.get("to_agent")
+        )
+        self.observe.emit(
+            "kairos_a2a_send",
+            trace_id=trace_context.get("trace_id") if trace_context else None,
+            root_trace_id=trace_context.get("root_trace_id") if trace_context else None,
+            span_id=trace_context.get("span_id") if trace_context else None,
+            parent_span_id=trace_context.get("parent_span_id") if trace_context else None,
+            job_id=trace_context.get("job_id") if trace_context else None,
+            artifact_id=trace_context.get("artifact_id") if trace_context else None,
+            payload=result,
+        )
 
-    def _handle_morning_video_brief(self, decision: TickDecision, trace_context: dict[str, Any] | None = None) -> None:
+    def _handle_morning_video_brief(
+        self, decision: TickDecision, trace_context: dict[str, Any] | None = None
+    ) -> None:
         """Generate daily briefing video via HeyGen and notify user."""
         import datetime
 
@@ -1218,21 +1325,35 @@ class KairosService:
         # 2. Get HeyGen API key from Keychain
         key_result = subprocess.run(
             ["security", "find-generic-password", "-a", "heygen", "-s", "HEYGEN_API_KEY", "-w"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         api_key = key_result.stdout.strip()
         if not api_key:
             raise RuntimeError("HEYGEN_API_KEY not found in Keychain")
 
         # 3. Submit video generation
-        payload = json.dumps({
-            "video_inputs": [{
-                "character": {"type": "avatar", "avatar_id": "284630e731f04f49ae7ba9f5d839e6bb", "avatar_style": "normal"},
-                "voice": {"type": "text", "input_text": brief_text, "voice_id": "398936ac428244c6966feefe6d151c6a"},
-            }],
-            "title": f"Morning Brief — {datetime.date.today().isoformat()}",
-            "dimension": {"width": 1280, "height": 720},
-        }).encode()
+        payload = json.dumps(
+            {
+                "video_inputs": [
+                    {
+                        "character": {
+                            "type": "avatar",
+                            "avatar_id": "284630e731f04f49ae7ba9f5d839e6bb",
+                            "avatar_style": "normal",
+                        },
+                        "voice": {
+                            "type": "text",
+                            "input_text": brief_text,
+                            "voice_id": "398936ac428244c6966feefe6d151c6a",
+                        },
+                    }
+                ],
+                "title": f"Morning Brief — {datetime.date.today().isoformat()}",
+                "dimension": {"width": 1280, "height": 720},
+            }
+        ).encode()
         req = Request(
             "https://api.heygen.com/v2/video/generate",
             data=payload,
@@ -1271,7 +1392,11 @@ class KairosService:
             except Exception:
                 logger.exception("HeyGen polling error for video_id=%s", video_id)
                 return
-            message = f"🎬 Morning Brief listo: {video_url}" if video_url else f"Video en proceso (id: {video_id})"
+            message = (
+                f"🎬 Morning Brief listo: {video_url}"
+                if video_url
+                else f"Video en proceso (id: {video_id})"
+            )
             self.observe.emit(
                 "kairos_notify_user",
                 trace_id=trace_context.get("trace_id") if trace_context else None,
@@ -1282,10 +1407,17 @@ class KairosService:
                 artifact_id=trace_context.get("artifact_id") if trace_context else None,
                 payload={"message": message, "video_url": video_url, "video_id": video_id},
             )
-            logger.info("KAIROS morning_video_brief: video_id=%s url=%s", video_id, video_url[:50] if video_url else "pending")
+            logger.info(
+                "KAIROS morning_video_brief: video_id=%s url=%s",
+                video_id,
+                video_url[:50] if video_url else "pending",
+            )
 
         import threading
-        threading.Thread(target=_poll_heygen, daemon=True, name=f"heygen-poll-{video_id[:8]}").start()
+
+        threading.Thread(
+            target=_poll_heygen, daemon=True, name=f"heygen-poll-{video_id[:8]}"
+        ).start()
 
     def _enforce_runtime_policy(
         self,
@@ -1340,9 +1472,7 @@ class KairosService:
                     timeout=5,
                 )
                 pids = [
-                    line.split()[0]
-                    for line in proc.stdout.strip().splitlines()
-                    if line.strip()
+                    line.split()[0] for line in proc.stdout.strip().splitlines() if line.strip()
                 ]
             except Exception as exc:
                 error = f"pgrep_failed: {exc}"
@@ -1392,8 +1522,12 @@ class KairosService:
             )
         except Exception:
             logger.exception("daemon_health_check: failed to emit notification event")
-        logger.info("KAIROS daemon_health_check: status=%s pids=%d tokens=%s",
-                     status, len(pids), anomaly_tokens_found)
+        logger.info(
+            "KAIROS daemon_health_check: status=%s pids=%d tokens=%s",
+            status,
+            len(pids),
+            anomaly_tokens_found,
+        )
 
     def _handle_run_agent_loop(
         self, decision: TickDecision, trace_context: dict[str, Any] | None = None

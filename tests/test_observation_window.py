@@ -107,14 +107,18 @@ class ObservationWindowTests(unittest.TestCase):
             )
 
             self.assertTrue(window.frozen)
-            breaker_events = [payload for name, payload in observe.events if name == "circuit_breaker_tripped"]
+            breaker_events = [
+                payload for name, payload in observe.events if name == "circuit_breaker_tripped"
+            ]
             self.assertEqual(breaker_events[0]["payload"]["breaker"], "cost_per_hour")
             # cost_per_hour is a budget alarm — operator must be notified.
             self.assertTrue(
                 any("circuit_breaker:cost_per_hour" in alert for alert in alerts),
                 f"expected cost_per_hour alert to reach notifier, got: {alerts!r}",
             )
-            self.assertTrue(any("circuit_breaker=cost_per_hour" in line for line in diagnostic_stream))
+            self.assertTrue(
+                any("circuit_breaker=cost_per_hour" in line for line in diagnostic_stream)
+            )
 
     def test_notional_subscription_cost_does_not_freeze(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -183,7 +187,8 @@ class ObservationWindowTests(unittest.TestCase):
             window.before_tool_execution(tool_name="Read", args={}, tier=1, actor="operator")
             self.assertFalse(window.frozen)
             cleared = [
-                payload for name, payload in observe.events
+                payload
+                for name, payload in observe.events
                 if name == "observation_window_freeze_auto_cleared"
                 and payload["payload"]["stale_reason"] == "circuit_breaker:tool_calls_per_minute"
             ]
@@ -336,7 +341,9 @@ class TokenWindowTests(unittest.TestCase):
                 model="claude",
                 estimated_input_tokens=12,
             )
-            self.assertIn("token_window_compaction_recommended", [name for name, _ in observe.events])
+            self.assertIn(
+                "token_window_compaction_recommended", [name for name, _ in observe.events]
+            )
 
     def test_token_window_records_estimated_usage_and_hard_freezes_non_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -376,7 +383,9 @@ class TokenWindowTests(unittest.TestCase):
             self.assertTrue(window.frozen)
             self.assertEqual(window.freeze_reason, "circuit_breaker:token_window")
 
-            window.before_tool_execution(tool_name="Read", args={}, tier=LOCAL_READ_ONLY_TIER, actor="operator")
+            window.before_tool_execution(
+                tool_name="Read", args={}, tier=LOCAL_READ_ONLY_TIER, actor="operator"
+            )
             with self.assertRaises(ObservationWindowBlocked):
                 window.before_tool_execution(tool_name="Write", args={}, tier=2, actor="operator")
             with self.assertRaises(ObservationWindowBlocked):
@@ -427,7 +436,9 @@ class TokenWindowTests(unittest.TestCase):
             self.assertFalse(window.frozen)
             self.assertEqual(token_window["total_tokens"], 0)
             self.assertFalse(token_window["hard_limit_reached"])
-            self.assertIn("observation_window_freeze_auto_cleared", [name for name, _ in observe.events])
+            self.assertIn(
+                "observation_window_freeze_auto_cleared", [name for name, _ in observe.events]
+            )
 
     def test_recent_persisted_token_window_freeze_survives_restart_without_samples(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -565,14 +576,16 @@ class CostBreakerTierSplitTests(unittest.TestCase):
                         actor="operator",
                     )
             allowed_events = [
-                payload for name, payload in observe.events
+                payload
+                for name, payload in observe.events
                 if name == "tool_allowed_during_cost_breaker"
             ]
             self.assertEqual(len(allowed_events), 3)
-            self.assertEqual(allowed_events[0]["payload"]["freeze_reason"], "circuit_breaker:cost_per_hour")
+            self.assertEqual(
+                allowed_events[0]["payload"]["freeze_reason"], "circuit_breaker:cost_per_hour"
+            )
             blocked_events = [
-                payload for name, payload in observe.events
-                if name == "tool_blocked_by_freeze"
+                payload for name, payload in observe.events if name == "tool_blocked_by_freeze"
             ]
             self.assertEqual(blocked_events, [])
 
@@ -583,11 +596,14 @@ class CostBreakerTierSplitTests(unittest.TestCase):
             window, observe = self._make_window(tmpdir)
             self._trip_cost_breaker(window)
             degraded = [
-                payload for name, payload in observe.events
+                payload
+                for name, payload in observe.events
                 if name == "autonomy_degraded_by_cost_breaker"
             ]
             self.assertEqual(len(degraded), 1)
-            self.assertIn("llm_calls_until_window_decays", degraded[0]["payload"]["blocked_capabilities"])
+            self.assertIn(
+                "llm_calls_until_window_decays", degraded[0]["payload"]["blocked_capabilities"]
+            )
             self.assertTrue(window.frozen)
             self.assertEqual(window.freeze_reason, "circuit_breaker:cost_per_hour")
 
@@ -604,8 +620,7 @@ class CostBreakerTierSplitTests(unittest.TestCase):
                     actor="operator",
                 )
             denylist_events = [
-                payload for name, payload in observe.events
-                if name == "tool_hard_denylist_blocked"
+                payload for name, payload in observe.events if name == "tool_hard_denylist_blocked"
             ]
             self.assertEqual(len(denylist_events), 1)
 
@@ -651,7 +666,8 @@ class CostBreakerTierSplitTests(unittest.TestCase):
             window, observe = self._make_window(tmpdir)
             self._trip_cost_breaker(window)
             degraded = [
-                (name, payload) for name, payload in observe.events
+                (name, payload)
+                for name, payload in observe.events
                 if name == "autonomy_degraded_by_cost_breaker"
             ]
             self.assertEqual(len(degraded), 1)

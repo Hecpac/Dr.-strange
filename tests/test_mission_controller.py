@@ -43,9 +43,7 @@ class MissionControllerTests(unittest.TestCase):
         state = self._store.get("s1")
         self.assertIn("active_object", state)
         self.assertIn("_mission", state["active_object"])
-        self.assertEqual(
-            state["active_object"]["_mission"]["mission_id"], m.mission_id
-        )
+        self.assertEqual(state["active_object"]["_mission"]["mission_id"], m.mission_id)
 
     def test_does_not_pollute_notebook_active_object_keys(self) -> None:
         # Pre-existing notebook in active_object
@@ -105,9 +103,7 @@ class MissionControllerTests(unittest.TestCase):
             task_kind="x_trends",
             route="cdp",
         )
-        self.mc.mark_blocked(
-            m.mission_id, session_id="s1", reason="cdp_unavailable"
-        )
+        self.mc.mark_blocked(m.mission_id, session_id="s1", reason="cdp_unavailable")
         latest = self.mc.latest_relevant("s1")
         # blocked is non-terminal, still reachable
         self.assertIsNotNone(latest)
@@ -141,9 +137,7 @@ class MissionControllerTests(unittest.TestCase):
             task_kind="ai_news_brief",
             route="skill",
         )
-        updated = self.mc.record_evidence(
-            m.mission_id, session_id="s1", evidence={"sources": []}
-        )
+        updated = self.mc.record_evidence(m.mission_id, session_id="s1", evidence={"sources": []})
         self.assertEqual(updated.status, "collecting_evidence")
         self.assertEqual(updated.phase, "collecting_evidence")
 

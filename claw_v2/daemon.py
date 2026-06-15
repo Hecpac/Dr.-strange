@@ -69,9 +69,7 @@ class ClawDaemon:
         # Checkpoint D: live drain of the read-only backlog. Default OFF — the
         # env flag (or an explicit arg) must opt in before any row transitions.
         if pending_verification_drain_apply is None:
-            pending_verification_drain_apply = _env_flag(
-                "CLAW_PENDING_VERIFICATION_DRAIN_APPLY"
-            )
+            pending_verification_drain_apply = _env_flag("CLAW_PENDING_VERIFICATION_DRAIN_APPLY")
         self.pending_verification_drain_apply = bool(pending_verification_drain_apply)
         self.pending_verification_drain_max_apply = pending_verification_drain_max_apply
         self.pending_verification_drain_max_scan = pending_verification_drain_max_scan
@@ -117,7 +115,9 @@ class ClawDaemon:
             # pending_verification_reconciliation job result/event, not in the
             # daemon control path.
             if pending_reconciliation_job_id is not None:
-                payload["pending_verification_reconciliation_job_id"] = pending_reconciliation_job_id
+                payload["pending_verification_reconciliation_job_id"] = (
+                    pending_reconciliation_job_id
+                )
             self.observe.emit(
                 "daemon_tick",
                 trace_id=trace["trace_id"],
@@ -149,7 +149,9 @@ class ClawDaemon:
             current = time.time()
         if current - self._last_task_reconciliation_at < self.task_reconciliation_interval:
             return 0
-        changed = self.task_ledger.mark_stale_running_lost(older_than_seconds=self.stale_task_seconds)
+        changed = self.task_ledger.mark_stale_running_lost(
+            older_than_seconds=self.stale_task_seconds
+        )
         self._last_task_reconciliation_at = current
         if changed and self.observe is not None:
             self.observe.emit(
@@ -173,9 +175,18 @@ class ClawDaemon:
             if not task_id:
                 continue
             task = self.task_ledger.get(task_id)
-            if task is None or task.status not in {"succeeded", "completed_unverified", "failed", "timed_out", "cancelled", "lost"}:
+            if task is None or task.status not in {
+                "succeeded",
+                "completed_unverified",
+                "failed",
+                "timed_out",
+                "cancelled",
+                "lost",
+            }:
                 continue
-            cancelled = self.job_service.cancel(job.job_id, reason=f"orphaned_by_task:{task.status}")
+            cancelled = self.job_service.cancel(
+                job.job_id, reason=f"orphaned_by_task:{task.status}"
+            )
             if cancelled is not None and cancelled.status == "cancelled":
                 changed += 1
         if changed and self.observe is not None:
@@ -185,7 +196,9 @@ class ClawDaemon:
             )
         return changed
 
-    def _enqueue_pending_verification_reconciliation(self, *, now: float | None = None) -> str | None:
+    def _enqueue_pending_verification_reconciliation(
+        self, *, now: float | None = None
+    ) -> str | None:
         """Enqueue pending-verification reconciliation work outside daemon tick.
 
         Returns the job id when a queued/running active job exists for this
@@ -252,9 +265,7 @@ class ClawDaemon:
         background_tasks: list[asyncio.Task[None]] = []
         if self.observe is not None:
             background_tasks.append(
-                asyncio.create_task(
-                    self._run_liveness_heartbeat_loop(shutdown, interval=interval)
-                )
+                asyncio.create_task(self._run_liveness_heartbeat_loop(shutdown, interval=interval))
             )
         if self.job_service is not None and self.task_ledger is not None:
             background_tasks.append(
@@ -267,9 +278,7 @@ class ClawDaemon:
             )
         for runner in self._background_job_runners:
             background_tasks.append(
-                asyncio.create_task(
-                    self._run_background_job_runner_loop(shutdown, runner=runner)
-                )
+                asyncio.create_task(self._run_background_job_runner_loop(shutdown, runner=runner))
             )
         try:
             while not shutdown.is_set():

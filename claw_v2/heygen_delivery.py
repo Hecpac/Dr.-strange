@@ -18,6 +18,7 @@ Why this exists: HeyGen returns raw H.264 ~8-9 Mbps. A 60-90s render is
 delivery also fails because CloudFront blocks Telegram's user-agent.
 The deterministic path is download → ffmpeg CRF 28 → multipart upload.
 """
+
 from __future__ import annotations
 
 import json
@@ -83,7 +84,9 @@ def _load_env() -> dict[str, str]:
 def _heygen_api_key() -> str:
     result = subprocess.run(
         ["security", "find-generic-password", "-s", "HEYGEN_API_KEY", "-w"],
-        capture_output=True, text=True, timeout=5,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     key = result.stdout.strip()
     if not key:
@@ -137,10 +140,22 @@ class HeygenDeliveryService:
 
     def compress(self, src: Path, dest: Path, crf: int = 28) -> Path:
         cmd = [
-            self.ffmpeg_path, "-y", "-i", str(src),
-            "-vcodec", "libx264", "-crf", str(crf), "-preset", "fast",
-            "-acodec", "aac", "-b:a", "96k",
-            "-movflags", "+faststart",
+            self.ffmpeg_path,
+            "-y",
+            "-i",
+            str(src),
+            "-vcodec",
+            "libx264",
+            "-crf",
+            str(crf),
+            "-preset",
+            "fast",
+            "-acodec",
+            "aac",
+            "-b:a",
+            "96k",
+            "-movflags",
+            "+faststart",
             str(dest),
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
@@ -183,9 +198,7 @@ class HeygenDeliveryService:
         env = _load_env()
         token = env.get("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
         target_chat = (
-            chat_id
-            or env.get("TELEGRAM_ALLOWED_USER_ID")
-            or os.getenv("TELEGRAM_ALLOWED_USER_ID")
+            chat_id or env.get("TELEGRAM_ALLOWED_USER_ID") or os.getenv("TELEGRAM_ALLOWED_USER_ID")
         )
         if not token or not target_chat:
             return {"ok": False, "error": "missing_token_or_chat_id"}
@@ -203,7 +216,9 @@ class HeygenDeliveryService:
         body, boundary = self._multipart_body(fields, "video", video_path)
         url = f"https://api.telegram.org/bot{token}/sendVideo"
         req = urllib.request.Request(
-            url, data=body, method="POST",
+            url,
+            data=body,
+            method="POST",
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
 
@@ -214,14 +229,23 @@ class HeygenDeliveryService:
             with urllib.request.urlopen(req, timeout=300) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            return {"ok": False, "http_error": e.code,
-                    "body": _redact(e.read().decode("utf-8", errors="replace"))}
+            return {
+                "ok": False,
+                "http_error": e.code,
+                "body": _redact(e.read().decode("utf-8", errors="replace")),
+            }
         except urllib.error.URLError as e:
-            return {"ok": False, "error": "telegram_url_error",
-                    "detail": _redact(str(getattr(e, "reason", e)))}
+            return {
+                "ok": False,
+                "error": "telegram_url_error",
+                "detail": _redact(str(getattr(e, "reason", e))),
+            }
         except Exception as e:
-            return {"ok": False, "error": "telegram_unexpected_error",
-                    "detail": _redact(f"{type(e).__name__}: {e}")}
+            return {
+                "ok": False,
+                "error": "telegram_unexpected_error",
+                "detail": _redact(f"{type(e).__name__}: {e}"),
+            }
 
     def auto_deliver(
         self,
@@ -240,15 +264,18 @@ class HeygenDeliveryService:
         status = data.get("status", "unknown")
         if status != "completed":
             return DeliveryResult(
-                ok=False, video_id=video_id, status=status,
+                ok=False,
+                video_id=video_id,
+                status=status,
                 error=str(data.get("error") or "render_did_not_complete"),
             )
 
         video_url = data.get("video_url")
         duration = data.get("duration")
         if not video_url:
-            return DeliveryResult(ok=False, video_id=video_id, status=status,
-                                  error="no_video_url_in_status")
+            return DeliveryResult(
+                ok=False, video_id=video_id, status=status, error="no_video_url_in_status"
+            )
 
         raw_path = self.artifacts_dir / f"{slug}_{video_id}.mp4"
         self.download(video_url, raw_path)

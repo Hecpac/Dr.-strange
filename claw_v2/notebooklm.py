@@ -17,12 +17,21 @@ logger = logging.getLogger(__name__)
 
 ResearchFallback = Callable[[str], str | dict[str, Any] | None]
 
+
 class NotebookLMSDKUnavailable(RuntimeError):
     """Raised when an operation requires the notebooklm SDK but it is not installed."""
 
 
 _NOTEBOOKLM_TIMEOUT_PATTERNS = ("timeout", "timed out", "did not complete", "deadline")
-_NOTEBOOKLM_AUTH_PATTERNS = ("auth", "unauthorized", "forbidden", "permission", "401", "403", "login")
+_NOTEBOOKLM_AUTH_PATTERNS = (
+    "auth",
+    "unauthorized",
+    "forbidden",
+    "permission",
+    "401",
+    "403",
+    "login",
+)
 _NOTEBOOKLM_RATE_LIMIT_PATTERNS = ("rate limit", "too many requests", "quota", "429")
 _NOTEBOOKLM_UNAVAILABLE_PATTERNS = (
     "api down",
@@ -140,6 +149,7 @@ class NotebookLMService:
         try:
             import notebooklm  # noqa: F401
             import pathlib
+
             state = pathlib.Path.home() / ".notebooklm" / "storage_state.json"
             return state.exists()
         except ImportError:
@@ -277,13 +287,17 @@ class NotebookLMService:
             return {
                 "notebook": {"id": nb.id, "title": nb.title, "sources_count": nb.sources_count},
                 "sources": [
-                    {"id": s.id, "title": s.title, "kind": s.kind, "url": s.url}
-                    for s in sources
+                    {"id": s.id, "title": s.title, "kind": s.kind, "url": s.url} for s in sources
                 ],
             }
 
     def status(self, notebook_id: str) -> dict:
-        self._enforce_policy("notebooklm.status", {"notebook_id": notebook_id}, mutates_state=False, requires_network=True)
+        self._enforce_policy(
+            "notebooklm.status",
+            {"notebook_id": notebook_id},
+            mutates_state=False,
+            requires_network=True,
+        )
         if self._use_external_backend:
             full_id = self._resolve_notebook_id(notebook_id)
             return self._external_backend.status(full_id)
@@ -412,7 +426,9 @@ class NotebookLMService:
                 metadata={"notebook_title": title},
             )
             job_id = job.job_id
-        self._emit("nlm_research_started", notebook_id=full_id, query=query, mode=mode, job_id=job_id)
+        self._emit(
+            "nlm_research_started", notebook_id=full_id, query=query, mode=mode, job_id=job_id
+        )
 
         def _worker():
             try:
@@ -442,7 +458,9 @@ class NotebookLMService:
                     try:
                         result = self._external_backend.deep_research(full_id, query, mode=mode)
                     except Exception as exc:
-                        logger.warning("External NotebookLM research failed; falling back to CDP: %s", exc)
+                        logger.warning(
+                            "External NotebookLM research failed; falling back to CDP: %s", exc
+                        )
                         cdp_fn = self._cdp_research_fn or notebooklm_cdp.deep_research
                         result = cdp_fn(full_id, query)
                 else:
@@ -670,6 +688,7 @@ class NotebookLMService:
                 raise RuntimeError("Research start returned no task")
             task_id = task["task_id"]
             import time as _time
+
             deadline = _time.monotonic() + 1200
             while _time.monotonic() < deadline:
                 poll = await client.research.poll(notebook_id)
@@ -680,11 +699,15 @@ class NotebookLMService:
                         last_exc: Exception | None = None
                         for attempt in range(3):
                             try:
-                                imported = await client.research.import_sources(notebook_id, task_id, sources)
+                                imported = await client.research.import_sources(
+                                    notebook_id, task_id, sources
+                                )
                                 return len(imported)
                             except Exception as exc:
                                 last_exc = exc
-                                logger.warning("import_sources attempt %d failed: %s", attempt + 1, exc)
+                                logger.warning(
+                                    "import_sources attempt %d failed: %s", attempt + 1, exc
+                                )
                                 await asyncio.sleep(5 * (attempt + 1))
                         raise last_exc  # type: ignore[misc]
                     return 0
@@ -788,13 +811,15 @@ class NotebookLMService:
             )
             return
         outputs = tuple(
-            str(item).strip().lower()
-            for item in payload.get("outputs", [])
-            if str(item).strip()
+            str(item).strip().lower() for item in payload.get("outputs", []) if str(item).strip()
         )
-        outputs = tuple(item for item in outputs if item in {"podcast", "blog", "video"}) or ("podcast", "blog")
+        outputs = tuple(item for item in outputs if item in {"podcast", "blog", "video"}) or (
+            "podcast",
+            "blog",
+        )
         step_fn = self._cdp_orchestrate_step_fn
         if step_fn is None:
+
             def step_fn(
                 notebook_id_arg: str,
                 checkpoint_arg: dict[str, object],
@@ -805,6 +830,7 @@ class NotebookLMService:
                     checkpoint_arg,
                     outputs=outputs_arg,
                 )
+
         try:
             result = step_fn(notebook_id, checkpoint, outputs)
         except Exception as exc:
@@ -834,9 +860,7 @@ class NotebookLMService:
         }
         if status == "completed":
             session_id = payload.get("session_id")
-            delivered = self._deliver_outputs(
-                notebook_id, outputs, result, session_id=session_id
-            )
+            delivered = self._deliver_outputs(notebook_id, outputs, result, session_id=session_id)
             completion_result = {**dict(result), "deliveries": delivered}
             self._job_service.checkpoint(job.job_id, merged_checkpoint)
             self._job_service.complete(job.job_id, result=completion_result)
@@ -985,7 +1009,9 @@ class NotebookLMService:
                 from pathlib import Path as _Path
 
                 sent = self._get_delivery().send_to_telegram(
-                    _Path(path), chat_id=chat_id, caption=caption,
+                    _Path(path),
+                    chat_id=chat_id,
+                    caption=caption,
                 )
                 record = sent.to_dict()
                 record["kind"] = kind
@@ -1059,7 +1085,9 @@ class NotebookLMService:
                     try:
                         self._external_backend.generate_artifact(full_id, normalized_kind)
                     except Exception as exc:
-                        logger.warning("External NotebookLM artifact failed; falling back to CDP: %s", exc)
+                        logger.warning(
+                            "External NotebookLM artifact failed; falling back to CDP: %s", exc
+                        )
                         cdp_fn = self._cdp_artifact_fn or notebooklm_cdp.generate_artifact
                         cdp_fn(full_id, normalized_kind)
                 else:
@@ -1089,7 +1117,9 @@ class NotebookLMService:
                         )
                     except Exception:
                         logger.exception("Job failure persistence failed for %s", job_id)
-                self._emit("nlm_error", notebook_id=full_id, operation=normalized_kind, error=str(exc))
+                self._emit(
+                    "nlm_error", notebook_id=full_id, operation=normalized_kind, error=str(exc)
+                )
                 self._notify(f"Error en {self._artifact_name(normalized_kind)}: {exc}")
             finally:
                 self._running.pop(full_id, None)

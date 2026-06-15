@@ -154,10 +154,14 @@ def _hide_terminal_windows() -> list[str]:
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"osascript failed (exit {result.returncode}): {result.stderr.strip()}")
+            raise RuntimeError(
+                f"osascript failed (exit {result.returncode}): {result.stderr.strip()}"
+            )
         return [a.strip() for a in result.stdout.strip().split(",") if a.strip()]
     except RuntimeError:
         raise
@@ -170,9 +174,13 @@ def _restore_terminal_windows(app_names: list[str]) -> None:
     for name in app_names:
         try:
             subprocess.run(
-                ["osascript", "-e",
-                 f'tell application "System Events" to set visible of process "{name}" to true'],
-                capture_output=True, timeout=5,
+                [
+                    "osascript",
+                    "-e",
+                    f'tell application "System Events" to set visible of process "{name}" to true',
+                ],
+                capture_output=True,
+                timeout=5,
             )
         except Exception:
             logger.warning("Failed to restore %s", name)
@@ -254,11 +262,15 @@ class CodexComputerBackend:
 
         prompt = f"{self._SYSTEM_PROMPT}\n\nTask: {task}"
         cmd = [
-            resolved, "exec",
-            "--model", self.model,
+            resolved,
+            "exec",
+            "--model",
+            self.model,
             "--skip-git-repo-check",
-            "--color", "never",
-            "--", prompt,
+            "--color",
+            "never",
+            "--",
+            prompt,
         ]
 
         try:
@@ -269,13 +281,9 @@ class CodexComputerBackend:
                 timeout=300,
             )
         except FileNotFoundError as exc:
-            raise RuntimeError(
-                f"Codex CLI not found at '{self.cli_path}'."
-            ) from exc
+            raise RuntimeError(f"Codex CLI not found at '{self.cli_path}'.") from exc
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                "Codex CLI timed out after 300s for computer use task"
-            ) from exc
+            raise RuntimeError("Codex CLI timed out after 300s for computer use task") from exc
 
         if result.returncode != 0:
             raise RuntimeError(
@@ -376,7 +384,10 @@ class ComputerUseService:
             scroll_val = -amount if direction == "down" else amount
             pag.scroll(scroll_val)
         elif action_type in ("left_click_drag", "drag"):
-            start = action.get("start_coordinate") or [action.get("start_x", 0), action.get("start_y", 0)]
+            start = action.get("start_coordinate") or [
+                action.get("start_x", 0),
+                action.get("start_y", 0),
+            ]
             end = action.get("coordinate") or [action.get("x", 0), action.get("y", 0)]
             sx, sy = self._scale_coords(start)
             ex, ey = self._scale_coords(end)
@@ -408,8 +419,11 @@ class ComputerUseService:
         try:
             with _computer_use_lock():
                 return self._run_loop(
-                    session=session, client=client, gate=gate,
-                    model=model, system_prompt=system_prompt,
+                    session=session,
+                    client=client,
+                    gate=gate,
+                    model=model,
+                    system_prompt=system_prompt,
                     current_url_resolver=current_url_resolver,
                 )
         finally:
@@ -425,12 +439,14 @@ class ComputerUseService:
         system_prompt: str | None,
         current_url_resolver: Callable[[], str | None] | None,
     ) -> str:
-        tools = [{
-            "type": "computer_use_preview",
-            "display_width": self.display_width,
-            "display_height": self.display_height,
-            "environment": "mac",
-        }]
+        tools = [
+            {
+                "type": "computer_use_preview",
+                "display_width": self.display_width,
+                "display_height": self.display_height,
+                "environment": "mac",
+            }
+        ]
 
         # Build initial input with screenshot
         if not session.messages:
@@ -438,10 +454,13 @@ class ComputerUseService:
             session.last_screenshot_hash = _screenshot_hash(screenshot)
             screenshot_url = f"data:{screenshot['media_type']};base64,{screenshot['data']}"
             session.messages = [
-                {"role": "user", "content": [
-                    {"type": "input_text", "text": session.task},
-                    {"type": "input_image", "image_url": screenshot_url},
-                ]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": session.task},
+                        {"type": "input_image", "image_url": screenshot_url},
+                    ],
+                },
             ]
         elif session.pending_action is not None:
             # Resume after approval — send the tool output
@@ -544,7 +563,9 @@ class ComputerUseService:
                 "backend": "codex",
                 "task": session.task,
             }
-            return "Codex computer backend needs approval before executing local desktop automation."
+            return (
+                "Codex computer backend needs approval before executing local desktop automation."
+            )
 
         esc_listener = _EscListener(session)
         esc_listener.start()
@@ -736,7 +757,9 @@ class BrowserUseService:
                     result = await asyncio.wait_for(agent.run(), timeout=timeout)
                 else:
                     result = await agent.run()
-            policy_interrupt = policy_state.get("interrupt") if isinstance(policy_state, dict) else None
+            policy_interrupt = (
+                policy_state.get("interrupt") if isinstance(policy_state, dict) else None
+            )
             if policy_interrupt is not None:
                 raise policy_interrupt
             artifact_path = await self._capture_page_artifact(browser, artifact_dir)
@@ -998,6 +1021,7 @@ def _resolve_api_key() -> str | None:
     """Resolve Anthropic API key from env or shell profiles."""
     import os
     import re
+
     if value := os.getenv("ANTHROPIC_API_KEY"):
         return value.strip() or None
     pattern = re.compile(r"^\s*(?:export\s+)?ANTHROPIC_API_KEY=(?P<value>.+?)\s*$")

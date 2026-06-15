@@ -81,6 +81,7 @@ def _set_limits(policy: ContainerPolicy):
             resource.setrlimit(resource.RLIMIT_NPROC, (policy.max_processes, policy.max_processes))
         except (ValueError, OSError):
             pass
+
     return _apply
 
 
@@ -115,17 +116,23 @@ def _docker_run(
     env_result: SanitizedChildEnv | None = None,
 ) -> subprocess.CompletedProcess:
     cwd_str = str(Path(cwd).resolve())
-    cmd_str = command if isinstance(command, str) else " ".join(shlex.quote(item) for item in command)
+    cmd_str = (
+        command if isinstance(command, str) else " ".join(shlex.quote(item) for item in command)
+    )
     docker_image = policy.docker_image or "python:3.12-slim"
     env_result = env_result or sanitize_child_env()
     docker_args = [
-        "docker", "run", "--rm",
+        "docker",
+        "run",
+        "--rm",
         f"--cpus={policy.cpu_count}",
         f"--memory={policy.memory_mb}m",
         f"--pids-limit={policy.max_processes}",
         "--read-only",
-        "-v", f"{cwd_str}:{cwd_str}",
-        "-w", cwd_str,
+        "-v",
+        f"{cwd_str}:{cwd_str}",
+        "-w",
+        cwd_str,
     ]
     if not policy.network_enabled:
         docker_args.append("--network=none")

@@ -94,9 +94,7 @@ def _read_bounded_script(path: str) -> str:
         return ""
 
 
-def _inline_browser_drive_reason(
-    tool_name: str, tool_input: dict[str, Any] | None
-) -> str | None:
+def _inline_browser_drive_reason(tool_name: str, tool_input: dict[str, Any] | None) -> str | None:
     """Return a deny reason if a Bash call would drive a browser/CDP/desktop.
 
     Scans the command and, when it runs a local ``.py`` script, that script's
@@ -120,9 +118,7 @@ def _inline_browser_drive_reason(
     return None
 
 
-def _detached_process_reason(
-    tool_name: str, tool_input: dict[str, Any] | None
-) -> str | None:
+def _detached_process_reason(tool_name: str, tool_input: dict[str, Any] | None) -> str | None:
     """Return a deny reason if a Bash call would launch a detached or
     backgrounded process from a chat turn.
 
@@ -152,14 +148,10 @@ def _safe_runtime_policy_reason(reason: str) -> str:
         text,
         flags=re.IGNORECASE,
     )
-    text = re.sub(
-        r"\ballowed whitelist\b", "local execution policy", text, flags=re.IGNORECASE
-    )
+    text = re.sub(r"\ballowed whitelist\b", "local execution policy", text, flags=re.IGNORECASE)
     text = re.sub(r"\bwhitelist\b", "policy", text, flags=re.IGNORECASE)
     text = re.sub(r"\bruntime host\b", "local runtime", text, flags=re.IGNORECASE)
-    text = re.sub(
-        r"\bBash tool\b|\btool Bash\b", "local tool", text, flags=re.IGNORECASE
-    )
+    text = re.sub(r"\bBash tool\b|\btool Bash\b", "local tool", text, flags=re.IGNORECASE)
     return text
 
 
@@ -447,11 +439,7 @@ def build_hooks(
     mutation_tracker: list[str] | None = None,
 ) -> dict[str, list[Any]] | None:
     def _track_mutation(tool_name: str) -> None:
-        if (
-            mutation_tracker is not None
-            and tool_name
-            and tool_name not in _READ_ONLY_SDK_TOOLS
-        ):
+        if mutation_tracker is not None and tool_name and tool_name not in _READ_ONLY_SDK_TOOLS:
             mutation_tracker.append(tool_name)
 
     hooks: dict[str, list[Any]] = {}
@@ -467,9 +455,7 @@ def build_hooks(
         hooks["PreToolUse"] = [
             sdk.HookMatcher(
                 hooks=[
-                    make_pre_tool_use_hook(
-                        request, runtime_policy=runtime_policy, observe=observe
-                    )
+                    make_pre_tool_use_hook(request, runtime_policy=runtime_policy, observe=observe)
                 ]
             )
         ]
@@ -506,9 +492,7 @@ def build_can_use_tool(
 ) -> Callable[..., Any]:
     allowed = set(request.allowed_tools or [])
 
-    async def can_use_tool(
-        tool_name: str, input_data: dict[str, Any], context: Any
-    ) -> Any:
+    async def can_use_tool(tool_name: str, input_data: dict[str, Any], context: Any) -> Any:
         if allowed and tool_name not in allowed:
             return sdk_types.PermissionResultDeny(
                 message=f"Tool '{tool_name}' is not allowed in this execution.",
@@ -564,9 +548,7 @@ def _tool_response_evidence(tool_name: str, tool_response: Any) -> dict[str, Any
         break
     if tool_name != "Bash":
         return evidence
-    stdout = _coerce_tool_response_text(
-        tool_response.get("stdout") or tool_response.get("output")
-    )
+    stdout = _coerce_tool_response_text(tool_response.get("stdout") or tool_response.get("output"))
     stderr = _coerce_tool_response_text(tool_response.get("stderr"))
     if stdout:
         evidence["stdout_chars"] = len(stdout)

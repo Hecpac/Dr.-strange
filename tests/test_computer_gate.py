@@ -14,31 +14,46 @@ class ActionGateTests(unittest.TestCase):
     # --- Tier 1: Browser CDP ---
 
     def test_cdp_screenshot_is_safe(self) -> None:
-        verdict = self.gate.classify_cdp_action({"type": "screenshot"}, url="https://ads.google.com/campaigns")
+        verdict = self.gate.classify_cdp_action(
+            {"type": "screenshot"}, url="https://ads.google.com/campaigns"
+        )
         self.assertEqual(verdict, ActionVerdict.SAFE)
 
     def test_cdp_goto_is_safe(self) -> None:
-        verdict = self.gate.classify_cdp_action({"type": "goto", "url": "https://ads.google.com"}, url="https://example.com")
+        verdict = self.gate.classify_cdp_action(
+            {"type": "goto", "url": "https://ads.google.com"}, url="https://example.com"
+        )
         self.assertEqual(verdict, ActionVerdict.SAFE)
 
     def test_cdp_click_on_sensitive_url_needs_approval(self) -> None:
-        verdict = self.gate.classify_cdp_action({"type": "click", "selector": "button"}, url="https://ads.google.com/campaigns")
+        verdict = self.gate.classify_cdp_action(
+            {"type": "click", "selector": "button"}, url="https://ads.google.com/campaigns"
+        )
         self.assertEqual(verdict, ActionVerdict.NEEDS_APPROVAL)
 
     def test_cdp_fill_on_sensitive_url_needs_approval(self) -> None:
-        verdict = self.gate.classify_cdp_action({"type": "fill", "selector": "input", "value": "100"}, url="https://ads.google.com/campaigns")
+        verdict = self.gate.classify_cdp_action(
+            {"type": "fill", "selector": "input", "value": "100"},
+            url="https://ads.google.com/campaigns",
+        )
         self.assertEqual(verdict, ActionVerdict.NEEDS_APPROVAL)
 
     def test_cdp_submit_always_needs_approval(self) -> None:
-        verdict = self.gate.classify_cdp_action({"type": "submit", "selector": "form"}, url="https://example.com")
+        verdict = self.gate.classify_cdp_action(
+            {"type": "submit", "selector": "form"}, url="https://example.com"
+        )
         self.assertEqual(verdict, ActionVerdict.NEEDS_APPROVAL)
 
     def test_cdp_click_on_non_sensitive_url_needs_approval(self) -> None:
-        verdict = self.gate.classify_cdp_action({"type": "click", "selector": "button"}, url="https://example.com")
+        verdict = self.gate.classify_cdp_action(
+            {"type": "click", "selector": "button"}, url="https://example.com"
+        )
         self.assertEqual(verdict, ActionVerdict.NEEDS_APPROVAL)
 
     def test_cdp_wait_for_is_safe(self) -> None:
-        verdict = self.gate.classify_cdp_action({"type": "wait_for", "ms": 1000}, url="https://ads.google.com")
+        verdict = self.gate.classify_cdp_action(
+            {"type": "wait_for", "ms": 1000}, url="https://ads.google.com"
+        )
         self.assertEqual(verdict, ActionVerdict.SAFE)
 
     # --- Tier 2: Computer Use ---
@@ -48,15 +63,27 @@ class ActionGateTests(unittest.TestCase):
         self.assertEqual(verdict, ActionVerdict.SAFE)
 
     def test_desktop_mouse_move_is_safe(self) -> None:
-        verdict = self.gate.classify_desktop_action({"action": "mouse_move", "coordinate": [100, 200]}, url=None)
+        verdict = self.gate.classify_desktop_action(
+            {"action": "mouse_move", "coordinate": [100, 200]}, url=None
+        )
         self.assertEqual(verdict, ActionVerdict.SAFE)
 
     def test_desktop_scroll_is_safe(self) -> None:
-        verdict = self.gate.classify_desktop_action({"action": "scroll", "coordinate": [500, 400], "scroll_direction": "down", "scroll_amount": 3}, url=None)
+        verdict = self.gate.classify_desktop_action(
+            {
+                "action": "scroll",
+                "coordinate": [500, 400],
+                "scroll_direction": "down",
+                "scroll_amount": 3,
+            },
+            url=None,
+        )
         self.assertEqual(verdict, ActionVerdict.SAFE)
 
     def test_desktop_click_without_url_needs_approval(self) -> None:
-        verdict = self.gate.classify_desktop_action({"action": "left_click", "coordinate": [500, 300]}, url=None)
+        verdict = self.gate.classify_desktop_action(
+            {"action": "left_click", "coordinate": [500, 300]}, url=None
+        )
         self.assertEqual(verdict, ActionVerdict.NEEDS_APPROVAL)
 
     def test_desktop_type_without_url_needs_approval(self) -> None:
@@ -64,11 +91,16 @@ class ActionGateTests(unittest.TestCase):
         self.assertEqual(verdict, ActionVerdict.NEEDS_APPROVAL)
 
     def test_desktop_click_with_non_sensitive_url_is_safe(self) -> None:
-        verdict = self.gate.classify_desktop_action({"action": "left_click", "coordinate": [500, 300]}, url="https://docs.google.com")
+        verdict = self.gate.classify_desktop_action(
+            {"action": "left_click", "coordinate": [500, 300]}, url="https://docs.google.com"
+        )
         self.assertEqual(verdict, ActionVerdict.SAFE)
 
     def test_desktop_click_with_sensitive_url_needs_approval(self) -> None:
-        verdict = self.gate.classify_desktop_action({"action": "left_click", "coordinate": [500, 300]}, url="https://ads.google.com/campaigns")
+        verdict = self.gate.classify_desktop_action(
+            {"action": "left_click", "coordinate": [500, 300]},
+            url="https://ads.google.com/campaigns",
+        )
         self.assertEqual(verdict, ActionVerdict.NEEDS_APPROVAL)
 
     def test_desktop_key_navigation_is_safe(self) -> None:
@@ -77,7 +109,9 @@ class ActionGateTests(unittest.TestCase):
             self.assertEqual(verdict, ActionVerdict.SAFE, f"key '{key}' should be safe")
 
     def test_desktop_key_destructive_needs_approval(self) -> None:
-        verdict = self.gate.classify_desktop_action({"action": "key", "text": "super+Delete"}, url=None)
+        verdict = self.gate.classify_desktop_action(
+            {"action": "key", "text": "super+Delete"}, url=None
+        )
         self.assertEqual(verdict, ActionVerdict.NEEDS_APPROVAL)
 
     # --- URL matching ---
@@ -186,11 +220,15 @@ class RiskLevelTests(unittest.TestCase):
         self.assertEqual(risk, RiskLevel.HIGH)
 
     def test_desktop_type_safe_url_is_medium(self) -> None:
-        risk = self.gate.risk_desktop({"action": "type", "text": "hello"}, url="https://docs.google.com")
+        risk = self.gate.risk_desktop(
+            {"action": "type", "text": "hello"}, url="https://docs.google.com"
+        )
         self.assertEqual(risk, RiskLevel.MEDIUM)
 
     def test_desktop_type_sensitive_url_is_high(self) -> None:
-        risk = self.gate.risk_desktop({"action": "type", "text": "100"}, url="https://polymarket.com")
+        risk = self.gate.risk_desktop(
+            {"action": "type", "text": "100"}, url="https://polymarket.com"
+        )
         self.assertEqual(risk, RiskLevel.HIGH)
 
     def test_desktop_nav_key_is_low(self) -> None:
@@ -202,7 +240,9 @@ class RiskLevelTests(unittest.TestCase):
         self.assertEqual(risk, RiskLevel.HIGH)
 
     def test_desktop_hotkey_on_sensitive_is_high(self) -> None:
-        risk = self.gate.risk_desktop({"action": "key", "text": "ctrl+a"}, url="https://ads.google.com")
+        risk = self.gate.risk_desktop(
+            {"action": "key", "text": "ctrl+a"}, url="https://ads.google.com"
+        )
         self.assertEqual(risk, RiskLevel.HIGH)
 
     def test_browser_use_navigate_to_sensitive_is_high(self) -> None:
@@ -232,24 +272,32 @@ class ActionGateAutoApproveTests(unittest.TestCase):
     unchanged — only the verdict threshold moves."""
 
     def setUp(self) -> None:
-        self.gate = ActionGate(sensitive_urls=["ads.google.com", "polymarket.com"], auto_approve=True)
+        self.gate = ActionGate(
+            sensitive_urls=["ads.google.com", "polymarket.com"], auto_approve=True
+        )
         self.gated = ActionGate(sensitive_urls=["ads.google.com", "polymarket.com"])
 
     # auto-approved when ON, gated when OFF (the friction this removes)
     def test_cdp_click_non_sensitive_is_auto_approved(self) -> None:
         action, url = {"type": "click", "selector": "b"}, "https://example.com"
         self.assertEqual(self.gate.classify_cdp_action(action, url=url), ActionVerdict.SAFE)
-        self.assertEqual(self.gated.classify_cdp_action(action, url=url), ActionVerdict.NEEDS_APPROVAL)
+        self.assertEqual(
+            self.gated.classify_cdp_action(action, url=url), ActionVerdict.NEEDS_APPROVAL
+        )
 
     def test_desktop_type_non_sensitive_is_auto_approved(self) -> None:
         action, url = {"action": "type", "text": "hello"}, "https://docs.google.com"
         self.assertEqual(self.gate.classify_desktop_action(action, url=url), ActionVerdict.SAFE)
-        self.assertEqual(self.gated.classify_desktop_action(action, url=url), ActionVerdict.NEEDS_APPROVAL)
+        self.assertEqual(
+            self.gated.classify_desktop_action(action, url=url), ActionVerdict.NEEDS_APPROVAL
+        )
 
     def test_desktop_click_without_url_is_auto_approved(self) -> None:
         # clicking a native app (no URL) — MEDIUM — auto-approved under the flag
         self.assertEqual(
-            self.gate.classify_desktop_action({"action": "left_click", "coordinate": [10, 10]}, url=None),
+            self.gate.classify_desktop_action(
+                {"action": "left_click", "coordinate": [10, 10]}, url=None
+            ),
             ActionVerdict.SAFE,
         )
 
@@ -268,7 +316,9 @@ class ActionGateAutoApproveTests(unittest.TestCase):
 
     def test_desktop_type_sensitive_still_needs_approval(self) -> None:
         self.assertEqual(
-            self.gate.classify_desktop_action({"action": "type", "text": "100"}, url="https://polymarket.com/trade"),
+            self.gate.classify_desktop_action(
+                {"action": "type", "text": "100"}, url="https://polymarket.com/trade"
+            ),
             ActionVerdict.NEEDS_APPROVAL,
         )
 
@@ -303,7 +353,9 @@ class ComputerHandlerBrowserAutoApproveTests(unittest.TestCase):
     sensitive domain — which still requires approval."""
 
     def _handler(self, *, auto_approve: bool, stub: _StubBrowserUse) -> ComputerHandler:
-        config = SimpleNamespace(computer_auto_approve=auto_approve, sensitive_urls=["robinhood.com", "stripe.com"])
+        config = SimpleNamespace(
+            computer_auto_approve=auto_approve, sensitive_urls=["robinhood.com", "stripe.com"]
+        )
         return ComputerHandler(browser_use=stub, config=config)
 
     def _session(self, task: str, current_url: str | None = None) -> SimpleNamespace:

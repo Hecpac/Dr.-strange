@@ -94,7 +94,10 @@ class ComputerImportSafetyTests(unittest.TestCase):
         self.assertTrue(hasattr(module, "ComputerUseService"))
 
     def test_import_main_does_not_require_pyautogui_or_display(self) -> None:
-        with _fresh_modules("claw_v2.main", "claw_v2.computer", "pyautogui"), _pyautogui_unavailable():
+        with (
+            _fresh_modules("claw_v2.main", "claw_v2.computer", "pyautogui"),
+            _pyautogui_unavailable(),
+        ):
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("DISPLAY", None)
                 module = importlib.import_module("claw_v2.main")
@@ -105,7 +108,10 @@ class ComputerImportSafetyTests(unittest.TestCase):
         from claw_v2 import computer
 
         fake = SimpleNamespace(FAILSAFE=False, PAUSE=0.0)
-        with patch.dict(sys.modules, {"pyautogui": fake}), patch.object(computer, "pyautogui", None):
+        with (
+            patch.dict(sys.modules, {"pyautogui": fake}),
+            patch.object(computer, "pyautogui", None),
+        ):
             loaded = computer._load_pyautogui()
 
         self.assertIs(loaded, fake)
@@ -142,7 +148,9 @@ class ComputerImportSafetyTests(unittest.TestCase):
                 OPENAI_API_KEY="test-key",
             )
             with patch.dict(os.environ, env, clear=False):
-                with patch.object(main, "_probe_pyautogui_display", side_effect=ComputerUseUnavailable("missing")):
+                with patch.object(
+                    main, "_probe_pyautogui_display", side_effect=ComputerUseUnavailable("missing")
+                ):
                     with self.assertRaisesRegex(RuntimeError, "computer_display"):
                         main.build_runtime(anthropic_executor=_fake_anthropic)
 
@@ -164,7 +172,9 @@ class ComputerImportSafetyTests(unittest.TestCase):
                 CODEX_CLI_PATH="missing-codex-for-test",
             )
             with patch.dict(os.environ, env, clear=False):
-                with patch.object(main, "_probe_pyautogui_display", side_effect=AssertionError("unexpected probe")):
+                with patch.object(
+                    main, "_probe_pyautogui_display", side_effect=AssertionError("unexpected probe")
+                ):
                     runtime = main.build_runtime(anthropic_executor=_fake_anthropic)
 
         self.assertIsNotNone(runtime.bot.computer)

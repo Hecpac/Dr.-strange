@@ -28,7 +28,9 @@ def _make_request(prompt: str = "Write a hello world function", lane: str = "wor
     )
 
 
-def _proc(returncode: int = 0, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
+def _proc(
+    returncode: int = 0, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(["codex"], returncode, stdout=stdout, stderr=stderr)
 
 
@@ -42,9 +44,15 @@ def _preflight_ok() -> list[subprocess.CompletedProcess[str]]:
 class CodexAdapterTests(unittest.TestCase):
     def test_transport_override_bypasses_subprocess(self) -> None:
         from claw_v2.types import LLMResponse
+
         fixed = LLMResponse(
-            content="hello world", lane="worker", provider="codex",
-            model="codex-mini-latest", confidence=0.7, cost_estimate=0.0, artifacts={},
+            content="hello world",
+            lane="worker",
+            provider="codex",
+            model="codex-mini-latest",
+            confidence=0.7,
+            cost_estimate=0.0,
+            artifacts={},
         )
         adapter = CodexAdapter(transport=lambda _: fixed)
         result = adapter.complete(_make_request())
@@ -59,14 +67,18 @@ class CodexAdapterTests(unittest.TestCase):
     def test_raises_adapter_error_on_nonzero_exit(self) -> None:
         adapter = CodexAdapter(cli_path="codex")
         fake_result = _proc(returncode=1, stdout="", stderr="some error")
-        with patch("claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), fake_result]):
+        with patch(
+            "claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), fake_result]
+        ):
             with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
                 with self.assertRaises(AdapterError):
                     adapter.complete(_make_request())
 
     def test_successful_completion_returns_stdout(self) -> None:
         adapter = CodexAdapter(cli_path="codex")
-        fake_result = MagicMock(returncode=0, stdout="def hello():\n    print('hello')\n", stderr="")
+        fake_result = MagicMock(
+            returncode=0, stdout="def hello():\n    print('hello')\n", stderr=""
+        )
         with patch("claw_v2.adapters.codex.subprocess.run", return_value=fake_result) as mock_run:
             with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
                 result = adapter.complete(_make_request())
@@ -138,7 +150,9 @@ class CodexAdapterTests(unittest.TestCase):
         adapter = CodexAdapter(cli_path="codex")
         first = MagicMock(returncode=1, stdout="", stderr="Reading additional input from stdin...")
         second = MagicMock(returncode=0, stdout="done", stderr="")
-        with patch("claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), first, second]) as mock_run:
+        with patch(
+            "claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), first, second]
+        ) as mock_run:
             with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
                 result = adapter.complete(_make_request())
         self.assertEqual(result.content, "done")
@@ -173,7 +187,9 @@ class CodexAdapterTests(unittest.TestCase):
     def test_preflight_checks_version_and_login_status_before_exec(self) -> None:
         adapter = CodexAdapter(cli_path="codex")
         execution = _proc(stdout="done")
-        with patch("claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), execution]) as mock_run:
+        with patch(
+            "claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), execution]
+        ) as mock_run:
             with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
                 result = adapter.complete(_make_request())
 
@@ -190,7 +206,9 @@ class CodexAdapterTests(unittest.TestCase):
         execution = _proc(stdout="classification")
         request = _make_request(prompt="classify", lane="judge")
         request.evidence_pack = {"record": "x"}
-        with patch("claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), execution]) as mock_run:
+        with patch(
+            "claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), execution]
+        ) as mock_run:
             with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
                 result = adapter.complete(request)
 
@@ -210,7 +228,9 @@ class CodexAdapterTests(unittest.TestCase):
             request = _make_request()
             request.cwd = missing
             with patch("claw_v2.adapters.codex.subprocess.run") as mock_run:
-                with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
+                with patch(
+                    "claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"
+                ):
                     with self.assertRaisesRegex(AdapterUnavailableError, "cwd does not exist"):
                         adapter.complete(request)
         mock_run.assert_not_called()
@@ -218,7 +238,9 @@ class CodexAdapterTests(unittest.TestCase):
     def test_preflight_auth_failure_is_unavailable(self) -> None:
         adapter = CodexAdapter(cli_path="codex")
         auth_failure = _proc(returncode=1, stderr="Not logged in")
-        with patch("claw_v2.adapters.codex.subprocess.run", side_effect=[_preflight_ok()[0], auth_failure]):
+        with patch(
+            "claw_v2.adapters.codex.subprocess.run", side_effect=[_preflight_ok()[0], auth_failure]
+        ):
             with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
                 with self.assertRaisesRegex(AdapterUnavailableError, "codex login"):
                     adapter.complete(_make_request())
@@ -226,7 +248,9 @@ class CodexAdapterTests(unittest.TestCase):
     def test_exec_auth_failure_is_unavailable(self) -> None:
         adapter = CodexAdapter(cli_path="codex")
         exec_failure = _proc(returncode=1, stderr="authentication required")
-        with patch("claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), exec_failure]):
+        with patch(
+            "claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), exec_failure]
+        ):
             with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
                 with self.assertRaisesRegex(AdapterUnavailableError, "codex login"):
                     adapter.complete(_make_request())
@@ -235,8 +259,12 @@ class CodexAdapterTests(unittest.TestCase):
         adapter = CodexAdapter(cli_path="codex")
         first = _proc(stdout="first")
         second = _proc(stdout="second")
-        with patch("claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), first, second]) as mock_run:
+        with patch(
+            "claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), first, second]
+        ) as mock_run:
             with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
                 self.assertEqual(adapter.complete(_make_request()).content, "first")
-                self.assertEqual(adapter.complete(_make_request("Write another function")).content, "second")
+                self.assertEqual(
+                    adapter.complete(_make_request("Write another function")).content, "second"
+                )
         self.assertEqual(mock_run.call_count, 4)

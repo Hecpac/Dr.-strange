@@ -52,10 +52,7 @@ class _StubTaskHandler:
         # Deduplicate on (summary, source) — mirrors the contract the
         # real TaskHandler offers without pulling in its full state.
         for existing in queue:
-            if (
-                existing.get("summary") == summary
-                and existing.get("source") == source
-            ):
+            if existing.get("summary") == summary and existing.get("source") == source:
                 return list(queue)
         return [
             *queue,
@@ -143,7 +140,7 @@ class PendingActionPersistenceTests(unittest.TestCase):
             self.assertIn("pending_action_persisted", event_names)
 
             # Reload (close + reopen against same path).
-            
+
             memory2 = _reopen(db_path)
             reloaded = memory2.get_session_state("tg-test")
             self.assertEqual(reloaded["pending_action"], persisted["pending_action"])
@@ -187,7 +184,7 @@ class OwnerDelegationAfterReloadTests(unittest.TestCase):
             )
 
             # Restart.
-            
+
             memory2 = _reopen(db_path)
             observe2 = _RecordingObserve()
             handler2 = StateHandler(
@@ -224,7 +221,6 @@ class ImplicitApprovalAfterReloadTests(unittest.TestCase):
                 "Encontre el plan en `wave_0_plan.md`. ¿Lo ejecuto?",
             )
 
-            
             memory2 = _reopen(db_path)
             state = memory2.get_session_state("mac-main")
             self.assertTrue(state["pending_action"])
@@ -257,7 +253,6 @@ class TaskQueuePersistenceTests(unittest.TestCase):
             self.assertEqual(len(queue), 1)
             self.assertIn("digest diario", queue[0]["summary"])
 
-            
             memory2 = _reopen(db_path)
             reloaded = memory2.get_session_state("tg-test")
             self.assertEqual(len(reloaded["task_queue"]), 1)
@@ -279,7 +274,6 @@ class LastOptionsPersistenceTests(unittest.TestCase):
             )
             handler.remember_assistant_turn_state("tg-test", "que hago con esto?", reply)
 
-            
             memory2 = _reopen(db_path)
             handler2 = StateHandler(brain_memory=memory2, task_handler=_StubTaskHandler())
 
@@ -328,9 +322,7 @@ class StalePendingActionTests(unittest.TestCase):
             active_object["pending_action_meta"]["created_at"] = (
                 time.time() - PENDING_ACTION_TTL_SECONDS - 60
             )
-            memory.update_session_state(
-                "tg-test", active_object=active_object, task_queue=[]
-            )
+            memory.update_session_state("tg-test", active_object=active_object, task_queue=[])
 
             resolution = handler.resolve_delegated_objective(
                 session_id="tg-test",
@@ -343,9 +335,7 @@ class StalePendingActionTests(unittest.TestCase):
             # and (b) the resolution did NOT come from pending_action.
             event_names = [name for name, _ in observe.events]
             self.assertIn("resolver_state_stale_ignored", event_names)
-            self.assertNotEqual(
-                resolution.resolution_source, "session_state.pending_action"
-            )
+            self.assertNotEqual(resolution.resolution_source, "session_state.pending_action")
 
     def test_stale_pending_action_is_rejected_for_short_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -364,9 +354,7 @@ class StalePendingActionTests(unittest.TestCase):
             )
             memory.update_session_state("tg-test", active_object=active_object)
 
-            response = handler.maybe_resolve_stateful_followup(
-                "dale", session_id="tg-test"
-            )
+            response = handler.maybe_resolve_stateful_followup("dale", session_id="tg-test")
 
             self.assertIsInstance(response, str)
             self.assertIn("ya no está vigente", response)
@@ -397,9 +385,7 @@ class StalePendingActionTests(unittest.TestCase):
                 },
             )
 
-            response = handler.maybe_resolve_stateful_followup(
-                "dale", session_id="tg-test"
-            )
+            response = handler.maybe_resolve_stateful_followup("dale", session_id="tg-test")
 
             self.assertIsInstance(response, str)
             self.assertIn("no coincide", response)
@@ -428,9 +414,7 @@ class StalePendingActionTests(unittest.TestCase):
                 },
             )
 
-            response = handler.maybe_resolve_stateful_followup(
-                "ok", session_id="tg-test"
-            )
+            response = handler.maybe_resolve_stateful_followup("ok", session_id="tg-test")
 
             self.assertIsInstance(response, str)
             self.assertIn("No la ejecuto con un ok corto", response)
@@ -461,7 +445,8 @@ class SensitivePendingActionTests(unittest.TestCase):
             state = memory.get_session_state("tg-test")
             self.assertNotIn(fake_token, str(state.get("pending_action") or ""))
             skipped = [
-                kwargs.get("payload") for name, kwargs in observe.events
+                kwargs.get("payload")
+                for name, kwargs in observe.events
                 if name == "resolver_state_skipped_sensitive"
             ]
             self.assertEqual(len(skipped), 1)
@@ -497,7 +482,6 @@ class ChannelContinuityTests(unittest.TestCase):
             persisted = memory.get_session_state(session_id)
             self.assertTrue(persisted["pending_action"])
 
-            
             memory2 = _reopen(db_path)
             reloaded = memory2.get_session_state(session_id)
             self.assertEqual(reloaded["pending_action"], persisted["pending_action"])

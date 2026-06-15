@@ -246,7 +246,9 @@ class PropertyGraphProjection:
         ).fetchall()
         return [_edge_from_row(row) for row in rows]
 
-    def neighbors(self, graph_id: str, *, edge_kind: str | None = None, limit: int = 100) -> list[GraphNode]:
+    def neighbors(
+        self, graph_id: str, *, edge_kind: str | None = None, limit: int = 100
+    ) -> list[GraphNode]:
         params: list[Any] = [graph_id]
         kind_clause = ""
         if edge_kind is not None:
@@ -267,7 +269,9 @@ class PropertyGraphProjection:
         ).fetchall()
         return [_node_from_row(row) for row in rows]
 
-    def _materialize_goals_and_claims(self, telemetry_root: Path, result: MaterializationResult) -> None:
+    def _materialize_goals_and_claims(
+        self, telemetry_root: Path, result: MaterializationResult
+    ) -> None:
         from claw_v2.evidence_ledger import load_claims
         from claw_v2.goal_contract import load_goals
 
@@ -451,7 +455,9 @@ class PropertyGraphProjection:
                 )
             self._materialize_observe_span(row, event_node, result)
 
-    def _materialize_observe_span(self, row: sqlite3.Row, event_node: GraphNode, result: MaterializationResult) -> None:
+    def _materialize_observe_span(
+        self, row: sqlite3.Row, event_node: GraphNode, result: MaterializationResult
+    ) -> None:
         span_id = _first_text(row["span_id"])
         if not span_id:
             return
@@ -559,7 +565,9 @@ class PropertyGraphProjection:
         if not self._table_exists("facts"):
             return
         result.sources.add("knowledge_facts")
-        rows = self._conn.execute("SELECT id, key, value, entity_tags, created_at FROM facts ORDER BY id ASC").fetchall()
+        rows = self._conn.execute(
+            "SELECT id, key, value, entity_tags, created_at FROM facts ORDER BY id ASC"
+        ).fetchall()
         for row in rows:
             fact_node = self.upsert_node(
                 kind="knowledge_fact",

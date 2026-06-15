@@ -3,6 +3,7 @@
 All tests are zero-network. They exercise the real F3b.2 adapter with
 fake keychain, fake approval grants, fake DNS, and fake HTTP responses.
 """
+
 from __future__ import annotations
 
 import io
@@ -54,9 +55,11 @@ class _Grant:
 
 class _GrantStore:
     def __init__(self, grants: list[_Grant] | None = None) -> None:
-        self.grants = grants if grants is not None else [
-            _Grant(metadata={"mode": "read_only_live", "approval_token": APPROVAL_TOKEN})
-        ]
+        self.grants = (
+            grants
+            if grants is not None
+            else [_Grant(metadata={"mode": "read_only_live", "approval_token": APPROVAL_TOKEN})]
+        )
 
     def find_grants_for(self, *, kind: str, target: str, now: float | None = None):
         assert kind == "tool"
@@ -335,9 +338,7 @@ def test_401_returns_failed_auth_rejected(tmp_path):
 def test_429_returns_pending_remote_rate_limit(tmp_path):
     adapter = _adapter(
         tmp_path,
-        urlopen=lambda *_a, **_kw: (_ for _ in ()).throw(
-            _http_error(429, {"Retry-After": "30"})
-        ),
+        urlopen=lambda *_a, **_kw: (_ for _ in ()).throw(_http_error(429, {"Retry-After": "30"})),
     )
 
     result = adapter.read_only_call("quota")

@@ -101,7 +101,7 @@ class SecretPathTests(unittest.TestCase):
             "README.md",
             "src/main.py",
             "docs/intro.md",
-            "config/app.yaml",          # guard: hardened patterns must not block generic config
+            "config/app.yaml",  # guard: hardened patterns must not block generic config
             "docs/release-history.md",  # guard: *_history must not match doc files
         ):
             with self.subTest(path=path):
@@ -264,11 +264,13 @@ class StrictToolSchemaTests(unittest.TestCase):
 class WorkspaceReadHandlerTests(unittest.TestCase):
     def _registry(self, tmpdir: str):
         from claw_v2.tools import ToolRegistry
+
         return ToolRegistry.default(workspace_root=tmpdir)
 
     def _gate(self):
         def auto_gate(_definition, _args):
             return None
+
         return auto_gate
 
     def test_read_workspace_nonsecret_blocks_env(self) -> None:
@@ -329,7 +331,12 @@ class DaemonExecutorIntegrationTests(unittest.TestCase):
         from claw_v2.adapters.base import LLMResponse, LLMRequest
 
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic", model=req.model)
+            return LLMResponse(
+                content="<response>ok</response>",
+                lane=req.lane,
+                provider="anthropic",
+                model=req.model,
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -348,6 +355,7 @@ class DaemonExecutorIntegrationTests(unittest.TestCase):
                 # high-risk tool name not in the daemon allowlist and confirm
                 # the gate raises ApprovalPending instead of auto-approving.
                 from claw_v2.tools import ToolDefinition
+
                 handler_calls = []
 
                 def handler(args):
@@ -360,7 +368,11 @@ class DaemonExecutorIntegrationTests(unittest.TestCase):
                         description="delete a workspace file",
                         allowed_agent_classes=("operator",),
                         handler=handler,
-                        parameter_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                        parameter_schema={
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
                         tier=3,
                     )
                 )
@@ -380,7 +392,12 @@ class DaemonExecutorIntegrationTests(unittest.TestCase):
         from claw_v2.adapters.base import LLMResponse, LLMRequest
 
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
-            return LLMResponse(content="<response>ok</response>", lane=req.lane, provider="anthropic", model=req.model)
+            return LLMResponse(
+                content="<response>ok</response>",
+                lane=req.lane,
+                provider="anthropic",
+                model=req.model,
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -406,7 +423,11 @@ class DaemonExecutorIntegrationTests(unittest.TestCase):
                         description="read memory rows",
                         allowed_agent_classes=("operator",),
                         handler=handler,
-                        parameter_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                        parameter_schema={
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
                         tier=1,
                     )
                 )
@@ -426,6 +447,7 @@ class ConfigLoadingTests(unittest.TestCase):
 
     def test_config_file_exists_and_loads(self) -> None:
         from claw_v2.tool_policy import _config_path
+
         path = _config_path()
         self.assertTrue(path.exists(), msg=f"missing config file: {path}")
 
@@ -499,6 +521,7 @@ class ConfigValidationTests(unittest.TestCase):
 
     def _write_and_load(self, content: str) -> dict:
         from claw_v2.tool_policy import _load_tool_policies_from_config
+
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "tool_policies.json"
             path.write_text(content, encoding="utf-8")
@@ -528,6 +551,7 @@ class ConfigValidationTests(unittest.TestCase):
 
     def test_missing_config_file_raises(self) -> None:
         from claw_v2.tool_policy import _load_tool_policies_from_config
+
         with self.assertRaises(FileNotFoundError):
             _load_tool_policies_from_config(Path("/nonexistent/tool_policies.json"))
 

@@ -105,9 +105,7 @@ def build_reconciliation_report(
     ``observe`` is provided, emits ``pending_verification_reconciliation``
     with summary counts so the daemon trace records every review.
     """
-    rows = task_ledger.list(
-        statuses=("completed_unverified",), limit=RECONCILIATION_SCAN_LIMIT
-    )
+    rows = task_ledger.list(statuses=("completed_unverified",), limit=RECONCILIATION_SCAN_LIMIT)
     now = time.time()
     cases: list[dict[str, Any]] = []
     for record in rows:

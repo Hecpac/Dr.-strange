@@ -203,7 +203,8 @@ class CoordinatorHardGuardTests(unittest.TestCase):
         )
         self.assertIsNone(result)
         payloads = [
-            kwargs.get("payload") for name, kwargs in observe.events
+            kwargs.get("payload")
+            for name, kwargs in observe.events
             if name == "coordinator_rejected_non_actionable_objective"
         ]
         self.assertEqual(len(payloads), 1)
@@ -216,7 +217,8 @@ class CoordinatorHardGuardTests(unittest.TestCase):
         result = handler.maybe_run_coordinated_task("tg-test", fake_token)
         self.assertIsNone(result)
         rejections = [
-            kwargs.get("payload") for name, kwargs in observe.events
+            kwargs.get("payload")
+            for name, kwargs in observe.events
             if name == "coordinator_rejected_non_actionable_objective"
         ]
         self.assertEqual(len(rejections), 1)
@@ -227,9 +229,7 @@ class CoordinatorHardGuardTests(unittest.TestCase):
 
     def test_start_autonomous_task_rejects_meta_with_safe_message(self) -> None:
         handler, observe = _make_task_handler_with_observe()
-        response = handler.start_autonomous_task(
-            "tg-test", "analiza esta conversacion"
-        )
+        response = handler.start_autonomous_task("tg-test", "analiza esta conversacion")
         self.assertIn("pregunta reflexiva", response)
         self.assertIn("implementa el fix", response)
         events = [name for name, _ in observe.events]
@@ -255,7 +255,8 @@ class CoordinatorHardGuardTests(unittest.TestCase):
         )
         self.assertIsNone(result)
         rejections = [
-            kwargs.get("payload") for name, kwargs in observe.events
+            kwargs.get("payload")
+            for name, kwargs in observe.events
             if name == "coordinator_rejected_non_actionable_objective"
         ]
         self.assertEqual(len(rejections), 1)

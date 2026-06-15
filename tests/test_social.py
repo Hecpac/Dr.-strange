@@ -31,7 +31,9 @@ class XAdapterTests(unittest.TestCase):
         mock_client = MagicMock()
         mock_client.get.return_value = MagicMock(
             status_code=200,
-            json=MagicMock(return_value={"data": {"public_metrics": {"like_count": 10, "reply_count": 2}}}),
+            json=MagicMock(
+                return_value={"data": {"public_metrics": {"like_count": 10, "reply_count": 2}}}
+            ),
         )
         adapter = XAdapter(bearer_token="test-token", handle="@test", client=mock_client)
         metrics = adapter.get_engagement("123")
@@ -59,7 +61,9 @@ class InstagramAdapterTests(unittest.TestCase):
             status_code=200,
             json=MagicMock(return_value={"id": "789"}),
         )
-        adapter = InstagramAdapter(access_token="test-token", ig_user_id="ig123", client=mock_client)
+        adapter = InstagramAdapter(
+            access_token="test-token", ig_user_id="ig123", client=mock_client
+        )
         result = adapter.publish("Instagram caption")
         self.assertEqual(result.platform, "instagram")
         self.assertEqual(result.post_id, "789")
@@ -69,7 +73,11 @@ class SocialPublisherTests(unittest.TestCase):
     def test_routes_to_correct_adapter(self) -> None:
         x_adapter = MagicMock()
         x_adapter.publish.return_value = PublishResult(
-            platform="x", account="test", post_id="1", url="https://x.com/1", published_at="2026-01-01",
+            platform="x",
+            account="test",
+            post_id="1",
+            url="https://x.com/1",
+            published_at="2026-01-01",
         )
         publisher = SocialPublisher(adapters={"test": {"x": x_adapter}})
         draft = PostDraft(account="test", platform="x", text="hello", hashtags=[])
@@ -88,7 +96,8 @@ class KeychainTests(unittest.TestCase):
     @patch("claw_v2.social.run_subprocess_bounded")
     def test_load_credential_calls_security(self, mock_run) -> None:
         mock_run.return_value = MagicMock(
-            returncode=0, stdout="secret-token\n",
+            returncode=0,
+            stdout="secret-token\n",
         )
         result = _load_keychain_credential("com.test.claw.social.acct.x")
         self.assertEqual(result, "secret-token")

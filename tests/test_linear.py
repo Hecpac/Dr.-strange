@@ -10,12 +10,26 @@ class ListActionableTests(unittest.TestCase):
     def test_filters_by_label_and_state(self) -> None:
         caller = MagicMock()
         caller.return_value = [
-            {"id": "abc", "identifier": "HEC-1", "title": "Fix bug", "description": "details",
-             "state": {"name": "Todo"}, "labels": [{"name": "claw-auto"}],
-             "branchName": "feat/hec-1-fix-bug", "url": "https://linear.app/hec/issue/HEC-1"},
-            {"id": "def", "identifier": "HEC-2", "title": "Other", "description": "",
-             "state": {"name": "Done"}, "labels": [{"name": "claw-auto"}],
-             "branchName": "feat/hec-2-other", "url": "https://linear.app/hec/issue/HEC-2"},
+            {
+                "id": "abc",
+                "identifier": "HEC-1",
+                "title": "Fix bug",
+                "description": "details",
+                "state": {"name": "Todo"},
+                "labels": [{"name": "claw-auto"}],
+                "branchName": "feat/hec-1-fix-bug",
+                "url": "https://linear.app/hec/issue/HEC-1",
+            },
+            {
+                "id": "def",
+                "identifier": "HEC-2",
+                "title": "Other",
+                "description": "",
+                "state": {"name": "Done"},
+                "labels": [{"name": "claw-auto"}],
+                "branchName": "feat/hec-2-other",
+                "url": "https://linear.app/hec/issue/HEC-2",
+            },
         ]
         svc = LinearService(caller)
         result = svc.list_actionable(label="claw-auto", state="Todo")
@@ -30,13 +44,18 @@ class ListActionableTests(unittest.TestCase):
 
 class GetIssueTests(unittest.TestCase):
     def test_parses_issue_data(self) -> None:
-        caller = MagicMock(return_value={
-            "id": "abc", "identifier": "HEC-5", "title": "Add feature",
-            "description": "Build the thing", "state": {"name": "Todo"},
-            "labels": [{"name": "claw-auto"}, {"name": "backend"}],
-            "branchName": "feat/hec-5-add-feature",
-            "url": "https://linear.app/hec/issue/HEC-5",
-        })
+        caller = MagicMock(
+            return_value={
+                "id": "abc",
+                "identifier": "HEC-5",
+                "title": "Add feature",
+                "description": "Build the thing",
+                "state": {"name": "Todo"},
+                "labels": [{"name": "claw-auto"}, {"name": "backend"}],
+                "branchName": "feat/hec-5-add-feature",
+                "url": "https://linear.app/hec/issue/HEC-5",
+            }
+        )
         svc = LinearService(caller)
         issue = svc.get_issue("HEC-5")
         self.assertEqual(issue.id, "HEC-5")
@@ -69,7 +88,10 @@ class LinkPrTests(unittest.TestCase):
         caller.assert_called_once()
         args = caller.call_args
         self.assertEqual(args.kwargs["id"], "HEC-5")
-        self.assertIn({"url": "https://github.com/org/repo/pull/1", "title": "feat: add feature"}, args.kwargs["links"])
+        self.assertIn(
+            {"url": "https://github.com/org/repo/pull/1", "title": "feat: add feature"},
+            args.kwargs["links"],
+        )
 
 
 class LinearGraphQLTests(unittest.TestCase):
@@ -83,13 +105,25 @@ class LinearGraphQLTests(unittest.TestCase):
 
     def test_query_list_issues(self) -> None:
         from claw_v2.linear import _query_list_issues
-        client = self._mock_gql_client({
-            "issues": {"nodes": [
-                {"id": "abc", "identifier": "HEC-1", "title": "Bug", "description": "",
-                 "state": {"name": "Todo"}, "labels": {"nodes": [{"name": "claw-auto"}]},
-                 "branchName": "feat/hec-1", "url": "https://linear.app/issue/HEC-1"},
-            ]}
-        })
+
+        client = self._mock_gql_client(
+            {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "abc",
+                            "identifier": "HEC-1",
+                            "title": "Bug",
+                            "description": "",
+                            "state": {"name": "Todo"},
+                            "labels": {"nodes": [{"name": "claw-auto"}]},
+                            "branchName": "feat/hec-1",
+                            "url": "https://linear.app/issue/HEC-1",
+                        },
+                    ]
+                }
+            }
+        )
         result = _query_list_issues(client, "claw-auto", "Todo")
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["identifier"], "HEC-1")
@@ -97,23 +131,34 @@ class LinearGraphQLTests(unittest.TestCase):
 
     def test_query_get_issue(self) -> None:
         from claw_v2.linear import _query_get_issue
-        client = self._mock_gql_client({
-            "issue": {"id": "abc", "identifier": "HEC-5", "title": "Feature",
-                      "description": "desc", "state": {"name": "Todo"},
-                      "labels": {"nodes": [{"name": "backend"}]},
-                      "branchName": "feat/hec-5", "url": "https://linear.app/issue/HEC-5"}
-        })
+
+        client = self._mock_gql_client(
+            {
+                "issue": {
+                    "id": "abc",
+                    "identifier": "HEC-5",
+                    "title": "Feature",
+                    "description": "desc",
+                    "state": {"name": "Todo"},
+                    "labels": {"nodes": [{"name": "backend"}]},
+                    "branchName": "feat/hec-5",
+                    "url": "https://linear.app/issue/HEC-5",
+                }
+            }
+        )
         result = _query_get_issue(client, "HEC-5")
         self.assertEqual(result["identifier"], "HEC-5")
 
     def test_query_get_issue_not_found(self) -> None:
         from claw_v2.linear import _query_get_issue
+
         client = self._mock_gql_client({"issue": None})
         with self.assertRaises(FileNotFoundError):
             _query_get_issue(client, "HEC-999")
 
     def test_normalize_node_flattens_labels(self) -> None:
         from claw_v2.linear import _normalize_node
+
         node = {"labels": {"nodes": [{"name": "a"}, {"name": "b"}]}}
         result = _normalize_node(node)
         self.assertEqual(result["labels"], [{"name": "a"}, {"name": "b"}])

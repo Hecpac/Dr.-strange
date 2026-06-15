@@ -161,7 +161,8 @@ class OpenAIAdapter(ProviderAdapter):
         """Execute function calls in a loop until the model stops calling tools."""
         for _ in range(_MAX_TOOL_ROUNDS):
             function_calls = [
-                item for item in getattr(response, "output", [])
+                item
+                for item in getattr(response, "output", [])
                 if getattr(item, "type", None) == "function_call"
             ]
             if not function_calls:
@@ -189,11 +190,13 @@ class OpenAIAdapter(ProviderAdapter):
                     output = json.dumps({"error": str(exc)})
                     logger.warning("OpenAI tool %s failed: %s", name, exc)
 
-                tool_results.append({
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": output[:50_000],  # safety cap
-                })
+                tool_results.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": output[:50_000],  # safety cap
+                    }
+                )
 
             kwargs: dict[str, Any] = dict(
                 model=request.model,
@@ -348,6 +351,7 @@ def _is_stale_previous_response_error(exc: Exception) -> bool:
 
 def _request_without_session(request: LLMRequest) -> LLMRequest:
     from dataclasses import replace
+
     evidence = dict(request.evidence_pack or {})
     evidence["session_recovery"] = "openai_previous_response_id_reset"
     evidence["stale_session_id"] = request.session_id
@@ -434,7 +438,7 @@ def _retry_delay_seconds(exc: Exception, attempt: int) -> float:
     retry_after = _retry_after_seconds(exc)
     if retry_after is not None:
         return min(max(retry_after, 0.0), 2.0)
-    return min(0.25 * (2 ** attempt), 2.0)
+    return min(0.25 * (2**attempt), 2.0)
 
 
 def _retry_after_seconds(exc: Exception) -> float | None:
@@ -492,7 +496,9 @@ def _normalize_content_blocks(blocks: list[Any]) -> list[dict[str, Any]]:
         elif btype == "image":
             source = block.get("source") or {}
             if source.get("type") == "base64":
-                url = f"data:{source.get('media_type', 'image/png')};base64,{source.get('data', '')}"
+                url = (
+                    f"data:{source.get('media_type', 'image/png')};base64,{source.get('data', '')}"
+                )
             else:
                 url = source.get("url", "")
             content.append({"type": "input_image", "image_url": url})

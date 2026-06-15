@@ -41,7 +41,9 @@ def collect_diagnostics(
         "launchctl_list": _run_command(["launchctl", "list", label], runner=runner),
         "launchctl_print": _run_command(["launchctl", "print", launchd_domain], runner=runner),
         "processes": _run_command(["pgrep", "-fl", "claw_v2.main"], runner=runner),
-        "port_listener": _run_command(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"], runner=runner),
+        "port_listener": _run_command(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"], runner=runner
+        ),
     }
     database = _database_summary(db, limit=limit, acknowledgements=acknowledgements)
     checks = _checks(commands=commands, database=database, port=port)
@@ -473,17 +475,16 @@ def acknowledge_events(
     return [int(event_id) for event_id in event_ids]
 
 
-def _checks(*, commands: dict[str, dict[str, Any]], database: dict[str, Any], port: int) -> dict[str, Any]:
+def _checks(
+    *, commands: dict[str, dict[str, Any]], database: dict[str, Any], port: int
+) -> dict[str, Any]:
     launchd_ok = bool(commands["launchctl_list"].get("ok") or commands["launchctl_print"].get("ok"))
     port_ok = f":{port}" in str(commands["port_listener"].get("stdout") or "")
     process_probe = commands["processes"]
     process_probe_stderr = str(process_probe.get("stderr") or "")
-    process_probe_unavailable = (
-        not process_probe.get("ok")
-        and (
-            "Cannot get process list" in process_probe_stderr
-            or "sysmond service not found" in process_probe_stderr
-        )
+    process_probe_unavailable = not process_probe.get("ok") and (
+        "Cannot get process list" in process_probe_stderr
+        or "sysmond service not found" in process_probe_stderr
     )
     process_ok = bool(process_probe.get("stdout")) or (
         process_probe_unavailable and launchd_ok and port_ok
@@ -505,12 +506,19 @@ def _checks(*, commands: dict[str, dict[str, Any]], database: dict[str, Any], po
     web_thread_dead = web_serving_known is False
     fresh_heartbeat = heartbeat_present and not heartbeat_stale
     transient_port_probe_failure = (
-        not port_ok
-        and process_ok
-        and fresh_heartbeat
-        and not web_thread_dead
+        not port_ok and process_ok and fresh_heartbeat and not web_thread_dead
     )
-    status = "healthy" if process_ok and port_ok and db_ok and launchd_ok and latest_errors == 0 and not heartbeat_stale and not web_thread_dead else "attention"
+    status = (
+        "healthy"
+        if process_ok
+        and port_ok
+        and db_ok
+        and launchd_ok
+        and latest_errors == 0
+        and not heartbeat_stale
+        and not web_thread_dead
+        else "attention"
+    )
     if (
         not process_ok
         or not db_ok
@@ -597,9 +605,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=_env_int("WEB_CHAT_PORT", DEFAULT_PORT))
     parser.add_argument("--label", default=os.getenv("CLAW_LAUNCHD_LABEL", DEFAULT_LABEL))
     parser.add_argument("--limit", type=int, default=10)
-    parser.add_argument("--ack-path", default=os.getenv("DIAGNOSTICS_ACK_PATH", str(DEFAULT_ACK_PATH)))
+    parser.add_argument(
+        "--ack-path", default=os.getenv("DIAGNOSTICS_ACK_PATH", str(DEFAULT_ACK_PATH))
+    )
     parser.add_argument("--ack-event", action="append", type=int, default=[])
-    parser.add_argument("--ack-current", action="store_true", help="Acknowledge all currently actionable events.")
+    parser.add_argument(
+        "--ack-current", action="store_true", help="Acknowledge all currently actionable events."
+    )
     parser.add_argument("--ack-hours", type=float, default=24.0)
     parser.add_argument("--ack-reason", default="")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of readable text.")
@@ -615,7 +627,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         ack_event_ids.extend(
             int(event["id"])
-            for event in ((current_report.get("database") or {}).get("observe") or {}).get("latest_errors") or []
+            for event in ((current_report.get("database") or {}).get("observe") or {}).get(
+                "latest_errors"
+            )
+            or []
         )
     if ack_event_ids:
         acknowledge_events(

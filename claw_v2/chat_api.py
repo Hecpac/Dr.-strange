@@ -47,11 +47,15 @@ class LocalChatAPI:
         self._agent_runtime = agent_runtime
         self._default_user_id = default_user_id or bot_service.allowed_user_id or "local-user"
         self._observe = observe or getattr(bot_service, "observe", None)
-        self._auth_token = auth_token.strip() if isinstance(auth_token, str) and auth_token.strip() else None
+        self._auth_token = (
+            auth_token.strip() if isinstance(auth_token, str) and auth_token.strip() else None
+        )
         # Wave 3.7: dashboard endpoints under /api/think/*. Optional dependencies —
         # endpoints return 503 when their backing service isn't wired so the chat
         # API still serves /api/chat in environments without observability.
-        self._observation_window = observation_window or getattr(bot_service, "observation_window", None)
+        self._observation_window = observation_window or getattr(
+            bot_service, "observation_window", None
+        )
         self._task_board = task_board
 
     def handle_http(
@@ -90,9 +94,13 @@ class LocalChatAPI:
         if normalized_path == "/api/think/projects":
             return self._think_projects(method=method)
         if normalized_path != "/api/chat":
-            return ChatAPIResponse(status_code=404, payload={"error": f"not found: {normalized_path}"})
+            return ChatAPIResponse(
+                status_code=404, payload={"error": f"not found: {normalized_path}"}
+            )
         if method.upper() != "POST":
-            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["POST"]})
+            return ChatAPIResponse(
+                status_code=405, payload={"error": "method not allowed", "allowed": ["POST"]}
+            )
 
         try:
             payload = self._decode_json(body)
@@ -102,9 +110,13 @@ class LocalChatAPI:
         session_id = payload.get("session_id")
         text = payload.get("text")
         if not isinstance(session_id, str) or not session_id.strip():
-            return ChatAPIResponse(status_code=400, payload={"error": "session_id must be a non-empty string"})
+            return ChatAPIResponse(
+                status_code=400, payload={"error": "session_id must be a non-empty string"}
+            )
         if not isinstance(text, str) or not text.strip():
-            return ChatAPIResponse(status_code=400, payload={"error": "text must be a non-empty string"})
+            return ChatAPIResponse(
+                status_code=400, payload={"error": "text must be a non-empty string"}
+            )
 
         session_id = session_id.strip()
         text = text.strip()
@@ -189,14 +201,18 @@ class LocalChatAPI:
 
     def _think_spending(self, *, method: str) -> ChatAPIResponse:
         if method.upper() != "GET":
-            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]})
+            return ChatAPIResponse(
+                status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]}
+            )
         if self._observe is None:
             return ChatAPIResponse(status_code=503, payload={"error": "observe stream unavailable"})
         try:
             spending = self._observe.spending_today()
             cost_per_agent = self._observe.cost_per_agent_today()
         except Exception as exc:
-            return ChatAPIResponse(status_code=500, payload={"error": f"spending query failed: {exc}"})
+            return ChatAPIResponse(
+                status_code=500, payload={"error": f"spending query failed: {exc}"}
+            )
         return ChatAPIResponse(
             status_code=200,
             payload={"spending_today": spending, "cost_per_agent_today": cost_per_agent},
@@ -204,7 +220,9 @@ class LocalChatAPI:
 
     def _think_recent(self, *, method: str, path: str) -> ChatAPIResponse:
         if method.upper() != "GET":
-            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]})
+            return ChatAPIResponse(
+                status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]}
+            )
         if self._observe is None:
             return ChatAPIResponse(status_code=503, payload={"error": "observe stream unavailable"})
         limit = self._query_param_as_int(path, "limit", default=50)
@@ -212,7 +230,9 @@ class LocalChatAPI:
         try:
             events = self._observe.recent_events(limit=limit, event_type=event_type)
         except Exception as exc:
-            return ChatAPIResponse(status_code=500, payload={"error": f"recent_events failed: {exc}"})
+            return ChatAPIResponse(
+                status_code=500, payload={"error": f"recent_events failed: {exc}"}
+            )
         return ChatAPIResponse(
             status_code=200,
             payload={"events": events, "filter_type": event_type, "limit": limit},
@@ -220,24 +240,34 @@ class LocalChatAPI:
 
     def _think_circuit(self, *, method: str) -> ChatAPIResponse:
         if method.upper() != "GET":
-            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]})
+            return ChatAPIResponse(
+                status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]}
+            )
         if self._observation_window is None:
-            return ChatAPIResponse(status_code=503, payload={"error": "observation_window unavailable"})
+            return ChatAPIResponse(
+                status_code=503, payload={"error": "observation_window unavailable"}
+            )
         try:
             payload = self._observation_window.status_payload()
         except Exception as exc:
-            return ChatAPIResponse(status_code=500, payload={"error": f"status_payload failed: {exc}"})
+            return ChatAPIResponse(
+                status_code=500, payload={"error": f"status_payload failed: {exc}"}
+            )
         return ChatAPIResponse(status_code=200, payload=payload)
 
     def _think_projects(self, *, method: str) -> ChatAPIResponse:
         if method.upper() != "GET":
-            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]})
+            return ChatAPIResponse(
+                status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]}
+            )
         if self._task_board is None:
             return ChatAPIResponse(status_code=503, payload={"error": "task_board unavailable"})
         try:
             projects = self._task_board.list_projects()
         except Exception as exc:
-            return ChatAPIResponse(status_code=500, payload={"error": f"list_projects failed: {exc}"})
+            return ChatAPIResponse(
+                status_code=500, payload={"error": f"list_projects failed: {exc}"}
+            )
         rows = []
         for project in projects:
             project_dict = project.to_dict() if hasattr(project, "to_dict") else dict(vars(project))
@@ -262,7 +292,9 @@ class LocalChatAPI:
 
     def _dispatch_traces(self, *, method: str, path: str) -> ChatAPIResponse:
         if method.upper() != "GET":
-            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]})
+            return ChatAPIResponse(
+                status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]}
+            )
         if self._observe is None:
             return ChatAPIResponse(status_code=503, payload={"error": "observe stream unavailable"})
         limit = self._query_param_as_int(path, "limit", default=10)
@@ -292,14 +324,18 @@ class LocalChatAPI:
 
     def _dispatch_trace_replay(self, *, method: str, trace_id: str) -> ChatAPIResponse:
         if method.upper() != "GET":
-            return ChatAPIResponse(status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]})
+            return ChatAPIResponse(
+                status_code=405, payload={"error": "method not allowed", "allowed": ["GET"]}
+            )
         if not trace_id:
             return ChatAPIResponse(status_code=400, payload={"error": "trace_id must be provided"})
         if self._observe is None:
             return ChatAPIResponse(status_code=503, payload={"error": "observe stream unavailable"})
         events = self._observe.trace_events(trace_id)
         if not events:
-            return ChatAPIResponse(status_code=404, payload={"error": f"trace not found: {trace_id}"})
+            return ChatAPIResponse(
+                status_code=404, payload={"error": f"trace not found: {trace_id}"}
+            )
         replay = [
             {
                 "timestamp": event["timestamp"],
@@ -329,7 +365,11 @@ class LocalChatAPI:
         except (TypeError, ValueError):
             content_length = 0
         body_stream = environ.get("wsgi.input")
-        body = body_stream.read(content_length) if body_stream is not None and content_length > 0 else b""
+        body = (
+            body_stream.read(content_length)
+            if body_stream is not None and content_length > 0
+            else b""
+        )
         status_code, response_headers, response_body = self.handle_http(
             method=method,
             path=path,

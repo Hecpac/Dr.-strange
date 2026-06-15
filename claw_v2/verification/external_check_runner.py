@@ -12,6 +12,7 @@ real HeyGen / Telegram / OpenAI fetchers is F3b.2+. Tests register fixture
 providers via `register_external_observation_provider()` and
 `register_preflight_provider()` for the duration of a test.
 """
+
 from __future__ import annotations
 
 from typing import Any, Callable, Mapping

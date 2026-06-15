@@ -99,9 +99,14 @@ INTERNAL_TOOL_TRACE_FALLBACK = (
 )
 
 _INTERNAL_TOOL_TRACE_PATTERNS = (
-    re.compile(r"(?<!\w)to=(?:functions|multi_tool_use|web|image_gen|tool_search)\.", re.IGNORECASE),
+    re.compile(
+        r"(?<!\w)to=(?:functions|multi_tool_use|web|image_gen|tool_search)\.", re.IGNORECASE
+    ),
     re.compile(r"(?<!\w)to=[A-Z][A-Za-z0-9_]*(?=\s|[\{\(\[]|$)"),
-    re.compile(r'"recipient_name"\s*:\s*"(?:functions|multi_tool_use|web|image_gen|tool_search)\.', re.IGNORECASE),
+    re.compile(
+        r'"recipient_name"\s*:\s*"(?:functions|multi_tool_use|web|image_gen|tool_search)\.',
+        re.IGNORECASE,
+    ),
     re.compile(r'"tool_uses"\s*:\s*\[', re.IGNORECASE),
 )
 _INTERNAL_PROMPT_ECHO_PATTERNS = (
@@ -114,7 +119,9 @@ _INTERNAL_PROMPT_ECHO_PATTERNS = (
     re.compile(r"\bNo user-visible text is valid outside <response> tags\b", re.IGNORECASE),
     re.compile(r"(?m)^\s*(?:user|assistant|system)\s*:\s*\S", re.IGNORECASE),
     re.compile(r"^\s*#+\s*Critical\s+instructions?\b", re.IGNORECASE),
-    re.compile(r"^\s*#+\s*(?:Instructions?|Rules|Directives|Guardrails)\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(
+        r"^\s*#+\s*(?:Instructions?|Rules|Directives|Guardrails)\s*$", re.IGNORECASE | re.MULTILINE
+    ),
     re.compile(r"\bDo NOT identify as Claude\b", re.IGNORECASE),
     re.compile(r"\byou are Dr\.?\s*Strange\b(?=[\s\S]{0,200}\bDo NOT\b)", re.IGNORECASE),
 )
@@ -162,20 +169,61 @@ def _request_looks_actionable(text: str) -> bool:
     if len(normalized) < 8:
         return False
     if normalized in {
-        "estatus", "status", "modo brujula", "procede", "ok", "si", "sí",
-        "hola", "hello", "buenas",
+        "estatus",
+        "status",
+        "modo brujula",
+        "procede",
+        "ok",
+        "si",
+        "sí",
+        "hola",
+        "hello",
+        "buenas",
     }:
         return False
     action_markers = (
-        "arregla", "corrige", "completa", "haz ", "hacer ", "manda ",
-        "sube", "subelo", "reinicia", "corre ", "ejecuta",
-        "revisa", "lee ", "crea ", "crea un", "crea una",
-        "fix ", "fixes", "implementa", "implementar",
-        "agrega", "monta", "instala", "deploy",
-        "parchea", "parcha", "finaliza", "termina", "termínalo",
-        "continúa", "continua", "sigue ", "sigue con", "dale ",
-        "aplica", "borra", "elimina", "envía", "envia",
-        "cierra ", "cierra el", "cierra la",
+        "arregla",
+        "corrige",
+        "completa",
+        "haz ",
+        "hacer ",
+        "manda ",
+        "sube",
+        "subelo",
+        "reinicia",
+        "corre ",
+        "ejecuta",
+        "revisa",
+        "lee ",
+        "crea ",
+        "crea un",
+        "crea una",
+        "fix ",
+        "fixes",
+        "implementa",
+        "implementar",
+        "agrega",
+        "monta",
+        "instala",
+        "deploy",
+        "parchea",
+        "parcha",
+        "finaliza",
+        "termina",
+        "termínalo",
+        "continúa",
+        "continua",
+        "sigue ",
+        "sigue con",
+        "dale ",
+        "aplica",
+        "borra",
+        "elimina",
+        "envía",
+        "envia",
+        "cierra ",
+        "cierra el",
+        "cierra la",
     )
     return any(marker in normalized for marker in action_markers)
 
@@ -204,13 +252,14 @@ def _format_recovery_message_body(reason: str, summary: str, job_id: int) -> str
     return (
         f"El turno falló porque {cause}. "
         f"Dejé tu pedido en cola de recovery (job #{job_id}) para retomarlo "
-        f"cuando el contexto se limpie: \"{short}\"."
+        f'cuando el contexto se limpie: "{short}".'
     )
 
 
 def _format_recovery_response(reason: str, summary: str, job_id: int) -> str:
     """Recovery message wrapped in <response> tags for the brain pipeline."""
     return f"<response>{_format_recovery_message_body(reason, summary, job_id)}</response>"
+
 
 SELF_HEALING_LOOP_CONTRACT = """# Self-healing loop
 When a tool returns an error:
@@ -340,7 +389,9 @@ class BrainService:
     wiki: object | None = None  # WikiService, injected after init
     # Factory(session_id) -> plain closure for LLMRequest.delegation_handler;
     # injected after init by BotService (same pattern as `wiki`).
-    delegation_handler_factory: Callable[[str], Callable[[dict[str, Any]], dict[str, Any]]] | None = None
+    delegation_handler_factory: (
+        Callable[[str], Callable[[dict[str, Any]], dict[str, Any]]] | None
+    ) = None
     playbooks: PlaybookLoader = None  # type: ignore[assignment]
 
     _last_confidence: OrderedDict = field(default_factory=OrderedDict)  # session_id → float
@@ -466,7 +517,9 @@ class BrainService:
     ) -> LLMResponse:
         stored_user_message = memory_text or _summarize_user_prompt(message)
         trace = new_trace_context(artifact_id=session_id)
-        model_override = model_overrides_from_state(self.memory.get_session_state(session_id)).get("brain")
+        model_override = model_overrides_from_state(self.memory.get_session_state(session_id)).get(
+            "brain"
+        )
         session_provider = model_override.provider if model_override else "anthropic"
         provider_session_id = self.memory.get_provider_session(session_id, session_provider)
         provider_cursor = self.memory.get_provider_session_cursor(session_id, session_provider)
@@ -694,7 +747,9 @@ class BrainService:
                 )
             else:
                 # Session may be corrupted/too large — retry with a fresh session.
-                logger.warning("Session resume failed for %s, retrying with fresh session", session_id)
+                logger.warning(
+                    "Session resume failed for %s, retrying with fresh session", session_id
+                )
                 if self.observe is not None:
                     self.observe.emit(
                         "session_resume_failed",
@@ -870,12 +925,16 @@ class BrainService:
                     logger.debug("Schema validation issues (non-fatal): %s", errors)
                 if not store_history:
                     messages_per_attempt = 2  # user prompt + assistant response
-                    self.memory.delete_last_messages(session_id, count=messages_per_attempt * (attempt + 1))
+                    self.memory.delete_last_messages(
+                        session_id, count=messages_per_attempt * (attempt + 1)
+                    )
                 return parsed
 
         if not store_history:
             messages_per_attempt = 2
-            self.memory.delete_last_messages(session_id, count=messages_per_attempt * (1 + max_retries))
+            self.memory.delete_last_messages(
+                session_id, count=messages_per_attempt * (1 + max_retries)
+            )
 
         return {"raw": last_content}
 
@@ -892,10 +951,16 @@ class BrainService:
     ) -> UserPrompt:
         lessons = ""
         if self.learning:
-            lessons, sparsity = self.learning.retrieve_lessons(stored_user_message, task_type=task_type)
+            lessons, sparsity = self.learning.retrieve_lessons(
+                stored_user_message, task_type=task_type
+            )
             if lessons and self.observe is not None:
                 first_tag_end = lessons.find("</learned_lesson>")
-                preview = lessons[:first_tag_end + len("</learned_lesson>")] if first_tag_end >= 0 else lessons[:400]
+                preview = (
+                    lessons[: first_tag_end + len("</learned_lesson>")]
+                    if first_tag_end >= 0
+                    else lessons[:400]
+                )
                 self.observe.emit(
                     "experience_replay_retrieved",
                     payload={
@@ -1047,7 +1112,8 @@ class BrainService:
         latest = self.checkpoint.latest()
         autonomy_mode = (
             self.memory.get_session_state(session_id).get("autonomy_mode", "assisted")
-            if session_id else "assisted"
+            if session_id
+            else "assisted"
         )
         if latest is None:
             if self.observe is not None:
@@ -1122,7 +1188,11 @@ class BrainService:
         if not recent:
             return ""
         lines = [f"{row['role']}: {row['content']}" for row in recent]
-        return "# Recent context (includes messages outside this session)\n" + "\n".join(lines) + "\n\n"
+        return (
+            "# Recent context (includes messages outside this session)\n"
+            + "\n".join(lines)
+            + "\n\n"
+        )
 
     def _autonomy_contract(self, session_id: str, *, task_type: str | None) -> str:
         if task_type != "telegram_message":
@@ -1160,7 +1230,9 @@ class BrainService:
             ]
         )
         if autonomy_mode == "autonomous":
-            lines.append("Batch multiple safe intermediate steps before yielding back to the user when that materially advances the task.")
+            lines.append(
+                "Batch multiple safe intermediate steps before yielding back to the user when that materially advances the task."
+            )
         return "\n".join(lines)
 
     def verify_critical_action(
@@ -1216,9 +1288,7 @@ class BrainService:
                     # PR #96 review (gemini): a raising speculative vote must
                     # not fail the whole verification — with it discarded, the
                     # corrected serial path below takes over.
-                    logger.warning(
-                        "speculative secondary verifier vote failed", exc_info=True
-                    )
+                    logger.warning("speculative secondary verifier vote failed", exc_info=True)
         primary_actual_provider = votes[0].get("provider") or primary_provider
         secondary_provider = self._secondary_verifier_provider(str(primary_actual_provider))
         if secondary_provider is not None:
@@ -1252,7 +1322,9 @@ class BrainService:
                     f"verifier only saw a rendering bounded to {ADVISORY_EVIDENCE_PACK_MAX_CHARS} chars"
                 ),
             ]
-        response = next((vote.get("response") for vote in votes if vote.get("response") is not None), None)
+        response = next(
+            (vote.get("response") for vote in votes if vote.get("response") is not None), None
+        )
 
         requires_human_approval = (
             parsed["recommendation"] != "approve"
@@ -1327,7 +1399,9 @@ class BrainService:
             consensus_status=parsed["consensus_status"],
         )
 
-    def _collect_verifier_vote(self, *, evidence: dict, provider: str, model: str, role: str) -> dict:
+    def _collect_verifier_vote(
+        self, *, evidence: dict, provider: str, model: str, role: str
+    ) -> dict:
         try:
             response = self.router.ask(
                 VERIFIER_PROMPT,
@@ -1426,7 +1500,11 @@ class BrainService:
                 approval_status=approval_status,
             )
 
-        if autonomy_mode == "autonomous" and verification.should_proceed and verification.risk_level in {"low", "medium"}:
+        if (
+            autonomy_mode == "autonomous"
+            and verification.should_proceed
+            and verification.risk_level in {"low", "medium"}
+        ):
             ckpt_id = self._maybe_pre_snapshot(action=action)
             result = executor()
             self._emit_execution_event(
@@ -1598,7 +1676,10 @@ class BrainService:
         error_snippet = verification.summary if mapped_status == "failed" else None
         resolved_session_id = session_id or "brain.critical_action"
         if session_id is None:
-            logger.info("_emit_execution_event: no session_id supplied, using fallback '%s'", resolved_session_id)
+            logger.info(
+                "_emit_execution_event: no session_id supplied, using fallback '%s'",
+                resolved_session_id,
+            )
         self._emit_verification_outcome(
             session_id=resolved_session_id,
             task_type=task_type,
@@ -1627,7 +1708,9 @@ def _format_verifier_evidence(*, plan: str, diff: str, test_output: str) -> dict
 def _parse_verifier_payload(content: str) -> dict:
     parsed = _try_parse_json_object(content)
     if parsed is None:
-        first_line = content.strip().splitlines()[0] if content.strip() else "Verifier returned no content."
+        first_line = (
+            content.strip().splitlines()[0] if content.strip() else "Verifier returned no content."
+        )
         summary = f"Verifier returned invalid JSON: {first_line[:200]}"
         return {
             "recommendation": "needs_approval",
@@ -1647,7 +1730,9 @@ def _parse_verifier_payload(content: str) -> dict:
     summary = str(parsed.get("summary") or "").strip() or "Verifier returned no summary."
     confidence = _clamp_confidence(parsed.get("confidence"))
 
-    if recommendation == "approve" and (blockers or missing_checks or risk_level in {"high", "critical"}):
+    if recommendation == "approve" and (
+        blockers or missing_checks or risk_level in {"high", "critical"}
+    ):
         recommendation = "needs_approval"
 
     return {
@@ -1726,8 +1811,14 @@ def _extract_visible_brain_response(response: LLMResponse) -> LLMResponse:
 
 
 def _split_trace_response(content: str) -> tuple[str, str | None]:
-    trace_matches = re.findall(r"<(?:trace|thinking)>\s*(.*?)\s*</(?:trace|thinking)>", content, flags=re.IGNORECASE | re.DOTALL)
-    response_matches = re.findall(r"<response>\s*(.*?)\s*</response>", content, flags=re.IGNORECASE | re.DOTALL)
+    trace_matches = re.findall(
+        r"<(?:trace|thinking)>\s*(.*?)\s*</(?:trace|thinking)>",
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    response_matches = re.findall(
+        r"<response>\s*(.*?)\s*</response>", content, flags=re.IGNORECASE | re.DOTALL
+    )
     trace = "\n\n".join(item.strip() for item in trace_matches if item.strip())
     if response_matches:
         visible_blocks = [item.strip() for item in response_matches if item.strip()]
@@ -1832,7 +1923,11 @@ def _aggregate_verifier_votes(votes: list[dict]) -> dict:
     missing_checks = _merge_vote_lists(all_votes, "missing_checks")
     reasons = _merge_vote_lists(all_votes, "reasons")
     if not reasons:
-        reasons = [str(vote.get("summary", "")).strip() for vote in all_votes if str(vote.get("summary", "")).strip()]
+        reasons = [
+            str(vote.get("summary", "")).strip()
+            for vote in all_votes
+            if str(vote.get("summary", "")).strip()
+        ]
     has_error = any(bool(vote.get("error")) for vote in all_votes)
     recommendations = {vote.get("recommendation") for vote in clean_votes}
     risk_levels = [str(vote.get("risk_level", "medium")) for vote in all_votes]
@@ -1898,7 +1993,11 @@ def _aggregate_verifier_votes(votes: list[dict]) -> dict:
             "consensus_status": "single_verifier_approve",
         }
     consensus_status = "verifier_error" if has_error else "disagreement"
-    summary_parts = [str(vote.get("summary", "")).strip() for vote in all_votes if str(vote.get("summary", "")).strip()]
+    summary_parts = [
+        str(vote.get("summary", "")).strip()
+        for vote in all_votes
+        if str(vote.get("summary", "")).strip()
+    ]
     summary = "Verifier consensus requires human review."
     if summary_parts:
         summary = f"{summary} " + " | ".join(summary_parts[:2])
@@ -1993,6 +2092,7 @@ def _try_parse_json_object(content: str) -> dict | None:
 
 def _first_json_object(content: str) -> str | None:
     import json as _json
+
     start = content.find("{")
     if start == -1:
         return None
@@ -2104,7 +2204,12 @@ def _clamp_confidence(value: object) -> float:
 
 
 def _strip_trace_tags(content: str) -> str:
-    content = re.sub(r"<(?:trace|thinking)>.*?</(?:trace|thinking)>\s*", "", content, flags=re.DOTALL | re.IGNORECASE)
+    content = re.sub(
+        r"<(?:trace|thinking)>.*?</(?:trace|thinking)>\s*",
+        "",
+        content,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
     content = re.sub(r"</?response>\s*", "", content, flags=re.IGNORECASE)
     return content.strip()
 

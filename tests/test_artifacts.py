@@ -36,7 +36,10 @@ class ArtifactTests(unittest.TestCase):
         lifecycle = payload["lifecycle"]
         self.assertEqual(lifecycle["plan"]["objective"], "fix login")
         self.assertEqual(lifecycle["execution"]["provider"], "codex")
-        self.assertEqual(lifecycle["plan"]["planned_phases"], ["research", "synthesis", "implementation", "verification"])
+        self.assertEqual(
+            lifecycle["plan"]["planned_phases"],
+            ["research", "synthesis", "implementation", "verification"],
+        )
         self.assertEqual([event["kind"] for event in lifecycle["events"]], ["plan", "execution"])
         self.assertEqual(len(lifecycle["artifact_ids"]), 2)
 

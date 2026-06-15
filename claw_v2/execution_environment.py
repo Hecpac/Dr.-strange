@@ -11,6 +11,7 @@ This is the foundation for not letting an environment that cannot execute
 real bash/python pretend it can. The capability router and bot use this to
 emit ``runtime_handoff`` instead of fake "I'll do it" replies.
 """
+
 from __future__ import annotations
 
 import os
@@ -74,18 +75,14 @@ def _python_module_runnable() -> bool:
 
 
 def _browser_cli_present(workspace_root: str | None = None) -> bool:
-    if workspace_root and os.path.exists(
-        os.path.join(workspace_root, "claw_v2", "browser_cli.py")
-    ):
+    if workspace_root and os.path.exists(os.path.join(workspace_root, "claw_v2", "browser_cli.py")):
         return True
     if shutil.which("browser_cli") is not None:
         return True
     return False
 
 
-def detect_execution_environment(
-    *, workspace_root: str | None = None
-) -> ExecutionEnvironment:
+def detect_execution_environment(*, workspace_root: str | None = None) -> ExecutionEnvironment:
     """Detect the active environment using env vars + tool availability.
 
     Order of checks:

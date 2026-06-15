@@ -49,7 +49,9 @@ class AnthropicIntegrationTests(unittest.TestCase):
     def test_tool_input_evidence_redacts_secret_shaped_commands(self) -> None:
         evidence = _tool_input_evidence(
             "Bash",
-            {"command": "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456' https://example.test"},
+            {
+                "command": "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456' https://example.test"
+            },
         )
 
         self.assertNotIn("abcdefghijklmnopqrstuvwxyz123456", evidence["command"])
@@ -67,10 +69,14 @@ class AnthropicIntegrationTests(unittest.TestCase):
         self.assertEqual(evidence["returncode"], 0)
         self.assertEqual(evidence["stdout_chars"], 67)
         self.assertIn("stdout_sha256", evidence)
-        self.assertEqual(evidence["json_markers"], [{"ok": True, "bytes": 123, "message_id": 12715}])
+        self.assertEqual(
+            evidence["json_markers"], [{"ok": True, "bytes": 123, "message_id": 12715}]
+        )
         serialized = str(evidence)
         self.assertNotIn("secret", serialized)
-        self.assertNotIn("stdout", serialized.replace("stdout_chars", "").replace("stdout_sha256", ""))
+        self.assertNotIn(
+            "stdout", serialized.replace("stdout_chars", "").replace("stdout_sha256", "")
+        )
 
     def test_runtime_policy_reason_hides_raw_whitelist_error(self) -> None:
         reason = _safe_runtime_policy_reason(
@@ -104,7 +110,15 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
                     self.model = model
 
             class FakeResultMessage:
-                def __init__(self, *, session_id: str, total_cost_usd: float, usage: dict, result: str, is_error: bool) -> None:
+                def __init__(
+                    self,
+                    *,
+                    session_id: str,
+                    total_cost_usd: float,
+                    usage: dict,
+                    result: str,
+                    is_error: bool,
+                ) -> None:
                     self.session_id = session_id
                     self.total_cost_usd = total_cost_usd
                     self.usage = usage
@@ -190,12 +204,16 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
 
             with patch.dict(environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
                 with patch("claw_v2.adapters.anthropic._load_sdk", return_value=fake_sdk):
-                    with patch("claw_v2.adapters.anthropic._load_sdk_types", return_value=fake_sdk_types):
+                    with patch(
+                        "claw_v2.adapters.anthropic._load_sdk_types", return_value=fake_sdk_types
+                    ):
                         response = await executor._run(request)
 
             self.assertEqual(response.content, "ok")
             self.assertEqual(recorded["options"].kwargs["setting_sources"], [])
-            self.assertEqual(recorded["options"].kwargs["extra_args"], {"disable-slash-commands": None})
+            self.assertEqual(
+                recorded["options"].kwargs["extra_args"], {"disable-slash-commands": None}
+            )
             self.assertEqual(recorded["options"].kwargs["permission_mode"], "bypassPermissions")
             self.assertTrue(callable(recorded["options"].kwargs["stderr"]))
             self.assertEqual(recorded["options"].kwargs["env"], {"ANTHROPIC_API_KEY": ""})
@@ -245,7 +263,9 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
                 options = executor._build_options(fake_sdk, request)
 
-            self.assertEqual(options.kwargs["extra_args"], {"disable-slash-commands": None, "bare": None})
+            self.assertEqual(
+                options.kwargs["extra_args"], {"disable-slash-commands": None, "bare": None}
+            )
             self.assertEqual(options.kwargs["env"]["ANTHROPIC_API_KEY"], "sk-test")
 
     async def test_brain_lane_appends_silence_directive_to_claude_code_preset(self) -> None:
@@ -345,7 +365,9 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
                     return None
 
                 async def receive_response(self):
-                    yield FakeAssistantMessage([SimpleNamespace(text="partial output")], "claude-opus-4-7")
+                    yield FakeAssistantMessage(
+                        [SimpleNamespace(text="partial output")], "claude-opus-4-7"
+                    )
                     yield FakeResultMessage(
                         session_id="sdk-session-error",
                         result="tool runtime exploded",
@@ -382,7 +404,9 @@ class AnthropicExecutorTests(unittest.IsolatedAsyncioTestCase):
 
             with patch.dict(environ, {"ANTHROPIC_API_KEY": "sk-test"}, clear=False):
                 with patch("claw_v2.adapters.anthropic._load_sdk", return_value=fake_sdk):
-                    with patch("claw_v2.adapters.anthropic._load_sdk_types", return_value=fake_sdk_types):
+                    with patch(
+                        "claw_v2.adapters.anthropic._load_sdk_types", return_value=fake_sdk_types
+                    ):
                         with self.assertRaises(AdapterError):
                             await executor._run(request)
 
@@ -598,9 +622,7 @@ class InlineBrowserDriveGuardTests(unittest.TestCase):
                 "import socket\nHOST, PORT = 'localhost', 9250\nWS = 'webSocketDebuggerUrl'\n",
                 encoding="utf-8",
             )
-            reason = _inline_browser_drive_reason(
-                "Bash", {"command": f"/usr/bin/python3 {script}"}
-            )
+            reason = _inline_browser_drive_reason("Bash", {"command": f"/usr/bin/python3 {script}"})
             self.assertIsNotNone(reason)
 
     def test_ignores_benign_and_non_bash(self) -> None:
@@ -609,9 +631,7 @@ class InlineBrowserDriveGuardTests(unittest.TestCase):
             _inline_browser_drive_reason("Bash", {"command": "grep -r TODO claw_v2/"})
         )
         self.assertIsNone(_inline_browser_drive_reason("Bash", {"command": ""}))
-        self.assertIsNone(
-            _inline_browser_drive_reason("Read", {"file_path": "/x/peekaboo.py"})
-        )
+        self.assertIsNone(_inline_browser_drive_reason("Read", {"file_path": "/x/peekaboo.py"}))
 
     def test_missing_script_path_does_not_raise(self) -> None:
         self.assertIsNone(
@@ -633,9 +653,7 @@ class DetachedProcessGuardTests(unittest.TestCase):
             "setsid brew install ffmpeg",
             "python3 long_job.py & disown",
         ):
-            self.assertIsNotNone(
-                _detached_process_reason("Bash", {"command": command}), command
-            )
+            self.assertIsNotNone(_detached_process_reason("Bash", {"command": command}), command)
 
     def test_detects_any_backgrounded_command(self) -> None:
         # Background-based: no long-running marker needed. A bare `python ... &`
@@ -649,9 +667,7 @@ class DetachedProcessGuardTests(unittest.TestCase):
             "rsync -av remote:bigdir . &",
             "ls -la &",
         ):
-            self.assertIsNotNone(
-                _detached_process_reason("Bash", {"command": command}), command
-            )
+            self.assertIsNotNone(_detached_process_reason("Bash", {"command": command}), command)
 
     def test_detects_background_followed_by_more_commands(self) -> None:
         # `&` is itself a shell separator: a command can follow it without a
@@ -664,9 +680,7 @@ class DetachedProcessGuardTests(unittest.TestCase):
             "pip install torch & wait",
             "curl -L -o model.bin https://example.com/model.bin & echo started",
         ):
-            self.assertIsNotNone(
-                _detached_process_reason("Bash", {"command": command}), command
-            )
+            self.assertIsNotNone(_detached_process_reason("Bash", {"command": command}), command)
 
     def test_allows_foreground_commands(self) -> None:
         for command in (
@@ -680,14 +694,10 @@ class DetachedProcessGuardTests(unittest.TestCase):
             "grep -r foo . 2>&1",
             "",
         ):
-            self.assertIsNone(
-                _detached_process_reason("Bash", {"command": command}), command
-            )
+            self.assertIsNone(_detached_process_reason("Bash", {"command": command}), command)
 
     def test_ignores_non_bash(self) -> None:
-        self.assertIsNone(
-            _detached_process_reason("Read", {"file_path": "/x/nohup.out"})
-        )
+        self.assertIsNone(_detached_process_reason("Read", {"file_path": "/x/nohup.out"}))
 
 
 class DetachedProcessHookLaneTests(unittest.IsolatedAsyncioTestCase):
@@ -697,9 +707,7 @@ class DetachedProcessHookLaneTests(unittest.IsolatedAsyncioTestCase):
     def _hook(lane: str):
         request = SimpleNamespace(lane=lane, model="m", evidence_pack=None)
         runtime_policy = SimpleNamespace(enforce=lambda *a, **k: None)
-        return make_pre_tool_use_hook(
-            request, runtime_policy=runtime_policy, observe=None
-        )
+        return make_pre_tool_use_hook(request, runtime_policy=runtime_policy, observe=None)
 
     async def test_brain_lane_denies_detached_launch(self) -> None:
         hook = self._hook("brain")
@@ -711,9 +719,7 @@ class DetachedProcessHookLaneTests(unittest.IsolatedAsyncioTestCase):
             None,
             None,
         )
-        self.assertEqual(
-            result["hookSpecificOutput"]["permissionDecision"], "deny"
-        )
+        self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIn("delegate_task", result["hookSpecificOutput"]["permissionDecisionReason"])
 
     async def test_worker_lane_allows_detached_launch(self) -> None:

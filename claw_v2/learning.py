@@ -1,4 +1,5 @@
 """Learning loop — records outcomes, retrieves lessons, derives insights via LLM."""
+
 from __future__ import annotations
 
 import hashlib
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class SparsityMetrics:
     """Captures retrieval health for OOD detection."""
+
     max_similarity: float = 0.0
     graph_expansion_count: int = 0
     total_relevant_lessons: int = 0
@@ -55,7 +57,10 @@ class LearningLoop:
         """Record a task outcome with embedding. Derives lesson+tags via LLM if not provided."""
         if not lesson:
             lesson, derived_tags = self._derive_outcome_metadata(
-                description, approach, outcome, error_snippet,
+                description,
+                approach,
+                outcome,
+                error_snippet,
             )
             if tags is None:
                 tags = derived_tags
@@ -81,7 +86,11 @@ class LearningLoop:
                 logger.debug("Calibration stats update failed", exc_info=True)
         logger.info(
             "Learning loop recorded outcome #%d (%s/%s) conf=%.2f tags=%s",
-            oid, task_type, outcome, predicted_confidence or 0.0, tags,
+            oid,
+            task_type,
+            outcome,
+            predicted_confidence or 0.0,
+            tags,
         )
         return oid
 
@@ -102,9 +111,15 @@ class LearningLoop:
         action_summary = (action_summary or "").strip()
         if not goal and not action_summary:
             return None
-        mapping = {"ok": "success", "passed": "success", "verified": "success",
-                   "failed": "failure", "error": "failure",
-                   "unknown": "partial", "pending": "partial"}
+        mapping = {
+            "ok": "success",
+            "passed": "success",
+            "verified": "success",
+            "failed": "failure",
+            "error": "failure",
+            "unknown": "partial",
+            "pending": "partial",
+        }
         outcome = mapping.get((verification_status or "").strip().lower(), "partial")
         description = goal or action_summary[:200]
         approach = action_summary or goal[:200]
@@ -136,16 +151,26 @@ class LearningLoop:
         """
         empty_metrics = SparsityMetrics()
         clean = context
-        for marker in ("# Current input\n", "# Profile facts\n", "# Recent messages\n", "# Learning rules\n"):
+        for marker in (
+            "# Current input\n",
+            "# Profile facts\n",
+            "# Recent messages\n",
+            "# Learning rules\n",
+        ):
             if marker in clean:
                 clean = clean.split(marker)[-1]
-        lines = [ln.strip() for ln in clean.strip().splitlines() if ln.strip() and not ln.startswith("#")]
+        lines = [
+            ln.strip() for ln in clean.strip().splitlines() if ln.strip() and not ln.startswith("#")
+        ]
         keywords = " ".join(lines[-1].split()[:40]) if lines else " ".join(context.split()[:40])
 
         outcomes: list[dict] = []
         try:
             outcomes = self.memory.search_outcomes_with_graph(
-                keywords, task_type=task_type, limit=limit, embed_fn=embed_fn,
+                keywords,
+                task_type=task_type,
+                limit=limit,
+                embed_fn=embed_fn,
             )
         except Exception:
             logger.debug("Graph outcome search failed, falling back to semantic", exc_info=True)
@@ -168,10 +193,15 @@ class LearningLoop:
         if not outcomes:
             try:
                 outcomes = self.memory.search_outcomes_semantic(
-                    keywords, task_type=task_type, limit=limit, embed_fn=embed_fn,
+                    keywords,
+                    task_type=task_type,
+                    limit=limit,
+                    embed_fn=embed_fn,
                 )
             except Exception:
-                logger.debug("Semantic outcome search failed, falling back to text search", exc_info=True)
+                logger.debug(
+                    "Semantic outcome search failed, falling back to text search", exc_info=True
+                )
 
         if not outcomes:
             outcomes = self.memory.search_past_outcomes(keywords, task_type=task_type, limit=limit)
@@ -180,7 +210,9 @@ class LearningLoop:
             token_matches: list[dict] = []
             tokens = [token for token in keywords.split() if len(token) >= 4]
             for token in tokens:
-                for match in self.memory.search_past_outcomes(token, task_type=task_type, limit=limit):
+                for match in self.memory.search_past_outcomes(
+                    token, task_type=task_type, limit=limit
+                ):
                     tid = match.get("task_id")
                     if tid in seen_task_ids:
                         continue
@@ -222,7 +254,9 @@ class LearningLoop:
             out_lines.append(f"  <description>{description}</description>")
             out_lines.append(f"  <lesson>{lesson}</lesson>{fb}")
             if o.get("error_snippet"):
-                out_lines.append(f"  <error>{escape(str(o['error_snippet'][:200]), quote=False)}</error>")
+                out_lines.append(
+                    f"  <error>{escape(str(o['error_snippet'][:200]), quote=False)}</error>"
+                )
             out_lines.append("</learned_lesson>")
         return "\n".join(out_lines), sparsity
 
@@ -238,7 +272,9 @@ class LearningLoop:
             return f"Outcome #{oid} not found."
         self.memory.update_outcome_feedback(oid, rating)
         if rating.strip().lower().startswith("negative"):
-            reason = rating.split(":", 1)[1].strip() if ":" in rating else "user rejected this approach"
+            reason = (
+                rating.split(":", 1)[1].strip() if ":" in rating else "user rejected this approach"
+            )
             self.memory.store_fact(
                 f"negative_preference.{oid}",
                 (
@@ -255,7 +291,11 @@ class LearningLoop:
     # --- Derive metadata ---
 
     def _derive_outcome_metadata(
-        self, description: str, approach: str, outcome: str, error_snippet: str | None,
+        self,
+        description: str,
+        approach: str,
+        outcome: str,
+        error_snippet: str | None,
     ) -> tuple[str, list[str]]:
         """Use LLM to derive lesson AND operational tags in a single call.
 
@@ -270,7 +310,11 @@ class LearningLoop:
         return self._derive_lesson_heuristic(outcome, error_snippet), []
 
     def _derive_metadata_llm(
-        self, description: str, approach: str, outcome: str, error_snippet: str | None,
+        self,
+        description: str,
+        approach: str,
+        outcome: str,
+        error_snippet: str | None,
     ) -> tuple[str, list[str]]:
         prompt = (
             "Analyze this task outcome from an AI agent. Return JSON only.\n\n"
@@ -297,8 +341,11 @@ class LearningLoop:
             },
         }
         resp = self.router.ask(  # type: ignore[union-attr]
-            prompt, lane="judge", evidence_pack=evidence_pack,
-            max_budget=0.05, timeout=30.0,
+            prompt,
+            lane="judge",
+            evidence_pack=evidence_pack,
+            max_budget=0.05,
+            timeout=30.0,
         )
         parsed = _parse_json_object(resp.content)
         if not parsed:
@@ -405,7 +452,11 @@ class LearningLoop:
         if not proposal or not proposal.get("suggestions"):
             return None
 
-        proposal["evidence_counts"] = {"signals": len(signals), "outcomes": len(outcomes), "events": len(events)}
+        proposal["evidence_counts"] = {
+            "signals": len(signals),
+            "outcomes": len(outcomes),
+            "events": len(events),
+        }
         value = json.dumps(proposal, ensure_ascii=True, sort_keys=True)
         # P0-F: dedup by content hash so identical proposals consolidate
         # instead of accumulating one fact per run.
@@ -466,14 +517,25 @@ class LearningLoop:
         """
         soul_path = Path(soul_path)
         if not soul_path.exists():
-            return {"applied": False, "event_id": None, "backup_path": None, "reason": f"soul_not_found:{soul_path}"}
+            return {
+                "applied": False,
+                "event_id": None,
+                "backup_path": None,
+                "reason": f"soul_not_found:{soul_path}",
+            }
 
         suggestions = [
-            s for s in proposal.get("suggestions") or []
+            s
+            for s in proposal.get("suggestions") or []
             if _priority_at_least(str(s.get("priority", "")), min_priority)
         ]
         if not suggestions:
-            return {"applied": False, "event_id": None, "backup_path": None, "reason": "no_suggestions_at_priority"}
+            return {
+                "applied": False,
+                "event_id": None,
+                "backup_path": None,
+                "reason": "no_suggestions_at_priority",
+            }
 
         before_text = soul_path.read_text(encoding="utf-8")
         before_hash = _short_hash(before_text)
@@ -502,9 +564,16 @@ class LearningLoop:
                             "proposal_summary": summary[:300],
                         },
                     )
-                return {"applied": False, "event_id": None, "backup_path": None, "reason": "gate_denied"}
+                return {
+                    "applied": False,
+                    "event_id": None,
+                    "backup_path": None,
+                    "reason": "gate_denied",
+                }
 
-        backup_dir_path = Path(backup_dir) if backup_dir is not None else soul_path.parent / ".soul_backups"
+        backup_dir_path = (
+            Path(backup_dir) if backup_dir is not None else soul_path.parent / ".soul_backups"
+        )
         backup_dir_path.mkdir(parents=True, exist_ok=True)
         backup_path = backup_dir_path / f"{event_id}.SOUL.md"
         backup_path.write_text(before_text, encoding="utf-8")
@@ -522,8 +591,7 @@ class LearningLoop:
                     "before_hash": before_hash,
                     "after_hash": after_hash,
                     "suggestions_applied": [
-                        str(s.get("section") or s.get("change") or "")[:80]
-                        for s in suggestions
+                        str(s.get("section") or s.get("change") or "")[:80] for s in suggestions
                     ],
                     "proposal_summary": summary[:300],
                 },
@@ -554,7 +622,8 @@ class LearningLoop:
         """
         outcomes = self.memory.iter_recent_outcomes(limit=outcome_limit)
         failures = [
-            outcome for outcome in outcomes
+            outcome
+            for outcome in outcomes
             if str(outcome.get("outcome") or "").lower() in {"failure", "partial"}
         ]
         by_tag: dict[str, list[dict]] = {}
@@ -587,8 +656,7 @@ class LearningLoop:
         results: list[dict[str, Any]] = []
         for tag, outcomes in clusters.items():
             sample_descriptions = [
-                str(outcome.get("description") or "")[:120]
-                for outcome in outcomes[:5]
+                str(outcome.get("description") or "")[:120] for outcome in outcomes[:5]
             ]
             task_description = (
                 f"Create a self-contained skill that handles failure pattern "
@@ -609,7 +677,9 @@ class LearningLoop:
                     task_description=task_description, tags=[tag]
                 )
             except Exception as exc:  # noqa: BLE001 — generation failures must not crash the loop
-                results.append({"tag": tag, "applied": False, "reason": f"generation_error:{exc!s}"[:200]})
+                results.append(
+                    {"tag": tag, "applied": False, "reason": f"generation_error:{exc!s}"[:200]}
+                )
                 continue
             if skill_result.get("success"):
                 if self.observe is not None:
@@ -721,7 +791,9 @@ _PRIORITY_RANK: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "critical": 
 
 
 def _priority_at_least(have: str, want: str) -> bool:
-    return _PRIORITY_RANK.get(have.strip().lower(), -1) >= _PRIORITY_RANK.get(want.strip().lower(), 99)
+    return _PRIORITY_RANK.get(have.strip().lower(), -1) >= _PRIORITY_RANK.get(
+        want.strip().lower(), 99
+    )
 
 
 def _short_hash(text: str) -> str:
@@ -813,14 +885,33 @@ def _sanitize_payload(payload: Any, *, depth: int = 0) -> Any:
 
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
-    return any(token in lowered for token in ("token", "secret", "password", "api_key", "authorization", "credential"))
+    return any(
+        token in lowered
+        for token in ("token", "secret", "password", "api_key", "authorization", "credential")
+    )
 
 
-_TAG_GENERIC_STOPWORDS = frozenset({
-    "error", "failure", "success", "task", "agent", "problem",
-    "bug", "fix", "issue", "code", "python", "general", "other",
-    "unknown", "misc", "thing", "stuff",
-})
+_TAG_GENERIC_STOPWORDS = frozenset(
+    {
+        "error",
+        "failure",
+        "success",
+        "task",
+        "agent",
+        "problem",
+        "bug",
+        "fix",
+        "issue",
+        "code",
+        "python",
+        "general",
+        "other",
+        "unknown",
+        "misc",
+        "thing",
+        "stuff",
+    }
+)
 _TAG_MIN_LEN = 3
 _TAG_MAX_LEN = 40
 
@@ -895,7 +986,9 @@ def _normalize_soul_update_proposal(parsed: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(do_not_change, list):
         do_not_change = [str(do_not_change)]
     return {
-        "summary": str(parsed.get("summary") or "Soul update suggestions derived from recent signals.")[:500],
+        "summary": str(
+            parsed.get("summary") or "Soul update suggestions derived from recent signals."
+        )[:500],
         "suggestions": suggestions[:8],
         "do_not_change": [str(item)[:240] for item in do_not_change[:5]],
     }
@@ -909,7 +1002,11 @@ def _heuristic_soul_update_proposal(
     suggestions: list[dict[str, Any]] = []
     negative = [o for o in outcomes if str(o.get("feedback") or "").lower().startswith("negative")]
     failures = [o for o in outcomes if o.get("outcome") == "failure"]
-    suppressed = [e for e in events if e.get("event_type") in {"kairos_notify_suppressed", "soul_update_suggestion"}]
+    suppressed = [
+        e
+        for e in events
+        if e.get("event_type") in {"kairos_notify_suppressed", "soul_update_suggestion"}
+    ]
 
     if negative:
         suggestions.append(
@@ -928,7 +1025,11 @@ def _heuristic_soul_update_proposal(
                 "change": "After repeated failures, switch strategy and summarize evidence before asking for help.",
                 "reason": "Recent failed outcomes indicate the agent benefits from an explicit strategy-switch checkpoint.",
                 "priority": "medium",
-                "evidence": [str(failures[0].get("lesson") or failures[0].get("error_snippet") or "failure")[:240]],
+                "evidence": [
+                    str(failures[0].get("lesson") or failures[0].get("error_snippet") or "failure")[
+                        :240
+                    ]
+                ],
             }
         )
     if suppressed:
@@ -964,7 +1065,9 @@ def _heuristic_soul_update_proposal(
 
 
 def _proposal_confidence(proposal: dict[str, Any]) -> float:
-    priorities = [item.get("priority") for item in proposal.get("suggestions", []) if isinstance(item, dict)]
+    priorities = [
+        item.get("priority") for item in proposal.get("suggestions", []) if isinstance(item, dict)
+    ]
     if "high" in priorities:
         return 0.8
     if "medium" in priorities:

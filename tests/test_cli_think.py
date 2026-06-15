@@ -118,7 +118,16 @@ class EndToEndTailTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.db"
             stream = ObserveStream(db_path)
-            stream.emit("dispatch_decision", payload={"session_id": "sess-x", "handler": "shortcut", "route": "intercepted", "reason": "matched", "text_preview": "go"})
+            stream.emit(
+                "dispatch_decision",
+                payload={
+                    "session_id": "sess-x",
+                    "handler": "shortcut",
+                    "route": "intercepted",
+                    "reason": "matched",
+                    "text_preview": "go",
+                },
+            )
             stream.emit("llm_response", payload={"session_id": "sess-x", "cost_estimate": 0.01})
 
             buf = io.StringIO()

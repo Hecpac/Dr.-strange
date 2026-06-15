@@ -74,7 +74,9 @@ class TestBrainContentReferencesEvidence:
         assert _brain_content_references_evidence("enviado a Telegram msg_id 10891")
 
     def test_db_reference(self) -> None:
-        assert _brain_content_references_evidence("grant persisted in data/claw.db tabla capability_grants")
+        assert _brain_content_references_evidence(
+            "grant persisted in data/claw.db tabla capability_grants"
+        )
 
     def test_plain_completion_claim_does_not_match(self) -> None:
         assert not _brain_content_references_evidence("Listo, lo hice")

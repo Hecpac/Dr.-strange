@@ -11,6 +11,7 @@ Telegram Bot API 50MB cap is transcoded to a 96k mp3 first (NotebookLM
 audio overviews are ~38MB for 10-15min, so this rarely fires, but a long
 overview can exceed the limit).
 """
+
 from __future__ import annotations
 
 import json
@@ -200,20 +201,22 @@ class NotebookLMDeliveryService:
 
         if not file_path.exists():
             return FileDeliveryResult(
-                ok=False, file_path=str(file_path), method=method,
+                ok=False,
+                file_path=str(file_path),
+                method=method,
                 error="file_not_found",
             )
 
         env = _load_env()
         token = env.get("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
         target_chat = (
-            chat_id
-            or env.get("TELEGRAM_ALLOWED_USER_ID")
-            or os.getenv("TELEGRAM_ALLOWED_USER_ID")
+            chat_id or env.get("TELEGRAM_ALLOWED_USER_ID") or os.getenv("TELEGRAM_ALLOWED_USER_ID")
         )
         if not token or not target_chat:
             return FileDeliveryResult(
-                ok=False, file_path=str(file_path), method=method,
+                ok=False,
+                file_path=str(file_path),
+                method=method,
                 error="missing_token_or_chat_id",
             )
 
@@ -230,7 +233,9 @@ class NotebookLMDeliveryService:
         body, boundary = self._multipart_body(fields, file_field, send_path)
         url = f"https://api.telegram.org/bot{token}/{method}"
         req = urllib.request.Request(
-            url, data=body, method="POST",
+            url,
+            data=body,
+            method="POST",
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
 
@@ -242,12 +247,16 @@ class NotebookLMDeliveryService:
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             return FileDeliveryResult(
-                ok=False, file_path=str(send_path), method=method,
+                ok=False,
+                file_path=str(send_path),
+                method=method,
                 error=_redact(f"http_{e.code}: {e.read().decode('utf-8', 'replace')}"),
             )
         except Exception as e:
             return FileDeliveryResult(
-                ok=False, file_path=str(send_path), method=method,
+                ok=False,
+                file_path=str(send_path),
+                method=method,
                 error=_redact(f"{type(e).__name__}: {e}"),
             )
 

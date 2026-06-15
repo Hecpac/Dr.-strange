@@ -113,11 +113,16 @@ async def _transcribe_local(audio_path: Path) -> str:
     out_dir = tempfile.mkdtemp(prefix="claw-whisper-")
     try:
         proc = await asyncio.create_subprocess_exec(
-            whisper_bin, str(audio_path),
-            "--model", "base",
-            "--language", "es",
-            "--output_format", "txt",
-            "--output_dir", out_dir,
+            whisper_bin,
+            str(audio_path),
+            "--model",
+            "base",
+            "--language",
+            "es",
+            "--output_format",
+            "txt",
+            "--output_dir",
+            out_dir,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -157,8 +162,14 @@ async def extract_audio(video_path: Path) -> Path:
     """Extract audio from video file to OGG using ffmpeg. Caller cleans up."""
     out = video_path.with_suffix(".ogg")
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y", "-i", str(video_path),
-        "-vn", "-acodec", "libopus", str(out),
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_path),
+        "-vn",
+        "-acodec",
+        "libopus",
+        str(out),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -253,23 +264,31 @@ async def _synthesize_realtime(
     headers = [("Authorization", f"Bearer {api_key}"), ("OpenAI-Beta", "realtime=v1")]
     chunks: list[bytes] = []
     async with websockets.connect(url, additional_headers=headers, max_size=20_000_000) as ws:
-        await ws.send(json.dumps({
-            "type": "session.update",
-            "session": {
-                "modalities": ["text", "audio"],
-                "voice": voice,
-                "output_audio_format": "pcm16",
-                "instructions": REALTIME_INSTRUCTIONS,
-            },
-        }))
-        await ws.send(json.dumps({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": text}],
-            },
-        }))
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "modalities": ["text", "audio"],
+                        "voice": voice,
+                        "output_audio_format": "pcm16",
+                        "instructions": REALTIME_INSTRUCTIONS,
+                    },
+                }
+            )
+        )
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": text}],
+                    },
+                }
+            )
+        )
         await ws.send(json.dumps({"type": "response.create"}))
         while True:
             evt = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
@@ -279,7 +298,9 @@ async def _synthesize_realtime(
             elif etype == "response.done":
                 break
             elif etype == "error":
-                raise RuntimeError(f"realtime error: {evt.get('error', {}).get('message', 'unknown')}")
+                raise RuntimeError(
+                    f"realtime error: {evt.get('error', {}).get('message', 'unknown')}"
+                )
     if not chunks:
         raise RuntimeError("realtime returned no audio")
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -296,8 +317,15 @@ async def _wav_to_ogg(wav_path: Path) -> Path:
     """Convert WAV PCM16 to OGG Opus for Telegram voice notes."""
     ogg_path = wav_path.with_suffix(".ogg")
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y", "-i", str(wav_path),
-        "-acodec", "libopus", "-b:a", "48k", str(ogg_path),
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(wav_path),
+        "-acodec",
+        "libopus",
+        "-b:a",
+        "48k",
+        str(ogg_path),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -347,8 +375,15 @@ async def _mp3_to_ogg(mp3_path: Path) -> Path:
     """Convert MP3 to OGG Opus for Telegram voice notes."""
     ogg_path = mp3_path.with_suffix(".ogg")
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y", "-i", str(mp3_path),
-        "-acodec", "libopus", "-b:a", "48k", str(ogg_path),
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(mp3_path),
+        "-acodec",
+        "libopus",
+        "-b:a",
+        "48k",
+        str(ogg_path),
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -418,7 +453,9 @@ async def synthesize_voice_note(
                         except Exception:
                             logger.debug("observe callback raised in voice", exc_info=True)
                 else:
-                    logger.warning("Realtime TTS failed, falling back to batch chain", exc_info=True)
+                    logger.warning(
+                        "Realtime TTS failed, falling back to batch chain", exc_info=True
+                    )
 
     if wav_path is not None:
         try:

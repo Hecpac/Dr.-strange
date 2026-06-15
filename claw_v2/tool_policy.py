@@ -177,14 +177,16 @@ def _load_tool_policies_from_config(path: Path) -> dict[str, ToolPolicy]:
 TOOL_POLICIES: dict[str, ToolPolicy] = _load_tool_policies_from_config(_config_path())
 
 
-DAEMON_AUTO_APPROVE: frozenset[str] = frozenset({
-    "memory.read",
-    "wiki.search",
-    "task_ledger.read",
-    "git.status",
-    "observe.recent_events_redacted",
-    "file.read_workspace_nonsecret",
-})
+DAEMON_AUTO_APPROVE: frozenset[str] = frozenset(
+    {
+        "memory.read",
+        "wiki.search",
+        "task_ledger.read",
+        "git.status",
+        "observe.recent_events_redacted",
+        "file.read_workspace_nonsecret",
+    }
+)
 
 
 def policy_for(name: str) -> ToolPolicy:
@@ -240,7 +242,9 @@ def _decode_path_text(path: str | Path) -> str:
     return value
 
 
-def validate_workspace_path(path: str | Path, *, workspace_root: str | Path, allow_secret: bool = False) -> Path:
+def validate_workspace_path(
+    path: str | Path, *, workspace_root: str | Path, allow_secret: bool = False
+) -> Path:
     candidate = Path(_decode_path_text(path))
     root = Path(workspace_root).resolve()
     resolved = (root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()

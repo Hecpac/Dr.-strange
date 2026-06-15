@@ -16,6 +16,7 @@ context window, no extra API cost, no token explosion in tests.
 Auto-engagement (auto-follow, auto-DM, auto-comment) is intentionally NOT
 implemented. Meta detects automation and shadowbans new accounts.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,9 +27,21 @@ from typing import Any
 
 
 PLATFORM_LIMITS: dict[str, dict[str, int]] = {
-    "instagram_feed": {"caption_max": 2200, "visible_before_more": 125, "hashtag_max_recommended": 5},
-    "instagram_reel": {"caption_max": 2200, "visible_before_more": 125, "hashtag_max_recommended": 3},
-    "instagram_story": {"caption_max": 100, "visible_before_more": 100, "hashtag_max_recommended": 0},
+    "instagram_feed": {
+        "caption_max": 2200,
+        "visible_before_more": 125,
+        "hashtag_max_recommended": 5,
+    },
+    "instagram_reel": {
+        "caption_max": 2200,
+        "visible_before_more": 125,
+        "hashtag_max_recommended": 3,
+    },
+    "instagram_story": {
+        "caption_max": 100,
+        "visible_before_more": 100,
+        "hashtag_max_recommended": 0,
+    },
     "linkedin": {"caption_max": 3000, "visible_before_more": 210, "hashtag_max_recommended": 3},
     "x": {"caption_max": 280, "visible_before_more": 280, "hashtag_max_recommended": 2},
     "threads": {"caption_max": 500, "visible_before_more": 500, "hashtag_max_recommended": 2},
@@ -238,7 +251,17 @@ def _detect_hook_patterns(captions: list[str]) -> list[str]:
             out.append(f"question: {first_line[:80]}")
         elif any(c.isdigit() for c in first_line[:30]):
             out.append(f"specific_number: {first_line[:80]}")
-        elif any(w in lower for w in ("ayer", "yesterday", "esta mañana", "this morning", "el otro día", "the other day")):
+        elif any(
+            w in lower
+            for w in (
+                "ayer",
+                "yesterday",
+                "esta mañana",
+                "this morning",
+                "el otro día",
+                "the other day",
+            )
+        ):
             out.append(f"concrete_story: {first_line[:80]}")
         else:
             out.append(f"other: {first_line[:80]}")
@@ -343,7 +366,9 @@ print(json.dumps(out, ensure_ascii=False))
         result = subprocess.run(
             [".venv/bin/python", str(script_path)],
             cwd="/Users/hector/Projects/Dr.-strange",
-            capture_output=True, text=True, timeout=180,
+            capture_output=True,
+            text=True,
+            timeout=180,
         )
         payload = json.loads(result.stdout.strip().splitlines()[-1])
     except Exception as exc:

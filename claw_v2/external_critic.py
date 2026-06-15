@@ -27,7 +27,9 @@ class ExternalCriticConfig:
 
     def validate_spawner(self, requester: str) -> None:
         if requester not in self.allowed_spawners:
-            raise PermissionError(f"requester '{requester}' is not allowed to spawn external critic")
+            raise PermissionError(
+                f"requester '{requester}' is not allowed to spawn external critic"
+            )
 
 
 def build_external_critic_payload(
@@ -39,7 +41,11 @@ def build_external_critic_payload(
     gdi_snapshot: GDISnapshot | None = None,
     recall_results: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    action = proposed_next_action if isinstance(proposed_next_action, ProposedAction) else ProposedAction.from_dict(proposed_next_action)
+    action = (
+        proposed_next_action
+        if isinstance(proposed_next_action, ProposedAction)
+        else ProposedAction.from_dict(proposed_next_action)
+    )
     payload = {
         "schema_version": EXTERNAL_CRITIC_REQUEST_SCHEMA_VERSION,
         "goal_contract": goal_contract.to_dict(),
@@ -88,4 +94,3 @@ def _safe_recall_result(result: dict[str, Any]) -> dict[str, Any]:
         "quality_gate": result.get("quality_gate", {}),
         "recorded_at": result.get("recorded_at"),
     }
-

@@ -88,7 +88,8 @@ class SchemaShapeTests(unittest.TestCase):
             section = COORDINATOR_RESULT_SCHEMA["properties"][key]
             inner = section.get("items") or section
             self.assertEqual(
-                inner.get("additionalProperties", False), False,
+                inner.get("additionalProperties", False),
+                False,
                 msg=key,
             )
 
@@ -122,7 +123,9 @@ class SemanticsTests(unittest.TestCase):
         payload = {
             "status": "executed",
             "task_kind": "coding_patch",
-            "actions_taken": [{"agent": "hex", "action": "patch", "tool": "none", "result": "claimed"}],
+            "actions_taken": [
+                {"agent": "hex", "action": "patch", "tool": "none", "result": "claimed"}
+            ],
             "evidence": [],
             "changed_files": [],
             "verification": {"status": "passed", "checks": []},
@@ -219,7 +222,11 @@ class CheckpointIntegrationTests(unittest.TestCase):
                     ),
                 ],
                 "verification": [
-                    WorkerResult(task_name="verify_findings", content="Verification Status: passed", duration_seconds=0.1),
+                    WorkerResult(
+                        task_name="verify_findings",
+                        content="Verification Status: passed",
+                        duration_seconds=0.1,
+                    ),
                 ],
             },
             synthesis="Findings synthesized",
@@ -241,10 +248,16 @@ class CheckpointIntegrationTests(unittest.TestCase):
             task_id="task-y",
             phase_results={
                 "implementation": [
-                    WorkerResult(task_name="apply_patch", content="patched files: a.py", duration_seconds=0.1),
+                    WorkerResult(
+                        task_name="apply_patch", content="patched files: a.py", duration_seconds=0.1
+                    ),
                 ],
                 "verification": [
-                    WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1),
+                    WorkerResult(
+                        task_name="verify_change",
+                        content="Verification Status: passed",
+                        duration_seconds=0.1,
+                    ),
                 ],
             },
             synthesis="Done",

@@ -103,9 +103,7 @@ def build_delegation_mcp_server(sdk: Any, request: LLMRequest) -> Any:
             return _error("delegate_task error: delegation returned no acknowledgement")
         return {"content": [{"type": "text", "text": ack}]}
 
-    return sdk.create_sdk_mcp_server(
-        name="claw", version="1.0.0", tools=[delegate_task]
-    )
+    return sdk.create_sdk_mcp_server(name="claw", version="1.0.0", tools=[delegate_task])
 
 
 def build_agents(sdk: Any, request: LLMRequest) -> dict[str, Any] | None:
@@ -161,12 +159,8 @@ def build_options(
         # Identity-override block first so the Dr. Strange persona wins over
         # the Claude Code preset's default "I am Claude" identity. Composed in
         # claw_v2.identity (D3) — single origin, golden-tested byte a byte.
-        system_prompt["append"] = build_sdk_system_prompt_append(
-            effective_system_prompt
-        )
-        permission_mode = (
-            "bypassPermissions" if config.sdk_bypass_permissions else "default"
-        )
+        system_prompt["append"] = build_sdk_system_prompt_append(effective_system_prompt)
+        permission_mode = "bypassPermissions" if config.sdk_bypass_permissions else "default"
 
     sdk_agents = build_agents(sdk, request)
     sdk_env: dict[str, str] = {}
@@ -213,7 +207,5 @@ def build_options(
         }
         options_kwargs["max_thinking_tokens"] = int(request.thinking_tokens)
     if request.lane == "brain" and request.delegation_handler is not None:
-        options_kwargs["mcp_servers"] = {
-            "claw": build_delegation_mcp_server(sdk, request)
-        }
+        options_kwargs["mcp_servers"] = {"claw": build_delegation_mcp_server(sdk, request)}
     return sdk.ClaudeAgentOptions(**options_kwargs)

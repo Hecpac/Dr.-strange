@@ -4,6 +4,7 @@ Covers the failure mode that killed the 2026-05-24 22:50 turn:
 provider rejects the conversation because of an unprocessable image,
 retry reuses the same image and fails again with internal_trace_repeated.
 """
+
 from __future__ import annotations
 
 import tempfile

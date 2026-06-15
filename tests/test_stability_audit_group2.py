@@ -7,6 +7,7 @@
 3. Per-request timeouts are actually enforced by the Anthropic and OpenAI
    adapters instead of only being validated.
 """
+
 from __future__ import annotations
 
 import asyncio

@@ -125,7 +125,9 @@ class ActionEventTests(unittest.TestCase):
         recovered = recover_orphan_actions(self.root)
 
         self.assertEqual(recovered, 0)
-        self.assertNotIn("interrupted_by_restart", (self.root / "events.jsonl").read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "interrupted_by_restart", (self.root / "events.jsonl").read_text(encoding="utf-8")
+        )
 
     def test_invalid_event_type_fails(self) -> None:
         with self.assertRaisesRegex(ValueError, "event_type"):

@@ -4,7 +4,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from claw_v2.adapters.base import AdapterError, AdapterUnavailableError, LLMRequest, build_effective_input
+from claw_v2.adapters.base import (
+    AdapterError,
+    AdapterUnavailableError,
+    LLMRequest,
+    build_effective_input,
+)
 from claw_v2.adapters.google import GoogleAdapter
 from claw_v2.adapters.ollama import OllamaAdapter
 from claw_v2.adapters.openai import OpenAIAdapter
@@ -32,7 +37,7 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
     def test_build_effective_input_embeds_evidence_pack_for_advisory_lanes(self) -> None:
         rendered = build_effective_input(make_request())
         self.assertIn("# Evidence Pack", rendered)
-        self.assertIn("\"diff\": \"print('x')\"", rendered)
+        self.assertIn('"diff": "print(\'x\')"', rendered)
         self.assertIn("# Task", rendered)
 
     def test_build_effective_input_truncates_large_evidence_pack(self) -> None:
@@ -41,8 +46,8 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
 
         rendered = build_effective_input(request)
 
-        self.assertIn("\"__truncated__\": true", rendered)
-        self.assertIn("\"small\": \"keep\"", rendered)
+        self.assertIn('"__truncated__": true', rendered)
+        self.assertIn('"small": "keep"', rendered)
         self.assertLess(len(rendered), 13_000)
 
     def test_openai_adapter_uses_responses_api(self) -> None:
@@ -106,11 +111,17 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
             tool_executor=lambda _name, _args: {"ok": True},
             tool_schemas=[
                 {"type": "function", "name": "shell.run", "parameters": {"type": "object"}},
-                {"type": "function", "name": "observe.recent_events_redacted", "parameters": {"type": "object"}},
+                {
+                    "type": "function",
+                    "name": "observe.recent_events_redacted",
+                    "parameters": {"type": "object"},
+                },
             ],
         )
 
-        with patch("claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)):
+        with patch(
+            "claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)
+        ):
             response = adapter.complete(request)
 
         self.assertEqual(response.content, "checked local logs")
@@ -118,7 +129,11 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
             recorded["request_kwargs"]["tools"],
             [
                 {"type": "function", "name": "shell.run", "parameters": {"type": "object"}},
-                {"type": "function", "name": "observe.recent_events_redacted", "parameters": {"type": "object"}},
+                {
+                    "type": "function",
+                    "name": "observe.recent_events_redacted",
+                    "parameters": {"type": "object"},
+                },
             ],
         )
 
@@ -140,10 +155,14 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
         adapter = OpenAIAdapter(
             api_key="sk-test",
             tool_executor=lambda _name, _args: {"ok": True},
-            tool_schemas=[{"type": "function", "name": "shell.run", "parameters": {"type": "object"}}],
+            tool_schemas=[
+                {"type": "function", "name": "shell.run", "parameters": {"type": "object"}}
+            ],
         )
 
-        with patch("claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)):
+        with patch(
+            "claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)
+        ):
             adapter.complete(make_request())
 
         self.assertNotIn("tools", recorded["request_kwargs"])
@@ -166,7 +185,9 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
         request = make_request()
         request.session_id = "bb1e321e-claude-session"
         adapter = OpenAIAdapter(api_key="sk-test")
-        with patch("claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)):
+        with patch(
+            "claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)
+        ):
             adapter.complete(request)
         self.assertNotIn("previous_response_id", recorded["request_kwargs"])
 
@@ -193,7 +214,10 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
 
         adapter = OpenAIAdapter(api_key="sk-test")
         with (
-            patch("claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)),
+            patch(
+                "claw_v2.adapters.openai.import_module",
+                return_value=SimpleNamespace(OpenAI=FakeClient),
+            ),
             patch("claw_v2.adapters.openai.time.sleep") as sleep,
         ):
             response = adapter.complete(make_request())
@@ -221,7 +245,10 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
 
         adapter = OpenAIAdapter(api_key="sk-test")
         with (
-            patch("claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)),
+            patch(
+                "claw_v2.adapters.openai.import_module",
+                return_value=SimpleNamespace(OpenAI=FakeClient),
+            ),
             patch("claw_v2.adapters.openai.time.sleep"),
             self.assertRaisesRegex(AdapterError, "rate_limited after 3 attempts"),
         ):
@@ -265,7 +292,9 @@ class SecondaryProviderAdapterTests(unittest.TestCase):
             }
         ]
         adapter = OpenAIAdapter(api_key="sk-test")
-        with patch("claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)):
+        with patch(
+            "claw_v2.adapters.openai.import_module", return_value=SimpleNamespace(OpenAI=FakeClient)
+        ):
             adapter.complete(request)
         request_input = recorded["request_kwargs"]["input"]
         self.assertEqual(request_input[0]["type"], "message")

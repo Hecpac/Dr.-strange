@@ -12,6 +12,7 @@ Also pins the wiring into task_handler.py by importing the integration
 target and asserting the gate function is reachable from that module.
 NO live calls. NO real X / LinkedIn / HeyGen / deploy / GitHub external.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -123,7 +124,7 @@ def test_tier2_local_blocked_when_state_delta_missing_observation():
         raw_verification_status="passed",
         completed_checkpoint=checkpoint,
     )
-    assert outcome.terminal_status == ""           # NOT succeeded
+    assert outcome.terminal_status == ""  # NOT succeeded
     assert outcome.verification_status == "pending_verification"
     assert outcome.degraded is True
 
@@ -175,7 +176,9 @@ def _tier3_preflight() -> PreflightSpec:
     )
 
 
-def _tier3_artifact(*, tool_result, external_observation, evidence_uri, preflight_passed, include_preflight=True):
+def _tier3_artifact(
+    *, tool_result, external_observation, evidence_uri, preflight_passed, include_preflight=True
+):
     sc = _tier3_condition()
     pf = _tier3_preflight()
     return {
@@ -243,7 +246,7 @@ def test_tier3_blocked_when_evidence_missing():
         "success_condition_artifact": _tier3_artifact(
             tool_result={"ok": True, "posted_id": "id1"},
             external_observation={"body_text": "hello world"},
-            evidence_uri=None,                    # missing
+            evidence_uri=None,  # missing
             preflight_passed=True,
         ),
     }
@@ -262,7 +265,7 @@ def test_tier3_pending_verification_when_external_observation_missing():
         "verification_status": "passed",
         "success_condition_artifact": _tier3_artifact(
             tool_result={"ok": True, "posted_id": "id1"},
-            external_observation=None,            # not pre-fetched yet
+            external_observation=None,  # not pre-fetched yet
             evidence_uri="artifacts/test/evidence.png",
             preflight_passed=True,
         ),
@@ -377,6 +380,7 @@ def test_task_handler_wires_promote_gate():
     import inspect
 
     from claw_v2 import task_handler
+
     src = inspect.getsource(task_handler)
     assert "apply_promote_gate_to_checkpoint" in src
     # Ensure the legacy fail-open try/except shim is gone.

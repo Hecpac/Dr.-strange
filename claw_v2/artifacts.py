@@ -89,7 +89,12 @@ def new_artifact_id(kind: str) -> str:
 
 def append_lifecycle_artifacts(
     artifacts: dict[str, Any] | None,
-    *items: PlanArtifact | ExecutionArtifact | VerificationArtifact | OutcomeArtifact | JobArtifact | dict[str, Any],
+    *items: PlanArtifact
+    | ExecutionArtifact
+    | VerificationArtifact
+    | OutcomeArtifact
+    | JobArtifact
+    | dict[str, Any],
 ) -> dict[str, Any]:
     payload = dict(artifacts or {})
     lifecycle = dict(payload.get("lifecycle") or {})

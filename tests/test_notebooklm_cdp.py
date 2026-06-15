@@ -79,7 +79,9 @@ def test_detect_completed_when_source_count_present() -> None:
 
 
 def test_detect_ready_to_import_when_finalizo_marker_present() -> None:
-    page = _FakePage(body_text="Iniciemos tu cuaderno\nDeep Research finalizó la búsqueda\nImportar")
+    page = _FakePage(
+        body_text="Iniciemos tu cuaderno\nDeep Research finalizó la búsqueda\nImportar"
+    )
     assert detect_deep_research_state(page) == DR_STATE_READY_TO_IMPORT
 
 
@@ -114,4 +116,3 @@ def test_detect_submittable_on_empty_notebook_welcome() -> None:
 def test_detect_unknown_when_no_markers_match() -> None:
     page = _FakePage(body_text="(some unrelated chrome text)")
     assert detect_deep_research_state(page) == DR_STATE_UNKNOWN
-

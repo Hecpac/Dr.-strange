@@ -24,7 +24,9 @@ class _StubBotService:
         return f"reply:{user_id}:{session_id}:{text}"
 
 
-def _http_status(port: int, path: str, *, method: str = "GET", headers: dict[str, str] | None = None) -> int:
+def _http_status(
+    port: int, path: str, *, method: str = "GET", headers: dict[str, str] | None = None
+) -> int:
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     try:
         conn.request(method, path, headers=headers or {})
@@ -176,7 +178,9 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
             await transport.start()
             try:
                 self.assertEqual(_http_status(transport.port, "/observability/state"), 401)
-                self.assertEqual(_http_status(transport.port, "/observability/freeze", method="POST"), 401)
+                self.assertEqual(
+                    _http_status(transport.port, "/observability/freeze", method="POST"), 401
+                )
                 self.assertFalse(window.frozen)
                 self.assertEqual(
                     _http_status(
@@ -199,7 +203,13 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
                 def __init__(self) -> None:
                     self.allowed_user_id = "123"
                     self.observe = ObserveStream(Path(tmpdir) / "observe.db")
-                    self.observe.emit("llm_response", lane="brain", provider="anthropic", model="claude", trace_id="trace-1")
+                    self.observe.emit(
+                        "llm_response",
+                        lane="brain",
+                        provider="anthropic",
+                        model="claude",
+                        trace_id="trace-1",
+                    )
 
             transport = WebTransport(
                 chat_api=LocalChatAPI(bot_service=_ObservedStubBotService()),

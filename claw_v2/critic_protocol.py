@@ -127,7 +127,9 @@ def evaluate_critic_decision(
 
     if goal.allowed_actions and action.tool not in set(goal.allowed_actions):
         factors.append("tool_not_in_allowed_actions")
-        required_fix.append("Use an action listed in the Goal Contract or update the contract first.")
+        required_fix.append(
+            "Use an action listed in the Goal Contract or update the contract first."
+        )
 
     if action.tier == "tier_2_5":
         tier_fix = _tier_25_required_fix(action)
@@ -222,12 +224,17 @@ def _coerce_action(value: ProposedAction | dict[str, Any]) -> ProposedAction:
 def _evidence_gaps(claims: list[Claim]) -> list[str]:
     gaps: list[str] = []
     for claim in claims:
-        if claim.claim_type in {"fact", "decision", "risk_signal"} and claim.verification_status != "verified":
+        if (
+            claim.claim_type in {"fact", "decision", "risk_signal"}
+            and claim.verification_status != "verified"
+        ):
             gaps.append(f"{claim.claim_id}:{claim.verification_status}")
     return gaps
 
 
-def _goal_alignment(goal: GoalContract, action: ProposedAction, gdi_snapshot: GDISnapshot | None) -> float:
+def _goal_alignment(
+    goal: GoalContract, action: ProposedAction, gdi_snapshot: GDISnapshot | None
+) -> float:
     alignment = 1.0
     if action.tool in set(goal.disallowed_actions):
         alignment = 0.0
@@ -286,4 +293,3 @@ def _decision(
         evidence_gaps=evidence_gaps,
         decided_at=now_iso(),
     )
-

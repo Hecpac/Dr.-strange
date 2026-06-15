@@ -55,9 +55,7 @@ class CronSchedulerTests(unittest.TestCase):
         def handler() -> None:
             called["count"] += 1
 
-        scheduler.register(
-            ScheduledJob(name="legacy", interval_seconds=60, handler=handler)
-        )
+        scheduler.register(ScheduledJob(name="legacy", interval_seconds=60, handler=handler))
         scheduler.run_due(now=1000.0)
         self.assertEqual(called["count"], 1)
         scheduler.run_due(now=1030.0)  # within interval
@@ -117,9 +115,7 @@ class CronSchedulerTests(unittest.TestCase):
 class DefaultsTests(unittest.TestCase):
     def test_ai_news_daily_uses_morning_schedule_not_plain_86400(self) -> None:
         defaults = _default_scheduled_sub_agents()
-        ai_news = next(
-            (job for job in defaults if job.skill == "ai-news-daily"), None
-        )
+        ai_news = next((job for job in defaults if job.skill == "ai-news-daily"), None)
         self.assertIsNotNone(ai_news)
         self.assertEqual(ai_news.daily_at, "08:00")
         self.assertEqual(ai_news.timezone, "America/Chicago")
@@ -162,11 +158,7 @@ class ConfigValidationTests(unittest.TestCase):
         from claw_v2.config import AppConfig
 
         cfg = AppConfig.from_env()
-        cfg.scheduled_sub_agents = [
-            ScheduledSubAgentConfig(
-                agent="x", skill="y", lane="worker"
-            )
-        ]
+        cfg.scheduled_sub_agents = [ScheduledSubAgentConfig(agent="x", skill="y", lane="worker")]
         with self.assertRaises(ValueError) as ctx:
             cfg.validate()
         self.assertIn("must declare interval_seconds or daily_at", str(ctx.exception))

@@ -23,7 +23,9 @@ class AgentWorkspaceTests(unittest.TestCase):
 
             self.assertIn("SOUL.md", result.existing_files)
             self.assertNotIn("SOUL.md", result.created_files)
-            self.assertEqual((root / "SOUL.md").read_text(encoding="utf-8"), "# Custom Soul\n\nHuman edited.")
+            self.assertEqual(
+                (root / "SOUL.md").read_text(encoding="utf-8"), "# Custom Soul\n\nHuman edited."
+            )
             for name in AgentWorkspace.REQUIRED_FILES:
                 self.assertTrue((root / name).exists(), name)
             self.assertTrue((root / "memory").is_dir())
@@ -41,7 +43,9 @@ class AgentWorkspaceTests(unittest.TestCase):
             root = Path(tmpdir)
             workspace = AgentWorkspace(root)
             workspace.ensure()
-            (root / "MEMORY.md").write_text("# MEMORY.md\n\nPrefers concise updates.", encoding="utf-8")
+            (root / "MEMORY.md").write_text(
+                "# MEMORY.md\n\nPrefers concise updates.", encoding="utf-8"
+            )
 
             context = workspace.stable_context()
 
@@ -77,7 +81,9 @@ class AgentWorkspaceTests(unittest.TestCase):
             )
             (root / "SOUL.md").write_text("Dr. Strange persona principal.", encoding="utf-8")
             (root / "USER.md").write_text("Hector Pachano\nPachano Design", encoding="utf-8")
-            (root / "MEMORY.md").write_text("# MEMORY.md\n\nmemoria persistente\n", encoding="utf-8")
+            (root / "MEMORY.md").write_text(
+                "# MEMORY.md\n\nmemoria persistente\n", encoding="utf-8"
+            )
             (root / "memory" / "2026-05-04.md").write_text(
                 "# 2026-05-04\n\n- Decision tomada y tarea abierta.\n",
                 encoding="utf-8",
@@ -153,7 +159,12 @@ class AgentWorkspaceTests(unittest.TestCase):
             self.assertIn("boot_protocol_loaded=false", context)
             self.assertFalse(report.boot_protocol_loaded)
             self.assertIn("BOOT_PROTOCOL.md", report.missing_files)
-            self.assertTrue(any(source.name == "BOOT_PROTOCOL.md" and source.status == "missing" for source in report.attempted_sources))
+            self.assertTrue(
+                any(
+                    source.name == "BOOT_PROTOCOL.md" and source.status == "missing"
+                    for source in report.attempted_sources
+                )
+            )
             self.assertIsNotNone(report.prompt_manifest)
 
     def test_prompt_manifest_shadow_does_not_change_context_text(self) -> None:
@@ -171,7 +182,9 @@ class AgentWorkspaceTests(unittest.TestCase):
             self.assertEqual(report.prompt_manifest.mode, "shadow")
             self.assertEqual(report.prompt_manifest.total_included_chars, len(context))
 
-    def test_prompt_manifest_includes_stable_block_hash_trust_source_priority_and_budget(self) -> None:
+    def test_prompt_manifest_includes_stable_block_hash_trust_source_priority_and_budget(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace = AgentWorkspace(root)
@@ -204,10 +217,15 @@ class AgentWorkspaceTests(unittest.TestCase):
 
             self.assertIn(secret, context)
             self.assertIsNotNone(report.prompt_manifest)
-            memory_block = next(block for block in report.prompt_manifest.blocks if block.source == "MEMORY.md")
+            memory_block = next(
+                block for block in report.prompt_manifest.blocks if block.source == "MEMORY.md"
+            )
             self.assertTrue(memory_block.redacted)
             self.assertEqual(memory_block.actual_chars, memory_block.included_chars)
-            self.assertEqual(report.prompt_manifest.total_included_chars, len(str(redact_sensitive(context, limit=0))))
+            self.assertEqual(
+                report.prompt_manifest.total_included_chars,
+                len(str(redact_sensitive(context, limit=0))),
+            )
             self.assertLess(report.prompt_manifest.total_included_chars, len(context))
             serialized = json.dumps(report.to_dict())
             self.assertNotIn(secret, serialized)
@@ -270,7 +288,10 @@ class AgentWorkspaceTests(unittest.TestCase):
             context, report = workspace.startup_context(memory=memory)
 
             self.assertIn("Prefiere respuestas concisas y directas.", context)
-            self.assertIn("source=direct_user_correction trust=trusted confidence=0.95 freshness=current", context)
+            self.assertIn(
+                "source=direct_user_correction trust=trusted confidence=0.95 freshness=current",
+                context,
+            )
             self.assertNotIn("Tal vez quiere reportes largos.", context)
             self.assertNotIn("Preferencia expirada.", context)
             self.assertNotIn(secret, context)
@@ -365,6 +386,7 @@ def datetime_from_iso(value: str):
     from datetime import datetime
 
     return datetime.fromisoformat(value)
+
 
 class _FakeConfig:
     telegram_bot_token = "configured-token"

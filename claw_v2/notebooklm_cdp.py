@@ -9,6 +9,7 @@ These functions are blocking (CDP work is inherently sequential). Long-running
 flows (Deep Research, podcast generation) are expected to be wrapped in a
 background thread by the caller.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -168,9 +169,7 @@ def _click_create_notebook(page) -> None:
             return
         except Exception as exc:
             last_exc = exc
-    raise CdpNotebookLMError(
-        f"Could not find NotebookLM create button: {last_exc}"
-    )
+    raise CdpNotebookLMError(f"Could not find NotebookLM create button: {last_exc}")
 
 
 def _scan_home_for_new_id(page, before_ids: set[str], *, limit: int = 30) -> str | None:
@@ -190,11 +189,7 @@ def _scan_home_for_new_id(page, before_ids: set[str], *, limit: int = 30) -> str
         except Exception:
             continue
         candidate = _extract_notebook_id(href)
-        if (
-            candidate
-            and candidate not in _TRANSIENT_NOTEBOOK_IDS
-            and candidate not in before_ids
-        ):
+        if candidate and candidate not in _TRANSIENT_NOTEBOOK_IDS and candidate not in before_ids:
             return candidate
     return None
 
@@ -383,7 +378,9 @@ def create_notebook(title: str, *, cdp_url: str = DEFAULT_CDP_URL) -> dict:
         except Exception:
             logger.warning(
                 "Could not rename notebook %s to %r; notebook exists with default title",
-                notebook_id, title, exc_info=True,
+                notebook_id,
+                title,
+                exc_info=True,
             )
 
         return {"id": notebook_id, "title": title}
@@ -518,9 +515,7 @@ def _wait_for_deep_research_completion(page, *, poll_timeout: float) -> None:
         if state in (DR_STATE_READY_TO_IMPORT, DR_STATE_COMPLETED):
             return
         time.sleep(15)
-    raise CdpNotebookLMError(
-        f"Deep Research did not complete within {poll_timeout:.0f}s"
-    )
+    raise CdpNotebookLMError(f"Deep Research did not complete within {poll_timeout:.0f}s")
 
 
 def deep_research(
@@ -624,9 +619,7 @@ def deep_research(
         except CdpNotebookLMError:
             raise
         except Exception as exc:
-            raise CdpNotebookLMError(
-                f"Could not switch to Deep Research mode: {exc}"
-            ) from exc
+            raise CdpNotebookLMError(f"Could not switch to Deep Research mode: {exc}") from exc
 
         # 2. Find the Deep Research query input (NOT the page title at y~12).
         try:
@@ -650,9 +643,7 @@ def deep_research(
 
         # 3. Click Enviar by bounding_box (aria-label collides with the chat box).
         try:
-            send_btn = page.locator(
-                'source-discovery-query-box button[aria-label="Enviar"]'
-            ).first
+            send_btn = page.locator('source-discovery-query-box button[aria-label="Enviar"]').first
             send_btn.wait_for(state="visible", timeout=10_000)
             send_box = send_btn.bounding_box()
             if not send_box:
@@ -792,9 +783,7 @@ def generate_artifact(
             except Exception:
                 return
             time.sleep(15)
-        raise CdpNotebookLMError(
-            f"Artifact '{kind}' did not complete within {poll_timeout:.0f}s"
-        )
+        raise CdpNotebookLMError(f"Artifact '{kind}' did not complete within {poll_timeout:.0f}s")
     finally:
         try:
             browser.close()
@@ -830,8 +819,7 @@ def classify_orchestration_state(body_text: str) -> dict[str, object]:
         )
     )
     blog_ready = bool(
-        "blog post" in normalized
-        or re.search(r"\binforme\b.+?\b(?:listo|ready)\b", normalized)
+        "blog post" in normalized or re.search(r"\binforme\b.+?\b(?:listo|ready)\b", normalized)
     )
     video_ready = bool(
         re.search(r"\b(?:resumen|overview).{0,40}\bvideo\b.+?\b(?:listo|ready)\b", normalized)
@@ -861,12 +849,10 @@ def classify_orchestration_state(body_text: str) -> dict[str, object]:
         ),
         "import_ready": "importar" in normalized,
         "audio_generating": (
-            "generando resumen de audio" in normalized
-            or "regresa en unos minutos" in normalized
+            "generando resumen de audio" in normalized or "regresa en unos minutos" in normalized
         ),
         "blog_generating": (
-            "generando informe" in normalized
-            or "iniciando la generación de informe" in normalized
+            "generando informe" in normalized or "iniciando la generación de informe" in normalized
         ),
         "video_generating": (
             "generando resumen de video" in normalized
@@ -924,10 +910,7 @@ def _click_first_visible(page, selectors: tuple[str, ...], *, timeout: float = 6
 def _write_orchestration_evidence(notebook_id: str, summary: dict[str, object]) -> str:
     _ORCHESTRATION_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     safe_id = re.sub(r"[^A-Za-z0-9_-]+", "", notebook_id)[:12] or "notebook"
-    path = (
-        _ORCHESTRATION_ARTIFACT_DIR
-        / f"notebooklm_orchestrate_{int(time.time())}_{safe_id}.json"
-    )
+    path = _ORCHESTRATION_ARTIFACT_DIR / f"notebooklm_orchestrate_{int(time.time())}_{safe_id}.json"
     payload = {
         "phase": "notebooklm.orchestrate",
         "notebook_id": notebook_id,

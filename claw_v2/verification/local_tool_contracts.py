@@ -21,6 +21,7 @@ This module is pure-function. No I/O, no external calls. The helper
 `build_local_tool_artifact()` produces a JSON-safe dict ready to attach
 to a task checkpoint as `success_condition_artifact`.
 """
+
 from __future__ import annotations
 
 import json
@@ -55,8 +56,8 @@ LOCAL_TOOL_SUCCESS_CONDITIONS: dict[str, SuccessCondition] = {
         must_contain_keys=("path", "changed_bytes"),
         state_delta_check=StateDeltaSpec(
             fs_path="",
-            expected_size_delta_bytes=0,        # Edit can grow OR shrink
-            expected_content_changed=True,      # but content hash MUST change
+            expected_size_delta_bytes=0,  # Edit can grow OR shrink
+            expected_content_changed=True,  # but content hash MUST change
         ),
         forbidden_reasons=("sandbox_block", "outside_workspace", "denied", "old_text_not_found"),
     ),
@@ -159,6 +160,7 @@ def resolve_success_condition(tool_name: str) -> SuccessCondition | None:
         return local
     try:
         from claw_v2.verification.external_tool_contracts import EXTERNAL_TOOL_SUCCESS_CONDITIONS
+
         return EXTERNAL_TOOL_SUCCESS_CONDITIONS.get(tool_name)
     except Exception:
         return None
@@ -183,9 +185,12 @@ def _redacted_args(tool_args: Mapping[str, Any]) -> dict[str, Any]:
     """
     try:
         from claw_v2.verification.external_tool_contracts import EXTERNAL_TOOL_REDACTED_KEYS
+
         dropped = EXTERNAL_TOOL_REDACTED_KEYS
     except Exception:
-        dropped = frozenset({"content", "old_text", "new_text", "image_bytes", "image_b64", "image_data"})
+        dropped = frozenset(
+            {"content", "old_text", "new_text", "image_bytes", "image_b64", "image_data"}
+        )
     credential_like = {"token", "secret", "password", "api_key"}
     out: dict[str, Any] = {}
     for k, v in dict(tool_args).items():
@@ -262,14 +267,22 @@ def _merge_bash_subcontract(base: SuccessCondition, sub: SuccessCondition) -> Su
         forbidden_reasons=tuple(dict.fromkeys((*base.forbidden_reasons, *sub.forbidden_reasons))),
         schema_version=base.schema_version,
         must_equal={**base.must_equal, **sub.must_equal},
-        must_be_empty_keys=tuple(dict.fromkeys((*base.must_be_empty_keys, *sub.must_be_empty_keys))),
-        must_be_existing_path=tuple(dict.fromkeys((*base.must_be_existing_path, *sub.must_be_existing_path))),
-        must_be_nonempty_str=tuple(dict.fromkeys((*base.must_be_nonempty_str, *sub.must_be_nonempty_str))),
+        must_be_empty_keys=tuple(
+            dict.fromkeys((*base.must_be_empty_keys, *sub.must_be_empty_keys))
+        ),
+        must_be_existing_path=tuple(
+            dict.fromkeys((*base.must_be_existing_path, *sub.must_be_existing_path))
+        ),
+        must_be_nonempty_str=tuple(
+            dict.fromkeys((*base.must_be_nonempty_str, *sub.must_be_nonempty_str))
+        ),
         cross_field_equality=tuple({*base.cross_field_equality, *sub.cross_field_equality}),
         cross_field_inequality=tuple({*base.cross_field_inequality, *sub.cross_field_inequality}),
         forbidden_field_values={**base.forbidden_field_values, **sub.forbidden_field_values},
         verify_file_integrity=tuple({*base.verify_file_integrity, *sub.verify_file_integrity}),
-        allowed_path_roots=tuple(dict.fromkeys((*base.allowed_path_roots, *sub.allowed_path_roots))),
+        allowed_path_roots=tuple(
+            dict.fromkeys((*base.allowed_path_roots, *sub.allowed_path_roots))
+        ),
     )
 
 
@@ -316,7 +329,11 @@ def build_local_tool_artifact(
     report_only = bool(tool_args.get("report_only"))
     needs_new_sc = (
         (base.state_delta_check is not None and base.state_delta_check.fs_path == "")
-        or (allow_noop and base.state_delta_check is not None and base.state_delta_check.expected_content_changed)
+        or (
+            allow_noop
+            and base.state_delta_check is not None
+            and base.state_delta_check.expected_content_changed
+        )
         or (report_only and base.must_be_empty_keys)
     )
     # F3a-ext.1 — inject allowed_path_roots from runtime if the contract has
@@ -335,7 +352,9 @@ def build_local_tool_artifact(
                 expected_rows_delta=new_sdc.expected_rows_delta,
                 fs_path=path if new_sdc.fs_path == "" else new_sdc.fs_path,
                 expected_size_delta_bytes=new_sdc.expected_size_delta_bytes,
-                expected_content_changed=(False if allow_noop else new_sdc.expected_content_changed),
+                expected_content_changed=(
+                    False if allow_noop else new_sdc.expected_content_changed
+                ),
             )
         sc = SuccessCondition(
             must_contain_keys=base.must_contain_keys,
@@ -365,12 +384,17 @@ def build_local_tool_artifact(
             EXTERNAL_TOOL_PREFLIGHTS,
             EXTERNAL_TOOL_SUCCESS_CONDITIONS,
         )
+
         is_external = tool_name in EXTERNAL_TOOL_SUCCESS_CONDITIONS
     except Exception:
         EXTERNAL_TOOL_PREFLIGHTS = {}
     preflight_spec = None
     if is_external:
-        spec = EXTERNAL_TOOL_PREFLIGHTS.get(tool_name) if isinstance(EXTERNAL_TOOL_PREFLIGHTS, dict) else None
+        spec = (
+            EXTERNAL_TOOL_PREFLIGHTS.get(tool_name)
+            if isinstance(EXTERNAL_TOOL_PREFLIGHTS, dict)
+            else None
+        )
         if spec is not None:
             preflight_spec = {
                 "probe_kind": spec.probe_kind,
@@ -386,7 +410,9 @@ def build_local_tool_artifact(
         "tool_result": dict(tool_result),
         "tool_args_redacted": _redacted_args(tool_args),
         "external_observation": dict(external_observation) if external_observation else None,
-        "state_delta_observation": dict(state_delta_observation) if state_delta_observation else None,
+        "state_delta_observation": dict(state_delta_observation)
+        if state_delta_observation
+        else None,
         "evidence_uri": evidence_uri,
         "preflight": preflight_spec,
         "preflight_passed": bool(preflight_passed) if preflight_passed is not None else False,

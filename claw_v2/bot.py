@@ -65,7 +65,10 @@ from claw_v2.model_registry import (
 from claw_v2.pipeline import PipelineService
 from claw_v2.social import SocialPublisher
 from claw_v2.bot_helpers import *  # noqa: F403
-from claw_v2.bot_helpers import _is_secret_shaped_token, verify_brain_tooluse  # explicit: private helper + B1 verifier seam
+from claw_v2.bot_helpers import (
+    _is_secret_shaped_token,
+    verify_brain_tooluse,
+)  # explicit: private helper + B1 verifier seam
 from claw_v2.turn_context import current_turn_id, turn_id_context
 from claw_v2.turn_receipt import emit_turn_receipt
 
@@ -100,7 +103,10 @@ _CHATGPT_OPEN_TOKENS = (
 )
 _BACKGROUND_MONITOR_PROMISE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bwatcher\b", re.IGNORECASE),
-    re.compile(r"\b(?:en|in)\s+background\b|\bbackground\s+(?:task|job|watcher|process|worker)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:en|in)\s+background\b|\bbackground\s+(?:task|job|watcher|process|worker)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bdispatch\s+durable\b", re.IGNORECASE),
     re.compile(r"\bsobreviv[ae]\s+(?:a\s+)?interrupciones?\b", re.IGNORECASE),
     re.compile(r"\bmonitore(?:ar|o|ando|aré|are|e|é)\b", re.IGNORECASE),
@@ -109,7 +115,10 @@ _BACKGROUND_MONITOR_PROMISE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsin\s+intervenci[oó]n\s+tuya\b", re.IGNORECASE),
     re.compile(r"\bno\s+necesit[aá]s\s+hacer\s+nada\b", re.IGNORECASE),
     re.compile(r"\bpolling\b|\bpoll(?:ea|ear|ando|ando)\b", re.IGNORECASE),
-    re.compile(r"\bcuando\s+.+?\btermine\b.+?\b(?:descarg|extra|notific|avis|renombr|entreg|mand|envi|devuelv|report)", re.IGNORECASE | re.DOTALL),
+    re.compile(
+        r"\bcuando\s+.+?\btermine\b.+?\b(?:descarg|extra|notific|avis|renombr|entreg|mand|envi|devuelv|report)",
+        re.IGNORECASE | re.DOTALL,
+    ),
 )
 _DURABLE_DISPATCH_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bdispatch\s+durable\b", re.IGNORECASE),
@@ -117,7 +126,9 @@ _DURABLE_DISPATCH_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bno\s+es\s+una\s+promesa\s+de\s+background\b", re.IGNORECASE),
 )
 _BRAIN_TOOLUSE_VERIFIED_ACTION_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b(?:publica(?:lo|la|los|las)?|publicaste|publish|posted|postear?)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:publica(?:lo|la|los|las)?|publicaste|publish|posted|postear?)\b", re.IGNORECASE
+    ),
     re.compile(r"\bpudiste\b", re.IGNORECASE),
     re.compile(r"\b(?:lee|leer|read)\s+(?:los?\s+)?(?:docs?|documentos?)\b", re.IGNORECASE),
     re.compile(r"\babre\s+(?:instagram|x|twitter|linkedin|chrome)\b", re.IGNORECASE),
@@ -195,9 +206,7 @@ _CAPABILITY_SURFACE_TERMS = (
 
 
 _PRE_HOOK_BLOCK_PREFIX = "Request blocked by pre-hook"
-_PRE_HOOK_BLOCK_RE = re.compile(
-    r"^Request blocked by pre-hook \(([^)]+)\)\. Reason: (.+)$"
-)
+_PRE_HOOK_BLOCK_RE = re.compile(r"^Request blocked by pre-hook \(([^)]+)\)\. Reason: (.+)$")
 
 
 def _looks_like_chatgpt_browser_request(normalized: str) -> bool:
@@ -241,10 +250,14 @@ _CAPABILITY_DENIAL_SENTENCE_SPLIT = re.compile(r"[.!?\n]+")
 _CAPABILITY_DENIAL_MAX_LEN = 600
 _IDENTITY_DRIFT_SENTENCE_SPLIT = re.compile(r"[.!?\n]+")
 _IDENTITY_DRIFT_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bsoy\s+(?:claude|claude code|codex|chatgpt|un modelo|una ia|un asistente de ia)\b"),
+    re.compile(
+        r"\bsoy\s+(?:claude|claude code|codex|chatgpt|un modelo|una ia|un asistente de ia)\b"
+    ),
     re.compile(r"\bmi identidad\s+es\s+(?:claude|claude code|codex|chatgpt|un modelo|una ia)\b"),
     re.compile(r"\bcomo\s+(?:claude|claude code|codex|chatgpt|modelo|ia)\b"),
-    re.compile(r"\bestoy\s+(?:corriendo|ejecutandome|en)\s+(?:claude code|codex cli|el cli|la cli)\b"),
+    re.compile(
+        r"\bestoy\s+(?:corriendo|ejecutandome|en)\s+(?:claude code|codex cli|el cli|la cli)\b"
+    ),
     re.compile(r"\bthis\s+(?:claude code|codex|chatgpt)\s+(?:session|instance)\b"),
     re.compile(r"\bi\s*(?:am|'m)\s+(?:claude|claude code|codex|chatgpt|an ai language model)\b"),
     re.compile(r"\bas\s+(?:claude|claude code|codex|chatgpt|an ai language model)\b"),
@@ -274,7 +287,9 @@ _MANUAL_HANDOFF_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:te toca|hazlo tu|hazlo t[uú]|lo haces tu|lo haces t[uú])\b"),
     re.compile(r"\b(?:desde aqui|desde aqu[ií])\s+no\s+puedo\b"),
     re.compile(r"\bno\s+(?:se\s+lo\s+)?(?:pegue|pegu[eé]|pude pegar|puedo pegar)\s+yo\b"),
-    re.compile(r"\b(?:run this command|try it yourself|copy and paste this|paste it yourself|you need to click|you do the final|press enter yourself)\b"),
+    re.compile(
+        r"\b(?:run this command|try it yourself|copy and paste this|paste it yourself|you need to click|you do the final|press enter yourself)\b"
+    ),
 )
 _OPERATOR_ACTION_REQUEST_TERMS = (
     "abre",
@@ -332,12 +347,18 @@ _OPERATOR_ACTION_REQUEST_TERMS = (
 )
 _COMPLETION_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:listo|hecho|done|cerrado|terminado|verificado)\b"),
-    re.compile(r"\b(?:lo\s+correg[ií]|lo\s+limpi[eé]|lo\s+arregl[eé]|cambi[eé]\s+el|actualic[eé]\s+el)\b"),
+    re.compile(
+        r"\b(?:lo\s+correg[ií]|lo\s+limpi[eé]|lo\s+arregl[eé]|cambi[eé]\s+el|actualic[eé]\s+el)\b"
+    ),
     re.compile(r"\b(?:i\s+fixed|i\s+changed|i\s+updated|completed|verified)\b"),
 )
 _SIDE_EFFECT_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b(?:archivo|file|comando|command|test|tests|deploy|mensaje|email|prompt|app|codex|approval|approvals|aprobaciones|ledger|cola)\b"),
-    re.compile(r"\b(?:corr[ií]|ejecut[eé]|corr[eí]\s+tests?|ran|changed|updated|sent|submitted|pasted)\b"),
+    re.compile(
+        r"\b(?:archivo|file|comando|command|test|tests|deploy|mensaje|email|prompt|app|codex|approval|approvals|aprobaciones|ledger|cola)\b"
+    ),
+    re.compile(
+        r"\b(?:corr[ií]|ejecut[eé]|corr[eí]\s+tests?|ran|changed|updated|sent|submitted|pasted)\b"
+    ),
 )
 # A turn that attributes a CONCRETE returned record to a search/lookup
 # ("la busqueda me devolvio ...", "el lookup arrojo el dueno") AND frames the
@@ -346,8 +367,12 @@ _SIDE_EFFECT_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
 # diacritics stripped) so all literals are ASCII-only. Used to block such a
 # claim when the only tool evidence for the turn is a FAILED tool run.
 _RETURNED_RECORD_ATTR_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b(?:la\s+)?(?:busqueda|consulta|lookup|query)\s+(?:me\s+)?(?:devolvio|arrojo|retorno|trajo|dio)\b"),
-    re.compile(r"\b(?:devolvio|arrojo|retorno|trajo)\s+(?:el\s+|los\s+|un\s+|unos\s+)?(?:dueno|duenos|owner|owners|deed|record|registro|propietario|propietarios)\b"),
+    re.compile(
+        r"\b(?:la\s+)?(?:busqueda|consulta|lookup|query)\s+(?:me\s+)?(?:devolvio|arrojo|retorno|trajo|dio)\b"
+    ),
+    re.compile(
+        r"\b(?:devolvio|arrojo|retorno|trajo)\s+(?:el\s+|los\s+|un\s+|unos\s+)?(?:dueno|duenos|owner|owners|deed|record|registro|propietario|propietarios)\b"
+    ),
 )
 _CONFIRMED_SOURCE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bfuente\s+(?:de\s+datos\s+)?(?:esta\s+)?confirmad[ao]\b"),
@@ -362,7 +387,9 @@ _STARTING_ACTION_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
 _STARTING_ACTION_OBJECT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:depur|limpi|archiv|ejecut|corr|aplic|actualiz|arregl)\w*\b"),
     re.compile(r"\b(?:clean|cleanup|archive|execute|run|apply|update|fix)\w*\b"),
-    re.compile(r"\b(?:approval|approvals|aprobaciones|ledger|cola|archivo|file|comando|command|task|tarea)\b"),
+    re.compile(
+        r"\b(?:approval|approvals|aprobaciones|ledger|cola|archivo|file|comando|command|task|tarea)\b"
+    ),
 )
 _PLAN_STATUS_SOURCE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bprimero\s+(?:entrega|prepara|dame|devuelve)\s+(?:el\s+)?plan\b"),
@@ -375,8 +402,12 @@ _PLAN_STATUS_SOURCE_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 _STATUS_ACK_SOURCE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bok\s+final\s*:\s*marca\b"),
-    re.compile(r"\bmarca\s+[a-z0-9_.+-]+\s+como\s+(?:done|succeeded|completed|list[oa]|cerrad[oa]|terminad[oa])\b"),
-    re.compile(r"\bdeja\s+[a-z0-9_.+-]+\s+como\s+(?:done|succeeded|completed|list[oa]|cerrad[oa]|terminad[oa])\b"),
+    re.compile(
+        r"\bmarca\s+[a-z0-9_.+-]+\s+como\s+(?:done|succeeded|completed|list[oa]|cerrad[oa]|terminad[oa])\b"
+    ),
+    re.compile(
+        r"\bdeja\s+[a-z0-9_.+-]+\s+como\s+(?:done|succeeded|completed|list[oa]|cerrad[oa]|terminad[oa])\b"
+    ),
 )
 _PLAN_STATUS_RESPONSE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*#+\s*plan\b", re.MULTILINE),
@@ -462,12 +493,13 @@ def _looks_like_operator_action_request(text: str) -> bool:
     if not normalized.strip():
         return False
     try:
-        if detect_telegram_imperative(text) is not None or detect_owner_delegation(text) is not None:
+        if (
+            detect_telegram_imperative(text) is not None
+            or detect_owner_delegation(text) is not None
+        ):
             return True
     except Exception:
-        logger.exception(
-            "dispatch detector failed in _looks_like_operator_action_request"
-        )
+        logger.exception("dispatch detector failed in _looks_like_operator_action_request")
     if looks_like_actionable_telegram_message(text):
         return True
     return _contains_operator_action_term(normalized)
@@ -559,10 +591,17 @@ def _evidence_gate_plan_status_skip_reason(source_text: str, content: str) -> st
 
 _USER_AUTHORITATIVE_DONE_PATTERNS = (
     re.compile(r"\bok\s+final\b[^\n]*\bmarca\b", re.IGNORECASE),
-    re.compile(r"\bmarca\s+(?:la\s+|el\s+|las\s+|los\s+)?\S[^\n]{0,80}?\s+como\s+(?:done|succeeded|listo|cerrad[oa]|terminad[oa]|completad[oa]|hech[oa])\b", re.IGNORECASE),
-    re.compile(r"\bdeja\s+(?:la\s+|el\s+|las\s+|los\s+)?\S[^\n]{0,80}?\s+como\s+done\b", re.IGNORECASE),
+    re.compile(
+        r"\bmarca\s+(?:la\s+|el\s+|las\s+|los\s+)?\S[^\n]{0,80}?\s+como\s+(?:done|succeeded|listo|cerrad[oa]|terminad[oa]|completad[oa]|hech[oa])\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bdeja\s+(?:la\s+|el\s+|las\s+|los\s+)?\S[^\n]{0,80}?\s+como\s+done\b", re.IGNORECASE
+    ),
     re.compile(r"\bya\s+quedó\s+(?:done|listo|cerrad[oa]|terminad[oa]|hech[oa])\b", re.IGNORECASE),
-    re.compile(r"\bmark\s+\S[^\n]{0,80}?\s+as\s+(?:done|succeeded|complete[d]?|closed)\b", re.IGNORECASE),
+    re.compile(
+        r"\bmark\s+\S[^\n]{0,80}?\s+as\s+(?:done|succeeded|complete[d]?|closed)\b", re.IGNORECASE
+    ),
 )
 
 
@@ -573,7 +612,10 @@ def _user_authoritatively_marked_done(source_text: str) -> bool:
 
 
 _EVIDENCE_REFERENCE_PATTERNS = (
-    re.compile(r"\bartifacts/(?:verification|heygen|content|x_sweep|notebooklm|behavior_audit|email)/\S+", re.IGNORECASE),
+    re.compile(
+        r"\bartifacts/(?:verification|heygen|content|x_sweep|notebooklm|behavior_audit|email)/\S+",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bevidence_uri\s*[:=]\s*\S+", re.IGNORECASE),
     re.compile(r"\bevidence\s*[:=]\s*[\"\']?artifacts/\S+", re.IGNORECASE),
     re.compile(r"\bf3b\d+_\w+_\d+\.(?:json|log)\b", re.IGNORECASE),
@@ -622,17 +664,22 @@ def _parse_pre_hook_block(content: str) -> tuple[str, str] | None:
 def _format_approval_pending(exc: ApprovalPending) -> str:
     """Convert a Tier 3 soft-block into Telegram-ready instructions for Hector."""
     lines = [
-        "⚠️ Acción de Tier 3 detectada. Requiere aprobación de Hector.\n\n"
-        f"Tool: `{exc.tool}`",
+        f"⚠️ Acción de Tier 3 detectada. Requiere aprobación de Hector.\n\nTool: `{exc.tool}`",
         f"Resumen: {exc.summary}",
     ]
     if exc.required_confirmation:
         lines.append(f"Risk code: `{exc.risk_code}`")
         if exc.sensitive_paths:
-            lines.append("Rutas sensibles: " + ", ".join(f"`{path}`" for path in exc.sensitive_paths[:8]))
+            lines.append(
+                "Rutas sensibles: " + ", ".join(f"`{path}`" for path in exc.sensitive_paths[:8])
+            )
         if exc.diff_summary:
-            lines.append(f"Diff resumido:\n```\n{redact_sensitive(exc.diff_summary, limit=1200)}\n```")
-        lines.append(f"Confirmación exacta: `/approve {exc.approval_id} {exc.required_confirmation}`")
+            lines.append(
+                f"Diff resumido:\n```\n{redact_sensitive(exc.diff_summary, limit=1200)}\n```"
+            )
+        lines.append(
+            f"Confirmación exacta: `/approve {exc.approval_id} {exc.required_confirmation}`"
+        )
     else:
         lines.append(f"Comando: `/approve {exc.approval_id} {exc.token}`")
     return "\n\n".join(lines)
@@ -774,23 +821,57 @@ def _is_autonomous_task_start_ack(text: str) -> bool:
 
 
 _TASK_TERMS = (
-    "tarea", "task", "trabajo", "job", "cuaderno", "notebook",
-    "pipeline", "run", "proceso",
+    "tarea",
+    "task",
+    "trabajo",
+    "job",
+    "cuaderno",
+    "notebook",
+    "pipeline",
+    "run",
+    "proceso",
 )
 
 _DIAGNOSTIC_TERMS = (
-    "por que", "por qué", "porque", "que paso", "qué pasó",
-    "fallo", "falló", "no pudiste", "no pudo", "no completaste",
-    "no terminaste", "no se completo", "no quedo", "no quedó",
-    "quedo pendiente", "bloqueada", "bloqueado", "error",
-    "failed", "why failed",
+    "por que",
+    "por qué",
+    "porque",
+    "que paso",
+    "qué pasó",
+    "fallo",
+    "falló",
+    "no pudiste",
+    "no pudo",
+    "no completaste",
+    "no terminaste",
+    "no se completo",
+    "no quedo",
+    "no quedó",
+    "quedo pendiente",
+    "bloqueada",
+    "bloqueado",
+    "error",
+    "failed",
+    "why failed",
 )
 
 _FOLLOWUP_TERMS = (
-    "continua", "continúa", "retoma", "reanuda", "sigue",
-    "hazlo", "crealo", "créalo", "lo que te pedi", "lo que te pedí",
-    "que te pedi", "que te pedí", "la anterior", "el anterior",
-    "eso mismo", "termina eso",
+    "continua",
+    "continúa",
+    "retoma",
+    "reanuda",
+    "sigue",
+    "hazlo",
+    "crealo",
+    "créalo",
+    "lo que te pedi",
+    "lo que te pedí",
+    "que te pedi",
+    "que te pedí",
+    "la anterior",
+    "el anterior",
+    "eso mismo",
+    "termina eso",
 )
 
 
@@ -845,17 +926,23 @@ def _looks_like_short_meta_question(text: str) -> bool:
     normalized = _normalize_command_text(text).strip()
     if len(normalized) >= 120:
         return False
-    is_question = "?" in text or normalized.startswith(("porque", "por que", "por qué", "que paso", "qué pasó"))
+    is_question = "?" in text or normalized.startswith(
+        ("porque", "por que", "por qué", "que paso", "qué pasó")
+    )
     if not is_question:
         return False
     if not _contains_command_term(normalized, ("tarea", "task", "job", "cuaderno", "notebook")):
         return False
-    return _contains_command_term(normalized, ("completaste", "fallo", "falló", "no pudiste", "que paso"))
+    return _contains_command_term(
+        normalized, ("completaste", "fallo", "falló", "no pudiste", "que paso")
+    )
 
 
 def _looks_like_operational_alert(text: str) -> bool:
     normalized = _normalize_command_text(text).strip()
-    return normalized.startswith("alerta operacional:") or normalized.startswith("operational alert:")
+    return normalized.startswith("alerta operacional:") or normalized.startswith(
+        "operational alert:"
+    )
 
 
 # Brain-bypass refactor: a literal task_id is the only natural-language
@@ -967,7 +1054,9 @@ class BotService:
             get_learning=lambda: self.learning,
             get_browser=lambda: self.browser,
             get_managed_chrome=lambda: self.managed_chrome,
-            wiki_ingest=lambda title, content, source_type: self._wiki_handler.maybe_ingest(title, content, source_type=source_type),
+            wiki_ingest=lambda title, content, source_type: self._wiki_handler.maybe_ingest(
+                title, content, source_type=source_type
+            ),
             capability_unavailable_message=self._capability_unavailable_message,
             update_session_state=brain.memory.update_session_state,
             get_session_state=brain.memory.get_session_state,
@@ -1011,7 +1100,9 @@ class BotService:
             capability_check=self._capability_unavailable_message,
             get_managed_chrome=lambda: self.managed_chrome,
         )
-        self._checkpoint_handler = CheckpointHandler(checkpoint=brain.checkpoint) if brain.checkpoint is not None else None
+        self._checkpoint_handler = (
+            CheckpointHandler(checkpoint=brain.checkpoint) if brain.checkpoint is not None else None
+        )
         self._computer_handler = ComputerHandler(
             computer=computer,
             browser_use=browser_use,
@@ -1031,9 +1122,7 @@ class BotService:
         # in-process browser executor (ComputerHandler -> BrowserUseService /
         # Playwright in the daemon venv) instead of the network-denied Codex
         # coordinator (whose --sandbox workspace-write blocks localhost:9250).
-        self._task_handler.browser_executor = (
-            self._computer_handler.run_delegated_browser_task
-        )
+        self._task_handler.browser_executor = self._computer_handler.run_delegated_browser_task
         self._agent_handler = AgentHandler(
             auto_research=auto_research,
             pull_requests=pull_requests,
@@ -1135,7 +1224,9 @@ class BotService:
     def resume_interrupted_tasks(self) -> int:
         return self._task_handler.resume_interrupted_autonomous_tasks()
 
-    def set_capability_status(self, name: str, *, available: bool, reason: str | None = None) -> None:
+    def set_capability_status(
+        self, name: str, *, available: bool, reason: str | None = None
+    ) -> None:
         self._capability_status[name] = {"available": available, "reason": reason or ""}
 
     def _capability_unavailable_message(self, name: str, fallback: str) -> str | None:
@@ -1181,9 +1272,7 @@ class BotService:
             )
         return self._execution_environment
 
-    def _maybe_handle_capability_route(
-        self, text: str, *, session_id: str
-    ) -> str | None:
+    def _maybe_handle_capability_route(self, text: str, *, session_id: str) -> str | None:
         # Guard: slash commands NO se interceptan; van a sus handlers existentes.
         if not text or text.lstrip().startswith("/"):
             return None
@@ -1283,7 +1372,9 @@ class BotService:
                 provider=getattr(agent_def, "provider", None),
                 model=getattr(agent_def, "model", None),
                 status="running",
-                route=active_object.get("last_channel_route") if isinstance(active_object.get("last_channel_route"), dict) else {},
+                route=active_object.get("last_channel_route")
+                if isinstance(active_object.get("last_channel_route"), dict)
+                else {},
                 metadata={
                     "agent": agent_name,
                     "skill": skill_name,
@@ -1349,7 +1440,11 @@ class BotService:
                     verification_status="blocked",
                 )
                 return
-            summary = result.strip().splitlines()[0][:500] if result.strip() else f"Skill {skill_name} completed"
+            summary = (
+                result.strip().splitlines()[0][:500]
+                if result.strip()
+                else f"Skill {skill_name} completed"
+            )
             self._mark_skill_task_succeeded(
                 task_id=task_id,
                 session_id=session_id,
@@ -1723,9 +1818,7 @@ class BotService:
         except Exception:
             logger.exception("failed to emit %s", event_type)
 
-    def _dispatch_runtime_handoff(
-        self, route: CapabilityRoute, *, session_id: str
-    ) -> str:
+    def _dispatch_runtime_handoff(self, route: CapabilityRoute, *, session_id: str) -> str:
         workspace_root = getattr(self.config, "workspace_root", None)
         queue_root = (
             Path(workspace_root) / "runtime_handoffs"
@@ -1765,15 +1858,11 @@ class BotService:
                 logger.exception("failed to emit runtime_handoff_created")
         return format_handoff_message(handoff)
 
-    def _emit_capability_route_event(
-        self, route: CapabilityRoute, *, session_id: str
-    ) -> None:
+    def _emit_capability_route_event(self, route: CapabilityRoute, *, session_id: str) -> None:
         if self.observe is None:
             return
         event_type = (
-            "capability_route_blocked"
-            if route.route == "blocked"
-            else "capability_route_selected"
+            "capability_route_blocked" if route.route == "blocked" else "capability_route_selected"
         )
         try:
             self.observe.emit(
@@ -1864,7 +1953,9 @@ class BotService:
 
         return _handle
 
-    def _emit_internal_chat_suppressed(self, session_id: str, *, reason: str, original: str, sanitized: str) -> None:
+    def _emit_internal_chat_suppressed(
+        self, session_id: str, *, reason: str, original: str, sanitized: str
+    ) -> None:
         if self.observe is None:
             return
         try:
@@ -2361,7 +2452,9 @@ class BotService:
                 return label
         return None
 
-    def _emit_sanitizer_recovery_event(self, event_type: str, session_id: str, **payload: Any) -> None:
+    def _emit_sanitizer_recovery_event(
+        self, event_type: str, session_id: str, **payload: Any
+    ) -> None:
         if self.observe is None:
             return
         safe_payload = {"session_id": session_id, **payload}
@@ -2408,7 +2501,9 @@ class BotService:
                         return summary.strip()
         return None
 
-    def _internal_trace_recovery_prompt(self, *, source_text: str, pending_action: str | None) -> str:
+    def _internal_trace_recovery_prompt(
+        self, *, source_text: str, pending_action: str | None
+    ) -> str:
         lines = [
             "Reintenta la respuesta para Telegram usando el mismo pedido del usuario.",
             "No hagas metacomentarios ni pidas que Hector repita la instrucción.",
@@ -2423,10 +2518,16 @@ class BotService:
             )
         return "\n".join(lines)
 
-    def _internal_trace_recovery_fallback(self, *, source_text: str, pending_action: str | None) -> str:
+    def _internal_trace_recovery_fallback(
+        self, *, source_text: str, pending_action: str | None
+    ) -> str:
         next_step = pending_action or source_text
-        next_step = _compact_summary(next_step, limit=160) or "continuar con el siguiente paso disponible"
-        if "datos en vivo" in _normalize_command_text(source_text) and "datos en vivo" not in _normalize_command_text(next_step):
+        next_step = (
+            _compact_summary(next_step, limit=160) or "continuar con el siguiente paso disponible"
+        )
+        if "datos en vivo" in _normalize_command_text(
+            source_text
+        ) and "datos en vivo" not in _normalize_command_text(next_step):
             next_step = f"{next_step} con datos en vivo"
         return f"Tuve un error preparando la respuesta. Retomo la acción: {next_step}."
 
@@ -2522,7 +2623,9 @@ class BotService:
             content = "Recibido. ¿Qué quieres que haga con esto?"
         elif _looks_like_pre_hook_block(content):
             content = self._maybe_augment_pre_hook_block(content)
-        elif _looks_like_manual_handoff(content) and _looks_like_operator_action_request(source_text):
+        elif _looks_like_manual_handoff(content) and _looks_like_operator_action_request(
+            source_text
+        ):
             if self._should_allow_tool_backed_handoff_response(response, content):
                 self._emit_identity_capability_binding_guard(
                     "operator_handoff_guard_allowed_tool_backed",
@@ -2900,7 +3003,9 @@ class BotService:
                 has_failure = True
         return has_failure and not has_success
 
-    def _should_allow_tool_backed_handoff_response(self, response: Any | None, content: str) -> bool:
+    def _should_allow_tool_backed_handoff_response(
+        self, response: Any | None, content: str
+    ) -> bool:
         if len(content or "") < 1200:
             return False
         if not self._response_has_evidence_signal(response):
@@ -2977,7 +3082,9 @@ class BotService:
                 pending_action_preview=pending_action[:160],
             )
         retry_prompt = self._with_runtime_capability_context(
-            self._internal_trace_recovery_prompt(source_text=source_text, pending_action=pending_action),
+            self._internal_trace_recovery_prompt(
+                source_text=source_text, pending_action=pending_action
+            ),
             runtime_channel=runtime_channel,
         )
         self._emit_sanitizer_recovery_event(
@@ -3009,7 +3116,9 @@ class BotService:
             logger.exception("clean retry after internal trace suppression failed")
             fallback = self._sanitize_visible_chat_response(
                 session_id,
-                self._internal_trace_recovery_fallback(source_text=source_text, pending_action=pending_action),
+                self._internal_trace_recovery_fallback(
+                    source_text=source_text, pending_action=pending_action
+                ),
             )
             self._emit_sanitizer_recovery_event(
                 "clean_retry_failed",
@@ -3071,7 +3180,9 @@ class BotService:
             prefetched_evidence_context=prefetched_evidence_context,
         )
         if content != raw_retry_content:
-            self.brain.memory.replace_latest_assistant_message(session_id, raw_retry_content, content)
+            self.brain.memory.replace_latest_assistant_message(
+                session_id, raw_retry_content, content
+            )
         self._emit_sanitizer_recovery_event(
             "clean_retry_completed",
             session_id,
@@ -3206,7 +3317,9 @@ class BotService:
         self.brain.memory.update_session_state(
             session_id,
             mode="ops",
-            current_goal=objective[:280] if self._looks_like_persistable_current_goal(objective) else "",
+            current_goal=objective[:280]
+            if self._looks_like_persistable_current_goal(objective)
+            else "",
             pending_action=objective,
             task_queue=task_queue,
             verification_status="awaiting_continue",
@@ -3231,7 +3344,7 @@ class BotService:
         name_fragment = f" `{mission_name}`" if mission_name else ""
         response = (
             f"Creé la misión durable{name_fragment} y la dejé lista como propuesta. "
-            "Respóndeme \"Procede\" para ejecutarla; si quieres ajustar el alcance, dime el cambio concreto."
+            'Respóndeme "Procede" para ejecutarla; si quieres ajustar el alcance, dime el cambio concreto.'
         )
         rendered = NaturalLanguageRenderer(mode="normal").render(response)
         self._store_memory_turn(session_id, text, rendered, assistant_limit=2000)
@@ -3338,7 +3451,9 @@ class BotService:
             decision="classified_before_state_resolution",
             output_kind="routing_trace",
         )
-        context = CommandContext(user_id=user_id, session_id=session_id, text=text, stripped=stripped)
+        context = CommandContext(
+            user_id=user_id, session_id=session_id, text=text, stripped=stripped
+        )
         try:
             command_response = dispatch_commands(self._pre_state_commands, context)
         except ApprovalPending as exc:
@@ -3395,7 +3510,9 @@ class BotService:
             captured=computer_approval_response is not None,
         )
         if computer_approval_response is not None:
-            self._store_memory_turn(session_id, stripped, computer_approval_response, assistant_limit=2000)
+            self._store_memory_turn(
+                session_id, stripped, computer_approval_response, assistant_limit=2000
+            )
             self._remember_assistant_turn_state(session_id, stripped, computer_approval_response)
             return computer_approval_response
         # Marker event at the dispatch boundary: when the message qualifies
@@ -3406,11 +3523,7 @@ class BotService:
             self._emit_dispatch_decision(
                 handler="explicit_command",
                 route="explicit_command",
-                reason=(
-                    "slash_prefix"
-                    if stripped.startswith("/")
-                    else "literal_task_id_match"
-                ),
+                reason=("slash_prefix" if stripped.startswith("/") else "literal_task_id_match"),
                 session_id=session_id,
                 text=stripped,
                 captured=True,
@@ -3477,10 +3590,14 @@ class BotService:
                 failure_summary_response,
                 source="operational_failure_summary",
             )
-            self._store_memory_turn(session_id, stripped, failure_summary_response, assistant_limit=3000)
+            self._store_memory_turn(
+                session_id, stripped, failure_summary_response, assistant_limit=3000
+            )
             self._remember_assistant_turn_state(session_id, stripped, failure_summary_response)
             return failure_summary_response
-        operational_status_response = self._maybe_handle_operational_status(stripped, session_id=session_id)
+        operational_status_response = self._maybe_handle_operational_status(
+            stripped, session_id=session_id
+        )
         self._emit_dispatch_decision(
             handler="operational_status",
             route="intercepted" if operational_status_response is not None else "fall_through",
@@ -3500,10 +3617,14 @@ class BotService:
                 operational_status_response,
                 source="operational_status",
             )
-            self._store_memory_turn(session_id, stripped, operational_status_response, assistant_limit=2000)
+            self._store_memory_turn(
+                session_id, stripped, operational_status_response, assistant_limit=2000
+            )
             self._remember_assistant_turn_state(session_id, stripped, operational_status_response)
             return operational_status_response
-        cleanup_status_response = self._maybe_handle_cleanup_status_query(stripped, session_id=session_id)
+        cleanup_status_response = self._maybe_handle_cleanup_status_query(
+            stripped, session_id=session_id
+        )
         self._emit_dispatch_decision(
             handler="cleanup_status",
             route="intercepted" if cleanup_status_response is not None else "fall_through",
@@ -3517,7 +3638,9 @@ class BotService:
             captured=cleanup_status_response is not None,
         )
         if cleanup_status_response is not None:
-            self._store_memory_turn(session_id, stripped, cleanup_status_response, assistant_limit=2000)
+            self._store_memory_turn(
+                session_id, stripped, cleanup_status_response, assistant_limit=2000
+            )
             self._remember_assistant_turn_state(session_id, stripped, cleanup_status_response)
             return cleanup_status_response
         owner_delegation_response = self._maybe_handle_owner_delegation_request(
@@ -3579,8 +3702,12 @@ class BotService:
                 telegram_imperative_response,
                 source="telegram_imperative",
             )
-            telegram_imperative_response = self._final_render(session_id, telegram_imperative_response)
-            self._store_memory_turn(session_id, stripped, telegram_imperative_response, assistant_limit=3000)
+            telegram_imperative_response = self._final_render(
+                session_id, telegram_imperative_response
+            )
+            self._store_memory_turn(
+                session_id, stripped, telegram_imperative_response, assistant_limit=3000
+            )
             self._remember_assistant_turn_state(session_id, stripped, telegram_imperative_response)
             return telegram_imperative_response
         actionable_task_response = self._maybe_handle_actionable_task_request(
@@ -3602,7 +3729,9 @@ class BotService:
             captured=actionable_task_response is not None,
         )
         if actionable_task_response is not None:
-            self._store_memory_turn(session_id, stripped, actionable_task_response, assistant_limit=2000)
+            self._store_memory_turn(
+                session_id, stripped, actionable_task_response, assistant_limit=2000
+            )
             self._remember_assistant_turn_state(session_id, stripped, actionable_task_response)
             return actionable_task_response
         task_intent_response = self._maybe_handle_task_intent(stripped, session_id=session_id)
@@ -3611,9 +3740,8 @@ class BotService:
         # "classifier returned unknown". Distinguish them so audits show why.
         if task_intent_response is not None:
             task_intent_reason = "task_intent_classifier_matched"
-        elif (
-            os.getenv("CLAW_DISABLE_TASK_INTENT_ROUTER", "1") == "1"
-            and not _has_literal_task_id(stripped)
+        elif os.getenv("CLAW_DISABLE_TASK_INTENT_ROUTER", "1") == "1" and not _has_literal_task_id(
+            stripped
         ):
             task_intent_reason = "disabled_by_flag"
         else:
@@ -3627,10 +3755,14 @@ class BotService:
             captured=task_intent_response is not None,
         )
         if task_intent_response is not None:
-            self._store_memory_turn(session_id, stripped, task_intent_response, assistant_limit=2000)
+            self._store_memory_turn(
+                session_id, stripped, task_intent_response, assistant_limit=2000
+            )
             self._remember_assistant_turn_state(session_id, stripped, task_intent_response)
             return task_intent_response
-        change_status_response = self._maybe_handle_change_status_question(stripped, session_id=session_id)
+        change_status_response = self._maybe_handle_change_status_question(
+            stripped, session_id=session_id
+        )
         self._emit_dispatch_decision(
             handler="change_status_question",
             route="intercepted" if change_status_response is not None else "fall_through",
@@ -3644,7 +3776,9 @@ class BotService:
             captured=change_status_response is not None,
         )
         if change_status_response is not None:
-            self._store_memory_turn(session_id, stripped, change_status_response, assistant_limit=2000)
+            self._store_memory_turn(
+                session_id, stripped, change_status_response, assistant_limit=2000
+            )
             self._remember_assistant_turn_state(session_id, stripped, change_status_response)
             return change_status_response
         # PR 0B: meta/introspection guard. Reflective questions, clarification
@@ -3746,11 +3880,15 @@ class BotService:
             captured=capability_route_response is not None,
         )
         if capability_route_response is not None:
-            self._store_memory_turn(session_id, stripped, capability_route_response, assistant_limit=2000)
+            self._store_memory_turn(
+                session_id, stripped, capability_route_response, assistant_limit=2000
+            )
             self._remember_assistant_turn_state(session_id, stripped, capability_route_response)
             return capability_route_response
         self._remember_user_turn_state(session_id, stripped)
-        pending_tool_approval = self._handle_pending_tool_approval_grant_response(session_id, stripped)
+        pending_tool_approval = self._handle_pending_tool_approval_grant_response(
+            session_id, stripped
+        )
         self._emit_dispatch_decision(
             handler="pending_tool_approval_grant",
             route="intercepted" if pending_tool_approval is not None else "fall_through",
@@ -3769,7 +3907,9 @@ class BotService:
         self._emit_dispatch_decision(
             handler="autonomy_grant",
             route="intercepted" if autonomy_grant_matched else "fall_through",
-            reason="autonomy_grant_matched" if autonomy_grant_matched else "autonomy_grant_no_match",
+            reason="autonomy_grant_matched"
+            if autonomy_grant_matched
+            else "autonomy_grant_no_match",
             session_id=session_id,
             text=stripped,
             captured=autonomy_grant_matched,
@@ -3814,15 +3954,21 @@ class BotService:
         shortcut_response = self._maybe_handle_shortcut(stripped, session_id=session_id)
         if isinstance(shortcut_response, _BrainShortcut):
             shortcut_route, shortcut_reason, shortcut_captured = (
-                "brain_shortcut", "shortcut_brain_shortcut", False,
+                "brain_shortcut",
+                "shortcut_brain_shortcut",
+                False,
             )
         elif shortcut_response is not None:
             shortcut_route, shortcut_reason, shortcut_captured = (
-                "intercepted", "shortcut_matched", True,
+                "intercepted",
+                "shortcut_matched",
+                True,
             )
         else:
             shortcut_route, shortcut_reason, shortcut_captured = (
-                "fall_through", "shortcut_no_match", False,
+                "fall_through",
+                "shortcut_no_match",
+                False,
             )
         self._emit_dispatch_decision(
             handler="shortcut",
@@ -3891,7 +4037,9 @@ class BotService:
             if is_start_ack and (runtime_channel or "").strip().lower() == "telegram":
                 self.brain.memory.store_message(session_id, "user", stripped)
                 return None
-            self._store_memory_turn(session_id, stripped, coordinated_response, assistant_limit=4000)
+            self._store_memory_turn(
+                session_id, stripped, coordinated_response, assistant_limit=4000
+            )
             if not is_start_ack:
                 self._remember_assistant_turn_state(session_id, stripped, coordinated_response)
             return coordinated_response
@@ -3919,34 +4067,111 @@ class BotService:
             BotCommand("status", self._handle_status_command, exact=("/status",)),
             BotCommand("restart", self._handle_restart_command, exact=("/restart",)),
             BotCommand("config", self._handle_config_command, exact=("/config",)),
-            BotCommand("model", self._handle_model_command, exact=("/models", "/model", "/model status"), prefixes=("/model ",)),
+            BotCommand(
+                "model",
+                self._handle_model_command,
+                exact=("/models", "/model", "/model status"),
+                prefixes=("/model ",),
+            ),
             BotCommand("tokens", self._handle_tokens_command, exact=("/tokens",)),
             BotCommand("spending", self._handle_spending_command, exact=("/spending",)),
             BotCommand("freeze", self._handle_freeze_command, exact=("/freeze",)),
             BotCommand("unfreeze", self._handle_unfreeze_command, exact=("/unfreeze",)),
-            BotCommand("budget_status", self._handle_budget_status_command, exact=("/budget_status",)),
+            BotCommand(
+                "budget_status", self._handle_budget_status_command, exact=("/budget_status",)
+            ),
             BotCommand("quality", self._handle_quality_command, exact=("/quality",)),
-            BotCommand("diagnose_task", self._handle_diagnose_task_command, prefixes=("/diagnose_task ",)),
-            BotCommand("task_run", self._handle_task_run_command, exact=("/task_run",), prefixes=("/task_run ",)),
-            BotCommand("autonomy", self._handle_autonomy_command, exact=("/autonomy", "/autonomy_policy"), prefixes=("/autonomy ",)),
-            BotCommand("jobs", self._handle_jobs_command, exact=("/jobs",), prefixes=("/jobs ", "/job_status ", "/job_trace ", "/job_resume ", "/job_cancel ", "/task_resume ", "/task_cancel ")),
-            BotCommand("task_state", self._handle_task_state_command, exact=("/tasks", "/task_status", "/task_loop", "/task_queue", "/task_pending", "/session_state"), prefixes=("/task_queue ",)),
-            BotCommand("task_transition", self._handle_task_transition_command, exact=("/task_done", "/task_defer"), prefixes=("/task_done ", "/task_defer ")),
+            BotCommand(
+                "diagnose_task", self._handle_diagnose_task_command, prefixes=("/diagnose_task ",)
+            ),
+            BotCommand(
+                "task_run",
+                self._handle_task_run_command,
+                exact=("/task_run",),
+                prefixes=("/task_run ",),
+            ),
+            BotCommand(
+                "autonomy",
+                self._handle_autonomy_command,
+                exact=("/autonomy", "/autonomy_policy"),
+                prefixes=("/autonomy ",),
+            ),
+            BotCommand(
+                "jobs",
+                self._handle_jobs_command,
+                exact=("/jobs",),
+                prefixes=(
+                    "/jobs ",
+                    "/job_status ",
+                    "/job_trace ",
+                    "/job_resume ",
+                    "/job_cancel ",
+                    "/task_resume ",
+                    "/task_cancel ",
+                ),
+            ),
+            BotCommand(
+                "task_state",
+                self._handle_task_state_command,
+                exact=(
+                    "/tasks",
+                    "/task_status",
+                    "/task_loop",
+                    "/task_queue",
+                    "/task_pending",
+                    "/session_state",
+                ),
+                prefixes=("/task_queue ",),
+            ),
+            BotCommand(
+                "task_transition",
+                self._handle_task_transition_command,
+                exact=("/task_done", "/task_defer"),
+                prefixes=("/task_done ", "/task_defer "),
+            ),
             BotCommand("browse", self._handle_browse_command, prefixes=("/browse ",)),
             *self._terminal_handler.commands(),
             *self._chrome_handler.commands(),
             *self._computer_handler.commands(),
-            BotCommand("buddy", self._handle_buddy_command, exact=("/buddy", "/buddy card", "/buddy hatch", "/buddy stats"), prefixes=("/buddy rename ",)),
+            BotCommand(
+                "buddy",
+                self._handle_buddy_command,
+                exact=("/buddy", "/buddy card", "/buddy hatch", "/buddy stats"),
+                prefixes=("/buddy rename ",),
+            ),
             *self._wiki_handler.commands(),
-            BotCommand("playbooks", self._handle_playbook_command, exact=("/playbooks",), prefixes=("/playbook ",)),
-            BotCommand("backtest", self._handle_backtest_command, exact=("/backtest",), prefixes=("/backtest ",)),
-            BotCommand("grill", self._handle_grill_command, exact=("/grill",), prefixes=("/grill ",)),
+            BotCommand(
+                "playbooks",
+                self._handle_playbook_command,
+                exact=("/playbooks",),
+                prefixes=("/playbook ",),
+            ),
+            BotCommand(
+                "backtest",
+                self._handle_backtest_command,
+                exact=("/backtest",),
+                prefixes=("/backtest ",),
+            ),
+            BotCommand(
+                "grill", self._handle_grill_command, exact=("/grill",), prefixes=("/grill ",)
+            ),
             BotCommand("tdd", self._handle_tdd_command, exact=("/tdd",), prefixes=("/tdd ",)),
-            BotCommand("improve_arch", self._handle_improve_arch_command, exact=("/improve_arch",), prefixes=("/improve_arch ",)),
-            BotCommand("effort", self._handle_effort_command, exact=("/effort",), prefixes=("/effort ",)),
-            BotCommand("verify", self._handle_verify_command, exact=("/verify",), prefixes=("/verify ",)),
+            BotCommand(
+                "improve_arch",
+                self._handle_improve_arch_command,
+                exact=("/improve_arch",),
+                prefixes=("/improve_arch ",),
+            ),
+            BotCommand(
+                "effort", self._handle_effort_command, exact=("/effort",), prefixes=("/effort ",)
+            ),
+            BotCommand(
+                "verify", self._handle_verify_command, exact=("/verify",), prefixes=("/verify ",)
+            ),
             BotCommand("focus", self._handle_focus_command, exact=("/focus",)),
-            BotCommand("voice", self._handle_voice_command, exact=("/voice",), prefixes=("/voice ",)),
+            BotCommand(
+                "voice", self._handle_voice_command, exact=("/voice",), prefixes=("/voice ",)
+            ),
             *self._design_handler.commands(),
             *(self._checkpoint_handler.commands() if self._checkpoint_handler is not None else []),
         ]
@@ -3954,11 +4179,41 @@ class BotService:
     def _build_post_shortcut_commands(self) -> list[BotCommand]:
         return [
             *self._agent_handler.commands(),
-            BotCommand("approvals", self._handle_approvals_command, exact=("/approvals",), prefixes=("/approval_status ", "/approve ", "/task_approve ", "/task_abort ")),
-            BotCommand("traces", self._handle_traces_command, exact=("/traces",), prefixes=("/traces ", "/trace ")),
-            BotCommand("feedback", self._handle_feedback_command, exact=("/feedback",), prefixes=("/feedback ",)),
-            BotCommand("pipeline", self._handle_pipeline_command, exact=("/pipeline", "/pipeline_approve", "/pipeline_merge", "/pipeline_status"), prefixes=("/pipeline_approve ", "/pipeline_merge ", "/pipeline_merge_confirm ", "/pipeline ")),
-            BotCommand("social", self._handle_social_command, exact=("/social_preview", "/social_publish", "/social_status"), prefixes=("/social_preview ", "/social_publish ", "/social_approve ")),
+            BotCommand(
+                "approvals",
+                self._handle_approvals_command,
+                exact=("/approvals",),
+                prefixes=("/approval_status ", "/approve ", "/task_approve ", "/task_abort "),
+            ),
+            BotCommand(
+                "traces",
+                self._handle_traces_command,
+                exact=("/traces",),
+                prefixes=("/traces ", "/trace "),
+            ),
+            BotCommand(
+                "feedback",
+                self._handle_feedback_command,
+                exact=("/feedback",),
+                prefixes=("/feedback ",),
+            ),
+            BotCommand(
+                "pipeline",
+                self._handle_pipeline_command,
+                exact=("/pipeline", "/pipeline_approve", "/pipeline_merge", "/pipeline_status"),
+                prefixes=(
+                    "/pipeline_approve ",
+                    "/pipeline_merge ",
+                    "/pipeline_merge_confirm ",
+                    "/pipeline ",
+                ),
+            ),
+            BotCommand(
+                "social",
+                self._handle_social_command,
+                exact=("/social_preview", "/social_publish", "/social_status"),
+                prefixes=("/social_preview ", "/social_publish ", "/social_approve "),
+            ),
             *self._nlm_handler.commands(),
         ]
 
@@ -4050,7 +4305,9 @@ class BotService:
                 f"alertas: {', '.join(warning_agents[:3])}{suffix}."
             )
         else:
-            lines.append(f"Agentes: {active_agents} activos, {paused_agents} pausados; alertas: ninguna.")
+            lines.append(
+                f"Agentes: {active_agents} activos, {paused_agents} pausados; alertas: ninguna."
+            )
         if invocations:
             degraded_text = f", {degraded} degradadas" if degraded else ""
             lines.append(f"Uso hoy: {invocations} llamadas, ${total_cost:.4f}{degraded_text}.")
@@ -4089,7 +4346,9 @@ class BotService:
         if self.config is None:
             return "config not available"
         c = self.config
-        overrides = model_overrides_from_state(self.brain.memory.get_session_state(context.session_id))
+        overrides = model_overrides_from_state(
+            self.brain.memory.get_session_state(context.session_id)
+        )
         lanes = {}
         for lane in ("brain", "worker", "worker_heavy", "verifier", "research", "judge"):
             override = overrides.get(lane)
@@ -4099,13 +4358,22 @@ class BotService:
             lanes[lane] = {
                 "provider": provider,
                 "model": model,
-                "effort": override.effort if override and override.effort else c.effort_for_lane(lane),
+                "effort": override.effort
+                if override and override.effort
+                else c.effort_for_lane(lane),
                 "billing": ref.billing,
                 "override": override is not None,
                 "context_window": c.context_window_for_lane(lane),
                 "max_output": c.max_output_for_lane(lane),
             }
-        return json.dumps({"lanes": lanes, "max_budget_usd": c.max_budget_usd, "daily_token_budget": c.daily_token_budget}, indent=2)
+        return json.dumps(
+            {
+                "lanes": lanes,
+                "max_budget_usd": c.max_budget_usd,
+                "daily_token_budget": c.daily_token_budget,
+            },
+            indent=2,
+        )
 
     def _handle_model_command(self, context: CommandContext) -> str:
         if self.config is None:
@@ -4114,13 +4382,17 @@ class BotService:
             payload = [model.to_dict() for model in self.model_registry.list_models()]
             return json.dumps(payload, indent=2, sort_keys=True)
         if context.stripped in {"/model", "/model status"}:
-            return json.dumps(self._model_status_payload(context.session_id), indent=2, sort_keys=True)
+            return json.dumps(
+                self._model_status_payload(context.session_id), indent=2, sort_keys=True
+            )
         parts = context.stripped.split()
         if len(parts) < 2:
             return "Uso: /model status | /models | /model set <lane> <provider:model> [effort=low|medium|high|xhigh|max] | /model clear <lane>"
         action = parts[1].lower()
         if action == "status":
-            return json.dumps(self._model_status_payload(context.session_id), indent=2, sort_keys=True)
+            return json.dumps(
+                self._model_status_payload(context.session_id), indent=2, sort_keys=True
+            )
         if action == "clear":
             if len(parts) < 3:
                 return "Uso: /model clear <lane>"
@@ -4128,10 +4400,14 @@ class BotService:
                 lane = normalize_model_lane(parts[2])
             except ValueError as exc:
                 return str(exc)
-            overrides = model_overrides_from_state(self.brain.memory.get_session_state(context.session_id))
+            overrides = model_overrides_from_state(
+                self.brain.memory.get_session_state(context.session_id)
+            )
             overrides.pop(lane, None)
             self._store_model_overrides(context.session_id, overrides)
-            return json.dumps(self._model_status_payload(context.session_id), indent=2, sort_keys=True)
+            return json.dumps(
+                self._model_status_payload(context.session_id), indent=2, sort_keys=True
+            )
         if action != "set":
             return f"Acción inválida: {action}"
         if len(parts) < 4:
@@ -4149,7 +4425,9 @@ class BotService:
             override = self.model_registry.override_from_selector(selector, effort=effort)
         except ValueError as exc:
             return str(exc)
-        overrides = model_overrides_from_state(self.brain.memory.get_session_state(context.session_id))
+        overrides = model_overrides_from_state(
+            self.brain.memory.get_session_state(context.session_id)
+        )
         overrides[lane] = override
         self._store_model_overrides(context.session_id, overrides)
         warning = ""
@@ -4208,7 +4486,9 @@ class BotService:
     def _handle_freeze_command(self, context: CommandContext) -> str:
         if self.observation_window is None:
             return "observation window unavailable"
-        self.observation_window.freeze(reason="manual_telegram", actor=f"telegram:{context.user_id}")
+        self.observation_window.freeze(
+            reason="manual_telegram", actor=f"telegram:{context.user_id}"
+        )
         return "Freeze activado. Autoexec queda pausado; el chat sigue disponible."
 
     def _handle_unfreeze_command(self, context: CommandContext) -> str:
@@ -4251,13 +4531,21 @@ class BotService:
         parts = context.stripped.split(maxsplit=1)
         if len(parts) != 2:
             return "usage: /task_run <objective>"
-        return self._task_handler.coordinated_task_response(context.session_id, parts[1], forced=True)
+        return self._task_handler.coordinated_task_response(
+            context.session_id, parts[1], forced=True
+        )
 
     def _handle_autonomy_command(self, context: CommandContext) -> str:
         if context.stripped == "/autonomy":
-            return json.dumps(self.brain.memory.get_session_state(context.session_id), indent=2, sort_keys=True)
+            return json.dumps(
+                self.brain.memory.get_session_state(context.session_id), indent=2, sort_keys=True
+            )
         if context.stripped == "/autonomy_policy":
-            return json.dumps(_autonomy_policy_payload(self.brain.memory.get_session_state(context.session_id)), indent=2, sort_keys=True)
+            return json.dumps(
+                _autonomy_policy_payload(self.brain.memory.get_session_state(context.session_id)),
+                indent=2,
+                sort_keys=True,
+            )
         parts = context.stripped.split(maxsplit=1)
         if len(parts) != 2:
             return "usage: /autonomy <manual|assisted|autonomous>"
@@ -4278,7 +4566,9 @@ class BotService:
             }
             return json.dumps(payload, indent=2, sort_keys=True)
         if context.stripped == "/task_status" and self.task_ledger is not None:
-            return json.dumps(self.task_ledger.summary(session_id=context.session_id), indent=2, sort_keys=True)
+            return json.dumps(
+                self.task_ledger.summary(session_id=context.session_id), indent=2, sort_keys=True
+            )
         if context.stripped in {"/tasks", "/task_status", "/task_loop"}:
             return json.dumps(state, indent=2, sort_keys=True)
         if context.stripped == "/task_queue":
@@ -4287,7 +4577,11 @@ class BotService:
             parts = context.stripped.split(maxsplit=1)
             if len(parts) != 2:
                 return "usage: /task_queue [mode]"
-            return json.dumps(_filter_task_queue_by_mode(state.get("task_queue") or [], parts[1]), indent=2, sort_keys=True)
+            return json.dumps(
+                _filter_task_queue_by_mode(state.get("task_queue") or [], parts[1]),
+                indent=2,
+                sort_keys=True,
+            )
         if context.stripped == "/task_pending":
             return json.dumps(state.get("pending_approvals") or [], indent=2, sort_keys=True)
         return json.dumps(state, indent=2, sort_keys=True)
@@ -4309,10 +4603,7 @@ class BotService:
             }
             if self.job_service is not None:
                 payload["system_summary"] = self.job_service.summary()
-                payload["system_jobs"] = [
-                    job.to_dict()
-                    for job in self.job_service.list(limit=20)
-                ]
+                payload["system_jobs"] = [job.to_dict() for job in self.job_service.list(limit=20)]
             return json.dumps(payload, indent=2, sort_keys=True)
         if command == "/job_status":
             if len(parts) != 2:
@@ -4320,7 +4611,9 @@ class BotService:
             record = self.task_ledger.get(parts[1])
             if record is not None:
                 payload = {"source": "task_ledger", **record.to_dict()}
-            elif self.job_service is not None and (job := self.job_service.get(parts[1])) is not None:
+            elif (
+                self.job_service is not None and (job := self.job_service.get(parts[1])) is not None
+            ):
                 payload = {"source": "job_service", **job.to_dict()}
             else:
                 payload = {"error": "job not found"}
@@ -4348,13 +4641,22 @@ class BotService:
                 job = self.job_service.get(parts[1])
                 if job is None:
                     return f"job {parts[1]} not found"
-                linked_task_id = job.payload.get("task_id") if isinstance(job.payload, dict) else None
-                if isinstance(linked_task_id, str) and self.task_ledger.get(linked_task_id) is not None:
-                    return self._task_handler.cancel_task_response(context.session_id, linked_task_id)
+                linked_task_id = (
+                    job.payload.get("task_id") if isinstance(job.payload, dict) else None
+                )
+                if (
+                    isinstance(linked_task_id, str)
+                    and self.task_ledger.get(linked_task_id) is not None
+                ):
+                    return self._task_handler.cancel_task_response(
+                        context.session_id, linked_task_id
+                    )
                 self.job_service.cancel(parts[1], reason=f"cancelled_by:{context.session_id}")
                 return f"Job cancelado: `{parts[1]}`"
             return self._task_handler.cancel_task_response(context.session_id, parts[1])
-        return "usage: /jobs | /job_status <task_id> | /task_resume <task_id> | /task_cancel <task_id>"
+        return (
+            "usage: /jobs | /job_status <task_id> | /task_resume <task_id> | /task_cancel <task_id>"
+        )
 
     def _handle_task_transition_command(self, context: CommandContext) -> str:
         if context.stripped == "/task_done":
@@ -4363,9 +4665,15 @@ class BotService:
             return "usage: /task_defer <task_id>"
         parts = context.stripped.split(maxsplit=1)
         if len(parts) != 2:
-            return "usage: /task_done <task_id>" if context.stripped.startswith("/task_done") else "usage: /task_defer <task_id>"
+            return (
+                "usage: /task_done <task_id>"
+                if context.stripped.startswith("/task_done")
+                else "usage: /task_defer <task_id>"
+            )
         to_status = "done" if context.stripped.startswith("/task_done") else "deferred"
-        return self._task_handler.task_queue_transition_response(context.session_id, parts[1], to_status=to_status)
+        return self._task_handler.task_queue_transition_response(
+            context.session_id, parts[1], to_status=to_status
+        )
 
     def _handle_browse_command(self, context: CommandContext) -> str:
         parts = context.stripped.split(maxsplit=1)
@@ -4386,7 +4694,6 @@ class BotService:
             return self._buddy_rename_response(context.user_id, parts[2])
         return self._buddy_card_response(context.user_id)
 
-
     def _handle_playbook_command(self, context: CommandContext) -> str:
         playbooks = self.brain.playbooks
         if not playbooks._loaded:
@@ -4394,7 +4701,10 @@ class BotService:
         if context.stripped == "/playbooks":
             if not playbooks.playbooks:
                 return "No hay playbooks disponibles."
-            lines = [f"- **{pb.name}** (triggers: {', '.join(pb.triggers[:4])})" for pb in playbooks.playbooks]
+            lines = [
+                f"- **{pb.name}** (triggers: {', '.join(pb.triggers[:4])})"
+                for pb in playbooks.playbooks
+            ]
             return "Playbooks disponibles:\n" + "\n".join(lines)
         parts = context.stripped.split(maxsplit=1)
         if len(parts) != 2:
@@ -4420,7 +4730,11 @@ class BotService:
             return "usage: /backtest <instrucción>"
         parts = context.stripped.split(maxsplit=1)
         instruction = parts[1]
-        prompt = f"{instruction}\n\n<playbook-context>\n{pb_context}\n</playbook-context>" if pb_context else instruction
+        prompt = (
+            f"{instruction}\n\n<playbook-context>\n{pb_context}\n</playbook-context>"
+            if pb_context
+            else instruction
+        )
         return self._brain_text_response(context.session_id, prompt)
 
     def _load_skill_content(self, skill_name: str) -> str:
@@ -4432,7 +4746,7 @@ class BotService:
         if text.startswith("---"):
             end = text.find("---", 3)
             if end != -1:
-                text = text[end + 3:].strip()
+                text = text[end + 3 :].strip()
         return text
 
     def _handle_grill_command(self, context: CommandContext) -> str:
@@ -4440,7 +4754,11 @@ class BotService:
             return "Uso: /grill <descripción del plan o diseño>\nEjemplo: /grill migrar auth a OAuth2 con refresh tokens"
         parts = context.stripped.split(maxsplit=1)
         skill_content = self._load_skill_content("grill-me")
-        prompt = f"<skill-context>\n{skill_content}\n</skill-context>\n\n{parts[1]}" if skill_content else parts[1]
+        prompt = (
+            f"<skill-context>\n{skill_content}\n</skill-context>\n\n{parts[1]}"
+            if skill_content
+            else parts[1]
+        )
         return self._brain_text_response(context.session_id, prompt)
 
     def _handle_tdd_command(self, context: CommandContext) -> str:
@@ -4448,7 +4766,11 @@ class BotService:
             return "Uso: /tdd <feature o bug a implementar>\nEjemplo: /tdd agregar validación de email en registro"
         parts = context.stripped.split(maxsplit=1)
         skill_content = self._load_skill_content("tdd")
-        prompt = f"<skill-context>\n{skill_content}\n</skill-context>\n\n{parts[1]}" if skill_content else parts[1]
+        prompt = (
+            f"<skill-context>\n{skill_content}\n</skill-context>\n\n{parts[1]}"
+            if skill_content
+            else parts[1]
+        )
         return self._brain_text_response(context.session_id, prompt)
 
     def _handle_improve_arch_command(self, context: CommandContext) -> str:
@@ -4458,7 +4780,11 @@ class BotService:
         else:
             parts = context.stripped.split(maxsplit=1)
             instruction = parts[1]
-        prompt = f"<skill-context>\n{skill_content}\n</skill-context>\n\n{instruction}" if skill_content else instruction
+        prompt = (
+            f"<skill-context>\n{skill_content}\n</skill-context>\n\n{instruction}"
+            if skill_content
+            else instruction
+        )
         return self._brain_text_response(context.session_id, prompt)
 
     _VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -4513,7 +4839,11 @@ class BotService:
         else:
             parts = context.stripped.split(maxsplit=1)
             instruction = f"Ejecuta verification pipeline sobre: {parts[1]}"
-        prompt = f"<playbook-context>\n{pb_context}\n</playbook-context>\n\n{instruction}" if pb_context else instruction
+        prompt = (
+            f"<playbook-context>\n{pb_context}\n</playbook-context>\n\n{instruction}"
+            if pb_context
+            else instruction
+        )
         return self._brain_text_response(context.session_id, prompt)
 
     def _handle_focus_command(self, context: CommandContext) -> str:
@@ -4645,7 +4975,9 @@ class BotService:
                             str(merge_payload.get("action", "")).startswith("pipeline_merge:")
                             and merge_payload.get("status") == "pending"
                         ):
-                            confirmation = merge_meta.get("required_confirmation") or result.approval_token
+                            confirmation = (
+                                merge_meta.get("required_confirmation") or result.approval_token
+                            )
                             response["approval_id"] = result.approval_id
                             response["approval_token"] = result.approval_token
                             response["confirm_with"] = (
@@ -4677,7 +5009,9 @@ class BotService:
                 return "approval rejected"
             try:
                 run = self.pipeline.merge_and_close(issue_id)
-                return json.dumps({"issue": run.issue_id, "status": run.status, "pr_url": run.pr_url}, indent=2)
+                return json.dumps(
+                    {"issue": run.issue_id, "status": run.status, "pr_url": run.pr_url}, indent=2
+                )
             except Exception:
                 logger.exception("pipeline merge error for %s", issue_id)
                 return "merge error — check logs for details"
@@ -4740,7 +5074,13 @@ class BotService:
             active = self.pipeline.list_active()
             if not active:
                 return "no active pipeline runs"
-            return json.dumps([{"issue": r.issue_id, "status": r.status, "branch": r.branch_name} for r in active], indent=2)
+            return json.dumps(
+                [
+                    {"issue": r.issue_id, "status": r.status, "branch": r.branch_name}
+                    for r in active
+                ],
+                indent=2,
+            )
         if stripped.startswith("/pipeline "):
             if self.pipeline is None:
                 return "pipeline service unavailable"
@@ -4749,7 +5089,16 @@ class BotService:
             repo_root = Path(parts[2]) if len(parts) == 3 else None
             try:
                 run = self.pipeline.process_issue(issue_id, repo_root=repo_root)
-                return json.dumps({"issue": run.issue_id, "status": run.status, "branch": run.branch_name, "approval_id": run.approval_id, "approve_command": f"/pipeline_approve {run.approval_id}"}, indent=2)
+                return json.dumps(
+                    {
+                        "issue": run.issue_id,
+                        "status": run.status,
+                        "branch": run.branch_name,
+                        "approval_id": run.approval_id,
+                        "approve_command": f"/pipeline_approve {run.approval_id}",
+                    },
+                    indent=2,
+                )
             except Exception:
                 logger.exception("pipeline error for %s", issue_id)
                 return "pipeline error — check logs for details"
@@ -4770,7 +5119,13 @@ class BotService:
             account = parts[1]
             try:
                 drafts = self.content_engine.generate_batch(account)
-                return json.dumps([{"platform": d.platform, "text": d.text, "hashtags": d.hashtags} for d in drafts], indent=2)
+                return json.dumps(
+                    [
+                        {"platform": d.platform, "text": d.text, "hashtags": d.hashtags}
+                        for d in drafts
+                    ],
+                    indent=2,
+                )
             except FileNotFoundError:
                 return f"account not found: {account}"
             except Exception:
@@ -4834,6 +5189,7 @@ class BotService:
                 return "usage: /social_approve <approval_id> <token>"
             approval_id, token = parts[1], parts[2]
             from claw_v2.content import PostDraft
+
             try:
                 payload = self.approvals.read(approval_id)
             except FileNotFoundError:
@@ -4894,16 +5250,16 @@ class BotService:
         if enriched != text:
             prompt_text = _format_tweet_analysis_prompt(text, enriched)
             prefetched_evidence_context = (
-                _extract_prefetched_evidence_context(prompt_text)
-                or prefetched_evidence_context
+                _extract_prefetched_evidence_context(prompt_text) or prefetched_evidence_context
             )
         if runtime_capability_question:
             prompt_text = _format_runtime_capability_prompt(prompt_text)
             prefetched_evidence_context = (
-                _extract_prefetched_evidence_context(prompt_text)
-                or prefetched_evidence_context
+                _extract_prefetched_evidence_context(prompt_text) or prefetched_evidence_context
             )
-        prompt_text = self._with_runtime_capability_context(prompt_text, runtime_channel=runtime_channel)
+        prompt_text = self._with_runtime_capability_context(
+            prompt_text, runtime_channel=runtime_channel
+        )
         pre_turn_message_id = self.brain.memory.last_message_id(session_id)
         try:
             response = self.brain.handle_message(
@@ -4982,7 +5338,9 @@ class BotService:
         )
         if contract_content != content:
             try:
-                self.brain.memory.replace_latest_assistant_message(session_id, content, contract_content)
+                self.brain.memory.replace_latest_assistant_message(
+                    session_id, content, contract_content
+                )
             except Exception:
                 logger.debug("background monitor contract memory replacement failed", exc_info=True)
             content = contract_content
@@ -4991,9 +5349,7 @@ class BotService:
         )
         self._remember_assistant_turn_state(session_id, source_text, content)
         if content == "Recibido. ¿Qué quieres que haga con esto?":
-            outcome = self._classify_brain_outcome_value(
-                brain_tool_use_record, fallback="failure"
-            )
+            outcome = self._classify_brain_outcome_value(brain_tool_use_record, fallback="failure")
             self._browse_handler._record_learning_outcome(
                 task_type="telegram_message",
                 session_id=session_id,
@@ -5005,9 +5361,7 @@ class BotService:
                 predicted_confidence=self.brain._last_confidence.get(session_id) or None,
             )
         else:
-            outcome = self._classify_brain_outcome_value(
-                brain_tool_use_record, fallback="success"
-            )
+            outcome = self._classify_brain_outcome_value(brain_tool_use_record, fallback="success")
             lesson = (
                 "The brain produced a usable reply but the tool-use ledger is unverified; verifier should reconcile."
                 if outcome == "usable_reply_unverified"
@@ -5074,7 +5428,9 @@ class BotService:
                             payload={"session_id": session_id, "trace_id": trace_id},
                         )
                     except Exception:
-                        logger.debug("brain_tooluse_ledger_deferred_failed emit failed", exc_info=True)
+                        logger.debug(
+                            "brain_tooluse_ledger_deferred_failed emit failed", exc_info=True
+                        )
 
         try:
             threading.Thread(
@@ -5168,7 +5524,9 @@ class BotService:
         except Exception:
             return
         active_object = state.get("active_object") or {} if isinstance(state, dict) else {}
-        active_task = active_object.get("active_task") or {} if isinstance(active_object, dict) else {}
+        active_task = (
+            active_object.get("active_task") or {} if isinstance(active_object, dict) else {}
+        )
         if not isinstance(active_task, dict) or str(active_task.get("task_id") or "") != task_id:
             return
         try:
@@ -5229,9 +5587,7 @@ class BotService:
         try:
             events = self.observe.trace_events(trace_id)
         except Exception:
-            logger.exception(
-                "brain_tooluse_ledger trace_events failed for trace_id=%s", trace_id
-            )
+            logger.exception("brain_tooluse_ledger trace_events failed for trace_id=%s", trace_id)
             try:
                 self.observe.emit(
                     "brain_tooluse_ledger_observe_failed",
@@ -5252,7 +5608,11 @@ class BotService:
                 tool_events.append(ev)
             elif etype == "sdk_post_tool_use_failure":
                 tool_failure_events.append(ev)
-            elif etype in {"approval_required", "tool_blocked_by_freeze", "tool_hard_denylist_blocked"}:
+            elif etype in {
+                "approval_required",
+                "tool_blocked_by_freeze",
+                "tool_hard_denylist_blocked",
+            }:
                 approval_events.append(ev)
         if not tool_events and not tool_failure_events and not approval_events:
             try:
@@ -5269,7 +5629,9 @@ class BotService:
         except Exception:
             state = {}
         active_object = state.get("active_object") or {} if isinstance(state, dict) else {}
-        active_task = active_object.get("active_task") or {} if isinstance(active_object, dict) else {}
+        active_task = (
+            active_object.get("active_task") or {} if isinstance(active_object, dict) else {}
+        )
         existing_task_id = ""
         if isinstance(active_task, dict):
             existing_task_id = str(active_task.get("task_id") or "")
@@ -5294,7 +5656,9 @@ class BotService:
                         },
                     )
                 except Exception:
-                    logger.debug("brain_tooluse_ledger_attached_existing emit failed", exc_info=True)
+                    logger.debug(
+                        "brain_tooluse_ledger_attached_existing emit failed", exc_info=True
+                    )
                 return
         # Approval-required tool was blocked — record as skipped/sensitive,
         # do NOT mark success.
@@ -5330,9 +5694,7 @@ class BotService:
         # `redact_sensitive` only matches well-known providers' shapes;
         # this catches mixed-alphanumeric tokens shaped like opaque
         # session/api credentials (same heuristic PR 0B/0D use).
-        source_summary, sensitive_redactions = self._redact_secret_tokens(
-            (source_text or "")[:200]
-        )
+        source_summary, sensitive_redactions = self._redact_secret_tokens((source_text or "")[:200])
         metadata = {
             "origin": "brain_fallback",
             "brain_tool_use": True,
@@ -5408,7 +5770,9 @@ class BotService:
                     {"kind": "brain_tooluse_verifier", "result": verification_result}
                 ]
 
-        requires_verified_completion = self._brain_tooluse_requires_verified_completion(source_summary)
+        requires_verified_completion = self._brain_tooluse_requires_verified_completion(
+            source_summary
+        )
         brain_artifacts = {
             "evidence_manifest": evidence_manifest,
             "outcome_manifest": outcome_manifest,
@@ -5422,7 +5786,9 @@ class BotService:
             "tool_event_count": len(tool_events),
             "tool_failure_count": len(tool_failure_events),
             "approval_event_count": len(approval_events),
-            "substeps": self._brain_tooluse_substeps(tool_events, tool_failure_events, approval_events),
+            "substeps": self._brain_tooluse_substeps(
+                tool_events, tool_failure_events, approval_events
+            ),
         }
         # P0-D: populate `route` so the agent_tasks.channel column is
         # non-NULL. Behavioral audit found 99/100 brain-tooluse rows had
@@ -5481,7 +5847,8 @@ class BotService:
                     task_id,
                     status="failed",
                     summary="brain action tool-use failed before passed verification",
-                    error=first_error[:300] or "action tool execution failed before passed verification",
+                    error=first_error[:300]
+                    or "action tool execution failed before passed verification",
                     verification_status="failed",
                     artifacts=brain_artifacts,
                 )
@@ -5524,7 +5891,9 @@ class BotService:
                         },
                     )
                 except Exception:
-                    logger.debug("brain_tooluse_ledger_completed_with_warnings emit failed", exc_info=True)
+                    logger.debug(
+                        "brain_tooluse_ledger_completed_with_warnings emit failed", exc_info=True
+                    )
                 return
             evidence_manifest["completed_at"] = time.time()
             evidence_manifest["verification_result"] = "failed"
@@ -5555,9 +5924,7 @@ class BotService:
         # against the artifacts that actually ran instead of the request text.
         performed_mutation = bool(files_written) or bool(commands_run)
         coordinator = getattr(getattr(self, "_task_handler", None), "coordinator", None)
-        verify_enabled = bool(
-            getattr(getattr(self, "config", None), "brain_tooluse_verify", False)
-        )
+        verify_enabled = bool(getattr(getattr(self, "config", None), "brain_tooluse_verify", False))
         should_verify = (
             verify_enabled
             and coordinator is not None
@@ -5625,7 +5992,9 @@ class BotService:
                         },
                     )
                 except Exception:
-                    logger.debug("brain_tooluse_ledger_verification_failed emit failed", exc_info=True)
+                    logger.debug(
+                        "brain_tooluse_ledger_verification_failed emit failed", exc_info=True
+                    )
                 return
         if self._brain_tooluse_has_verified_readonly_browser_evidence(
             source_summary,
@@ -5656,7 +6025,9 @@ class BotService:
                     },
                 )
             except Exception:
-                logger.debug("brain_tooluse_ledger_verified_readonly_browser emit failed", exc_info=True)
+                logger.debug(
+                    "brain_tooluse_ledger_verified_readonly_browser emit failed", exc_info=True
+                )
             return
         # Tools ran without failure, but no verifier has passed yet.
         # PR2 Checkpoint B: block on executed mutation (files_written /
@@ -5695,7 +6066,9 @@ class BotService:
                     },
                 )
             except Exception:
-                logger.debug("brain_tooluse_ledger_blocked_unverified_action emit failed", exc_info=True)
+                logger.debug(
+                    "brain_tooluse_ledger_blocked_unverified_action emit failed", exc_info=True
+                )
             return
         evidence_manifest["completed_at"] = time.time()
         evidence_manifest["verification_result"] = "needs_verification"
@@ -5823,7 +6196,12 @@ class BotService:
         evidence_paths = [p.lower() for p in files_read]
         has_instagram_artifact = any(
             ("artifacts/ig_feed/" in path or "artifacts/instagram/" in path)
-            and (path.endswith(".png") or path.endswith(".jpg") or path.endswith(".jpeg") or path.endswith(".json"))
+            and (
+                path.endswith(".png")
+                or path.endswith(".jpg")
+                or path.endswith(".jpeg")
+                or path.endswith(".json")
+            )
             for path in evidence_paths
         )
         if not has_instagram_artifact:
@@ -5843,8 +6221,7 @@ class BotService:
         if not normalized:
             return False
         return any(
-            pattern.search(normalized)
-            for pattern in _BRAIN_TOOLUSE_VERIFIED_ACTION_PATTERNS
+            pattern.search(normalized) for pattern in _BRAIN_TOOLUSE_VERIFIED_ACTION_PATTERNS
         )
 
     @staticmethod
@@ -5880,7 +6257,9 @@ class BotService:
         for event in failure_events:
             payload = cls._tool_payload(event)
             error = str(payload.get("error") or "")[:300]
-            reason = "file_too_large" if "exceeds maximum allowed tokens" in error else "tool_failed"
+            reason = (
+                "file_too_large" if "exceeds maximum allowed tokens" in error else "tool_failed"
+            )
             substeps.append(
                 {
                     "tool": str(payload.get("tool_name") or payload.get("tool") or "unknown")[:80],
@@ -6017,25 +6396,46 @@ class BotService:
             parts.append(f"stderr_chars={tool_response.get('stderr_chars')}")
         return "; ".join(parts)
 
-    def _with_runtime_capability_context(self, prompt_text: str, *, runtime_channel: str | None = None) -> str:
+    def _with_runtime_capability_context(
+        self, prompt_text: str, *, runtime_channel: str | None = None
+    ) -> str:
         context = self._runtime_capability_context(runtime_channel=runtime_channel)
         if not context:
             return prompt_text
         return f"{context}\n\n# User request\n{prompt_text}"
 
     def _runtime_capability_context(self, *, runtime_channel: str | None = None) -> str:
-        lines = ["# Runtime capability context", "Use this as current local runtime evidence before claiming a capability is unavailable."]
+        lines = [
+            "# Runtime capability context",
+            "Use this as current local runtime evidence before claiming a capability is unavailable.",
+        ]
         lines.append("- External identity: Dr. Strange, Hector's local autonomous operator.")
-        lines.append("- Claude, Claude Code, Codex, OpenAI, ChatGPT, and provider models are internal tools/providers, not the agent identity.")
-        lines.append("- Binding rule: do not answer as Claude Code/Codex/the model; answer as Dr. Strange operating through the verified runtime.")
+        lines.append(
+            "- Claude, Claude Code, Codex, OpenAI, ChatGPT, and provider models are internal tools/providers, not the agent identity."
+        )
+        lines.append(
+            "- Binding rule: do not answer as Claude Code/Codex/the model; answer as Dr. Strange operating through the verified runtime."
+        )
         if runtime_channel:
             normalized_channel = runtime_channel.strip().lower()
             lines.append(f"- Current inbound channel: {normalized_channel}")
             lines.append("- Runtime process: daemon/local runtime")
-            lines.append("- CLI channel active: false" if normalized_channel != "cli" else "- CLI channel active: true")
-            lines.append("Rule: Telegram is the Telegram channel; do not describe Telegram as CLI unless the current inbound channel is cli and local evidence confirms it.")
-            lines.append("Rule: contexto interno != respuesta externa; summarize source names/status, never print private boot context wholesale.")
-        if self._capability_available("chrome_cdp") and self.browser is not None and self.managed_chrome is not None:
+            lines.append(
+                "- CLI channel active: false"
+                if normalized_channel != "cli"
+                else "- CLI channel active: true"
+            )
+            lines.append(
+                "Rule: Telegram is the Telegram channel; do not describe Telegram as CLI unless the current inbound channel is cli and local evidence confirms it."
+            )
+            lines.append(
+                "Rule: contexto interno != respuesta externa; summarize source names/status, never print private boot context wholesale."
+            )
+        if (
+            self._capability_available("chrome_cdp")
+            and self.browser is not None
+            and self.managed_chrome is not None
+        ):
             cdp_url = str(getattr(self.managed_chrome, "cdp_url", "") or "")
             detail = f"available ({cdp_url})" if cdp_url else "available"
             lines.append(f"- Chrome CDP: {detail}")
@@ -6061,7 +6461,9 @@ class BotService:
             lines.append("- Terminal bridge: available")
         else:
             lines.append("- Terminal bridge: unavailable")
-        lines.append("Rule: do not say 'no tengo acceso/no puedo usar navegador/herramientas' unless the relevant line above is unavailable or a concrete attempted route failed.")
+        lines.append(
+            "Rule: do not say 'no tengo acceso/no puedo usar navegador/herramientas' unless the relevant line above is unavailable or a concrete attempted route failed."
+        )
         return "\n".join(lines)
 
     def _identity_binding_response(self) -> str:
@@ -6124,7 +6526,10 @@ class BotService:
         reason: str,
     ) -> str | None:
         task_id = f"{session_id}:evidence-gate:{time.time_ns()}"
-        objective = _compact_summary(source_text, limit=220) or "Evidence gate blocked an unverified action claim"
+        objective = (
+            _compact_summary(source_text, limit=220)
+            or "Evidence gate blocked an unverified action claim"
+        )
         artifacts = {
             "action_result": {
                 "status": "explicit_blocker",
@@ -6238,7 +6643,11 @@ class BotService:
 
     def _correct_unverified_capability_denial(self, content: str) -> str | None:
         available = []
-        if self._capability_available("chrome_cdp") and self.browser is not None and self.managed_chrome is not None:
+        if (
+            self._capability_available("chrome_cdp")
+            and self.browser is not None
+            and self.managed_chrome is not None
+        ):
             cdp_url = str(getattr(self.managed_chrome, "cdp_url", "") or "")
             available.append(f"Chrome/CDP{f' ({cdp_url})' if cdp_url else ''}")
         if self._capability_available("browser_use") and self.browser_use is not None:
@@ -6290,7 +6699,11 @@ class BotService:
     def _clear_pending_tool_approval(self, session_id: str, approval_id: str | None = None) -> None:
         state = self.brain.memory.get_session_state(session_id)
         pending = (state.get("active_object") or {}).get("pending_tool_approval")
-        if approval_id is None or not isinstance(pending, dict) or pending.get("approval_id") == approval_id:
+        if (
+            approval_id is None
+            or not isinstance(pending, dict)
+            or pending.get("approval_id") == approval_id
+        ):
             self.brain.memory.merge_active_object(
                 session_id,
                 {},
@@ -6299,7 +6712,9 @@ class BotService:
                 verification_status="unknown",
             )
 
-    def _handle_pending_tool_approval_grant_response(self, session_id: str, text: str) -> str | None:
+    def _handle_pending_tool_approval_grant_response(
+        self, session_id: str, text: str
+    ) -> str | None:
         state = self.brain.memory.get_session_state(session_id)
         active_object = dict(state.get("active_object") or {})
         pending = active_object.get("pending_tool_approval")
@@ -6321,7 +6736,9 @@ class BotService:
         required_confirmation = str(metadata.get("required_confirmation") or "").strip()
         if required_confirmation:
             if text.strip() != required_confirmation:
-                if _looks_like_pending_tool_approval_grant(text) or text.strip().upper().startswith("CONFIRMO"):
+                if _looks_like_pending_tool_approval_grant(text) or text.strip().upper().startswith(
+                    "CONFIRMO"
+                ):
                     return (
                         "Esta aprobación toca cambios sensibles. No alcanza con `ok`, `sí` o `dale`.\n"
                         f"Responde exactamente: `{required_confirmation}`"
@@ -6496,9 +6913,15 @@ class BotService:
                 failure_summary_response,
                 assistant_limit=3000,
             )
-            self._remember_assistant_turn_state(session_id, multimodal_text, failure_summary_response)
+            self._remember_assistant_turn_state(
+                session_id, multimodal_text, failure_summary_response
+            )
             return failure_summary_response
-        runtime_context = self._runtime_capability_context(runtime_channel=runtime_channel) if runtime_channel else ""
+        runtime_context = (
+            self._runtime_capability_context(runtime_channel=runtime_channel)
+            if runtime_channel
+            else ""
+        )
         prompt_blocks = list(content_blocks)
         if runtime_context:
             prompt_blocks = [{"type": "text", "text": runtime_context}, *prompt_blocks]
@@ -6533,20 +6956,27 @@ class BotService:
                 parts.append(text)
         return "\n".join(parts).strip()
 
-
     def _tokens_info_response(self, session_id: str) -> str:
         if self.observation_window is None:
-            return json.dumps({
-                "session_id": session_id,
-                "token_window": {"available": False},
-            }, indent=2, sort_keys=True)
+            return json.dumps(
+                {
+                    "session_id": session_id,
+                    "token_window": {"available": False},
+                },
+                indent=2,
+                sort_keys=True,
+            )
         try:
             status_payload = self.observation_window.status_payload()
         except Exception:
-            return json.dumps({
-                "session_id": session_id,
-                "token_window": {"available": False},
-            }, indent=2, sort_keys=True)
+            return json.dumps(
+                {
+                    "session_id": session_id,
+                    "token_window": {"available": False},
+                },
+                indent=2,
+                sort_keys=True,
+            )
 
         token_window = dict(status_payload.get("token_window") or {})
         usage_pct = float(token_window.get("usage_ratio") or 0.0) * 100
@@ -6554,7 +6984,9 @@ class BotService:
         if token_window.get("hard_limit_reached"):
             status = "critical"
             status_emoji = "🔴"
-            recommendation = "Autonomía no read-only congelada hasta que baje la ventana o haya override humano"
+            recommendation = (
+                "Autonomía no read-only congelada hasta que baje la ventana o haya override humano"
+            )
         elif token_window.get("soft_limit_reached"):
             status = "warning"
             status_emoji = "🟡"
@@ -6565,21 +6997,25 @@ class BotService:
             recommendation = "Ventana de tokens saludable"
 
         max_output = self.config.brain_max_output if self.config else 128_000
-        return json.dumps({
-            "session_id": session_id,
-            "model": "Claude Opus 4.7 / Sonnet 4.6",
-            "max_output": max_output,
-            "token_window": {
-                **token_window,
-                "available": True,
-                "usage_percentage": round(usage_pct, 1),
+        return json.dumps(
+            {
+                "session_id": session_id,
+                "model": "Claude Opus 4.7 / Sonnet 4.6",
+                "max_output": max_output,
+                "token_window": {
+                    **token_window,
+                    "available": True,
+                    "usage_percentage": round(usage_pct, 1),
+                },
+                "status": status,
+                "status_display": f"{status_emoji} {status.title()}",
+                "recommendation": recommendation,
+                "frozen": bool(status_payload.get("frozen")),
+                "freeze_reason": status_payload.get("freeze_reason") or "",
             },
-            "status": status,
-            "status_display": f"{status_emoji} {status.title()}",
-            "recommendation": recommendation,
-            "frozen": bool(status_payload.get("frozen")),
-            "freeze_reason": status_payload.get("freeze_reason") or "",
-        }, indent=2, sort_keys=True)
+            indent=2,
+            sort_keys=True,
+        )
 
     def _quality_response(self) -> str:
         ledger_summary: dict[str, int] = {}
@@ -6613,21 +7049,27 @@ class BotService:
         pre_hook_blocked_repeated_count = counts.get("pre_hook_blocked_repeated", 0)
         capability_route_selected_count = counts.get("capability_route_selected", 0)
         capability_route_blocked_count = counts.get("capability_route_blocked", 0)
-        notebook_context_resolved_count = counts.get(
-            "notebook_context_resolved", 0
-        )
+        notebook_context_resolved_count = counts.get("notebook_context_resolved", 0)
         telegram_imperative_detected_total = counts.get("telegram_imperative_detected", 0)
         telegram_imperative_routed_total = counts.get("telegram_imperative_routed", 0)
         telegram_imperative_executed_total = counts.get("telegram_imperative_executed", 0)
-        telegram_imperative_execution_failed_total = counts.get("telegram_imperative_execution_failed", 0)
-        telegram_imperative_pending_approval_total = counts.get("telegram_imperative_pending_approval", 0)
+        telegram_imperative_execution_failed_total = counts.get(
+            "telegram_imperative_execution_failed", 0
+        )
+        telegram_imperative_pending_approval_total = counts.get(
+            "telegram_imperative_pending_approval", 0
+        )
         telegram_imperative_blocked_total = counts.get("telegram_imperative_blocked", 0)
         telegram_imperative_clarification_total = counts.get("telegram_imperative_clarification", 0)
-        telegram_actionable_no_match_total = counts.get("actionable_no_match", 0) + counts.get("telegram_actionable_no_match", 0)
+        telegram_actionable_no_match_total = counts.get("actionable_no_match", 0) + counts.get(
+            "telegram_actionable_no_match", 0
+        )
         brain_fallback_for_actionable_total = counts.get("brain_fallback_for_actionable", 0)
         quality_guard_triggered_total = counts.get("quality_guard_triggered", 0)
         identity_drift_guard_triggered_total = counts.get("identity_drift_guard_triggered", 0)
-        capability_binding_guard_triggered_total = counts.get("capability_binding_guard_triggered", 0)
+        capability_binding_guard_triggered_total = counts.get(
+            "capability_binding_guard_triggered", 0
+        )
         operator_handoff_guard_triggered_total = counts.get("operator_handoff_guard_triggered", 0)
         owner_delegation_detected_total = counts.get("owner_delegation_match", 0)
         active_mission_resolution_success_total = counts.get("active_mission_resolution_success", 0)
@@ -6673,8 +7115,7 @@ class BotService:
                 "false_success_prevented": false_success_prevented,
             },
             "top_failure_reasons": [
-                {"reason": reason, "count": count}
-                for reason, count in top_reasons
+                {"reason": reason, "count": count} for reason, count in top_reasons
             ],
             "provider_health": {
                 "provider_session_reset": provider_session_reset,
@@ -6684,10 +7125,7 @@ class BotService:
             "pre_hook_blocks": {
                 "count": pre_hook_blocked_count,
                 "repeated_count": pre_hook_blocked_repeated_count,
-                "top_hooks": [
-                    {"hook": hook, "count": count}
-                    for hook, count in top_pre_hooks
-                ],
+                "top_hooks": [{"hook": hook, "count": count} for hook, count in top_pre_hooks],
             },
             "autonomy_routing": {
                 "capability_route_selected_count": capability_route_selected_count,
@@ -6736,10 +7174,19 @@ class BotService:
         metadata = dict(getattr(record, "metadata", {}) or {})
         task_kind = str(metadata.get("intent") or metadata.get("task_kind") or "unknown")
         evidence_keys = [
-            key for key in (
-                "handler_result", "notebook_id", "notebook_title", "review_summary",
-                "diff", "test_output", "changed_files", "pr_url", "sources",
-                "screenshot_after", "partial_output",
+            key
+            for key in (
+                "handler_result",
+                "notebook_id",
+                "notebook_title",
+                "review_summary",
+                "diff",
+                "test_output",
+                "changed_files",
+                "pr_url",
+                "sources",
+                "screenshot_after",
+                "partial_output",
             )
             if artifacts.get(key)
         ]
@@ -6754,10 +7201,12 @@ class BotService:
                         break
             except Exception:
                 last_event = "n/a"
-        can_resume = (
-            status in {"running", "lost", "failed", "queued"}
-            or verification in {"pending", "missing_evidence", "interrupted", "blocked"}
-        )
+        can_resume = status in {"running", "lost", "failed", "queued"} or verification in {
+            "pending",
+            "missing_evidence",
+            "interrupted",
+            "blocked",
+        }
         lines = [
             f"Task: `{task_id}`",
             f"Estado: {status} / verificación: {verification}",
@@ -6787,7 +7236,13 @@ class BotService:
             payload = self.observe.spending_today()
         else:
             total = self.observe.total_cost_today()
-            payload = {"total": round(float(total), 6), "by_lane": {}, "by_provider": {}, "by_model": {}, "rows": []}
+            payload = {
+                "total": round(float(total), 6),
+                "by_lane": {},
+                "by_provider": {},
+                "by_model": {},
+                "rows": [],
+            }
         return json.dumps(payload, indent=2, sort_keys=True)
 
     def _traces_response(self, *, limit: int) -> str:
@@ -6827,6 +7282,7 @@ class BotService:
         html_path: str | None = None
         try:
             from claw_v2.visualizer import TraceVisualizerService
+
             viz = TraceVisualizerService(self.observe)
             html_path = str(viz.render(trace_id, limit=limit))
         except Exception as exc:
@@ -6847,7 +7303,11 @@ class BotService:
             }
             for event in events
         ]
-        result: dict[str, Any] = {"trace_id": trace_id, "event_count": len(replay), "events": replay}
+        result: dict[str, Any] = {
+            "trace_id": trace_id,
+            "event_count": len(replay),
+            "events": replay,
+        }
         if html_path:
             result["html"] = html_path
         return redact_sensitive(json.dumps(result, indent=2, sort_keys=True), limit=0)
@@ -6876,11 +7336,13 @@ class BotService:
             for event in events
         ]
         return redact_sensitive(
-            json.dumps({"job_id": job_id, "event_count": len(replay), "events": replay}, indent=2, sort_keys=True),
+            json.dumps(
+                {"job_id": job_id, "event_count": len(replay), "events": replay},
+                indent=2,
+                sort_keys=True,
+            ),
             limit=0,
         )
-
-
 
     # -- Buddy handlers --------------------------------------------------------
 
@@ -6904,7 +7366,6 @@ class BotService:
         if not hasattr(self, "buddy") or self.buddy is None:
             return "buddy service not available"
         return self.buddy.rename(user_id, new_name)
-
 
     def _set_autonomy_mode_response(self, session_id: str, value: str) -> str:
         mode = _parse_autonomy_mode(value)
@@ -6974,14 +7435,18 @@ class BotService:
     def _remember_user_turn_state(self, session_id: str, text: str) -> None:
         self._state_handler.remember_user_turn_state(session_id, text)
 
-    def _remember_assistant_turn_state(self, session_id: str, user_text: str, reply_text: str) -> None:
+    def _remember_assistant_turn_state(
+        self, session_id: str, user_text: str, reply_text: str
+    ) -> None:
         self._state_handler.remember_assistant_turn_state(session_id, user_text, reply_text)
         try:
             self._idle_executor.inspect_turn(session_id=session_id)
         except Exception:
             logger.debug("idle ownership executor inspection failed", exc_info=True)
 
-    def _maybe_resolve_stateful_followup(self, text: str, *, session_id: str) -> str | _BrainShortcut | None:
+    def _maybe_resolve_stateful_followup(
+        self, text: str, *, session_id: str
+    ) -> str | _BrainShortcut | None:
         return self._state_handler.maybe_resolve_stateful_followup(text, session_id=session_id)
 
     def _handle_stateful_brain_shortcut(
@@ -7044,15 +7509,22 @@ class BotService:
             ):
                 self._browse_handler.remember_recent_browse_url(session_id, normalized_url)
                 return _BrainShortcut(text)
-            if "chrome" in normalized and (any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url)):
+            if "chrome" in normalized and (
+                any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS)
+                or _looks_like_standalone_url(text, extracted_url)
+            ):
                 return self._chrome_handler.browse_response(extracted_url, session_id=session_id)
             if normalized_url is not None and (
                 _is_local_url(normalized_url)
                 or (_has_url_query(normalized_url) and "://" not in extracted_url)
             ):
                 return self._browse_handler.browse_response(extracted_url, session_id=session_id)
-            if any(token in normalized for token in _LINK_ANALYSIS_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):
-                return self._browse_handler.link_review_shortcut(text, extracted_url, session_id=session_id)
+            if any(
+                token in normalized for token in _LINK_ANALYSIS_SHORTCUT_TOKENS
+            ) or _looks_like_standalone_url(text, extracted_url):
+                return self._browse_handler.link_review_shortcut(
+                    text, extracted_url, session_id=session_id
+                )
             if any(token in normalized for token in _BROWSE_OPEN_TOKENS):
                 # Open/operate intent on a site: a single site goes to the
                 # authenticated Chrome CDP path (not jina/markdown); multiple
@@ -7061,7 +7533,9 @@ class BotService:
                 if len(_extract_url_candidates(text)) > 1:
                     return _BrainShortcut(text)
                 return self._chrome_handler.browse_response(extracted_url, session_id=session_id)
-            if any(token in normalized for token in _BROWSE_SHORTCUT_TOKENS) or _looks_like_standalone_url(text, extracted_url):
+            if any(
+                token in normalized for token in _BROWSE_SHORTCUT_TOKENS
+            ) or _looks_like_standalone_url(text, extracted_url):
                 return self._browse_handler.browse_response(extracted_url, session_id=session_id)
 
         if _looks_like_tweet_followup_request(normalized):
@@ -7083,15 +7557,32 @@ class BotService:
         if _looks_like_computer_read_request(normalized):
             return self._computer_handler.computer_response(text, session_id)
 
-        if any(token in normalized for token in ("abre", "abrir", "open", "inicia", "iniciar", "run", "corre")):
+        if any(
+            token in normalized
+            for token in ("abre", "abrir", "open", "inicia", "iniciar", "run", "corre")
+        ):
             if "terminal" in normalized and "claude" in normalized:
                 return self._terminal_handler._open_response("claude", cwd=None)
             if "terminal" in normalized and "codex" in normalized:
                 return self._terminal_handler._open_response("codex", cwd=None)
 
         if "google ads" in normalized or "ads.google.com" in normalized:
-            if any(token in normalized for token in ("abre", "abrir", "open", "revisa", "revisa", "revisalo", "review", "check")):
-                return self._chrome_handler.browse_response("https://ads.google.com", session_id=session_id)
+            if any(
+                token in normalized
+                for token in (
+                    "abre",
+                    "abrir",
+                    "open",
+                    "revisa",
+                    "revisa",
+                    "revisalo",
+                    "review",
+                    "check",
+                )
+            ):
+                return self._chrome_handler.browse_response(
+                    "https://ads.google.com", session_id=session_id
+                )
 
         return None
 
@@ -7125,7 +7616,11 @@ class BotService:
         if not _looks_like_operational_alert(text):
             return None
         fields = _parse_operational_alert_fields(text)
-        title = text.splitlines()[0].split(":", 1)[1].strip() if ":" in text.splitlines()[0] else "unknown"
+        title = (
+            text.splitlines()[0].split(":", 1)[1].strip()
+            if ":" in text.splitlines()[0]
+            else "unknown"
+        )
         severity = fields.get("severidad") or fields.get("severity") or "unknown"
         agent = fields.get("agent") or fields.get("agente") or "unknown"
         reason = fields.get("reason") or fields.get("razon") or "unknown"
@@ -7159,9 +7654,13 @@ class BotService:
         if error:
             lines.append(f"Error: {error[:300]}")
         if agent == "perf-optimizer" and reason == "codex_timeout":
-            lines.append("Acción: mantener `perf-optimizer` pausado y revisar/reanudar manualmente cuando quieras validar el proveedor.")
+            lines.append(
+                "Acción: mantener `perf-optimizer` pausado y revisar/reanudar manualmente cuando quieras validar el proveedor."
+            )
         else:
-            lines.append("Acción: revisar `/jobs`, `/tasks` o `scripts/diagnose.sh` antes de reintentar.")
+            lines.append(
+                "Acción: revisar `/jobs`, `/tasks` o `scripts/diagnose.sh` antes de reintentar."
+            )
         return "\n".join(lines)
 
     def _classify_task_intent(self, text: str, *, session_id: str) -> dict[str, Any]:
@@ -7187,9 +7686,8 @@ class BotService:
         # "estado de la task nlm-abc123"), the router IS allowed to capture
         # it even when the canned-disable flag is set. The brain-bypass risk
         # comes from regex over-triggers, not from explicit references.
-        if (
-            os.getenv("CLAW_DISABLE_TASK_INTENT_ROUTER", "1") == "1"
-            and not _has_literal_task_id(text)
+        if os.getenv("CLAW_DISABLE_TASK_INTENT_ROUTER", "1") == "1" and not _has_literal_task_id(
+            text
         ):
             return None
 
@@ -7359,7 +7857,9 @@ class BotService:
             )
             if self._pending_tasks_synthesis_usable(content):
                 if content != raw_content:
-                    self.brain.memory.replace_latest_assistant_message(session_id, raw_content, content)
+                    self.brain.memory.replace_latest_assistant_message(
+                        session_id, raw_content, content
+                    )
                 self._remember_assistant_turn_state(session_id, text, content)
                 self._emit_pending_tasks_synthesis("brain", session_id=session_id)
                 return content
@@ -7400,12 +7900,13 @@ class BotService:
             "statusdelledger",
         }:
             return True
-        return (
-            any(token in normalized for token in ("estatus", "estado", "status"))
-            and any(token in normalized for token in ("tareas", "tasks", "ledger"))
+        return any(token in normalized for token in ("estatus", "estado", "status")) and any(
+            token in normalized for token in ("tareas", "tasks", "ledger")
         )
 
-    def _emit_pending_tasks_synthesis(self, mode: str, *, session_id: str, error: str | None = None) -> None:
+    def _emit_pending_tasks_synthesis(
+        self, mode: str, *, session_id: str, error: str | None = None
+    ) -> None:
         payload: dict[str, Any] = {"session_id": session_id, "mode": mode}
         if error:
             payload["error"] = error
@@ -7574,16 +8075,26 @@ class BotService:
                 records = self.task_ledger.list(session_id=session_id, limit=20)
             except Exception:
                 records = []
-        active = [record for record in records if str(getattr(record, "status", "")) in {"queued", "running"}]
+        active = [
+            record
+            for record in records
+            if str(getattr(record, "status", "")) in {"queued", "running"}
+        ]
         blocked = [record for record in records if self._is_pending_task_blocker(record)]
         state = self.brain.memory.get_session_state(session_id)
         pending_action = self._pending_action_for_task_summary(state)
         lines: list[str] = []
         if active:
             count = len(active)
-            lines.append(f"Ahora mismo tengo {count} tarea{'s' if count != 1 else ''} corriendo o en cola en esta sesion:")
+            lines.append(
+                f"Ahora mismo tengo {count} tarea{'s' if count != 1 else ''} corriendo o en cola en esta sesion:"
+            )
             for record in active[:5]:
-                detail = str(getattr(record, "summary", "") or getattr(record, "objective", "") or "sin resumen").strip()
+                detail = str(
+                    getattr(record, "summary", "")
+                    or getattr(record, "objective", "")
+                    or "sin resumen"
+                ).strip()
                 verification = str(getattr(record, "verification_status", "unknown") or "unknown")
                 lines.append(f"- {detail[:180]} ({verification}).")
             if len(active) > 5:
@@ -7652,15 +8163,23 @@ class BotService:
         elif approvals:
             lines.append("No veo aprobaciones vivas; solo ruido viejo o duplicado.")
         for item, _classification in active_items[:3]:
-            summary = str(item.get("summary") or item.get("action") or "aprobacion pendiente").strip()
+            summary = str(
+                item.get("summary") or item.get("action") or "aprobacion pendiente"
+            ).strip()
             age_hours = self._approval_age_hours(item)
             lines.append(f"- {summary[:180]} (edad ~{age_hours:.1f}h).")
         if len(active_items) > 3:
-            lines.append(f"- {len(active_items) - 3} aprobaciones activas adicionales no entran en este resumen.")
+            lines.append(
+                f"- {len(active_items) - 3} aprobaciones activas adicionales no entran en este resumen."
+            )
         if duplicate_count:
-            lines.append(f"Tambien hay {duplicate_count} aprobaciones duplicadas; no las cuento como trabajo pendiente real.")
+            lines.append(
+                f"Tambien hay {duplicate_count} aprobaciones duplicadas; no las cuento como trabajo pendiente real."
+            )
         if stale_or_expired_count:
-            lines.append(f"Ademas hay {stale_or_expired_count} aprobaciones viejas/expiradas fuera del resumen operativo.")
+            lines.append(
+                f"Ademas hay {stale_or_expired_count} aprobaciones viejas/expiradas fuera del resumen operativo."
+            )
         if duplicate_count or stale_or_expired_count:
             lines.append("Si quieres, puedo limpiarlas con `Limpia aprobaciones duplicadas`.")
         return lines
@@ -7675,8 +8194,7 @@ class BotService:
         if verification not in {"blocked", "missing_evidence", "pending_approval"}:
             return False
         text = " ".join(
-            str(getattr(record, field, "") or "")
-            for field in ("error", "summary", "objective")
+            str(getattr(record, field, "") or "") for field in ("error", "summary", "objective")
         ).lower()
         actionable_markers = (
             "waiting_for_user_input",
@@ -7693,7 +8211,9 @@ class BotService:
         )
         return any(marker in text for marker in actionable_markers)
 
-    def _is_recent_pending_blocker(self, record: Any, *, max_age_seconds: float = 24 * 3600) -> bool:
+    def _is_recent_pending_blocker(
+        self, record: Any, *, max_age_seconds: float = 24 * 3600
+    ) -> bool:
         try:
             updated_at = float(getattr(record, "updated_at", 0.0) or 0.0)
         except (TypeError, ValueError):
@@ -7711,7 +8231,11 @@ class BotService:
         if "waiting_for_user_input" in normalized:
             source = re.sub(r"(?i)^waiting_for_user_input:\s*", "", source).strip()
             return f"necesito confirmacion o dato faltante: {source[:180]}"
-        if "blocked_by_capability" in normalized or "missing_capability" in normalized or "capability" in normalized:
+        if (
+            "blocked_by_capability" in normalized
+            or "missing_capability" in normalized
+            or "capability" in normalized
+        ):
             return f"bloqueada por capacidad faltante: {source[:180]}"
         if "blocked_by_policy" in normalized or "policy_blocked" in normalized:
             return f"bloqueada por politica: {source[:180]}"
@@ -7779,7 +8303,9 @@ class BotService:
         return safe
 
     def _safe_status_response(self, session_id: str, *, reason: str) -> str:
-        web_port = int(getattr(self.config, "web_chat_port", 8765)) if self.config is not None else 8765
+        web_port = (
+            int(getattr(self.config, "web_chat_port", 8765)) if self.config is not None else 8765
+        )
         runtime = "vivo" if self._runtime_alive() else "sin respuesta local"
         approvals = []
         try:
@@ -7810,7 +8336,9 @@ class BotService:
         ]
         seen_actions: set[str] = set()
         for item in approvals_for_audit[:5]:
-            summary = str(item.get("summary") or item.get("action") or "aprobacion pendiente").strip()
+            summary = str(
+                item.get("summary") or item.get("action") or "aprobacion pendiente"
+            ).strip()
             age_hours = self._approval_age_hours(item)
             classification = self._classify_approval(item, seen_actions=seen_actions)
             lines.append(
@@ -7917,7 +8445,11 @@ class BotService:
                     "artifact_hint": intent.artifact_hint,
                 },
             )
-            return None, f"telegram_imperative:{intent.intent}:contextual_fallthrough", intent.matched_pattern
+            return (
+                None,
+                f"telegram_imperative:{intent.intent}:contextual_fallthrough",
+                intent.matched_pattern,
+            )
         if intent.intent == "task.continue_active_mission":
             stateful_followup, resolution_source = self._maybe_resolve_telegram_continuation(
                 text,
@@ -7937,7 +8469,11 @@ class BotService:
                         ),
                     },
                 )
-                return stateful_followup, f"telegram_imperative:{intent.intent}:stateful", intent.matched_pattern
+                return (
+                    stateful_followup,
+                    f"telegram_imperative:{intent.intent}:stateful",
+                    intent.matched_pattern,
+                )
             # SOUL routing policy: a continuation this layer cannot resolve
             # deterministically belongs to the brain (it has session_state +
             # reply_context). Pre-brain routers must not ask for clarification.
@@ -7949,10 +8485,18 @@ class BotService:
                     "reason": resolution_source or "continuation_context_not_found",
                 },
             )
-            return None, f"telegram_imperative:{intent.intent}:fallthrough_to_brain", intent.matched_pattern
+            return (
+                None,
+                f"telegram_imperative:{intent.intent}:fallthrough_to_brain",
+                intent.matched_pattern,
+            )
         response = self._handle_telegram_imperative(intent, text, session_id=session_id)
         if response is None:
-            return None, f"telegram_imperative:{intent.intent}:fallthrough_to_brain", intent.matched_pattern
+            return (
+                None,
+                f"telegram_imperative:{intent.intent}:fallthrough_to_brain",
+                intent.matched_pattern,
+            )
         return response, f"telegram_imperative:{intent.intent}", intent.matched_pattern
 
     def _telegram_ui_imperative_should_fallthrough(
@@ -8051,13 +8595,17 @@ class BotService:
         pending_approval = self._latest_pending_approval_context(session_id, state)
         if pending_approval is not None:
             approval_id = str(pending_approval.get("approval_id") or "").strip()
-            summary = str(pending_approval.get("summary") or pending_approval.get("action") or "").strip()
+            summary = str(
+                pending_approval.get("summary") or pending_approval.get("action") or ""
+            ).strip()
             lines = ["Hay una aprobación pendiente antes de continuar."]
             if approval_id:
                 lines.append(f"approval_id: `{approval_id}`")
             if summary:
                 lines.append(f"Acción: {summary[:240]}")
-            lines.append("Usa `/task_pending` para ver el comando de aprobación o responde con autorización explícita.")
+            lines.append(
+                "Usa `/task_pending` para ver el comando de aprobación o responde con autorización explícita."
+            )
             return "\n".join(lines), "pending_approval"
 
         waiting_task = self._recent_waiting_for_user_task(session_id)
@@ -8142,7 +8690,9 @@ class BotService:
             verification_status="pending",
         )
         checkpoint = state.get("last_checkpoint") or {}
-        checkpoint_text = json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
+        checkpoint_text = (
+            json.dumps(checkpoint, ensure_ascii=True, sort_keys=True) if checkpoint else "{}"
+        )
         task_line = f"\nTask previa: {task_id}" if task_id else ""
         self._emit_safe(
             "continuation_resolved",
@@ -8190,12 +8740,17 @@ class BotService:
                     raw_missions.extend(item for item in value if isinstance(item, dict))
             for raw in raw_missions:
                 mission = dict(raw)
-                if not self._telegram_mission_matches_session(mission, session_id, source_session_id):
+                if not self._telegram_mission_matches_session(
+                    mission, session_id, source_session_id
+                ):
                     continue
                 if not self._telegram_mission_is_active(mission):
                     continue
                 mission["_source_session_id"] = source_session_id
-                key = str(mission.get("mission_id") or f"{source_session_id}:{mission.get('active_target')}")
+                key = str(
+                    mission.get("mission_id")
+                    or f"{source_session_id}:{mission.get('active_target')}"
+                )
                 if any(str(existing.get("mission_id") or "") == key for existing in candidates):
                     continue
                 candidates.append(mission)
@@ -8335,7 +8890,9 @@ class BotService:
             aliases = self._telegram_session_aliases(session_id)
             for item in reversed(approvals):
                 metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-                item_session = str(metadata.get("session_id") or metadata.get("external_session_id") or "").strip()
+                item_session = str(
+                    metadata.get("session_id") or metadata.get("external_session_id") or ""
+                ).strip()
                 if item_session and item_session in aliases:
                     return item
         return None
@@ -8355,7 +8912,10 @@ class BotService:
                     json.dumps(getattr(record, "metadata", {}) or {}, sort_keys=True),
                 ]
             ).lower()
-            if "waiting_for_user_input" in haystack and str(getattr(record, "objective", "") or "").strip():
+            if (
+                "waiting_for_user_input" in haystack
+                and str(getattr(record, "objective", "") or "").strip()
+            ):
                 return record
         return None
 
@@ -8377,7 +8937,9 @@ class BotService:
             verification = str(getattr(record, "verification_status", "") or "").strip().lower()
             status = str(getattr(record, "status", "") or "").strip().lower()
             metadata = getattr(record, "metadata", {}) or {}
-            metadata_status = str(metadata.get("status") or metadata.get("result_status") or "").strip().lower()
+            metadata_status = (
+                str(metadata.get("status") or metadata.get("result_status") or "").strip().lower()
+            )
             if (
                 status in {"running", "queued"}
                 or verification in {"awaiting_continue", "needs_verification", "pending"}
@@ -8411,7 +8973,10 @@ class BotService:
                 "reason": "no_route_match",
             },
         )
-        self._emit_safe("telegram_actionable_no_match", {"session_id": session_id, "candidate_action": candidate_action})
+        self._emit_safe(
+            "telegram_actionable_no_match",
+            {"session_id": session_id, "candidate_action": candidate_action},
+        )
         return None
 
     @staticmethod
@@ -8436,13 +9001,18 @@ class BotService:
         # from the literal text + active mission, the message belongs to the
         # brain. Returning None falls through silently; the forbidden
         # "¿en qué app o target?" clarification must never come from here.
-        if intent.needs_context and not target and intent.intent in {
-            "ui.paste_text",
-            "ui.set_instructions",
-            "ui.submit_prompt",
-            "ui.inspect_app",
-            "task.continue_active_mission",
-        }:
+        if (
+            intent.needs_context
+            and not target
+            and intent.intent
+            in {
+                "ui.paste_text",
+                "ui.set_instructions",
+                "ui.submit_prompt",
+                "ui.inspect_app",
+                "task.continue_active_mission",
+            }
+        ):
             self._emit_safe(
                 "active_mission_resolution_failed",
                 {"session_id": session_id, "intent": intent.intent, "reason": "missing_target"},
@@ -8457,7 +9027,11 @@ class BotService:
         if intent.intent in {"ui.paste_text", "ui.set_instructions"} and not artifact_text:
             self._emit_safe(
                 "active_mission_resolution_failed",
-                {"session_id": session_id, "intent": intent.intent, "reason": "missing_artifact_text"},
+                {
+                    "session_id": session_id,
+                    "intent": intent.intent,
+                    "reason": "missing_artifact_text",
+                },
             )
             return None
         if mission:
@@ -8479,7 +9053,9 @@ class BotService:
                 target=target,
                 artifact=artifact,
                 last_user_goal=text,
-                pending_action=self._objective_for_imperative(intent, target=target, artifact=artifact),
+                pending_action=self._objective_for_imperative(
+                    intent, target=target, artifact=artifact
+                ),
             )
         if intent.intent == "task.continue_active_mission":
             objective = self._objective_for_imperative(intent, target=target, artifact=artifact)
@@ -8494,7 +9070,10 @@ class BotService:
                     capability=None,
                     summary="Active mission continuation resolved but not auto-executed by UI router.",
                 )
-                self._emit_safe("telegram_imperative_routed", {"session_id": session_id, "intent": intent.intent, "task_id": task_id})
+                self._emit_safe(
+                    "telegram_imperative_routed",
+                    {"session_id": session_id, "intent": intent.intent, "task_id": task_id},
+                )
                 return self._public_telegram_imperative_result(
                     session_id=session_id,
                     intent=intent,
@@ -8529,7 +9108,9 @@ class BotService:
             )
             fallback = ""
             if intent.intent in {"ui.paste_text", "ui.set_instructions"}:
-                artifact_label = "instrucciones" if intent.intent == "ui.set_instructions" else "prompt"
+                artifact_label = (
+                    "instrucciones" if intent.intent == "ui.set_instructions" else "prompt"
+                )
                 fallback = (
                     f"\nFallback seguro: puedo preparar/copiar el {artifact_label}, "
                     "pero eso no equivale a pegarlo en la app."
@@ -8622,7 +9203,9 @@ class BotService:
             if self._prompt_text_from_reply_context(state):
                 return "prompt from reply context"
         if intent.artifact_hint == "instructions":
-            prompt = active_object.get("active_prompt") or active_object.get("active_instructions") or {}
+            prompt = (
+                active_object.get("active_prompt") or active_object.get("active_instructions") or {}
+            )
             if isinstance(prompt, dict):
                 return str(prompt.get("summary") or "instructions").strip() or None
             if isinstance(prompt, str) and prompt.strip():
@@ -8746,7 +9329,8 @@ class BotService:
             {
                 "channel": "telegram",
                 "chat_id": session_id,
-                "mission_id": mission.get("mission_id") or f"mission:{session_id}:{int(time.time())}",
+                "mission_id": mission.get("mission_id")
+                or f"mission:{session_id}:{int(time.time())}",
                 "active_target": target,
                 "active_artifact": artifact or mission.get("active_artifact") or "",
                 "last_user_goal": last_user_goal[:240],
@@ -8842,7 +9426,12 @@ class BotService:
             )
             self._emit_safe(
                 "telegram_imperative_execution_failed",
-                {"session_id": session_id, "intent": intent.intent, "task_id": task_id, "error": str(exc)[:240]},
+                {
+                    "session_id": session_id,
+                    "intent": intent.intent,
+                    "task_id": task_id,
+                    "error": str(exc)[:240],
+                },
             )
             return f"No pude leer las aprobaciones pendientes: {str(exc)[:240]}"
         candidates = self._approval_cleanup_candidates(approvals)
@@ -8854,7 +9443,9 @@ class BotService:
                 failed.append(("", "missing_approval_id"))
                 continue
             try:
-                ok = self.approvals.archive(approval_id, reason=f"telegram_cleanup:{classification}")
+                ok = self.approvals.archive(
+                    approval_id, reason=f"telegram_cleanup:{classification}"
+                )
             except Exception as exc:
                 failed.append((approval_id, str(exc)[:160]))
                 continue
@@ -8875,10 +9466,16 @@ class BotService:
         )
         handler_lines = [
             summary,
-            "Archived IDs: " + (", ".join(f"{approval_id}:{reason}" for approval_id, reason in archived) or "none"),
+            "Archived IDs: "
+            + (", ".join(f"{approval_id}:{reason}" for approval_id, reason in archived) or "none"),
         ]
         if failed:
-            handler_lines.append("Failed IDs: " + ", ".join(f"{approval_id or 'unknown'}:{reason}" for approval_id, reason in failed))
+            handler_lines.append(
+                "Failed IDs: "
+                + ", ".join(
+                    f"{approval_id or 'unknown'}:{reason}" for approval_id, reason in failed
+                )
+            )
         task_id = self._record_telegram_imperative_task(
             session_id=session_id,
             text=text,
@@ -8919,10 +9516,14 @@ class BotService:
             f"Conservadas: {kept_count}. Fallidas: {len(failed)}.",
         ]
         if failed:
-            response_lines.append("Algunas no se pudieron archivar; dejé el detalle en el registro interno.")
+            response_lines.append(
+                "Algunas no se pudieron archivar; dejé el detalle en el registro interno."
+            )
         return "\n".join(response_lines)
 
-    def _approval_cleanup_candidates(self, approvals: list[dict[str, Any]]) -> list[tuple[dict[str, Any], str]]:
+    def _approval_cleanup_candidates(
+        self, approvals: list[dict[str, Any]]
+    ) -> list[tuple[dict[str, Any], str]]:
         candidates: list[tuple[dict[str, Any], str]] = []
         seen_actions: set[str] = set()
         for item in self._sorted_approvals_for_audit(approvals):
@@ -8982,7 +9583,11 @@ class BotService:
         handler_result: str | None = None,
         capability: str | None = None,
     ) -> str:
-        detail = self._final_render(session_id, str(handler_result or "").strip()) if handler_result else ""
+        detail = (
+            self._final_render(session_id, str(handler_result or "").strip())
+            if handler_result
+            else ""
+        )
         normalized_detail = _normalize_command_text(detail)
         if result_status == "succeeded":
             return detail or "Listo. Acción completada."
@@ -9102,7 +9707,11 @@ class BotService:
         elif result_status == "blocked_by_capability":
             self._emit_safe(
                 "telegram_imperative_blocked",
-                {**event_payload, "blocked_reason": "blocked_by_capability", "capability": "computer_control"},
+                {
+                    **event_payload,
+                    "blocked_reason": "blocked_by_capability",
+                    "capability": "computer_control",
+                },
             )
         elif result_status == "failed":
             self._emit_safe("telegram_imperative_execution_failed", event_payload)
@@ -9154,7 +9763,9 @@ class BotService:
                     timeout=10,
                 )
                 if open_result.returncode != 0:
-                    detail = (open_result.stderr or open_result.stdout or "open returned non-zero").strip()
+                    detail = (
+                        open_result.stderr or open_result.stdout or "open returned non-zero"
+                    ).strip()
                     raise RuntimeError(f"open failed: {redact_sensitive(detail[:240])}")
                 time.sleep(0.4)
                 copy_result = subprocess.run(
@@ -9165,7 +9776,9 @@ class BotService:
                     timeout=10,
                 )
                 if copy_result.returncode != 0:
-                    detail = (copy_result.stderr or copy_result.stdout or "pbcopy returned non-zero").strip()
+                    detail = (
+                        copy_result.stderr or copy_result.stdout or "pbcopy returned non-zero"
+                    ).strip()
                     raise RuntimeError(f"pbcopy failed: {redact_sensitive(detail[:240])}")
                 paste_result = subprocess.run(
                     [
@@ -9178,7 +9791,9 @@ class BotService:
                     timeout=10,
                 )
                 if paste_result.returncode != 0:
-                    detail = (paste_result.stderr or paste_result.stdout or "osascript returned non-zero").strip()
+                    detail = (
+                        paste_result.stderr or paste_result.stdout or "osascript returned non-zero"
+                    ).strip()
                     raise RuntimeError(f"paste failed: {redact_sensitive(detail[:240])}")
             except Exception as exc:
                 result_status = "failed"
@@ -9262,7 +9877,9 @@ class BotService:
                     handler_result = f"`{app_name}` abierto/enfocado."
                 else:
                     result_status = "failed"
-                    detail = (completed.stderr or completed.stdout or "open returned non-zero").strip()
+                    detail = (
+                        completed.stderr or completed.stdout or "open returned non-zero"
+                    ).strip()
                     handler_result = f"No pude abrir `{app_name}`: {redact_sensitive(detail[:240])}"
         task_id = self._record_telegram_imperative_task(
             session_id=session_id,
@@ -9466,7 +10083,11 @@ class BotService:
                 artifacts=artifacts,
             )
             if result_status != "pending_approval":
-                terminal_status = "failed" if result_status.startswith("blocked") or result_status == "failed" else "succeeded"
+                terminal_status = (
+                    "failed"
+                    if result_status.startswith("blocked") or result_status == "failed"
+                    else "succeeded"
+                )
                 if result_status == "succeeded":
                     verification = "passed"
                 elif result_status == "partial_success":
@@ -9583,8 +10204,7 @@ class BotService:
                 except Exception:
                     logger.debug("%s emit failed", event_name, exc_info=True)
             return resolution.clarifying_question or (
-                "Lo tomo como tuyo, pero dime en una frase imperativa que "
-                "accion concreta ejecuto."
+                "Lo tomo como tuyo, pero dime en una frase imperativa que accion concreta ejecuto."
             )
         # Risky / external / destructive → ask one approval question.
         if resolution.is_risky:
@@ -9600,9 +10220,7 @@ class BotService:
                         },
                     )
                 except Exception:
-                    logger.debug(
-                        "owner_delegation_approval_required emit failed", exc_info=True
-                    )
+                    logger.debug("owner_delegation_approval_required emit failed", exc_info=True)
             objective_preview = (resolution.objective or "")[:200]
             return (
                 "Lo que pides toca algo externo, destructivo o con costo "
@@ -9610,7 +10228,7 @@ class BotService:
                 "delete / production). No lo ejecuto sin tu aprobacion "
                 "explicita.\n\n"
                 f"Objetivo resuelto: {objective_preview}\n\n"
-                "Responde \"aprobado\" para que proceda, o aclara el alcance."
+                'Responde "aprobado" para que proceda, o aclara el alcance.'
             )
         # Safe + resolved → start a durable task-scoped delegated coordinator
         # run. We intentionally do NOT flip the session autonomy_mode; the
@@ -9878,7 +10496,10 @@ class BotService:
             and re.search(r"\b(termina|completa|finaliza)", normalized) is not None
         )
         return (
-            ("actualiza" in normalized and any(token in normalized for token in ("codex", "claude", "codex app")))
+            (
+                "actualiza" in normalized
+                and any(token in normalized for token in ("codex", "claude", "codex app"))
+            )
             or ("regenera" in normalized and "lock" in normalized)
             or ("poetry.lock" in normalized)
             or ("pyproject" in normalized and "lock" in normalized)
@@ -9906,7 +10527,9 @@ class BotService:
             )
         )
 
-    def _run_capability_preflight(self, objective: str, *, session_id: str) -> CapabilityPreflightResult:
+    def _run_capability_preflight(
+        self, objective: str, *, session_id: str
+    ) -> CapabilityPreflightResult:
         self._emit_safe(
             "capability_preflight_started",
             {"session_id": session_id, "objective_preview": objective[:160]},
@@ -9982,10 +10605,10 @@ class BotService:
             "qué hay pendiente",
             "daily status",
         }
-        greeting_status = (
-            any(greeting in normalized for greeting in ("buen dia", "buenos dias", "good morning", "hola"))
-            and any(token in normalized for token in ("status", "estado", "estatus"))
-        )
+        greeting_status = any(
+            greeting in normalized
+            for greeting in ("buen dia", "buenos dias", "good morning", "hola")
+        ) and any(token in normalized for token in ("status", "estado", "estatus"))
         contains_status_request = normalized in status_phrases or compact in {
             "estas",
             "estasvivo",
@@ -10003,7 +10626,11 @@ class BotService:
         latest_line = "sin tareas recientes"
         if self.task_ledger is not None:
             records = self.task_ledger.list(session_id=session_id, limit=5)
-            active = [record for record in records if getattr(record, "status", "") in {"queued", "running"}]
+            active = [
+                record
+                for record in records
+                if getattr(record, "status", "") in {"queued", "running"}
+            ]
             active_count = len(active)
             if records:
                 latest = active[0] if active else records[0]
@@ -10012,7 +10639,9 @@ class BotService:
                     f"{getattr(latest, 'verification_status', 'unknown') or 'unknown'} — "
                     f"`{getattr(latest, 'task_id', 'unknown')}`"
                 )
-        web_port = int(getattr(self.config, "web_chat_port", 8765)) if self.config is not None else 8765
+        web_port = (
+            int(getattr(self.config, "web_chat_port", 8765)) if self.config is not None else 8765
+        )
         runtime = "vivo" if self._runtime_alive() else "sin respuesta local"
         try:
             approvals = self.approvals.list_pending() if self.approvals is not None else []
@@ -10031,7 +10660,9 @@ class BotService:
         lines.append("Comandos útiles: `/jobs`, `/tasks`, `/quality`, `/restart`.")
         return "\n".join(lines)
 
-    def _maybe_handle_operational_failure_summary(self, text: str, *, session_id: str) -> str | None:
+    def _maybe_handle_operational_failure_summary(
+        self, text: str, *, session_id: str
+    ) -> str | None:
         normalized = _normalize_command_text(text).strip()
         if not self._matches_operational_failure_summary_request(normalized):
             return None
@@ -10045,10 +10676,13 @@ class BotService:
         def _contains_report_term(term: str) -> bool:
             if " " in term:
                 return term in normalized
-            return re.search(
-                rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])",
-                normalized,
-            ) is not None
+            return (
+                re.search(
+                    rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])",
+                    normalized,
+                )
+                is not None
+            )
 
         stop_or_scope_markers = (
             "no continuemos",
@@ -10096,13 +10730,10 @@ class BotService:
         )
         if any(phrase in normalized for phrase in direct_complaints):
             return True
-        if (
-            "ninguna tarea" not in normalized
-            and (
-                "por que no completas" in normalized
-                or "por qué no completas" in normalized
-                or "porque no completas" in normalized
-            )
+        if "ninguna tarea" not in normalized and (
+            "por que no completas" in normalized
+            or "por qué no completas" in normalized
+            or "porque no completas" in normalized
         ):
             return False
         failure_terms = (
@@ -10179,8 +10810,10 @@ class BotService:
             for msg in recent_messages
             if msg.get("role") == "assistant"
             and (
-                "que accion concreta quieres que ejecute" in _normalize_command_text(str(msg.get("content") or ""))
-                or "necesito una aclaracion minima" in _normalize_command_text(str(msg.get("content") or ""))
+                "que accion concreta quieres que ejecute"
+                in _normalize_command_text(str(msg.get("content") or ""))
+                or "necesito una aclaracion minima"
+                in _normalize_command_text(str(msg.get("content") or ""))
             )
         )
 
@@ -10188,10 +10821,9 @@ class BotService:
             f"Resumen operativo de fallos de hoy ({today_prefix}), con evidencia local:",
         ]
         findings: list[str] = []
-        imperative_bounces = (
-            event_counts.get("telegram_imperative_clarification", 0)
-            + event_counts.get("active_mission_resolution_failed", 0)
-        )
+        imperative_bounces = event_counts.get(
+            "telegram_imperative_clarification", 0
+        ) + event_counts.get("active_mission_resolution_failed", 0)
         if imperative_bounces:
             findings.append(
                 f"Continuidad: {imperative_bounces} evento(s) de continuación terminaron en aclaración/bounce en vez de usar contexto."
@@ -10206,7 +10838,9 @@ class BotService:
             findings.append(
                 f"Contexto conversacional: {clarification_count} respuesta(s) pidieron una acción concreta aunque había contexto previo."
             )
-        routed_continuations = event_counts.get("stateful_continuation_routed_to_actionable_task", 0)
+        routed_continuations = event_counts.get(
+            "stateful_continuation_routed_to_actionable_task", 0
+        )
         if routed_continuations:
             findings.append(
                 f"Continuación stateful: {routed_continuations} continuación(es) ya fueron convertidas en tarea durable."
@@ -10245,7 +10879,9 @@ class BotService:
         )
         return "\n".join(lines)
 
-    def _recent_today_observe_events(self, *, limit: int, today_prefix: str) -> list[dict[str, Any]]:
+    def _recent_today_observe_events(
+        self, *, limit: int, today_prefix: str
+    ) -> list[dict[str, Any]]:
         if self.observe is None:
             return []
         try:
@@ -10254,9 +10890,7 @@ class BotService:
             logger.debug("failed to read observe_stream for failure summary", exc_info=True)
             return []
         today = [
-            event
-            for event in events
-            if str(event.get("timestamp") or "").startswith(today_prefix)
+            event for event in events if str(event.get("timestamp") or "").startswith(today_prefix)
         ]
         return today or events
 
@@ -10302,9 +10936,7 @@ class BotService:
                 limit=140,
             )
             detail = f" - {error}" if error else ""
-            lines.append(
-                f"- {status} / {verification}: {objective or 'sin objetivo'}{detail}"
-            )
+            lines.append(f"- {status} / {verification}: {objective or 'sin objetivo'}{detail}")
         return lines
 
     @staticmethod
@@ -10335,7 +10967,12 @@ class BotService:
     ) -> str | None:
         normalized = _normalize_command_text(text).strip()
         asks_boot = any(term in normalized for term in ("arranque", "arrancar", "boot", "startup"))
-        asks_context = "contexto" in normalized or "fuentes" in normalized or "cargaste" in normalized or "cargado" in normalized
+        asks_context = (
+            "contexto" in normalized
+            or "fuentes" in normalized
+            or "cargaste" in normalized
+            or "cargado" in normalized
+        )
         if not asks_boot or not asks_context:
             return None
         if self.observe is None:
@@ -10343,8 +10980,12 @@ class BotService:
         try:
             events = self.observe.recent_events(limit=300)
         except Exception as exc:
-            return f"No pude leer observe_stream para verificar el boot actual: {type(exc).__name__}."
-        event = next((item for item in events if item.get("event_type") == "agent_startup_context"), None)
+            return (
+                f"No pude leer observe_stream para verificar el boot actual: {type(exc).__name__}."
+            )
+        event = next(
+            (item for item in events if item.get("event_type") == "agent_startup_context"), None
+        )
         if event is None:
             return (
                 "No hay evento `agent_startup_context` en `observe_stream` para este proceso. "
@@ -10383,7 +11024,11 @@ class BotService:
         latest = None
         if self.task_ledger is not None:
             records = self.task_ledger.list(session_id=session_id, limit=5)
-            active = [record for record in records if getattr(record, "status", "") in {"queued", "running"}]
+            active = [
+                record
+                for record in records
+                if getattr(record, "status", "") in {"queued", "running"}
+            ]
             latest = active[0] if active else (records[0] if records else None)
         if latest is not None:
             status = str(getattr(latest, "status", "unknown"))
@@ -10431,15 +11076,26 @@ class BotService:
         return "No tengo tareas registradas para esta conversación."
 
     def _change_status_question_response(self, session_id: str) -> str:
-        records = self.task_ledger.list(session_id=session_id, limit=20) if self.task_ledger is not None else []
-        relevant = [record for record in records if not _looks_like_change_status_question(str(getattr(record, "objective", "") or ""))]
+        records = (
+            self.task_ledger.list(session_id=session_id, limit=20)
+            if self.task_ledger is not None
+            else []
+        )
+        relevant = [
+            record
+            for record in records
+            if not _looks_like_change_status_question(str(getattr(record, "objective", "") or ""))
+        ]
         terminal = [
-            record for record in relevant
-            if getattr(record, "status", "") in {"succeeded", "failed", "timed_out", "cancelled", "lost"}
+            record
+            for record in relevant
+            if getattr(record, "status", "")
+            in {"succeeded", "failed", "timed_out", "cancelled", "lost"}
             and self._is_change_status_relevant_record(record)
         ][:5]
         active = [
-            record for record in relevant
+            record
+            for record in relevant
             if getattr(record, "status", "") in {"queued", "running"}
             and self._is_change_status_relevant_record(record)
         ][:3]
@@ -10458,7 +11114,9 @@ class BotService:
             lines.extend(self._format_task_status_line(record) for record in active)
         if ignored_status_queries:
             plural = "s" if ignored_status_queries != 1 else ""
-            lines.append(f"Ignoré {ignored_status_queries} consulta{plural} de estatus abierta{plural}; eso no cuenta como cambio pendiente.")
+            lines.append(
+                f"Ignoré {ignored_status_queries} consulta{plural} de estatus abierta{plural}; eso no cuenta como cambio pendiente."
+            )
         if len(lines) == 1:
             return "No encontré commits ni tareas cerradas recientes para los fixes/cambios de esta sesión."
         return "\n".join(lines)
@@ -10474,20 +11132,32 @@ class BotService:
             )
         )
         normalized = _normalize_command_text(text)
-        return any(token in normalized for token in ("fix", "fixes", "cambio", "cambios", "bug", "codigo", "código", "handler"))
+        return any(
+            token in normalized
+            for token in ("fix", "fixes", "cambio", "cambios", "bug", "codigo", "código", "handler")
+        )
 
     def _format_task_status_line(self, record: Any) -> str:
         status = str(getattr(record, "status", "unknown") or "unknown")
         verification = str(getattr(record, "verification_status", "unknown") or "unknown")
         task_id = str(getattr(record, "task_id", "unknown") or "unknown")
-        detail = str(getattr(record, "summary", "") or getattr(record, "objective", "") or "sin resumen").strip()
+        detail = str(
+            getattr(record, "summary", "") or getattr(record, "objective", "") or "sin resumen"
+        ).strip()
         return f"- `{task_id}` — {status} / {verification}: {detail[:220]}"
 
     def _recent_workspace_commits(self, *, limit: int = 5) -> list[tuple[str, str]]:
         workspace_root = Path(getattr(self.config, "workspace_root", None) or Path.cwd())
         try:
             result = subprocess.run(
-                ["git", "-C", str(workspace_root), "log", f"-n{max(1, min(int(limit), 20))}", "--pretty=format:%h%x00%s"],
+                [
+                    "git",
+                    "-C",
+                    str(workspace_root),
+                    "log",
+                    f"-n{max(1, min(int(limit), 20))}",
+                    "--pretty=format:%h%x00%s",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=2,
@@ -10526,10 +11196,11 @@ class BotService:
         summary = str(getattr(latest, "summary", "") or "").strip()
         task_id = str(getattr(latest, "task_id", "") or "")
         reason = error or summary or "no hay detalle suficiente registrado"
-        can_resume = (
-            status in {"failed", "running", "lost", "timed_out"}
-            or verification in {"blocked", "pending", "missing_evidence"}
-        )
+        can_resume = status in {"failed", "running", "lost", "timed_out"} or verification in {
+            "blocked",
+            "pending",
+            "missing_evidence",
+        }
         lines = [
             "No voy a crear otra tarea para esto; revisé la tarea más reciente.",
             f"Task: `{task_id}`",

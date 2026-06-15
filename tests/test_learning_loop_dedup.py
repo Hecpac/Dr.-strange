@@ -108,11 +108,13 @@ class LearningLoopDedupTests(unittest.TestCase):
 
         event_types = [e[0] for e in observe.events]
         self.assertIn(
-            "soul_update_suggestion", event_types,
+            "soul_update_suggestion",
+            event_types,
             "first persisted proposal still emits the canonical event",
         )
         self.assertIn(
-            "learning_loop_dedup", event_types,
+            "learning_loop_dedup",
+            event_types,
             "second (duplicate) call must emit a learning_loop_dedup event",
         )
 
@@ -144,7 +146,9 @@ class LearningLoopDedupTests(unittest.TestCase):
         ctx.start()
         self.addCleanup(ctx.stop)
         loop.suggest_soul_updates(
-            observe=observe, soul_text="x", min_signals=0,
+            observe=observe,
+            soul_text="x",
+            min_signals=0,
         )
         rows = memory._conn.execute(  # type: ignore[attr-defined]
             "SELECT key FROM facts WHERE key LIKE 'soul_update_suggestion.%'"
@@ -154,7 +158,9 @@ class LearningLoopDedupTests(unittest.TestCase):
         # Hit dedup many times — confidence must rise but stay ≤ 1.0.
         for _ in range(50):
             loop.suggest_soul_updates(
-                observe=observe, soul_text="x", min_signals=0,
+                observe=observe,
+                soul_text="x",
+                min_signals=0,
             )
         final = _confidence_for_key(memory, key)
         self.assertGreater(final, initial)

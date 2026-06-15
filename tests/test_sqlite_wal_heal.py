@@ -640,9 +640,7 @@ class TerminalWriteRetryTests(unittest.TestCase):
                 status="running",
             )
             ledger._conn = _LockedNTimesConn(ledger._conn, failures=2)
-            record = ledger.mark_terminal(
-                "t-1", status="failed", summary="s", error="boom"
-            )
+            record = ledger.mark_terminal("t-1", status="failed", summary="s", error="boom")
             self.assertIsNotNone(record)
             assert record is not None
             self.assertEqual(record.status, "failed")
@@ -698,9 +696,7 @@ class TerminalWriteRetryTests(unittest.TestCase):
 
             task_ledger_module.heal_wal_after_disk_io = fake_heal
             try:
-                record = ledger.mark_terminal(
-                    "t-disk", status="failed", summary="s", error="boom"
-                )
+                record = ledger.mark_terminal("t-disk", status="failed", summary="s", error="boom")
             finally:
                 task_ledger_module.heal_wal_after_disk_io = original_heal
 
@@ -920,7 +916,11 @@ class WalGenerationSwapTests(unittest.TestCase):
             self.assertIn("drift_probe", events)
 
     def test_heal_clears_generation_stamp(self) -> None:
-        from claw_v2.sqlite_runtime import _WAL_GENERATION_INODES, _registry_key, note_wal_generation
+        from claw_v2.sqlite_runtime import (
+            _WAL_GENERATION_INODES,
+            _registry_key,
+            note_wal_generation,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "t.db"
@@ -984,7 +984,7 @@ class TerminalWriteHealExhaustionTests(unittest.TestCase):
                 runtime="coordinator",
                 provider="anthropic",
                 model="m",
-            status="running",
+                status="running",
             )
             # Make the heal trigger (orphaned sidecars) while the ledger conn
             # keeps failing locked even after the heal round.
@@ -1146,9 +1146,7 @@ class WalHealCascadeTests(unittest.TestCase):
 
             def worker() -> None:
                 try:
-                    results.append(
-                        heal_wal_after_closed_connection(db_path, exc, context="test")
-                    )
+                    results.append(heal_wal_after_closed_connection(db_path, exc, context="test"))
                 except BaseException as e:  # pragma: no cover - assertion path
                     errors.append(e)
 

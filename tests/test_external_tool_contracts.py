@@ -8,6 +8,7 @@ Demonstrates that no Tier 3 tool can ever land `succeeded` from
 tool.ok=True alone — the gate requires preflight + external_check +
 evidence per F2.5+F2.5.1+F3a.1 invariants.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -28,16 +29,26 @@ from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
 def _no_network(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("Network call attempted from F3b.0 test — forbidden")
+
     import socket
     import urllib.request
+
     monkeypatch.setattr(socket.socket, "connect", _boom)
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     yield
 
 
-def _build_and_gate(tool_name, tool_args, tool_result, *, external_observation=None,
-                     state_delta_observation=None, evidence_uri=None,
-                     allowed_path_roots=(), preflight_passed=True):
+def _build_and_gate(
+    tool_name,
+    tool_args,
+    tool_result,
+    *,
+    external_observation=None,
+    state_delta_observation=None,
+    evidence_uri=None,
+    allowed_path_roots=(),
+    preflight_passed=True,
+):
     """Build an artifact + ride it through the promote gate."""
     artifact = build_local_tool_artifact(
         tool_name=tool_name,
@@ -66,8 +77,9 @@ def _build_and_gate(tool_name, tool_args, tool_result, *, external_observation=N
 # ===========================================================================
 
 
-@pytest.mark.parametrize("tool", ["HeyGenDeliver", "HeyGenVideo", "GPTImage",
-                                  "SkillExecute", "A2ASend", "WikiDelete"])
+@pytest.mark.parametrize(
+    "tool", ["HeyGenDeliver", "HeyGenVideo", "GPTImage", "SkillExecute", "A2ASend", "WikiDelete"]
+)
 def test_external_tool_has_contract(tool):
     assert tool in EXTERNAL_TOOL_SUCCESS_CONDITIONS
     assert tool in EXTERNAL_TOOL_PREFLIGHTS
@@ -115,7 +127,7 @@ def test_heygendeliver_ok_but_no_external_observation_pending(tmp_path):
             "output_size_bytes": len(body),
             "telegram_msg_id": "12345",
         },
-        external_observation=None,    # NOT pre-fetched
+        external_observation=None,  # NOT pre-fetched
         evidence_uri=str(mp4),
         allowed_path_roots=(str(tmp_path),),
     )
@@ -172,7 +184,7 @@ def test_heygendeliver_artifact_missing_blocks(tmp_path):
 
 def test_heygendeliver_output_file_missing_fails(tmp_path):
     """tool.ok=True but the declared output_path does not exist on disk."""
-    fake_path = tmp_path / "ghost.mp4"     # never created
+    fake_path = tmp_path / "ghost.mp4"  # never created
     (terminal, verification, new_ck, _ev), _ = _build_and_gate(
         "HeyGenDeliver",
         {"video_id": "abc123def456ghij"},
@@ -190,7 +202,10 @@ def test_heygendeliver_output_file_missing_fails(tmp_path):
     )
     assert terminal == "failed"
     errors = new_ck["promote_gate_envelope"]["verification_result"]["errors"]
-    assert any("path_file_not_found:output_path" == e or "integrity_file_not_found:output_path" == e for e in errors)
+    assert any(
+        "path_file_not_found:output_path" == e or "integrity_file_not_found:output_path" == e
+        for e in errors
+    )
 
 
 def test_heygendeliver_declared_hash_differs_from_real_fails(tmp_path):
@@ -361,7 +376,7 @@ def test_gptimage_mime_must_match_regex(tmp_path):
         {
             "ok": True,
             "output_path": str(png),
-            "mime_type": "application/octet-stream",      # invalid mime
+            "mime_type": "application/octet-stream",  # invalid mime
             "size_bytes": len(body),
             "output_sha256": sha,
         },
@@ -487,11 +502,14 @@ def test_wikidelete_missing_approval_artifact_still_blocks():
 # ===========================================================================
 
 
-@pytest.mark.parametrize("tool,args", [
-    ("HeyGenVideo", {"text": "SECRET-TEXT-XYZ", "avatar_id": "a1"}),
-    ("GPTImage", {"prompt": "SECRET-PROMPT-XYZ", "size": "1024x1024"}),
-    ("HeyGenDeliver", {"video_id": "abc123def456ghij", "image_b64": "SECRET-XYZ"}),
-])
+@pytest.mark.parametrize(
+    "tool,args",
+    [
+        ("HeyGenVideo", {"text": "SECRET-TEXT-XYZ", "avatar_id": "a1"}),
+        ("GPTImage", {"prompt": "SECRET-PROMPT-XYZ", "size": "1024x1024"}),
+        ("HeyGenDeliver", {"video_id": "abc123def456ghij", "image_b64": "SECRET-XYZ"}),
+    ],
+)
 def test_privacy_no_sensitive_args_in_artifact(tool, args, tmp_path):
     # Provide minimal tool_result to make build succeed
     result = {"ok": True}
@@ -500,22 +518,26 @@ def test_privacy_no_sensitive_args_in_artifact(tool, args, tmp_path):
     elif tool == "GPTImage":
         f = tmp_path / "x.png"
         f.write_bytes(b"\x89PNG" + b"X" * 100)
-        result.update({
-            "output_path": str(f),
-            "mime_type": "image/png",
-            "size_bytes": f.stat().st_size,
-            "output_sha256": hashlib.sha256(f.read_bytes()).hexdigest(),
-        })
+        result.update(
+            {
+                "output_path": str(f),
+                "mime_type": "image/png",
+                "size_bytes": f.stat().st_size,
+                "output_sha256": hashlib.sha256(f.read_bytes()).hexdigest(),
+            }
+        )
     elif tool == "HeyGenDeliver":
         f = tmp_path / "v.mp4"
         f.write_bytes(b"X" * 200)
-        result.update({
-            "video_id": "abc123def456ghij",
-            "output_path": str(f),
-            "output_sha256": hashlib.sha256(f.read_bytes()).hexdigest(),
-            "output_size_bytes": f.stat().st_size,
-            "telegram_msg_id": "12345",
-        })
+        result.update(
+            {
+                "video_id": "abc123def456ghij",
+                "output_path": str(f),
+                "output_sha256": hashlib.sha256(f.read_bytes()).hexdigest(),
+                "output_size_bytes": f.stat().st_size,
+                "telegram_msg_id": "12345",
+            }
+        )
 
     artifact = build_local_tool_artifact(
         tool_name=tool,

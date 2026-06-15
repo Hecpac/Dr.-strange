@@ -69,7 +69,11 @@ class ObservationWindowState:
     ) -> None:
         self.observe = observe
         self.config = config or ObservationWindowConfig()
-        self.state_path = Path(state_path).expanduser() if state_path is not None else Path.home() / ".claw" / "observation_window.json"
+        self.state_path = (
+            Path(state_path).expanduser()
+            if state_path is not None
+            else Path.home() / ".claw" / "observation_window.json"
+        )
         self._clock = clock or time.time
         self._lock = threading.Lock()
         self._tool_call_times: deque[float] = deque()
@@ -153,9 +157,15 @@ class ObservationWindowState:
             frozen = self._frozen
             freeze_reason = self._freeze_reason or "observation_window_frozen"
         if auto_cleared:
-            self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:token_window"})
+            self._emit(
+                "observation_window_freeze_auto_cleared",
+                {"stale_reason": "circuit_breaker:token_window"},
+            )
         if cost_cleared:
-            self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:cost_per_hour"})
+            self._emit(
+                "observation_window_freeze_auto_cleared",
+                {"stale_reason": "circuit_breaker:cost_per_hour"},
+            )
         if rate_cleared:
             self._emit(
                 "observation_window_freeze_auto_cleared",
@@ -213,7 +223,11 @@ class ObservationWindowState:
         if error:
             payload["error"] = error[:300]
         self._emit("observation_tool_event", payload)
-        self._notify_stream(_format_stream_line(tool=tool_name, tier=f"tier_{tier}", actor=actor, cost=cost, status=status))
+        self._notify_stream(
+            _format_stream_line(
+                tool=tool_name, tier=f"tier_{tier}", actor=actor, cost=cost, status=status
+            )
+        )
 
     def handle_llm_audit_event(self, event: dict[str, Any]) -> None:
         action = str(event.get("action") or "llm_event")
@@ -239,7 +253,9 @@ class ObservationWindowState:
                 cost_per_hour = sum(item_cost for _, item_cost in self._llm_costs)
             if cost_per_hour > self.config.cost_per_hour_threshold:
                 lane = str(event.get("lane")) if event.get("lane") is not None else None
-                provider_for_event = str(event.get("provider")) if event.get("provider") is not None else None
+                provider_for_event = (
+                    str(event.get("provider")) if event.get("provider") is not None else None
+                )
                 self.trip_breaker(
                     "cost_per_hour",
                     value=cost_per_hour,
@@ -277,9 +293,15 @@ class ObservationWindowState:
             totals = self._token_window_totals_locked()
             compact_before_large_calls = totals["total_tokens"] >= self._token_soft_threshold()
         if auto_cleared:
-            self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:token_window"})
+            self._emit(
+                "observation_window_freeze_auto_cleared",
+                {"stale_reason": "circuit_breaker:token_window"},
+            )
         if cost_cleared:
-            self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:cost_per_hour"})
+            self._emit(
+                "observation_window_freeze_auto_cleared",
+                {"stale_reason": "circuit_breaker:cost_per_hour"},
+            )
         if frozen and freeze_reason == "circuit_breaker:token_window":
             payload = {
                 "lane": lane,
@@ -290,7 +312,9 @@ class ObservationWindowState:
                 "token_window_cap": self.config.token_window_cap,
             }
             self._emit("llm_blocked_by_token_window", payload)
-            raise ObservationWindowBlocked("observation window frozen: circuit_breaker:token_window")
+            raise ObservationWindowBlocked(
+                "observation window frozen: circuit_breaker:token_window"
+            )
         if frozen and freeze_reason == "circuit_breaker:cost_per_hour":
             # autonomy_degraded_by_cost_breaker announces
             # "llm_calls_until_window_decays" — enforce it (it previously only
@@ -306,7 +330,9 @@ class ObservationWindowState:
                 "cost_per_hour_threshold": self.config.cost_per_hour_threshold,
             }
             self._emit("llm_blocked_by_cost_breaker", payload)
-            raise ObservationWindowBlocked("observation window frozen: circuit_breaker:cost_per_hour")
+            raise ObservationWindowBlocked(
+                "observation window frozen: circuit_breaker:cost_per_hour"
+            )
         if compact_before_large_calls:
             self._emit(
                 "token_window_compaction_recommended",
@@ -401,7 +427,10 @@ class ObservationWindowState:
             actor = self._freeze_actor
             tripped = sorted(self._tripped_breakers)
         if auto_cleared:
-            self._emit("observation_window_freeze_auto_cleared", {"stale_reason": "circuit_breaker:token_window"})
+            self._emit(
+                "observation_window_freeze_auto_cleared",
+                {"stale_reason": "circuit_breaker:token_window"},
+            )
         cost_today = self._cost_today()
         daily_budget = self.config.daily_budget_cap
         remaining = None if daily_budget is None else round(max(daily_budget - cost_today, 0.0), 6)
@@ -520,7 +549,9 @@ class ObservationWindowState:
             self._llm_costs.popleft()
         while self._llm_tokens and now - self._llm_tokens[0][0] > self.config.token_window_seconds:
             self._llm_tokens.popleft()
-        self._token_soft_limit_active = self._token_window_totals_locked()["total_tokens"] >= self._token_soft_threshold()
+        self._token_soft_limit_active = (
+            self._token_window_totals_locked()["total_tokens"] >= self._token_soft_threshold()
+        )
 
     def _record_token_window_event(self, event: dict[str, Any], *, now: float) -> None:
         token_usage = _extract_token_usage(event)
@@ -635,7 +666,10 @@ class ObservationWindowState:
         totals = self._token_window_totals_locked()
         if totals["total_tokens"] >= self._token_hard_threshold():
             return False
-        if not self._llm_tokens and self._freeze_age_seconds_locked(now) <= self.config.token_window_seconds:
+        if (
+            not self._llm_tokens
+            and self._freeze_age_seconds_locked(now) <= self.config.token_window_seconds
+        ):
             return False
         self._frozen = False
         self._freeze_reason = ""
@@ -780,8 +814,12 @@ def _extract_token_usage(event: dict[str, Any]) -> dict[str, Any]:
             "estimated": bool(candidate.get("estimated")),
             "provider_total_tokens": _coerce_int(candidate.get("provider_total_tokens"), 0),
             "cache_read_input_tokens": _coerce_int(candidate.get("cache_read_input_tokens"), 0),
-            "cache_creation_input_tokens": _coerce_int(candidate.get("cache_creation_input_tokens"), 0),
-            "token_window_excludes_cache_read": bool(candidate.get("token_window_excludes_cache_read")),
+            "cache_creation_input_tokens": _coerce_int(
+                candidate.get("cache_creation_input_tokens"), 0
+            ),
+            "token_window_excludes_cache_read": bool(
+                candidate.get("token_window_excludes_cache_read")
+            ),
         }
     return {"total_tokens": 0, "estimated": True}
 
@@ -815,7 +853,10 @@ def _has_vercel_prod(tokens: list[str]) -> bool:
 
 def _has_gh_release_create(tokens: list[str]) -> bool:
     for index in range(0, max(len(tokens) - 2, 0)):
-        if Path(tokens[index]).name == "gh" and tokens[index + 1 : index + 3] == ["release", "create"]:
+        if Path(tokens[index]).name == "gh" and tokens[index + 1 : index + 3] == [
+            "release",
+            "create",
+        ]:
             return True
     return False
 
@@ -850,8 +891,7 @@ def _is_dynamic_rm_target(target: str) -> bool:
 
 def _recent_failure_rate(events: list[dict[str, Any]]) -> float:
     finished = [
-        event for event in events
-        if event.get("event_type") in {"action_executed", "action_failed"}
+        event for event in events if event.get("event_type") in {"action_executed", "action_failed"}
     ][:50]
     if not finished:
         return 0.0

@@ -6,12 +6,7 @@ from claw_v2.no_fudge import validate_no_fudge_factors
 
 
 def _diff(path: str, added_line: str) -> str:
-    return (
-        f"diff --git a/{path} b/{path}\n"
-        f"+++ b/{path}\n"
-        "@@ -1,1 +1,1 @@\n"
-        f"+{added_line}\n"
-    )
+    return f"diff --git a/{path} b/{path}\n+++ b/{path}\n@@ -1,1 +1,1 @@\n+{added_line}\n"
 
 
 class NoFudgeTests(unittest.TestCase):

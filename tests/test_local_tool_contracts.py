@@ -14,6 +14,7 @@ Demonstrates:
       - state_delta missing   → terminal_status="" + verification="pending_verification"
       - tool.ok=True + delta invalid (rows/bytes below threshold) → terminal_status="failed"
 """
+
 from __future__ import annotations
 
 import json
@@ -33,8 +34,10 @@ from claw_v2.verification.success_contract import (
 def _no_network(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("Network call attempted from test_local_tool_contracts — forbidden")
+
     import socket
     import urllib.request
+
     monkeypatch.setattr(socket.socket, "connect", _boom)
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
     yield
@@ -71,11 +74,12 @@ def test_tools_py_attaches_local_contracts():
     """Sanity wire-check: ToolDefinition for Write/Edit/Bash/WikiLint references the contract."""
     import inspect
     from claw_v2 import tools as tools_mod
+
     src = inspect.getsource(tools_mod)
-    assert "success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS[\"Write\"]" in src
-    assert "success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS[\"Edit\"]" in src
-    assert "success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS[\"Bash\"]" in src
-    assert "success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS[\"WikiLint\"]" in src
+    assert 'success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Write"]' in src
+    assert 'success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Edit"]' in src
+    assert 'success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Bash"]' in src
+    assert 'success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["WikiLint"]' in src
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +177,7 @@ def test_integration_write_state_delta_missing_yields_pending(tmp_path):
         tool_name="Write",
         tool_args={"path": str(target), "content": "x"},
         tool_result={"ok": True, "path": str(target), "bytes_written": 1},
-        state_delta_observation=None,             # observation NOT pre-fetched
+        state_delta_observation=None,  # observation NOT pre-fetched
         evidence_uri=str(target),
     )
     checkpoint = _checkpoint_with(artifact)
@@ -182,7 +186,7 @@ def test_integration_write_state_delta_missing_yields_pending(tmp_path):
         raw_verification_status="passed",
         completed_checkpoint=checkpoint,
     )
-    assert terminal == ""                           # NOT succeeded
+    assert terminal == ""  # NOT succeeded
     assert verification == "pending_verification"
     assert new_checkpoint["promote_gate_reason"] == "missing_observation"
     assert any(name == "promote_gate_degraded" for name, _ in events)
@@ -196,7 +200,9 @@ def test_integration_write_tool_ok_but_invalid_delta_yields_failed(tmp_path):
         tool_name="Write",
         tool_args={"path": str(target), "content": "anything"},
         tool_result={"ok": True, "path": str(target), "bytes_written": 8},
-        state_delta_observation={"fs_size_added_bytes": 0},  # invalid: tool claims 8 bytes but FS shows 0
+        state_delta_observation={
+            "fs_size_added_bytes": 0
+        },  # invalid: tool claims 8 bytes but FS shows 0
         evidence_uri=str(target),
     )
     checkpoint = _checkpoint_with(artifact)
@@ -219,7 +225,7 @@ def test_integration_edit_missing_required_key_yields_failed(tmp_path):
     artifact = build_local_tool_artifact(
         tool_name="Edit",
         tool_args={"path": str(target), "old_text": "x = 1", "new_text": "x = 2"},
-        tool_result={"ok": True, "path": str(target)},   # NOTE: no "changed_bytes"
+        tool_result={"ok": True, "path": str(target)},  # NOTE: no "changed_bytes"
         state_delta_observation={"fs_size_added_bytes": 0},  # benign for Edit
         evidence_uri=str(target),
     )
@@ -242,7 +248,12 @@ def test_integration_edit_forbidden_reason_old_text_not_found(tmp_path):
     artifact = build_local_tool_artifact(
         tool_name="Edit",
         tool_args={"path": str(target), "old_text": "missing", "new_text": "x"},
-        tool_result={"ok": True, "path": str(target), "changed_bytes": 0, "reason": "old_text_not_found"},
+        tool_result={
+            "ok": True,
+            "path": str(target),
+            "changed_bytes": 0,
+            "reason": "old_text_not_found",
+        },
         state_delta_observation={"fs_size_added_bytes": 0},
         evidence_uri=str(target),
     )
@@ -294,7 +305,10 @@ def test_integration_bash_sandbox_block_yields_failed():
     assert terminal == "failed"
     assert verification == "failed"
     envelope = new_checkpoint["promote_gate_envelope"]
-    assert any("forbidden_reason_matched:sandbox_block" == e for e in envelope["verification_result"]["errors"])
+    assert any(
+        "forbidden_reason_matched:sandbox_block" == e
+        for e in envelope["verification_result"]["errors"]
+    )
 
 
 def test_integration_wikilint_issues_key_absent_yields_failed():
@@ -303,7 +317,7 @@ def test_integration_wikilint_issues_key_absent_yields_failed():
     artifact = build_local_tool_artifact(
         tool_name="WikiLint",
         tool_args={},
-        tool_result={"ok": True},     # NOTE: no "issues" key at all
+        tool_result={"ok": True},  # NOTE: no "issues" key at all
         state_delta_observation=None,
         evidence_uri=None,
     )

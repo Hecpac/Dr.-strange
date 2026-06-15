@@ -6,6 +6,7 @@ module provides the same scrubbing as a free function so the *audit* path
 persisting. Three layers, one regex set — a leak that bypasses one path
 still gets caught by the others.
 """
+
 from __future__ import annotations
 
 import re
@@ -14,7 +15,9 @@ from typing import Any
 
 _SYSTEM_REMINDER_BLOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"<\s*system-reminder\s*>[\s\S]*?</\s*system-reminder\s*>", re.IGNORECASE),
-    re.compile(r"&lt;\s*system-reminder\s*&gt;[\s\S]*?&lt;/\s*system-reminder\s*&gt;", re.IGNORECASE),
+    re.compile(
+        r"&lt;\s*system-reminder\s*&gt;[\s\S]*?&lt;/\s*system-reminder\s*&gt;", re.IGNORECASE
+    ),
     re.compile(
         r"\[redacted:\s*system-reminder\][\s\S]*?\[redacted:\s*system-reminder\]",
         re.IGNORECASE,

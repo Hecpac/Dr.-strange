@@ -92,7 +92,9 @@ class DecideTests(unittest.TestCase):
         self.assertIn("evidence_pack", call_kwargs)
 
     def test_decide_prompt_includes_few_shot_examples_and_configured_sites(self) -> None:
-        svc, router, *_ = _make_service(monitored_sites=[_Site("status.example", "https://status.example")])
+        svc, router, *_ = _make_service(
+            monitored_sites=[_Site("status.example", "https://status.example")]
+        )
         router.ask.return_value = MagicMock(content='{"action": "none"}')
 
         svc._decide("Pending approvals: 0")
@@ -130,7 +132,9 @@ class DecideTests(unittest.TestCase):
         router.ask.side_effect = RuntimeError("Codex CLI timed out after 300.0s")
         decision = svc._decide("ctx")
         self.assertEqual(decision.action, "none")
-        emit_calls = [call for call in observe.emit.call_args_list if call.args[0] == "kairos_decide_failed"]
+        emit_calls = [
+            call for call in observe.emit.call_args_list if call.args[0] == "kairos_decide_failed"
+        ]
         self.assertEqual(len(emit_calls), 1)
         payload = emit_calls[0].kwargs["payload"]
         self.assertEqual(payload["error_kind"], "codex_timeout")
@@ -140,7 +144,9 @@ class DecideTests(unittest.TestCase):
         svc, router, _, observe = _make_service()
         router.ask.side_effect = RuntimeError("something unexpected")
         svc._decide("ctx")
-        emit_calls = [call for call in observe.emit.call_args_list if call.args[0] == "kairos_decide_failed"]
+        emit_calls = [
+            call for call in observe.emit.call_args_list if call.args[0] == "kairos_decide_failed"
+        ]
         self.assertEqual(emit_calls[0].kwargs["payload"]["error_kind"], "general")
 
 
@@ -153,9 +159,7 @@ class RunAgentLoopHandlerTests(unittest.TestCase):
         class _StubLoop:
             def run(self, goal: str):
                 run_calls.append(goal)
-                return AgentLoopOutcome(
-                    status="passed", final_result=None, history=(), reason="ok"
-                )
+                return AgentLoopOutcome(status="passed", final_result=None, history=(), reason="ok")
 
         factory_calls: list[tuple] = []
 
@@ -181,7 +185,8 @@ class RunAgentLoopHandlerTests(unittest.TestCase):
         self.assertEqual(factory_calls, [("g_landing", "p_site", "m_hero")])
         self.assertEqual(run_calls, ["Ship hero copy"])
         emit_calls = [
-            call for call in observe.emit.call_args_list
+            call
+            for call in observe.emit.call_args_list
             if call.args[0] == "kairos_agent_loop_complete"
         ]
         self.assertEqual(len(emit_calls), 1)
@@ -198,7 +203,7 @@ class RunAgentLoopHandlerTests(unittest.TestCase):
 
     def test_run_agent_loop_requires_goal_id(self) -> None:
         svc, *_ = _make_service(agent_loop_factory=lambda *a, **kw: None)
-        decision = TickDecision(action="run_agent_loop", detail='{}')
+        decision = TickDecision(action="run_agent_loop", detail="{}")
         with self.assertRaises(ValueError):
             svc._handle_run_agent_loop(decision)
 
@@ -222,7 +227,9 @@ class RunAgentLoopHandlerTests(unittest.TestCase):
 
 class ClassifyDecideErrorTests(unittest.TestCase):
     def test_codex_timeout_recognized(self) -> None:
-        self.assertEqual(_classify_decide_error("Codex CLI timed out after 300.0s"), "codex_timeout")
+        self.assertEqual(
+            _classify_decide_error("Codex CLI timed out after 300.0s"), "codex_timeout"
+        )
 
     def test_codex_timeout_recognized_in_lowercase_variants(self) -> None:
         self.assertEqual(_classify_decide_error("codex provider timed out"), "codex_timeout")
@@ -317,7 +324,8 @@ class TickTests(unittest.TestCase):
         self.assertEqual(result.error, "duplicate_action_suppressed")
         self.assertEqual(svc.state.actions_taken, 0)
         suppressed = [
-            call for call in observe.emit.call_args_list
+            call
+            for call in observe.emit.call_args_list
             if call.args and call.args[0] == "kairos_action_suppressed"
         ]
         self.assertEqual(len(suppressed), 1)
@@ -418,7 +426,8 @@ class TickTests(unittest.TestCase):
         self.assertEqual(result.action, "alert")
         self.assertEqual(svc.state.actions_taken, 1)
         started = [
-            call for call in observe.emit.call_args_list
+            call
+            for call in observe.emit.call_args_list
             if call.args and call.args[0] == "kairos_action_started"
         ]
         self.assertEqual(len(started), 1)
@@ -443,9 +452,7 @@ class TickTests(unittest.TestCase):
 
     def test_tick_budget_exhaustion(self) -> None:
         svc, router, _, observe = _make_service(action_budget=0.0)
-        router.ask.return_value = MagicMock(
-            content='{"action": "notify", "reason": "test"}'
-        )
+        router.ask.return_value = MagicMock(content='{"action": "notify", "reason": "test"}')
 
         result = svc.tick()
 
@@ -471,7 +478,12 @@ class TickTests(unittest.TestCase):
             span_id=ANY,
             parent_span_id=ANY,
             artifact_id="kairos_event:github.notification",
-            payload={"event_type": "github.notification", "action": "none", "reason": "", "error": ""},
+            payload={
+                "event_type": "github.notification",
+                "action": "none",
+                "reason": "",
+                "error": "",
+            },
         )
 
 
@@ -498,7 +510,9 @@ class ExecuteActionTests(unittest.TestCase):
         decision = TickDecision(
             action="dispatch_to_agent",
             reason="test failure detected",
-            detail=json.dumps({"to_agent": "hex", "topic": "test_failure", "payload": {"file": "bot.py"}}),
+            detail=json.dumps(
+                {"to_agent": "hex", "topic": "test_failure", "payload": {"file": "bot.py"}}
+            ),
         )
         result = svc._execute(decision, budget=10.0)
         self.assertEqual(result.action, "dispatch_to_agent")
@@ -507,7 +521,9 @@ class ExecuteActionTests(unittest.TestCase):
 
     def test_pause_agent_emits_event(self) -> None:
         auto_research = MagicMock()
-        svc, _, _, observe = _make_service(bus=MagicMock(), approvals=MagicMock(), auto_research=auto_research)
+        svc, _, _, observe = _make_service(
+            bus=MagicMock(), approvals=MagicMock(), auto_research=auto_research
+        )
         decision = TickDecision(
             action="pause_agent",
             reason="budget exceeded",
@@ -547,7 +563,12 @@ class ExecuteActionTests(unittest.TestCase):
             parent_span_id=ANY,
             job_id=None,
             artifact_id="run_skill",
-            payload={"agent": "rook", "skill": "health-audit", "lane": "worker", "result": "skill-output"},
+            payload={
+                "agent": "rook",
+                "skill": "health-audit",
+                "lane": "worker",
+                "result": "skill-output",
+            },
         )
 
     def test_approve_pending_refuses_external_mutation(self) -> None:
@@ -610,7 +631,9 @@ class ExecuteActionTests(unittest.TestCase):
     def test_notify_user_suppresses_noise(self) -> None:
         svc, router, _, observe = _make_service()
         router.ask.return_value = MagicMock(content='{"important": false}')
-        decision = TickDecision(action="notify_user", reason="routine FYI", detail="Routine background update")
+        decision = TickDecision(
+            action="notify_user", reason="routine FYI", detail="Routine background update"
+        )
 
         svc._handle_notify_user(decision)
 
@@ -629,7 +652,9 @@ class ExecuteActionTests(unittest.TestCase):
 
     def test_notify_user_bypasses_noise_filter_for_critical_text(self) -> None:
         svc, router, _, observe = _make_service()
-        decision = TickDecision(action="notify_user", reason="critical approval", detail="Critical approval pending")
+        decision = TickDecision(
+            action="notify_user", reason="critical approval", detail="Critical approval pending"
+        )
 
         svc._handle_notify_user(decision)
 
@@ -653,20 +678,14 @@ class ExecuteActionTests(unittest.TestCase):
                 "event_type": "kairos_notify_user",
                 "timestamp": observed_at,
                 "payload": {
-                    "message": (
-                        "5 approvals require review: "
-                        "0e8fd603c8ccd46c, 4885d761ae58ee7d"
-                    )
+                    "message": ("5 approvals require review: 0e8fd603c8ccd46c, 4885d761ae58ee7d")
                 },
             }
         ]
         decision = TickDecision(
             action="notify_user",
             reason="approval backlog",
-            detail=(
-                "Pending approval IDs: "
-                "4885d761ae58ee7d, 0e8fd603c8ccd46c"
-            ),
+            detail=("Pending approval IDs: 4885d761ae58ee7d, 0e8fd603c8ccd46c"),
         )
 
         svc._handle_notify_user(decision)
@@ -681,10 +700,7 @@ class ExecuteActionTests(unittest.TestCase):
             job_id=None,
             artifact_id=None,
             payload={
-                "message": (
-                    "Pending approval IDs: "
-                    "4885d761ae58ee7d, 0e8fd603c8ccd46c"
-                ),
+                "message": ("Pending approval IDs: 4885d761ae58ee7d, 0e8fd603c8ccd46c"),
                 "reason": "duplicate_approval_backlog",
             },
         )
@@ -697,10 +713,7 @@ class ExecuteActionTests(unittest.TestCase):
                 "event_type": "kairos_notify_user",
                 "timestamp": observed_at,
                 "payload": {
-                    "message": (
-                        "5 approvals require review: "
-                        "0e8fd603c8ccd46c, 4885d761ae58ee7d"
-                    )
+                    "message": ("5 approvals require review: 0e8fd603c8ccd46c, 4885d761ae58ee7d")
                 },
             }
         ]
@@ -737,7 +750,14 @@ class EnhancedContextTests(unittest.TestCase):
     def test_context_includes_urgent_bus_messages(self) -> None:
         tmpdir = Path(tempfile.mkdtemp())
         bus = AgentBus(bus_root=tmpdir)
-        msg = _new_message(from_agent="rook", to_agent="hex", intent="escalate", topic="fire", payload={}, priority="urgent")
+        msg = _new_message(
+            from_agent="rook",
+            to_agent="hex",
+            intent="escalate",
+            topic="fire",
+            payload={},
+            priority="urgent",
+        )
         bus.send(msg)
         svc, _, _, _ = _make_service(bus=bus)
         ctx = svc._gather_context()
@@ -747,7 +767,14 @@ class EnhancedContextTests(unittest.TestCase):
     def test_context_includes_expired_requests(self) -> None:
         tmpdir = Path(tempfile.mkdtemp())
         bus = AgentBus(bus_root=tmpdir)
-        msg = _new_message(from_agent="rook", to_agent="hex", intent="request", topic="help", payload={}, ttl_seconds=1)
+        msg = _new_message(
+            from_agent="rook",
+            to_agent="hex",
+            intent="request",
+            topic="help",
+            payload={},
+            ttl_seconds=1,
+        )
         msg.created_at = time.time() - 10
         bus.send(msg)
         svc, _, _, _ = _make_service(bus=bus)
@@ -807,8 +834,10 @@ class AutoActionApprovalTests(unittest.TestCase):
         adapter = MagicMock()
         adapter.publish.return_value = MagicMock(success=True, post_id="pid")
         decision = TickDecision(action="auto_publish_social")
-        with patch.dict(os.environ, {"KAIROS_AUTO_PUBLISH_SOCIAL": "1"}), \
-             patch("claw_v2.social.x_adapter_from_keychain", return_value=adapter):
+        with (
+            patch.dict(os.environ, {"KAIROS_AUTO_PUBLISH_SOCIAL": "1"}),
+            patch("claw_v2.social.x_adapter_from_keychain", return_value=adapter),
+        ):
             svc._handle_auto_publish_social(decision)
         adapter.publish.assert_called_once_with("Tweet draft text")
         approvals.create.assert_not_called()
@@ -853,8 +882,10 @@ class AutoActionApprovalTests(unittest.TestCase):
             MagicMock(returncode=0, stdout="local_sha\n"),
             MagicMock(returncode=0, stdout=""),
         ]
-        with patch.dict(os.environ, {"KAIROS_AUTO_DEPLOY": "1"}), \
-             patch("subprocess.run", side_effect=run_results) as runner:
+        with (
+            patch.dict(os.environ, {"KAIROS_AUTO_DEPLOY": "1"}),
+            patch("subprocess.run", side_effect=run_results) as runner,
+        ):
             svc._handle_auto_deploy(decision)
         self.assertEqual(runner.call_count, 3)
         approvals.create.assert_not_called()

@@ -29,7 +29,11 @@ class LLMRouterTests(unittest.TestCase):
             config = make_config(Path(tmpdir))
             router = LLMRouter(
                 config=config,
-                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic"))},
+                adapters={
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    )
+                },
             )
             with self.assertRaises(ValueError):
                 router.ask("judge this", lane="judge")
@@ -57,7 +61,9 @@ class LLMRouterTests(unittest.TestCase):
             )
 
             with self.assertRaises(AdapterError):
-                router.ask("do the task", lane="worker", provider="openai", model="gpt-unpriced-xyz")
+                router.ask(
+                    "do the task", lane="worker", provider="openai", model="gpt-unpriced-xyz"
+                )
 
             self.assertTrue(
                 any(event.get("action") == "cost_metering_unknown" for event in audit_events),
@@ -102,7 +108,9 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
                     "openai": StaticAdapter("openai", tool_capable=False, responder=failing),
                 },
             )
@@ -148,10 +156,14 @@ class LLMRouterTests(unittest.TestCase):
             )
 
             with self.assertRaises(AdapterError):
-                router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+                router.ask(
+                    "verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"}
+                )
 
             self.assertEqual(fallback_called, [], "blocked fallback must never reach the adapter")
-            blocked = [e for e in audit_events if e.get("action") == "llm_fallback_blocked_by_pre_hook"]
+            blocked = [
+                e for e in audit_events if e.get("action") == "llm_fallback_blocked_by_pre_hook"
+            ]
             self.assertEqual(len(blocked), 1)
             self.assertEqual(blocked[0]["metadata"]["block_reason"], "daily_budget_exceeded")
 
@@ -171,12 +183,16 @@ class LLMRouterTests(unittest.TestCase):
                 config=config,
                 adapters={
                     "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=failing),
-                    "openai": StaticAdapter("openai", tool_capable=False, responder=echo_response("openai")),
+                    "openai": StaticAdapter(
+                        "openai", tool_capable=False, responder=echo_response("openai")
+                    ),
                 },
                 pre_hooks=[recording_hook],
             )
 
-            response = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+            response = router.ask(
+                "verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"}
+            )
 
             self.assertEqual(response.provider, "openai")
             self.assertEqual(seen_providers, ["anthropic", "openai"])
@@ -272,8 +288,12 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
-                    "ollama": StaticAdapter("ollama", tool_capable=True, responder=echo_response("ollama")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
+                    "ollama": StaticAdapter(
+                        "ollama", tool_capable=True, responder=echo_response("ollama")
+                    ),
                 },
             )
             response = router.ask("classify this", lane="judge", evidence_pack={"data": "x"})
@@ -288,8 +308,12 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
-                    "ollama": StaticAdapter("ollama", tool_capable=True, responder=echo_response("ollama")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
+                    "ollama": StaticAdapter(
+                        "ollama", tool_capable=True, responder=echo_response("ollama")
+                    ),
                 },
             )
             response = router.ask("classify this", lane="judge", evidence_pack={"data": "x"})
@@ -303,7 +327,9 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
                 },
                 audit_sink=audit_events.append,
             )
@@ -403,7 +429,9 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
                     "ollama": StaticAdapter("ollama", tool_capable=True, responder=failing),
                 },
             )
@@ -424,15 +452,23 @@ class LLMRouterTests(unittest.TestCase):
                 config=config,
                 adapters={
                     "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=failing),
-                    "openai": StaticAdapter("openai", tool_capable=False, responder=echo_response("openai")),
+                    "openai": StaticAdapter(
+                        "openai", tool_capable=False, responder=echo_response("openai")
+                    ),
                 },
                 audit_sink=audit_events.append,
                 circuit_breaker=ProviderCircuitBreaker(failure_threshold=2, cooldown_seconds=60),
             )
 
-            first = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
-            second = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
-            third = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+            first = router.ask(
+                "verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"}
+            )
+            second = router.ask(
+                "verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"}
+            )
+            third = router.ask(
+                "verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"}
+            )
 
             self.assertEqual(first.provider, "openai")
             self.assertEqual(second.provider, "openai")
@@ -457,7 +493,9 @@ class LLMRouterTests(unittest.TestCase):
                 config=config,
                 adapters={
                     "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=flaky),
-                    "openai": StaticAdapter("openai", tool_capable=False, responder=echo_response("openai")),
+                    "openai": StaticAdapter(
+                        "openai", tool_capable=False, responder=echo_response("openai")
+                    ),
                 },
                 audit_sink=audit_events.append,
                 circuit_breaker=ProviderCircuitBreaker(
@@ -467,13 +505,19 @@ class LLMRouterTests(unittest.TestCase):
                 ),
             )
 
-            fallback = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+            fallback = router.ask(
+                "verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"}
+            )
             now[0] = 111.0
-            recovered = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+            recovered = router.ask(
+                "verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"}
+            )
 
             self.assertEqual(fallback.provider, "openai")
             self.assertEqual(recovered.provider, "anthropic")
-            self.assertTrue(any(event["action"] == "llm_circuit_recovered" for event in audit_events))
+            self.assertTrue(
+                any(event["action"] == "llm_circuit_recovered" for event in audit_events)
+            )
 
     def test_fallback_to_anthropic_uses_safe_anthropic_model_when_worker_is_codex(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -490,7 +534,9 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
                     "openai": StaticAdapter("openai", tool_capable=True, responder=failing),
                 },
                 audit_sink=audit_events.append,
@@ -507,8 +553,12 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
-                    "openai": StaticAdapter("openai", tool_capable=False, responder=echo_response("openai")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
+                    "openai": StaticAdapter(
+                        "openai", tool_capable=False, responder=echo_response("openai")
+                    ),
                 },
             )
             with self.assertRaises(ValueError):
@@ -520,8 +570,12 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
-                    "google": StaticAdapter("google", tool_capable=False, responder=echo_response("google")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
+                    "google": StaticAdapter(
+                        "google", tool_capable=False, responder=echo_response("google")
+                    ),
                 },
             )
             with self.assertRaises(ValueError):
@@ -539,7 +593,9 @@ class LLMRouterTests(unittest.TestCase):
 
             router = LLMRouter(
                 config=config,
-                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)
+                },
             )
             with self.assertRaisesRegex(ValueError, "timeout"):
                 router.ask("do work", lane="brain", timeout=0)
@@ -559,7 +615,9 @@ class LLMRouterTests(unittest.TestCase):
 
             router = LLMRouter(
                 config=config,
-                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)
+                },
             )
 
             response = router.ask(
@@ -579,7 +637,11 @@ class LLMRouterTests(unittest.TestCase):
             config = make_config(Path(tmpdir))
             router = LLMRouter(
                 config=config,
-                adapters={"codex": StaticAdapter("codex", tool_capable=True, responder=echo_response("codex"))},
+                adapters={
+                    "codex": StaticAdapter(
+                        "codex", tool_capable=True, responder=echo_response("codex")
+                    )
+                },
             )
 
             with self.assertRaisesRegex(ValueError, "codex is not allowed"):
@@ -601,7 +663,9 @@ class LLMRouterTests(unittest.TestCase):
 
             router = LLMRouter(
                 config=config,
-                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=timeout)},
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=timeout)
+                },
                 audit_sink=audit_events.append,
             )
 
@@ -630,7 +694,9 @@ class LLMRouterTests(unittest.TestCase):
 
             router = LLMRouter(
                 config=config,
-                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)
+                },
             )
             router.ask("think", lane="brain", max_budget=0.05)
             self.assertEqual(seen["max_budget"], 1.0)
@@ -647,7 +713,9 @@ class LLMRouterTests(unittest.TestCase):
 
             router = LLMRouter(
                 config=config,
-                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)
+                },
             )
             router.ask("think", lane="brain", max_budget=0.05)
             self.assertEqual(seen["max_budget"], 0.05)
@@ -658,11 +726,16 @@ class LLMRouterTests(unittest.TestCase):
             config.worker_provider = "codex"
             config.worker_model = "codex-mini-latest"
             from claw_v2.eval_mocks import StaticAdapter, echo_response
+
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
-                    "codex": StaticAdapter("codex", tool_capable=True, responder=echo_response("codex")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
+                    "codex": StaticAdapter(
+                        "codex", tool_capable=True, responder=echo_response("codex")
+                    ),
                 },
             )
             response = router.ask("write a function", lane="worker")
@@ -674,8 +747,12 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
-                    "codex": StaticAdapter("codex", tool_capable=True, responder=echo_response("codex")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
+                    "codex": StaticAdapter(
+                        "codex", tool_capable=True, responder=echo_response("codex")
+                    ),
                 },
             )
             response = router.ask("debug terminal failure", lane="worker_heavy")
@@ -694,7 +771,9 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
                     "codex": StaticAdapter("codex", tool_capable=True, responder=failing),
                 },
             )
@@ -713,7 +792,9 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
                     "codex": StaticAdapter("codex", tool_capable=True, responder=failing),
                 },
             )
@@ -726,6 +807,7 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter.default(config)
             self.assertIn("codex", router.adapters)
             from claw_v2.adapters.codex import CodexAdapter
+
             self.assertIsInstance(router.adapters["codex"], CodexAdapter)
 
     def test_fallback_post_hooks_receive_fallback_request(self) -> None:
@@ -737,8 +819,10 @@ class LLMRouterTests(unittest.TestCase):
 
             def fallback(request: LLMRequest) -> LLMResponse:
                 return LLMResponse(
-                    content="ok", lane=request.lane,
-                    provider="anthropic", model=request.model,
+                    content="ok",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
                 )
 
             seen: dict = {}
@@ -769,8 +853,10 @@ class LLMRouterTests(unittest.TestCase):
 
             def fallback(request: LLMRequest) -> LLMResponse:
                 return LLMResponse(
-                    content="ok", lane=request.lane,
-                    provider="anthropic", model=request.model,
+                    content="ok",
+                    lane=request.lane,
+                    provider="anthropic",
+                    model=request.model,
                 )
 
             audit_log: list[dict] = []
@@ -801,8 +887,10 @@ class LLMRouterTests(unittest.TestCase):
 
                     def fallback(request: LLMRequest, fb=fallback_provider) -> LLMResponse:
                         return LLMResponse(
-                            content="ok", lane=request.lane,
-                            provider=fb, model=request.model,
+                            content="ok",
+                            lane=request.lane,
+                            provider=fb,
+                            model=request.model,
                         )
 
                     seen: dict = {}
@@ -815,11 +903,15 @@ class LLMRouterTests(unittest.TestCase):
                         config=config,
                         adapters={
                             primary: StaticAdapter(primary, tool_capable=False, responder=failing),
-                            fallback_provider: StaticAdapter(fallback_provider, tool_capable=True, responder=fallback),
+                            fallback_provider: StaticAdapter(
+                                fallback_provider, tool_capable=True, responder=fallback
+                            ),
                         },
                     )
                     router.post_hooks.append(post_hook)
-                    router.ask("verify", lane="verifier", evidence_pack={"diff": "x"}, provider=primary)
+                    router.ask(
+                        "verify", lane="verifier", evidence_pack={"diff": "x"}, provider=primary
+                    )
 
                     self.assertEqual(seen["provider"], fallback_provider)
 
@@ -834,9 +926,13 @@ class LLMRouterTests(unittest.TestCase):
 
             router = LLMRouter(
                 config=config,
-                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)
+                },
             )
-            response = router.ask("verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"})
+            response = router.ask(
+                "verify", lane="verifier", provider="anthropic", evidence_pack={"diff": "x"}
+            )
 
             self.assertEqual(response.provider, "anthropic")
             self.assertTrue(seen["model"].startswith("claude-"))
@@ -846,11 +942,21 @@ class LLMRouterTests(unittest.TestCase):
             config = make_config(Path(tmpdir))
             router = LLMRouter(
                 config=config,
-                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic"))},
+                adapters={
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    )
+                },
             )
 
             with self.assertRaisesRegex(ValueError, "Anthropic provider cannot serve OpenAI model"):
-                router.ask("verify", lane="verifier", provider="anthropic", model="gpt-5.5", evidence_pack={"diff": "x"})
+                router.ask(
+                    "verify",
+                    lane="verifier",
+                    provider="anthropic",
+                    model="gpt-5.5",
+                    evidence_pack={"diff": "x"},
+                )
 
     def test_suppresses_corrupt_internal_tool_trace_from_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -899,7 +1005,9 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
                 },
                 audit_sink=audit_log.append,
             )
@@ -961,7 +1069,9 @@ class LLMRouterTests(unittest.TestCase):
             router = LLMRouter(
                 config=config,
                 adapters={
-                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic")),
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    ),
                 },
                 audit_sink=audit_log.append,
                 observation_window=window,
@@ -986,7 +1096,9 @@ class DelegationHandlerThreadingTests(unittest.TestCase):
 
             router = LLMRouter(
                 config=config,
-                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)},
+                adapters={
+                    "anthropic": StaticAdapter("anthropic", tool_capable=True, responder=responder)
+                },
             )
 
             def handler(payload: dict) -> dict:
@@ -1000,7 +1112,11 @@ class DelegationHandlerThreadingTests(unittest.TestCase):
             config = make_config(Path(tmpdir))
             router = LLMRouter(
                 config=config,
-                adapters={"anthropic": StaticAdapter("anthropic", tool_capable=True, responder=echo_response("anthropic"))},
+                adapters={
+                    "anthropic": StaticAdapter(
+                        "anthropic", tool_capable=True, responder=echo_response("anthropic")
+                    )
+                },
             )
             with self.assertRaises(ValueError):
                 router.ask(

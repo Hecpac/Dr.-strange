@@ -66,19 +66,27 @@ class BotTests(unittest.TestCase):
                 self.assertIn("/terminal_list", overview)
                 self.assertIn("/spending", overview)
 
-                pipeline_help = runtime.bot.handle_text(user_id="123", session_id="s1", text="/help pipeline")
+                pipeline_help = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/help pipeline"
+                )
                 self.assertIn("/pipeline_status", pipeline_help)
                 self.assertIn("/pipeline_merge <issue_id>", pipeline_help)
 
-                agents_help = runtime.bot.handle_text(user_id="123", session_id="s1", text="/help agents")
+                agents_help = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/help agents"
+                )
                 self.assertIn("/agent_create", agents_help)
                 self.assertIn("/agent_pr", agents_help)
 
-                traces_help = runtime.bot.handle_text(user_id="123", session_id="s1", text="/help traces")
+                traces_help = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/help traces"
+                )
                 self.assertIn("/traces [limit]", traces_help)
                 self.assertIn("/trace <trace_id> [limit]", traces_help)
 
-                unknown = runtime.bot.handle_text(user_id="123", session_id="s1", text="/help desconocido")
+                unknown = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/help desconocido"
+                )
                 self.assertIn("Tema de ayuda no reconocido", unknown)
 
     def test_spending_command_returns_daily_llm_decision_breakdown(self) -> None:
@@ -129,11 +137,15 @@ class BotTests(unittest.TestCase):
                 reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/freeze")
                 self.assertIn("Freeze activado", reply)
                 with self.assertRaises(PermissionError):
-                    runtime.tool_registry.execute("Read", {"path": str(target)}, agent_class="researcher")
+                    runtime.tool_registry.execute(
+                        "Read", {"path": str(target)}, agent_class="researcher"
+                    )
 
                 reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/unfreeze")
                 self.assertIn("Freeze desactivado", reply)
-                result = runtime.tool_registry.execute("Read", {"path": str(target)}, agent_class="researcher")
+                result = runtime.tool_registry.execute(
+                    "Read", {"path": str(target)}, agent_class="researcher"
+                )
                 self.assertEqual(result["content"], "hello")
 
     def test_command_router_preserves_terminal_usage_response(self) -> None:
@@ -150,7 +162,9 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
 
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_read")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/terminal_read"
+                )
 
                 self.assertEqual(reply, "usage: /terminal_read <session_id> [offset]")
 
@@ -169,14 +183,22 @@ class BotTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.handle_text(user_id="123", session_id="s1", text="hola")
 
-                traces = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/traces 5"))
+                traces = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/traces 5")
+                )
                 self.assertGreaterEqual(len(traces["traces"]), 1)
                 trace_id = traces["traces"][0]["trace_id"]
 
-                replay = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/trace {trace_id}"))
+                replay = json.loads(
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text=f"/trace {trace_id}"
+                    )
+                )
                 self.assertEqual(replay["trace_id"], trace_id)
                 self.assertGreaterEqual(replay["event_count"], 1)
-                self.assertTrue(any(event["event_type"] == "llm_response" for event in replay["events"]))
+                self.assertTrue(
+                    any(event["event_type"] == "llm_response" for event in replay["events"])
+                )
 
     def test_trace_replay_redacts_sensitive_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -200,7 +222,9 @@ class BotTests(unittest.TestCase):
                     trace_id=trace_id,
                     payload={"note": "user typed /approve abc-123 secret-token-xyz to confirm"},
                 )
-                replay = runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/trace {trace_id}")
+                replay = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text=f"/trace {trace_id}"
+                )
                 self.assertNotIn("secret-token-xyz", replay)
                 self.assertIn("[REDACTED]", replay)
 
@@ -226,12 +250,17 @@ class BotTests(unittest.TestCase):
                 runtime.bot.content_engine.generate_batch.return_value = [draft]
                 publisher_mock = MagicMock()
                 publisher_mock.publish.return_value = PublishResult(
-                    platform="x", account="acme", post_id="42",
-                    url="https://x.com/acme/42", published_at="2026-04-26",
+                    platform="x",
+                    account="acme",
+                    post_id="42",
+                    url="https://x.com/acme/42",
+                    published_at="2026-04-26",
                 )
                 runtime.bot.social_publisher = publisher_mock
 
-                first = runtime.bot.handle_text(user_id="123", session_id="s1", text="/social_publish acme")
+                first = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/social_publish acme"
+                )
                 payload = json.loads(first)
 
                 self.assertEqual(payload["status"], "approval_required")
@@ -242,7 +271,8 @@ class BotTests(unittest.TestCase):
                 approval_id = payload["approval_id"]
                 token = payload["approval_token"]
                 second = runtime.bot.handle_text(
-                    user_id="123", session_id="s1",
+                    user_id="123",
+                    session_id="s1",
                     text=f"/social_approve {approval_id} {token}",
                 )
 
@@ -273,13 +303,18 @@ class BotTests(unittest.TestCase):
                 runtime.bot.content_engine.generate_batch.return_value = [draft]
                 publisher_mock = MagicMock()
                 publisher_mock.publish.return_value = PublishResult(
-                    platform="x", account="acme", post_id="42",
-                    url="https://x.com/acme/42", published_at="2026-04-26",
+                    platform="x",
+                    account="acme",
+                    post_id="42",
+                    url="https://x.com/acme/42",
+                    published_at="2026-04-26",
                 )
                 runtime.bot.social_publisher = publisher_mock
 
                 payload = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/social_publish acme")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/social_publish acme"
+                    )
                 )
                 approval_id = payload["approval_id"]
                 token = payload["approval_token"]
@@ -329,7 +364,8 @@ class BotTests(unittest.TestCase):
                 self.assertIn("parcial sintetizado", record.artifacts.get("partial_output", ""))
 
                 events = [
-                    e for e in runtime.observe.recent_events(limit=50)
+                    e
+                    for e in runtime.observe.recent_events(limit=50)
                     if e["event_type"] == "stream_interrupted_checkpointed"
                 ]
                 self.assertGreaterEqual(len(events), 1)
@@ -361,7 +397,9 @@ class BotTests(unittest.TestCase):
                     verification_status="passed",
                     artifacts={"diff": "+1 -0"},
                 )
-                response = runtime.bot.handle_text(user_id="123", session_id="tg-1", text="/quality")
+                response = runtime.bot.handle_text(
+                    user_id="123", session_id="tg-1", text="/quality"
+                )
                 payload = json.loads(response)
                 self.assertIn("tasks", payload)
                 self.assertIn("quality", payload)
@@ -398,7 +436,9 @@ class BotTests(unittest.TestCase):
                     artifacts={"handler_result": "started"},
                 )
                 response = runtime.bot.handle_text(
-                    user_id="123", session_id="tg-1", text="/diagnose_task tg-1:nb",
+                    user_id="123",
+                    session_id="tg-1",
+                    text="/diagnose_task tg-1:nb",
                 )
                 self.assertIn("tg-1:nb", response)
                 self.assertIn("missing_evidence", response)
@@ -485,7 +525,8 @@ class BotTests(unittest.TestCase):
                     summary="provider down",
                 )
                 reply = runtime.bot.handle_text(
-                    user_id="123", session_id="tg-1",
+                    user_id="123",
+                    session_id="tg-1",
                     text="¿Por qué falló la tarea?",
                 )
                 self.assertIn("tg-1:nb-prev", reply)
@@ -510,23 +551,31 @@ class BotTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 pipeline_mock = MagicMock()
                 pipeline_mock._load_run.return_value = PipelineRun(
-                    issue_id="HEC-9", branch_name="feat/hec-9",
-                    repo_root=str(root), status="pr_created",
+                    issue_id="HEC-9",
+                    branch_name="feat/hec-9",
+                    repo_root=str(root),
+                    status="pr_created",
                     pr_url="https://github.com/owner/repo/pull/9",
                 )
                 pipeline_mock.merge_and_close.return_value = PipelineRun(
-                    issue_id="HEC-9", branch_name="feat/hec-9",
-                    repo_root=str(root), status="done",
+                    issue_id="HEC-9",
+                    branch_name="feat/hec-9",
+                    repo_root=str(root),
+                    status="done",
                     pr_url="https://github.com/owner/repo/pull/9",
                 )
                 runtime.bot.pipeline = pipeline_mock
 
-                first = runtime.bot.handle_text(user_id="123", session_id="s1", text="/pipeline_merge HEC-9")
+                first = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/pipeline_merge HEC-9"
+                )
                 payload = json.loads(first)
 
                 self.assertEqual(payload["status"], "approval_required")
                 self.assertEqual(payload["issue"], "HEC-9")
-                self.assertEqual(payload["risk_basis"], "pipeline_merge_requires_human_hmac_confirmation")
+                self.assertEqual(
+                    payload["risk_basis"], "pipeline_merge_requires_human_hmac_confirmation"
+                )
                 self.assertEqual(payload["sensitive_paths"], [])
                 self.assertIsNone(payload["risk_code"])
                 self.assertIn("/pipeline_merge_confirm", payload["confirm_with"])
@@ -535,7 +584,8 @@ class BotTests(unittest.TestCase):
                 approval_id = payload["approval_id"]
                 token = payload["approval_token"]
                 second = runtime.bot.handle_text(
-                    user_id="123", session_id="s1",
+                    user_id="123",
+                    session_id="s1",
                     text=f"/pipeline_merge_confirm {approval_id} {token}",
                 )
 
@@ -561,25 +611,37 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                diff_approval = runtime.bot.approvals.create(action="pipeline:HEC-9", summary="diff")
-                merge_approval = runtime.bot.approvals.create(action="pipeline_merge:HEC-9", summary="merge")
+                diff_approval = runtime.bot.approvals.create(
+                    action="pipeline:HEC-9", summary="diff"
+                )
+                merge_approval = runtime.bot.approvals.create(
+                    action="pipeline_merge:HEC-9", summary="merge"
+                )
 
                 pipeline_mock = MagicMock()
                 pipeline_mock.list_active.return_value = [
                     PipelineRun(
-                        issue_id="HEC-9", branch_name="feat/hec-9", repo_root=str(root),
-                        status="awaiting_approval", approval_id=diff_approval.approval_id,
+                        issue_id="HEC-9",
+                        branch_name="feat/hec-9",
+                        repo_root=str(root),
+                        status="awaiting_approval",
+                        approval_id=diff_approval.approval_id,
                     )
                 ]
                 pipeline_mock.complete_pipeline.return_value = PipelineRun(
-                    issue_id="HEC-9", branch_name="feat/hec-9", repo_root=str(root),
-                    status="pr_created", pr_url="https://github.com/owner/repo/pull/9",
-                    approval_id=merge_approval.approval_id, approval_token=merge_approval.token,
+                    issue_id="HEC-9",
+                    branch_name="feat/hec-9",
+                    repo_root=str(root),
+                    status="pr_created",
+                    pr_url="https://github.com/owner/repo/pull/9",
+                    approval_id=merge_approval.approval_id,
+                    approval_token=merge_approval.token,
                 )
                 runtime.bot.pipeline = pipeline_mock
 
                 out = runtime.bot.handle_text(
-                    user_id="123", session_id="s1",
+                    user_id="123",
+                    session_id="s1",
                     text=f"/pipeline_approve {diff_approval.approval_id} {diff_approval.token}",
                 )
                 payload = json.loads(out)
@@ -607,12 +669,17 @@ class BotTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 pipeline_mock = MagicMock()
                 pipeline_mock._load_run.return_value = PipelineRun(
-                    issue_id="HEC-9", branch_name="feat/hec-9",
-                    repo_root=str(root), status="awaiting_approval", pr_url=None,
+                    issue_id="HEC-9",
+                    branch_name="feat/hec-9",
+                    repo_root=str(root),
+                    status="awaiting_approval",
+                    pr_url=None,
                 )
                 runtime.bot.pipeline = pipeline_mock
 
-                response = runtime.bot.handle_text(user_id="123", session_id="s1", text="/pipeline_merge HEC-9")
+                response = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/pipeline_merge HEC-9"
+                )
                 payload = json.loads(response)
 
                 self.assertEqual(payload["status"], "not_mergeable")
@@ -640,11 +707,14 @@ class BotTests(unittest.TestCase):
                 publisher_mock = MagicMock()
                 runtime.bot.social_publisher = publisher_mock
 
-                first = runtime.bot.handle_text(user_id="123", session_id="s1", text="/social_publish acme")
+                first = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/social_publish acme"
+                )
                 approval_id = json.loads(first)["approval_id"]
 
                 response = runtime.bot.handle_text(
-                    user_id="123", session_id="s1",
+                    user_id="123",
+                    session_id="s1",
                     text=f"/social_approve {approval_id} wrong-token",
                 )
                 self.assertEqual(response, "approval rejected")
@@ -663,7 +733,9 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/trace missing-trace")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/trace missing-trace"
+                )
                 self.assertEqual(reply, "trace not found: missing-trace")
 
     def test_bot_persists_visible_fallback_instead_of_no_result(self) -> None:
@@ -693,7 +765,9 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(reply, "Recibido. ¿Qué quieres que haga con esto?")
                 recent = runtime.memory.get_recent_messages("s1", limit=2)
                 self.assertEqual(recent[-1]["content"], "Recibido. ¿Qué quieres que haga con esto?")
-                outcomes = runtime.memory.search_past_outcomes("fallback", task_type="telegram_message")
+                outcomes = runtime.memory.search_past_outcomes(
+                    "fallback", task_type="telegram_message"
+                )
                 self.assertEqual(len(outcomes), 1)
                 self.assertEqual(outcomes[0]["outcome"], "failure")
                 self.assertIn("clarifying question", outcomes[0]["lesson"])
@@ -711,10 +785,14 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="explícame el login")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="explícame el login"
+                )
 
                 self.assertEqual(reply, "handled")
-                outcomes = runtime.memory.search_past_outcomes("login", task_type="telegram_message")
+                outcomes = runtime.memory.search_past_outcomes(
+                    "login", task_type="telegram_message"
+                )
                 self.assertEqual(len(outcomes), 1)
                 self.assertEqual(outcomes[0]["outcome"], "success")
                 self.assertIn("usable reply", outcomes[0]["lesson"])
@@ -738,7 +816,9 @@ class BotTests(unittest.TestCase):
                     reason="Chrome no pudo iniciar en el puerto configurado.",
                 )
 
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/chrome_pages")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/chrome_pages"
+                )
 
                 self.assertIn("módulo de navegación", reply)
                 self.assertIn("Chrome no pudo iniciar", reply)
@@ -762,7 +842,9 @@ class BotTests(unittest.TestCase):
                     reason="Computer Use está desactivado por healthcheck.",
                 )
 
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/computer revisa la pantalla")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/computer revisa la pantalla"
+                )
 
                 self.assertIn("módulo de control de escritorio", reply)
                 self.assertIn("healthcheck", reply)
@@ -781,15 +863,21 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
 
-                initial = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy"))
+                initial = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy")
+                )
                 self.assertEqual(initial["autonomy_mode"], "assisted")
 
                 updated = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/autonomy autonomous"
+                    )
                 )
                 self.assertEqual(updated["autonomy_mode"], "autonomous")
 
-                policy = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy_policy"))
+                policy = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy_policy")
+                )
                 self.assertEqual(policy["autonomy_mode"], "autonomous")
                 self.assertIn("coding", policy["automatic_coordinator_modes"])
                 self.assertIn("browse", policy["automatic_coordinator_modes"])
@@ -808,8 +896,12 @@ class BotTests(unittest.TestCase):
                 self.assertIn("commit", policy["task_action_patterns"])
                 self.assertIn("push", policy["task_action_patterns"])
 
-                invalid = runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy unsafe")
-                self.assertEqual(invalid, "autonomy mode must be one of: manual, assisted, autonomous")
+                invalid = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/autonomy unsafe"
+                )
+                self.assertEqual(
+                    invalid, "autonomy mode must be one of: manual, assisted, autonomous"
+                )
 
     def test_natural_language_autonomy_grant_sets_autonomous_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -834,7 +926,10 @@ class BotTests(unittest.TestCase):
                 self.assertIn("Autonomía activada", reply)
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["autonomy_mode"], "autonomous")
-                self.assertIn("push", state["active_object"]["autonomy_grant"]["allowed_without_phase_approval"])
+                self.assertIn(
+                    "push",
+                    state["active_object"]["autonomy_grant"]["allowed_without_phase_approval"],
+                )
 
     def test_telegram_sessions_default_to_assisted_until_explicit_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -853,9 +948,13 @@ class BotTests(unittest.TestCase):
                 runtime.bot.handle_text(user_id="123", session_id="tg-123", text="hola")
                 state = runtime.memory.get_session_state("tg-123")
                 self.assertEqual(state["autonomy_mode"], "assisted")
-                self.assertEqual(state["active_object"]["autonomy_configured"]["source"], "telegram_default")
+                self.assertEqual(
+                    state["active_object"]["autonomy_configured"]["source"], "telegram_default"
+                )
 
-                runtime.bot.handle_text(user_id="123", session_id="tg-123", text="/autonomy autonomous")
+                runtime.bot.handle_text(
+                    user_id="123", session_id="tg-123", text="/autonomy autonomous"
+                )
                 runtime.bot.handle_text(user_id="123", session_id="tg-123", text="hola de nuevo")
                 state = runtime.memory.get_session_state("tg-123")
                 self.assertEqual(state["autonomy_mode"], "autonomous")
@@ -875,7 +974,11 @@ class BotTests(unittest.TestCase):
             prompts: list[str] = []
 
             def scripted_executor(request: LLMRequest) -> LLMResponse:
-                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompt_text = (
+                    request.prompt
+                    if isinstance(request.prompt, str)
+                    else json.dumps(request.prompt)
+                )
                 prompts.append(prompt_text)
                 if len(prompts) == 1:
                     content = "1. Revisar logs\n2. Corregir el bug de browse"
@@ -898,7 +1001,9 @@ class BotTests(unittest.TestCase):
                 )
                 self.assertIn("1. Revisar logs", first)
                 state = runtime.memory.get_session_state("s1")
-                self.assertEqual(state["last_options"], ["Revisar logs", "Corregir el bug de browse"])
+                self.assertEqual(
+                    state["last_options"], ["Revisar logs", "Corregir el bug de browse"]
+                )
 
                 selected = runtime.bot.handle_text(user_id="123", session_id="s1", text="opción 2")
                 self.assertEqual(selected, "handled")
@@ -907,7 +1012,9 @@ class BotTests(unittest.TestCase):
 
                 proceed = runtime.bot.handle_text(user_id="123", session_id="s1", text="procede")
                 self.assertEqual(proceed, "handled")
-                self.assertIn("Continúa con esta acción pendiente: Corregir el bug de browse", prompts[-1])
+                self.assertIn(
+                    "Continúa con esta acción pendiente: Corregir el bug de browse", prompts[-1]
+                )
 
     @patch("claw_v2.browse_handler._jina_read")
     def test_browse_updates_active_object_in_session_state(self, mock_jina) -> None:
@@ -948,7 +1055,11 @@ class BotTests(unittest.TestCase):
             prompts: list[str] = []
 
             def scripted_executor(request: LLMRequest) -> LLMResponse:
-                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompt_text = (
+                    request.prompt
+                    if isinstance(request.prompt, str)
+                    else json.dumps(request.prompt)
+                )
                 prompts.append(prompt_text)
                 return LLMResponse(
                     content="handled",
@@ -986,7 +1097,11 @@ class BotTests(unittest.TestCase):
             prompts: list[str] = []
 
             def scripted_executor(request: LLMRequest) -> LLMResponse:
-                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompt_text = (
+                    request.prompt
+                    if isinstance(request.prompt, str)
+                    else json.dumps(request.prompt)
+                )
                 prompts.append(prompt_text)
                 if len(prompts) == 1:
                     content = "Hecho.\nSiguiente paso: correr pytest -q"
@@ -1001,7 +1116,9 @@ class BotTests(unittest.TestCase):
 
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=scripted_executor)
-                runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="corrige el bug del login"
+                )
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["pending_action"], "correr pytest -q")
                 self.assertEqual(state["task_queue"][0]["summary"], "correr pytest -q")
@@ -1027,7 +1144,11 @@ class BotTests(unittest.TestCase):
             prompts: list[str] = []
 
             def scripted_executor(request: LLMRequest) -> LLMResponse:
-                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompt_text = (
+                    request.prompt
+                    if isinstance(request.prompt, str)
+                    else json.dumps(request.prompt)
+                )
                 prompts.append(prompt_text)
                 return LLMResponse(
                     content="prueba ejecutada",
@@ -1054,10 +1175,14 @@ class BotTests(unittest.TestCase):
                     ],
                 )
 
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="Haz la prueba")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="Haz la prueba"
+                )
 
                 self.assertEqual(reply, "prueba ejecutada")
-                self.assertIn("Continúa con esta acción pendiente: correr prueba local simple", prompts[-1])
+                self.assertIn(
+                    "Continúa con esta acción pendiente: correr prueba local simple", prompts[-1]
+                )
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=20)]
                 self.assertIn("approval_detected", events)
                 self.assertIn("pending_action_execution_started", events)
@@ -1080,11 +1205,15 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
 
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="Haz la prueba")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="Haz la prueba"
+                )
 
                 self.assertEqual(reply, "handled")
 
-    def test_telegram_update_request_starts_task_after_safe_preflight_when_task_intent_flag_disabled(self) -> None:
+    def test_telegram_update_request_starts_task_after_safe_preflight_when_task_intent_flag_disabled(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -1397,7 +1526,9 @@ class BotTests(unittest.TestCase):
         captured_prompts: list[str] = []
 
         def pending_synth(request: LLMRequest) -> LLMResponse:
-            prompt = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+            prompt = (
+                request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+            )
             captured_prompts.append(prompt)
             return LLMResponse(
                 content=(
@@ -1538,7 +1669,9 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=marker_executor)
 
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="cuentame una respuesta de prueba")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="cuentame una respuesta de prueba"
+                )
 
                 self.assertNotIn("system-reminder", reply.lower())
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=10)]
@@ -1609,7 +1742,11 @@ class BotTests(unittest.TestCase):
             prompts: list[str] = []
 
             def scripted_executor(request: LLMRequest) -> LLMResponse:
-                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompt_text = (
+                    request.prompt
+                    if isinstance(request.prompt, str)
+                    else json.dumps(request.prompt)
+                )
                 prompts.append(prompt_text)
                 if len(prompts) == 1:
                     return LLMResponse(
@@ -1670,7 +1807,11 @@ class BotTests(unittest.TestCase):
             prompts: list[str] = []
 
             def scripted_executor(request: LLMRequest) -> LLMResponse:
-                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompt_text = (
+                    request.prompt
+                    if isinstance(request.prompt, str)
+                    else json.dumps(request.prompt)
+                )
                 prompts.append(prompt_text)
                 if len(prompts) == 1:
                     return LLMResponse(
@@ -1721,7 +1862,11 @@ class BotTests(unittest.TestCase):
             prompts: list[str] = []
 
             def scripted_executor(request: LLMRequest) -> LLMResponse:
-                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompt_text = (
+                    request.prompt
+                    if isinstance(request.prompt, str)
+                    else json.dumps(request.prompt)
+                )
                 prompts.append(prompt_text)
                 if len(prompts) == 1:
                     return LLMResponse(
@@ -1754,7 +1899,9 @@ class BotTests(unittest.TestCase):
                 )
 
                 lowered = reply.lower()
-                self.assertEqual(reply, "Plan F3b.2: consulto fuentes read-only y reporto evidencia.")
+                self.assertEqual(
+                    reply, "Plan F3b.2: consulto fuentes read-only y reporto evidencia."
+                )
                 self.assertNotIn("[se cortó]", lowered)
                 self.assertNotIn("user:", lowered)
                 self.assertNotIn("now respond", lowered)
@@ -1809,8 +1956,12 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(jobs[0]["failure_reason"], "provider_repeated_internal_trace")
                 self.assertIn(f"#{jobs[0]['id']}", reply)
                 state = runtime.memory.get_session_state("s1")
-                self.assertEqual(state["pending_action"], "Olvidate del budget y completa Los fixes")
-                self.assertEqual(state["task_queue"][0]["summary"], "Olvidate del budget y completa Los fixes")
+                self.assertEqual(
+                    state["pending_action"], "Olvidate del budget y completa Los fixes"
+                )
+                self.assertEqual(
+                    state["task_queue"][0]["summary"], "Olvidate del budget y completa Los fixes"
+                )
                 self.assertEqual(state["task_queue"][0]["source"], "sanitizer_recovery")
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=80)]
                 self.assertIn("pending_action_persisted_after_suppression", events)
@@ -1830,7 +1981,11 @@ class BotTests(unittest.TestCase):
             prompts: list[str] = []
 
             def scripted_executor(request: LLMRequest) -> LLMResponse:
-                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompt_text = (
+                    request.prompt
+                    if isinstance(request.prompt, str)
+                    else json.dumps(request.prompt)
+                )
                 prompts.append(prompt_text)
                 if len(prompts) == 1:
                     return LLMResponse(
@@ -1870,7 +2025,10 @@ class BotTests(unittest.TestCase):
                 )
 
                 self.assertEqual(reply, "Retomo la prueba con datos en vivo.")
-                self.assertIn("Acción pendiente a retomar: correr la prueba usando datos actuales", prompts[-1])
+                self.assertIn(
+                    "Acción pendiente a retomar: correr la prueba usando datos actuales",
+                    prompts[-1],
+                )
                 self.assertIn("Mensaje actual de Hector: Hagámoslo con datos en vivo", prompts[-1])
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=80)]
                 self.assertIn("pending_action_resumed_after_suppression", events)
@@ -1947,7 +2105,9 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=scripted_executor)
                 runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy assisted")
-                runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="corrige el bug del login"
+                )
 
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["step_budget"], 2)
@@ -1959,11 +2119,15 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(state["last_checkpoint"]["pending_action"], "correr pytest -q")
                 self.assertEqual(state["last_checkpoint"]["self_reported_status"], "pending")
 
-                task_loop = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_loop"))
+                task_loop = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_loop")
+                )
                 self.assertEqual(task_loop["steps_taken"], 1)
                 self.assertEqual(task_loop["verification_status"], "unknown")
 
-                queue = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_queue"))
+                queue = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_queue")
+                )
                 self.assertEqual(queue[0]["summary"], "correr pytest -q")
                 self.assertEqual(queue[0]["priority"], 1)
 
@@ -1983,12 +2147,30 @@ class BotTests(unittest.TestCase):
                 runtime.memory.update_session_state(
                     "s1",
                     task_queue=[
-                        {"task_id": "coding:assistant:correr-pytest-q", "summary": "correr pytest -q", "mode": "coding", "status": "pending", "source": "assistant", "priority": 1},
-                        {"task_id": "research:assistant:revisar-fuentes", "summary": "revisar fuentes", "mode": "research", "status": "pending", "source": "assistant", "priority": 1},
+                        {
+                            "task_id": "coding:assistant:correr-pytest-q",
+                            "summary": "correr pytest -q",
+                            "mode": "coding",
+                            "status": "pending",
+                            "source": "assistant",
+                            "priority": 1,
+                        },
+                        {
+                            "task_id": "research:assistant:revisar-fuentes",
+                            "summary": "revisar fuentes",
+                            "mode": "research",
+                            "status": "pending",
+                            "source": "assistant",
+                            "priority": 1,
+                        },
                     ],
                 )
 
-                queue = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_queue coding"))
+                queue = json.loads(
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/task_queue coding"
+                    )
+                )
                 self.assertEqual(len(queue), 1)
                 self.assertEqual(queue[0]["mode"], "coding")
 
@@ -2006,7 +2188,11 @@ class BotTests(unittest.TestCase):
             prompts: list[str] = []
 
             def scripted_executor(request: LLMRequest) -> LLMResponse:
-                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompt_text = (
+                    request.prompt
+                    if isinstance(request.prompt, str)
+                    else json.dumps(request.prompt)
+                )
                 prompts.append(prompt_text)
                 if len(prompts) == 1:
                     content = "Hecho.\nSiguiente paso: correr pytest -q"
@@ -2021,7 +2207,9 @@ class BotTests(unittest.TestCase):
 
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=scripted_executor)
-                runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="corrige el bug del login"
+                )
                 state = runtime.memory.get_session_state("s1")
                 runtime.memory.update_session_state(
                     "s1",
@@ -2031,7 +2219,9 @@ class BotTests(unittest.TestCase):
 
                 reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="procede")
                 self.assertEqual(reply, "handled")
-                self.assertIn("Continúa con este siguiente paso de la cola: correr pytest -q", prompts[-1])
+                self.assertIn(
+                    "Continúa con este siguiente paso de la cola: correr pytest -q", prompts[-1]
+                )
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["task_queue"][0]["status"], "in_progress")
 
@@ -2049,7 +2239,11 @@ class BotTests(unittest.TestCase):
             prompts: list[str] = []
 
             def scripted_executor(request: LLMRequest) -> LLMResponse:
-                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompt_text = (
+                    request.prompt
+                    if isinstance(request.prompt, str)
+                    else json.dumps(request.prompt)
+                )
                 prompts.append(prompt_text)
                 return LLMResponse(
                     content="handled",
@@ -2065,14 +2259,30 @@ class BotTests(unittest.TestCase):
                     mode="coding",
                     pending_action="",
                     task_queue=[
-                        {"task_id": "research:assistant:revisar-fuentes", "summary": "revisar fuentes", "mode": "research", "status": "pending", "source": "assistant", "priority": 0},
-                        {"task_id": "coding:assistant:correr-pytest-q", "summary": "correr pytest -q", "mode": "coding", "status": "pending", "source": "assistant", "priority": 1},
+                        {
+                            "task_id": "research:assistant:revisar-fuentes",
+                            "summary": "revisar fuentes",
+                            "mode": "research",
+                            "status": "pending",
+                            "source": "assistant",
+                            "priority": 0,
+                        },
+                        {
+                            "task_id": "coding:assistant:correr-pytest-q",
+                            "summary": "correr pytest -q",
+                            "mode": "coding",
+                            "status": "pending",
+                            "source": "assistant",
+                            "priority": 1,
+                        },
                     ],
                 )
 
                 reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="procede")
                 self.assertEqual(reply, "handled")
-                self.assertIn("Continúa con este siguiente paso de la cola: correr pytest -q", prompts[-1])
+                self.assertIn(
+                    "Continúa con este siguiente paso de la cola: correr pytest -q", prompts[-1]
+                )
 
     def test_proceed_stops_when_step_budget_is_exhausted(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2097,7 +2307,9 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=scripted_executor)
                 runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy manual")
-                runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="corrige el bug del login"
+                )
 
                 reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="procede")
                 self.assertIn("step budget agotado", reply)
@@ -2125,7 +2337,9 @@ class BotTests(unittest.TestCase):
 
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=scripted_executor)
-                runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="corrige el bug del login"
+                )
                 task_id = runtime.memory.get_session_state("s1")["task_queue"][0]["task_id"]
 
                 result = json.loads(
@@ -2153,7 +2367,11 @@ class BotTests(unittest.TestCase):
             }
 
             def scripted_executor(request: LLMRequest) -> LLMResponse:
-                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompt_text = (
+                    request.prompt
+                    if isinstance(request.prompt, str)
+                    else json.dumps(request.prompt)
+                )
                 if "corrige el bug del login" in prompt_text:
                     return LLMResponse(
                         content="Hecho.\nSiguiente paso: correr pytest -q",
@@ -2170,7 +2388,9 @@ class BotTests(unittest.TestCase):
 
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=scripted_executor)
-                runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="corrige el bug del login"
+                )
                 runtime.memory.update_session_state(
                     "s1",
                     task_queue=[
@@ -2220,7 +2440,11 @@ class BotTests(unittest.TestCase):
             prompts: list[str] = []
 
             def scripted_executor(request: LLMRequest) -> LLMResponse:
-                prompt_text = request.prompt if isinstance(request.prompt, str) else json.dumps(request.prompt)
+                prompt_text = (
+                    request.prompt
+                    if isinstance(request.prompt, str)
+                    else json.dumps(request.prompt)
+                )
                 prompts.append(prompt_text)
                 return LLMResponse(
                     content="handled",
@@ -2329,9 +2553,27 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:123",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
-                        "implementation": [WorkerResult(task_name="implement_change", content="edited files", duration_seconds=0.2)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks",
+                                content="scope ok",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "implementation": [
+                            WorkerResult(
+                                task_name="implement_change",
+                                content="edited files",
+                                duration_seconds=0.2,
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="1. Update the failing path",
                 )
@@ -2370,8 +2612,20 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:autonomous",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: pending\nSiguiente paso: correr pytest -q", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks",
+                                content="scope ok",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: pending\nSiguiente paso: correr pytest -q",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="1. Inspect the login path",
                 )
@@ -2405,30 +2659,68 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(generic_job.checkpoint["verification_status"], "pending")
                 lifecycle = record.artifacts["lifecycle"]
                 self.assertEqual(lifecycle["plan"]["objective"], "corrige el bug del login")
-                self.assertEqual(lifecycle["plan"]["planned_phases"], ["research", "synthesis", "implementation", "verification"])
+                self.assertEqual(
+                    lifecycle["plan"]["planned_phases"],
+                    ["research", "synthesis", "implementation", "verification"],
+                )
                 self.assertEqual(lifecycle["verification"]["status"], "pending")
                 self.assertNotIn("outcome", lifecycle)
                 self.assertEqual(lifecycle["job"]["lifecycle_status"], "pending")
-                tasks_payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/tasks"))
+                tasks_payload = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/tasks")
+                )
                 self.assertEqual(tasks_payload["summary"], {"running": 1})
                 self.assertEqual(tasks_payload["tasks"][0]["task_id"], task_id)
-                jobs_payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/jobs"))
+                jobs_payload = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/jobs")
+                )
                 self.assertEqual(jobs_payload["system_summary"], {"retrying": 1})
                 self.assertEqual(jobs_payload["system_jobs"][0]["job_id"], generic_job_id)
-                job_trace = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/job_trace {task_id}"))
+                job_trace = json.loads(
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text=f"/job_trace {task_id}"
+                    )
+                )
                 self.assertEqual(job_trace["job_id"], task_id)
                 self.assertTrue(
-                    any(event["event_type"] == "task_ledger_checkpoint" for event in job_trace["events"])
+                    any(
+                        event["event_type"] == "task_ledger_checkpoint"
+                        for event in job_trace["events"]
+                    )
                 )
-                self.assertTrue(all(event["artifact_id"] for event in job_trace["events"] if event["event_type"].startswith("task_ledger_")))
+                self.assertTrue(
+                    all(
+                        event["artifact_id"]
+                        for event in job_trace["events"]
+                        if event["event_type"].startswith("task_ledger_")
+                    )
+                )
 
                 runtime.bot.coordinator.run.reset_mock()
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id=task_id,
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
-                        "implementation": [WorkerResult(task_name="apply_patch", content="patched files: login.py", duration_seconds=0.1)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks",
+                                content="scope ok",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "implementation": [
+                            WorkerResult(
+                                task_name="apply_patch",
+                                content="patched files: login.py",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="verified after resume",
                 )
@@ -2458,7 +2750,13 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="task-1",
                     phase_results={
-                        "research": [WorkerResult(task_name="gather_findings", content="no evidence", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="gather_findings",
+                                content="no evidence",
+                                duration_seconds=0.1,
+                            )
+                        ],
                         "verification": [
                             WorkerResult(
                                 task_name="verify_findings",
@@ -2490,7 +2788,9 @@ class BotTests(unittest.TestCase):
                 generic_job = runtime.job_service.get(record.metadata["generic_job_id"])
                 self.assertEqual(generic_job.status, "failed")
                 self.assertIn("waiting_for_user_input", generic_job.error)
-                tasks_payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/tasks"))
+                tasks_payload = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/tasks")
+                )
                 self.assertEqual(tasks_payload["summary"], {"failed": 1})
 
     def test_task_completion_question_reports_status_without_starting_task(self) -> None:
@@ -2661,9 +2961,23 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:fixes",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="ok", duration_seconds=0.1)],
-                        "implementation": [WorkerResult(task_name="implement_change", content="fixed", duration_seconds=0.1)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks", content="ok", duration_seconds=0.1
+                            )
+                        ],
+                        "implementation": [
+                            WorkerResult(
+                                task_name="implement_change", content="fixed", duration_seconds=0.1
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="fixes applied",
                 )
@@ -2703,9 +3017,23 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:fixes",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="ok", duration_seconds=0.1)],
-                        "implementation": [WorkerResult(task_name="implement_change", content="fixed", duration_seconds=0.1)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks", content="ok", duration_seconds=0.1
+                            )
+                        ],
+                        "implementation": [
+                            WorkerResult(
+                                task_name="implement_change", content="fixed", duration_seconds=0.1
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="fixes applied",
                 )
@@ -2772,6 +3100,7 @@ class BotTests(unittest.TestCase):
 
     def test_coding_task_autostashes_dirty_worktree(self) -> None:
         import subprocess as _sub
+
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace = root / "workspace"
@@ -2799,31 +3128,54 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:autonomous",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="ok", duration_seconds=0.1)],
-                        "implementation": [WorkerResult(task_name="implement_change", content="## Edits\n- foo: x", duration_seconds=0.1)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks", content="ok", duration_seconds=0.1
+                            )
+                        ],
+                        "implementation": [
+                            WorkerResult(
+                                task_name="implement_change",
+                                content="## Edits\n- foo: x",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="1. Implement",
                 )
 
                 runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="corrige el bug del login"
+                )
                 task_id = re.search(r"`([^`]+)`", reply).group(1)
                 self.assertTrue(runtime.bot._task_handler.wait_for_task(task_id, timeout=2))
 
                 stash_list = _sub.run(
                     ["git", "-C", str(workspace), "stash", "list"],
-                    capture_output=True, text=True, check=True,
+                    capture_output=True,
+                    text=True,
+                    check=True,
                 )
                 self.assertIn(f"claw:autostash:{task_id}", stash_list.stdout)
                 clean = _sub.run(
                     ["git", "-C", str(workspace), "status", "--porcelain"],
-                    capture_output=True, text=True, check=True,
+                    capture_output=True,
+                    text=True,
+                    check=True,
                 )
                 self.assertEqual(clean.stdout.strip(), "")
 
     def test_resumed_coding_task_keeps_dirty_worktree_context(self) -> None:
         import subprocess as _sub
+
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             workspace = root / "workspace"
@@ -2858,19 +3210,35 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:lost-task",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks",
+                                content="scope ok",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="kept dirty context",
                 )
 
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_resume s1:lost-task")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/task_resume s1:lost-task"
+                )
                 self.assertIn("Tarea reanudada", reply)
                 self.assertTrue(runtime.bot._task_handler.wait_for_task("s1:lost-task", timeout=2))
 
                 stash_list = _sub.run(
                     ["git", "-C", str(workspace), "stash", "list"],
-                    capture_output=True, text=True, check=True,
+                    capture_output=True,
+                    text=True,
+                    check=True,
                 )
                 self.assertNotIn("claw:autostash:s1:lost-task", stash_list.stdout)
                 self.assertEqual((workspace / "README.md").read_text(), "partial task work\n")
@@ -2892,18 +3260,28 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:autonomous",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
-                        "implementation": [WorkerResult(
-                            task_name="implement_change",
-                            content="",
-                            duration_seconds=0.1,
-                            error="Codex CLI timed out after 120.0s",
-                        )],
-                        "verification": [WorkerResult(
-                            task_name="verify_change",
-                            content="No hay evidencia de implementación.",
-                            duration_seconds=0.1,
-                        )],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks",
+                                content="scope ok",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "implementation": [
+                            WorkerResult(
+                                task_name="implement_change",
+                                content="",
+                                duration_seconds=0.1,
+                                error="Codex CLI timed out after 120.0s",
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="No hay evidencia de implementación.",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="1. Inspect the login path",
                 )
@@ -2949,7 +3327,13 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="internal-critical-id",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks",
+                                content="scope ok",
+                                duration_seconds=0.1,
+                            )
+                        ],
                         "implementation": [
                             WorkerResult(
                                 task_name="implement_change",
@@ -2989,7 +3373,9 @@ class BotTests(unittest.TestCase):
                 state = runtime.memory.get_session_state("s1")
                 self.assertEqual(state["verification_status"], "failed")
                 self.assertTrue(state["last_checkpoint"]["critical_worker_error"])
-                self.assertEqual(state["last_checkpoint"]["coordinator_audit"]["phase"], "implementation")
+                self.assertEqual(
+                    state["last_checkpoint"]["coordinator_audit"]["phase"], "implementation"
+                )
 
                 record = runtime.task_ledger.get(task_id)
                 self.assertIsNotNone(record)
@@ -3003,7 +3389,10 @@ class BotTests(unittest.TestCase):
                 assistant_text = "\n".join(
                     message["content"] for message in messages if message["role"] == "assistant"
                 )
-                self.assertIn("No pude avanzar la tarea porque el subagente experimentó un error crítico", assistant_text)
+                self.assertIn(
+                    "No pude avanzar la tarea porque el subagente experimentó un error crítico",
+                    assistant_text,
+                )
                 self.assertNotIn("internal-critical-id", assistant_text)
                 self.assertNotIn("critical_worker_error:", assistant_text)
 
@@ -3033,14 +3422,34 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:lost-task",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
-                        "implementation": [WorkerResult(task_name="apply_patch", content="patched files: login.py", duration_seconds=0.1)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks",
+                                content="scope ok",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "implementation": [
+                            WorkerResult(
+                                task_name="apply_patch",
+                                content="patched files: login.py",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="resumed and verified",
                 )
 
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_resume s1:lost-task")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/task_resume s1:lost-task"
+                )
                 self.assertIn("Tarea reanudada", reply)
                 self.assertTrue(runtime.bot._task_handler.wait_for_task("s1:lost-task", timeout=2))
 
@@ -3081,7 +3490,9 @@ class BotTests(unittest.TestCase):
                     resume_key="coordinator:s1:false-success",
                     metadata={"reason": "initial_run"},
                 )
-                runtime.job_service.complete(old_job.job_id, result={"verification_status": "pending"})
+                runtime.job_service.complete(
+                    old_job.job_id, result={"verification_status": "pending"}
+                )
                 runtime.task_ledger.create(
                     task_id="s1:false-success",
                     session_id="s1",
@@ -3108,16 +3519,38 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:false-success",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
-                        "implementation": [WorkerResult(task_name="apply_patch", content="patched files: hero.html", duration_seconds=0.1)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks",
+                                content="scope ok",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "implementation": [
+                            WorkerResult(
+                                task_name="apply_patch",
+                                content="patched files: hero.html",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="resumed and verified",
                 )
 
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_resume s1:false-success")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/task_resume s1:false-success"
+                )
                 self.assertIn("Tarea reanudada", reply)
-                self.assertTrue(runtime.bot._task_handler.wait_for_task("s1:false-success", timeout=2))
+                self.assertTrue(
+                    runtime.bot._task_handler.wait_for_task("s1:false-success", timeout=2)
+                )
 
                 runtime.bot.coordinator.run.assert_called_once()
                 record = runtime.task_ledger.get("s1:false-success")
@@ -3212,7 +3645,9 @@ class BotTests(unittest.TestCase):
                 )
                 runtime.bot.coordinator = MagicMock()
 
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_resume s1:verified-success")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/task_resume s1:verified-success"
+                )
 
                 self.assertIn("already succeeded", reply)
                 runtime.bot.coordinator.run.assert_not_called()
@@ -3240,17 +3675,27 @@ class BotTests(unittest.TestCase):
                     metadata={"autonomous": True},
                 )
 
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/task_cancel s1:running-task")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/task_cancel s1:running-task"
+                )
                 self.assertIn("Tarea cancelada", reply)
 
                 record = runtime.task_ledger.get("s1:running-task")
                 self.assertEqual(record.status, "cancelled")
                 self.assertEqual(record.verification_status, "cancelled")
-                self.assertEqual(record.artifacts["lifecycle"]["plan"]["objective"], "corrige el bug del login")
+                self.assertEqual(
+                    record.artifacts["lifecycle"]["plan"]["objective"], "corrige el bug del login"
+                )
                 self.assertEqual(record.artifacts["lifecycle"]["outcome"]["status"], "cancelled")
-                status = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/job_status s1:running-task"))
+                status = json.loads(
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/job_status s1:running-task"
+                    )
+                )
                 self.assertEqual(status["status"], "cancelled")
-                jobs = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/jobs"))
+                jobs = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/jobs")
+                )
                 self.assertEqual(jobs["summary"], {"cancelled": 1})
                 self.assertEqual(jobs["jobs"][0]["task_id"], "s1:running-task")
 
@@ -3287,7 +3732,9 @@ class BotTests(unittest.TestCase):
                     resume_key="coordinator:s1:running-task",
                 )
 
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/job_cancel {job.job_id}")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text=f"/job_cancel {job.job_id}"
+                )
 
                 self.assertIn("Tarea cancelada", reply)
                 self.assertEqual(runtime.task_ledger.get("s1:running-task").status, "cancelled")
@@ -3312,15 +3759,23 @@ class BotTests(unittest.TestCase):
                     resume_key="nlm:nb1",
                 )
 
-                jobs = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/jobs"))
+                jobs = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/jobs")
+                )
                 self.assertEqual(jobs["system_summary"], {"queued": 1})
                 self.assertEqual(jobs["system_jobs"][0]["job_id"], job.job_id)
 
-                status = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/job_status {job.job_id}"))
+                status = json.loads(
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text=f"/job_status {job.job_id}"
+                    )
+                )
                 self.assertEqual(status["source"], "job_service")
                 self.assertEqual(status["kind"], "notebooklm.research")
 
-                cancel = runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/job_cancel {job.job_id}")
+                cancel = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text=f"/job_cancel {job.job_id}"
+                )
                 self.assertIn("Job cancelado", cancel)
                 self.assertEqual(runtime.job_service.get(job.job_id).status, "cancelled")
 
@@ -3368,9 +3823,27 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:push",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
-                        "implementation": [WorkerResult(task_name="implement_change", content="pushed branch", duration_seconds=0.1)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks",
+                                content="scope ok",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "implementation": [
+                            WorkerResult(
+                                task_name="implement_change",
+                                content="pushed branch",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="git push completed",
                 )
@@ -3462,9 +3935,27 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:commit",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
-                        "implementation": [WorkerResult(task_name="implement_change", content="created commit", duration_seconds=0.1)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks",
+                                content="scope ok",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "implementation": [
+                            WorkerResult(
+                                task_name="implement_change",
+                                content="created commit",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="commit completed",
                 )
@@ -3499,9 +3990,27 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:approved",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="scope ok", duration_seconds=0.1)],
-                        "implementation": [WorkerResult(task_name="implement_change", content="created commit", duration_seconds=0.2)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks",
+                                content="scope ok",
+                                duration_seconds=0.1,
+                            )
+                        ],
+                        "implementation": [
+                            WorkerResult(
+                                task_name="implement_change",
+                                content="created commit",
+                                duration_seconds=0.2,
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="1. Commit created and verified",
                 )
@@ -3656,7 +4165,9 @@ class BotTests(unittest.TestCase):
                 )
 
                 self.assertIn("browse error", reply)
-                outcomes = runtime.memory.search_past_outcomes("example.com/fail", task_type="browse")
+                outcomes = runtime.memory.search_past_outcomes(
+                    "example.com/fail", task_type="browse"
+                )
                 self.assertEqual(len(outcomes), 1)
                 self.assertEqual(outcomes[0]["outcome"], "failure")
                 self.assertIn("backend path", outcomes[0]["lesson"])
@@ -3678,12 +4189,19 @@ class BotTests(unittest.TestCase):
                 bridge.list_sessions.return_value = [{"session_id": "sess-1", "status": "running"}]
                 bridge.open.return_value = {"session_id": "sess-1", "tool": "codex"}
                 bridge.status.return_value = {"session_id": "sess-1", "status": "running"}
-                bridge.read.return_value = {"session_id": "sess-1", "offset": 12, "next_offset": 16, "output": "pong"}
+                bridge.read.return_value = {
+                    "session_id": "sess-1",
+                    "offset": 12,
+                    "next_offset": 16,
+                    "output": "pong",
+                }
                 bridge.send.return_value = {"session_id": "sess-1", "bytes_written": 12}
                 bridge.close.return_value = {"session_id": "sess-1", "status": "closing"}
                 runtime.bot.terminal_bridge = bridge
 
-                sessions = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_list"))
+                sessions = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_list")
+                )
                 self.assertEqual(sessions["sessions"][0]["session_id"], "sess-1")
 
                 opened = json.loads(
@@ -3697,13 +4215,17 @@ class BotTests(unittest.TestCase):
                 bridge.open.assert_called_once_with("codex", cwd="/tmp/work dir")
 
                 status = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_status sess-1")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/terminal_status sess-1"
+                    )
                 )
                 self.assertEqual(status["status"], "running")
                 bridge.status.assert_called_once_with("sess-1")
 
                 read = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_read sess-1 12")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/terminal_read sess-1 12"
+                    )
                 )
                 self.assertEqual(read["output"], "pong")
                 bridge.read.assert_called_once_with("sess-1", offset=12, limit=3000)
@@ -3719,7 +4241,9 @@ class BotTests(unittest.TestCase):
                 bridge.send.assert_called_once_with("sess-1", "hola codex")
 
                 closed = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_close sess-1")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/terminal_close sess-1"
+                    )
                 )
                 self.assertEqual(closed["status"], "closing")
                 bridge.close.assert_called_once_with("sess-1")
@@ -3744,7 +4268,9 @@ class BotTests(unittest.TestCase):
                     "usage: /terminal_open <claude|codex> [cwd]",
                 )
                 self.assertEqual(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_status"),
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/terminal_status"
+                    ),
                     "usage: /terminal_status <session_id>",
                 )
                 self.assertEqual(
@@ -3760,7 +4286,9 @@ class BotTests(unittest.TestCase):
                     "usage: /terminal_close <session_id>",
                 )
                 self.assertEqual(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/terminal_read sess-1 -1"),
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/terminal_read sess-1 -1"
+                    ),
                     "offset must be greater than or equal to 0",
                 )
 
@@ -3803,7 +4331,9 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 pending = runtime.approvals.create("deploy_prod", "high risk deploy")
-                approvals_payload = runtime.bot.handle_text(user_id="123", session_id="s1", text="/approvals")
+                approvals_payload = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/approvals"
+                )
                 parsed = json.loads(approvals_payload)
                 self.assertEqual(parsed[0]["approval_id"], pending.approval_id)
                 status = runtime.bot.handle_text(
@@ -3857,10 +4387,14 @@ class BotTests(unittest.TestCase):
                         pending.approval_id,
                     )
                     messages = runtime.brain.memory.get_recent_messages("tg-123", limit=2)
-                    self.assertEqual(messages[0]["content"], "Ejecuta la herramienta protegida de prueba")
+                    self.assertEqual(
+                        messages[0]["content"], "Ejecuta la herramienta protegida de prueba"
+                    )
                     self.assertNotIn(pending.token, messages[1]["content"])
 
-                    second = runtime.bot.handle_text(user_id="123", session_id="tg-123", text="Aprobada")
+                    second = runtime.bot.handle_text(
+                        user_id="123", session_id="tg-123", text="Aprobada"
+                    )
 
                 self.assertEqual(runtime.approvals.status(pending.approval_id), "approved")
                 self.assertIn("Reintenté la acción original", second)
@@ -3922,12 +4456,16 @@ class BotTests(unittest.TestCase):
                     self.assertIn(required, first)
                     self.assertNotIn(pending.token, first)
 
-                    rejected = runtime.bot.handle_text(user_id="123", session_id="tg-123", text="ok")
+                    rejected = runtime.bot.handle_text(
+                        user_id="123", session_id="tg-123", text="ok"
+                    )
                     self.assertIn("No alcanza", rejected)
                     self.assertEqual(runtime.approvals.status(pending.approval_id), "pending")
                     self.assertEqual(mock_handle_message.call_count, 1)
 
-                    approved = runtime.bot.handle_text(user_id="123", session_id="tg-123", text=required)
+                    approved = runtime.bot.handle_text(
+                        user_id="123", session_id="tg-123", text=required
+                    )
 
                 self.assertEqual(runtime.approvals.status(pending.approval_id), "approved")
                 self.assertIn("Reintenté la acción original", approved)
@@ -3954,22 +4492,30 @@ class BotTests(unittest.TestCase):
                     )
                 )
 
-                listing = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/agents"))
+                listing = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agents")
+                )
                 self.assertEqual(listing[0]["name"], "operator-1")
                 self.assertFalse(listing[0]["commit_on_promotion"])
 
                 promote = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_promote operator-1 on")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_promote operator-1 on"
+                    )
                 )
                 self.assertTrue(promote["promote_on_improvement"])
 
                 branch = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_branch operator-1 on")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_branch operator-1 on"
+                    )
                 )
                 self.assertTrue(branch["branch_on_promotion"])
 
                 commit = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_commit operator-1 on")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_commit operator-1 on"
+                    )
                 )
                 self.assertTrue(commit["commit_on_promotion"])
 
@@ -3980,7 +4526,9 @@ class BotTests(unittest.TestCase):
                         text="/agent_commit_message operator-1 chore(claw): publish operator-1",
                     )
                 )
-                self.assertEqual(message["promotion_commit_message"], "chore(claw): publish operator-1")
+                self.assertEqual(
+                    message["promotion_commit_message"], "chore(claw): publish operator-1"
+                )
 
                 branch_name = json.loads(
                     runtime.bot.handle_text(
@@ -3992,18 +4540,26 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(branch_name["promotion_branch_name"], "claw/operator-1/review")
 
                 detail = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_status operator-1")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_status operator-1"
+                    )
                 )
                 self.assertEqual(detail["instruction"], "Ship carefully.")
                 self.assertTrue(detail["commit_on_promotion"])
                 self.assertTrue(detail["branch_on_promotion"])
 
                 cleared = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_commit_message operator-1 clear")
+                    runtime.bot.handle_text(
+                        user_id="123",
+                        session_id="s1",
+                        text="/agent_commit_message operator-1 clear",
+                    )
                 )
                 self.assertIsNone(cleared["promotion_commit_message"])
                 cleared_branch = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_branch_name operator-1 clear")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_branch_name operator-1 clear"
+                    )
                 )
                 self.assertIsNone(cleared_branch["promotion_branch_name"])
                 duplicate = runtime.bot.handle_text(
@@ -4027,43 +4583,63 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 self.assertEqual(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_status missing"),
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_status missing"
+                    ),
                     "agent not found: missing",
                 )
                 self.assertEqual(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_create ../bad operator Nope"),
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_create ../bad operator Nope"
+                    ),
                     "agent_name must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}",
                 )
                 self.assertEqual(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_create bad-judge judge Nope"),
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_create bad-judge judge Nope"
+                    ),
                     "agent_class must be one of: researcher, operator, deployer",
                 )
                 self.assertEqual(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_branch_name missing claw/foo"),
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_branch_name missing claw/foo"
+                    ),
                     "agent not found: missing",
                 )
                 self.assertEqual(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_commit missing on"),
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_commit missing on"
+                    ),
                     "agent not found: missing",
                 )
                 self.assertEqual(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_commit foo maybe"),
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_commit foo maybe"
+                    ),
                     "toggle must be one of: on, off",
                 )
                 self.assertEqual(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_run foo 0"),
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_run foo 0"
+                    ),
                     "max_experiments must be greater than 0",
                 )
                 self.assertEqual(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_publish foo 0"),
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_publish foo 0"
+                    ),
                     "max_experiments must be greater than 0",
                 )
                 self.assertEqual(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_run_until foo nope 3"),
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_run_until foo nope 3"
+                    ),
                     "target_metric must be a number",
                 )
                 self.assertEqual(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_history foo nope"),
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_history foo nope"
+                    ),
                     "limit must be an integer",
                 )
                 runtime.auto_research.create_agent(
@@ -4108,7 +4684,9 @@ class BotTests(unittest.TestCase):
                 )
 
                 run_payload = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_run operator-2 1")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_run operator-2 1"
+                    )
                 )
                 self.assertEqual(run_payload["run_reason"], "completed")
                 self.assertEqual(run_payload["experiments_run"], 1)
@@ -4122,7 +4700,9 @@ class BotTests(unittest.TestCase):
                     ]
                 )
                 run_until_payload = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_run_until operator-2 0.3 3")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_run_until operator-2 0.3 3"
+                    )
                 )
                 self.assertEqual(run_until_payload["run_reason"], "target_reached")
                 self.assertEqual(run_until_payload["experiments_run"], 2)
@@ -4148,30 +4728,42 @@ class BotTests(unittest.TestCase):
                         instruction="Inspect history.",
                     )
                 )
-                runtime.auto_research.store.append_result("operator-4", ExperimentRecord(1, 0.2, 0.1, "improved", 0.01))
+                runtime.auto_research.store.append_result(
+                    "operator-4", ExperimentRecord(1, 0.2, 0.1, "improved", 0.01)
+                )
                 runtime.auto_research.store.append_result(
                     "operator-4",
-                    ExperimentRecord(2, 0.25, 0.2, "improved", 0.02, "abc1234", "claw/operator-4/abc1234"),
+                    ExperimentRecord(
+                        2, 0.25, 0.2, "improved", 0.02, "abc1234", "claw/operator-4/abc1234"
+                    ),
                 )
 
                 paused = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_pause operator-4")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_pause operator-4"
+                    )
                 )
                 self.assertTrue(paused["paused"])
 
                 resumed = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_resume operator-4")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_resume operator-4"
+                    )
                 )
                 self.assertFalse(resumed["paused"])
 
                 history = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_history operator-4 1")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_history operator-4 1"
+                    )
                 )
                 self.assertEqual(history["history_limit"], 1)
                 self.assertEqual(history["history_count"], 1)
                 self.assertEqual(history["history"][0]["experiment_number"], 2)
                 self.assertEqual(history["history"][0]["promotion_commit_sha"], "abc1234")
-                self.assertEqual(history["history"][0]["promotion_branch_name"], "claw/operator-4/abc1234")
+                self.assertEqual(
+                    history["history"][0]["promotion_branch_name"], "claw/operator-4/abc1234"
+                )
 
     def test_agent_publish_command_returns_publication_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4209,7 +4801,9 @@ class BotTests(unittest.TestCase):
                 )
 
                 payload = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_publish operator-publish 1")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_publish operator-publish 1"
+                    )
                 )
                 self.assertEqual(payload["run_reason"], "completed")
                 self.assertTrue(payload["publish_mode_updated"])
@@ -4265,14 +4859,15 @@ class BotTests(unittest.TestCase):
 
                 runtime.bot.pull_requests = FakePullRequests()
                 payload = json.loads(
-                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/agent_pr operator-pr 1")
+                    runtime.bot.handle_text(
+                        user_id="123", session_id="s1", text="/agent_pr operator-pr 1"
+                    )
                 )
                 self.assertTrue(payload["published"])
                 self.assertTrue(payload["pull_request_created"])
                 self.assertEqual(payload["pull_request_number"], 7)
                 self.assertEqual(payload["pull_request_url"], "https://github.com/acme/repo/pull/7")
                 self.assertTrue(payload["pull_request_draft"])
-
 
     def test_chrome_pages_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4293,7 +4888,9 @@ class BotTests(unittest.TestCase):
                 runtime.bot.browser.connect_to_chrome.return_value = [
                     {"url": "https://ads.google.com", "title": "Google Ads", "index": 0},
                 ]
-                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="/chrome_pages")
+                result = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/chrome_pages"
+                )
                 parsed = json.loads(result)
                 self.assertEqual(parsed["pages"][0]["url"], "https://ads.google.com")
 
@@ -4310,6 +4907,7 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 from claw_v2.browser import BrowseResult
+
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.browser = MagicMock()
                 runtime.bot.managed_chrome = MagicMock()
@@ -4319,7 +4917,9 @@ class BotTests(unittest.TestCase):
                     title="Google Ads",
                     content="campaign data...",
                 )
-                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="/chrome_browse https://ads.google.com")
+                result = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/chrome_browse https://ads.google.com"
+                )
                 self.assertIn("Google Ads", result)
                 self.assertIn("campaign data", result)
 
@@ -4336,6 +4936,7 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 from claw_v2.browser import BrowseResult
+
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.browser = MagicMock()
                 runtime.bot.managed_chrome = MagicMock()
@@ -4437,7 +5038,9 @@ class BotTests(unittest.TestCase):
                 pending_session = runtime.bot._computer_handler._sessions["s1"]
                 self.assertEqual(pending_session.pending_action["action"], "browser_use_task")
                 self.assertIn("https://chatgpt.com/", pending_session.pending_action["task"])
-                self.assertIn("imagen que represente mi marca", pending_session.pending_action["task"])
+                self.assertIn(
+                    "imagen que represente mi marca", pending_session.pending_action["task"]
+                )
                 self.assertEqual(pending_session.current_url, "https://chatgpt.com/")
 
                 approved = runtime.bot.handle_text(
@@ -4487,7 +5090,9 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(result, "handled")
                 self.assertFalse(browser_use.called)
                 runtime.bot.computer.run_agent_loop.assert_not_called()
-                event_types = [event["event_type"] for event in runtime.observe.recent_events(limit=20)]
+                event_types = [
+                    event["event_type"] for event in runtime.observe.recent_events(limit=20)
+                ]
                 self.assertNotIn("computer_session_started", event_types)
 
     def test_contextual_chatgpt_image_request_resolves_to_brain_not_shortcut(self) -> None:
@@ -4538,7 +5143,9 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(result, "handled")
                 self.assertFalse(browser_use.called)
                 runtime.bot.computer.run_agent_loop.assert_not_called()
-                event_types = [event["event_type"] for event in runtime.observe.recent_events(limit=30)]
+                event_types = [
+                    event["event_type"] for event in runtime.observe.recent_events(limit=30)
+                ]
                 self.assertIn("pending_action_execution_started", event_types)
                 self.assertNotIn("computer_session_started", event_types)
 
@@ -4588,7 +5195,9 @@ class BotTests(unittest.TestCase):
                     if event["event_type"] == "error"
                 ]
                 self.assertTrue(error_events)
-                self.assertIn("browser_use timed out after 180s", error_events[0]["payload"]["error"])
+                self.assertIn(
+                    "browser_use timed out after 180s", error_events[0]["payload"]["error"]
+                )
 
     def test_approved_browser_use_no_result_returns_natural_blocker(self) -> None:
         class NoResultBrowserUse:
@@ -4640,7 +5249,9 @@ class BotTests(unittest.TestCase):
                 self.assertIn("sin un resultado verificable", result)
                 self.assertIn("No marco la acción como completada", result)
                 self.assertEqual(runtime.bot._classify_computer_handler_result(result), "failed")
-                event_types = [event["event_type"] for event in runtime.observe.recent_events(limit=10)]
+                event_types = [
+                    event["event_type"] for event in runtime.observe.recent_events(limit=10)
+                ]
                 self.assertIn("computer_browser_use_task_unverifiable_result", event_types)
 
     def test_brain_prompt_includes_runtime_capability_context(self) -> None:
@@ -4672,7 +5283,9 @@ class BotTests(unittest.TestCase):
                 runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
                 runtime.bot.browser_use = MagicMock()
 
-                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="responde prueba")
+                result = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="responde prueba"
+                )
 
                 self.assertEqual(result, "ok")
                 self.assertIn("# Runtime capability context", captured["prompt"])
@@ -4782,7 +5395,9 @@ class BotTests(unittest.TestCase):
                 runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
                 runtime.bot.browser_use = MagicMock()
 
-                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="responde prueba")
+                result = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="responde prueba"
+                )
 
                 self.assertIn("No cierro esto como falta de acceso", result)
                 self.assertNotIn("Chrome/CDP", result)
@@ -4813,7 +5428,9 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=identity_drift)
 
-                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="responde prueba")
+                result = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="responde prueba"
+                )
 
                 self.assertIn("Soy Dr. Strange", result)
                 self.assertIn("proveedores o herramientas locales", result)
@@ -4906,7 +5523,9 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=manual_handoff)
 
-                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="Pégale el prompt a Codex app")
+                result = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="Pégale el prompt a Codex app"
+                )
 
                 self.assertIn("No cierro esto con handoff manual", result)
                 self.assertIn("accion operativa", result)
@@ -4919,7 +5538,10 @@ class BotTests(unittest.TestCase):
     def test_operator_handoff_guard_allows_long_tool_backed_result(self) -> None:
         useful_body = (
             "Resultado de Claude Design:\n"
-            + "\n".join(f"- Decisión {i}: ajustar el prototipo con evidencia de herramienta." for i in range(45))
+            + "\n".join(
+                f"- Decisión {i}: ajustar el prototipo con evidencia de herramienta."
+                for i in range(45)
+            )
             + "\n\nPasos finales: revisé el material generado y dejé el resumen accionable arriba."
         )
 
@@ -4945,7 +5567,9 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=tool_backed_handoff)
 
-                result = runtime.bot.handle_text(user_id="123", session_id="s1", text="Pégale el prompt a Codex app")
+                result = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="Pégale el prompt a Codex app"
+                )
 
                 self.assertIn("Resultado de Claude Design", result)
                 self.assertIn("Pasos finales", result)
@@ -4967,7 +5591,9 @@ class BotTests(unittest.TestCase):
                 "TELEGRAM_ALLOWED_USER_ID": "123",
             }
             with patch.dict(os.environ, env, clear=False):
-                mock_jina.return_value = "# Pricing\n\nOpenAI API Pricing — pay per token for GPT models. " + "x" * 200
+                mock_jina.return_value = (
+                    "# Pricing\n\nOpenAI API Pricing — pay per token for GPT models. " + "x" * 200
+                )
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
                     mock_handle_message.return_value = LLMResponse(
@@ -5082,7 +5708,9 @@ class BotTests(unittest.TestCase):
                 self.assertIn("browse_result", events)
                 self.assertNotIn("evidence_gate_blocked_completion_claim", events)
                 args, kwargs = mock_handle_message.call_args
-                self.assertIn("[URL analizada]: https://www.instagram.com/tcinsurance1?igsh=test", args[1])
+                self.assertIn(
+                    "[URL analizada]: https://www.instagram.com/tcinsurance1?igsh=test", args[1]
+                )
                 self.assertEqual(
                     kwargs["memory_text"],
                     "Revisa el Instagram de Tatiana https://www.instagram.com/tcinsurance1?igsh=test",
@@ -5229,7 +5857,9 @@ class BotTests(unittest.TestCase):
                     )
 
                 self.assertIn("handled", result)
-                self.assertEqual([call.args[0] for call in mock_jina.call_args_list], [parent_url, nested_url])
+                self.assertEqual(
+                    [call.args[0] for call in mock_jina.call_args_list], [parent_url, nested_url]
+                )
                 args, kwargs = mock_handle_message.call_args
                 self.assertIn("[URL anidada analizada]: https://example.com/nested", args[1])
                 self.assertIn("Nested output details were fetched autonomously", args[1])
@@ -5294,7 +5924,9 @@ class BotTests(unittest.TestCase):
                 from claw_v2.browser import BrowseResult
 
                 tweet_url = "https://x.com/tendenciatuits/status/2039116558836936982?s=46"
-                mock_tweet_read.return_value = f"**Tendencias y Tuits Borrados on X** ({tweet_url})\n\nTexto limpio del tweet."
+                mock_tweet_read.return_value = (
+                    f"**Tendencias y Tuits Borrados on X** ({tweet_url})\n\nTexto limpio del tweet."
+                )
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.browser = MagicMock()
                 runtime.bot.managed_chrome = MagicMock()
@@ -5302,7 +5934,8 @@ class BotTests(unittest.TestCase):
                 runtime.bot.browser.chrome_navigate.return_value = BrowseResult(
                     url=tweet_url,
                     title="X",
-                    content="Don't miss what's happening\nLog in\nSign up\nSee new posts " + "x" * 200,
+                    content="Don't miss what's happening\nLog in\nSign up\nSee new posts "
+                    + "x" * 200,
                 )
 
                 first = runtime.bot.handle_text(
@@ -5338,7 +5971,9 @@ class BotTests(unittest.TestCase):
                 from claw_v2.browser import BrowseResult
 
                 tweet_url = "https://x.com/tendenciatuits/status/2039116558836936982?s=46"
-                mock_tweet_read.return_value = f"**Tendencias y Tuits Borrados on X** ({tweet_url})\n\nTexto limpio del tweet."
+                mock_tweet_read.return_value = (
+                    f"**Tendencias y Tuits Borrados on X** ({tweet_url})\n\nTexto limpio del tweet."
+                )
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.browser = MagicMock()
                 runtime.bot.managed_chrome = MagicMock()
@@ -5346,7 +5981,8 @@ class BotTests(unittest.TestCase):
                 runtime.bot.browser.chrome_navigate.return_value = BrowseResult(
                     url=tweet_url,
                     title="X",
-                    content="Don't miss what's happening\nLog in\nSign up\nSee new posts " + "x" * 200,
+                    content="Don't miss what's happening\nLog in\nSign up\nSee new posts "
+                    + "x" * 200,
                 )
 
                 first = runtime.bot.handle_text(
@@ -5380,7 +6016,9 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 tweet_url = "https://x.com/karpathy/status/2044708010506541998?s=46"
-                mock_tweet_read.return_value = f"**Andrej Karpathy (@karpathy) on X** ({tweet_url})\n\nTexto limpio del tweet."
+                mock_tweet_read.return_value = (
+                    f"**Andrej Karpathy (@karpathy) on X** ({tweet_url})\n\nTexto limpio del tweet."
+                )
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.browser = MagicMock()
                 with patch.object(type(runtime.bot.brain), "handle_message") as mock_handle_message:
@@ -5407,7 +6045,9 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(kwargs["memory_text"], f"Revisa este tweet {tweet_url}")
 
     @patch("claw_v2.bot_helpers._tweet_fxtwitter_read")
-    def test_tweet_querystring_review_uses_prefetched_evidence_not_gate(self, mock_tweet_read) -> None:
+    def test_tweet_querystring_review_uses_prefetched_evidence_not_gate(
+        self, mock_tweet_read
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -5492,14 +6132,21 @@ class BotTests(unittest.TestCase):
                     )
 
                 self.assertEqual(result, "handled")
-                self.assertEqual([call.args[0] for call in mock_tweet_read.call_args_list], [tweet_url, nested_url])
+                self.assertEqual(
+                    [call.args[0] for call in mock_tweet_read.call_args_list],
+                    [tweet_url, nested_url],
+                )
                 args, kwargs = mock_handle_message.call_args
-                self.assertIn("[URL anidada analizada]: https://x.com/i/status/2056813606595949014", args[1])
+                self.assertIn(
+                    "[URL anidada analizada]: https://x.com/i/status/2056813606595949014", args[1]
+                )
                 self.assertIn("Nested tweet output", args[1])
                 self.assertEqual(kwargs["memory_text"], f"Revisa este tweet {tweet_url}")
 
     @patch("claw_v2.bot_helpers._tweet_fxtwitter_read")
-    def test_tweet_followup_reuses_tweet_url_from_direct_brain_shortcut(self, mock_tweet_read) -> None:
+    def test_tweet_followup_reuses_tweet_url_from_direct_brain_shortcut(
+        self, mock_tweet_read
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             env = {
@@ -5532,7 +6179,9 @@ class BotTests(unittest.TestCase):
                         model="claude-opus-4-7",
                     )
 
-                with patch.object(type(runtime.bot.brain), "handle_message", side_effect=brain_response) as mock_handle_message:
+                with patch.object(
+                    type(runtime.bot.brain), "handle_message", side_effect=brain_response
+                ) as mock_handle_message:
                     first = runtime.bot.handle_text(
                         user_id="123",
                         session_id="s1",
@@ -5808,7 +6457,10 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.terminal_bridge = MagicMock()
-                runtime.bot.terminal_bridge.open.return_value = {"session_id": "sess-1", "tool": "claude"}
+                runtime.bot.terminal_bridge.open.return_value = {
+                    "session_id": "sess-1",
+                    "tool": "claude",
+                }
                 result = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
@@ -5834,7 +6486,9 @@ class BotTests(unittest.TestCase):
                 runtime.bot.browser = MagicMock()
                 runtime.bot.managed_chrome = MagicMock()
                 runtime.bot.managed_chrome.cdp_url = "http://localhost:9250"
-                runtime.bot.browser.chrome_navigate.side_effect = RuntimeError("connect ECONNREFUSED 127.0.0.1:9250")
+                runtime.bot.browser.chrome_navigate.side_effect = RuntimeError(
+                    "connect ECONNREFUSED 127.0.0.1:9250"
+                )
                 result = runtime.bot.handle_text(
                     user_id="123",
                     session_id="s1",
@@ -5857,7 +6511,10 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.computer = MagicMock()
-                runtime.bot.computer.capture_screenshot.return_value = {"data": "abc123base64data", "media_type": "image/png"}
+                runtime.bot.computer.capture_screenshot.return_value = {
+                    "data": "abc123base64data",
+                    "media_type": "image/png",
+                }
                 result = runtime.bot.handle_text(user_id="123", session_id="s1", text="/screen")
                 parsed = json.loads(result)
                 self.assertIn("screenshot_data", parsed)
@@ -5904,7 +6561,10 @@ class BotTests(unittest.TestCase):
                 self.assertEqual(args[1][0]["type"], "text")
                 self.assertEqual(args[1][1]["type"], "image")
                 self.assertEqual(args[1][1]["source"]["media_type"], "image/png")
-                self.assertEqual(kwargs["memory_text"], "[Screenshot de escritorio]\nrevisa la pagina actual y dime que ves")
+                self.assertEqual(
+                    kwargs["memory_text"],
+                    "[Screenshot de escritorio]\nrevisa la pagina actual y dime que ves",
+                )
 
     def test_computer_action_command_creates_pending_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -6005,7 +6665,9 @@ class BotTests(unittest.TestCase):
                 pending = runtime.approvals.list_pending()
                 self.assertEqual(len(pending), 1)
                 approval_id = pending[0]["approval_id"]
-                token = runtime.bot._computer_handler._sessions["s1"].pending_action["approval_token"]
+                token = runtime.bot._computer_handler._sessions["s1"].pending_action[
+                    "approval_token"
+                ]
 
                 second = runtime.bot.handle_text(
                     user_id="123",
@@ -6147,7 +6809,11 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 pending = runtime.bot.approvals.create(action="click", summary="test")
-                result = runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/action_approve {pending.approval_id} {pending.token}")
+                result = runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text=f"/action_approve {pending.approval_id} {pending.token}",
+                )
                 self.assertEqual(result, "approved")
 
     def test_action_abort_command(self) -> None:
@@ -6164,10 +6830,11 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 pending = runtime.bot.approvals.create(action="click", summary="test")
-                result = runtime.bot.handle_text(user_id="123", session_id="s1", text=f"/action_abort {pending.approval_id}")
+                result = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text=f"/action_abort {pending.approval_id}"
+                )
                 self.assertEqual(result, "action rejected")
                 self.assertEqual(runtime.bot.approvals.status(pending.approval_id), "rejected")
-
 
     def test_playbooks_command_lists_available_playbooks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -6199,7 +6866,9 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/playbook backtesting")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/playbook backtesting"
+                )
                 self.assertIn("QTS Backtesting", reply)
                 self.assertIn("backtest_multi.py", reply)
 
@@ -6233,10 +6902,11 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/backtest corre ICT para BTC")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/backtest corre ICT para BTC"
+                )
                 self.assertIsInstance(reply, str)
                 self.assertTrue(len(reply) > 0)
-
 
     def test_grill_command_without_args_shows_usage(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -6267,7 +6937,9 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/grill migrar auth a OAuth2")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/grill migrar auth a OAuth2"
+                )
                 self.assertIsInstance(reply, str)
                 self.assertTrue(len(reply) > 0)
 
@@ -6300,10 +6972,11 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/improve_arch")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/improve_arch"
+                )
                 self.assertIsInstance(reply, str)
                 self.assertTrue(len(reply) > 0)
-
 
     def test_effort_command_shows_current_levels(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -6335,7 +7008,9 @@ class BotTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="/effort xhigh brain")
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/effort xhigh brain"
+                )
                 self.assertIn("xhigh", reply)
                 self.assertEqual(runtime.bot.config.brain_effort, "xhigh")
 
@@ -6373,7 +7048,9 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
 
-                payload = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/models"))
+                payload = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/models")
+                )
 
                 by_key = {item["key"]: item for item in payload}
                 self.assertEqual(by_key["codex:gpt-5.5"]["billing"], "chatgpt_subscription")
@@ -6403,8 +7080,12 @@ class BotTests(unittest.TestCase):
                     session_id="s1",
                     text="/model set research openai:gpt-5.5",
                 )
-                status = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/model status"))
-                config = json.loads(runtime.bot.handle_text(user_id="123", session_id="s1", text="/config"))
+                status = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/model status")
+                )
+                config = json.loads(
+                    runtime.bot.handle_text(user_id="123", session_id="s1", text="/config")
+                )
 
                 self.assertIn("Modelo para worker", reply)
                 self.assertIn("chatgpt_subscription", reply)
@@ -6433,15 +7114,31 @@ class BotTests(unittest.TestCase):
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:override",
                     phase_results={
-                        "research": [WorkerResult(task_name="scope_and_risks", content="ok", duration_seconds=0.1)],
-                        "verification": [WorkerResult(task_name="verify_change", content="Verification Status: passed", duration_seconds=0.1)],
+                        "research": [
+                            WorkerResult(
+                                task_name="scope_and_risks", content="ok", duration_seconds=0.1
+                            )
+                        ],
+                        "verification": [
+                            WorkerResult(
+                                task_name="verify_change",
+                                content="Verification Status: passed",
+                                duration_seconds=0.1,
+                            )
+                        ],
                     },
                     synthesis="done",
                 )
 
                 runtime.bot.handle_text(user_id="123", session_id="s1", text="/autonomy autonomous")
-                runtime.bot.handle_text(user_id="123", session_id="s1", text="/model set coding codex:gpt-5.5 effort=xhigh")
-                reply = runtime.bot.handle_text(user_id="123", session_id="s1", text="corrige el bug del login")
+                runtime.bot.handle_text(
+                    user_id="123",
+                    session_id="s1",
+                    text="/model set coding codex:gpt-5.5 effort=xhigh",
+                )
+                reply = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="corrige el bug del login"
+                )
                 task_id = re.search(r"`([^`]+)`", reply).group(1)
                 self.assertTrue(runtime.bot._task_handler.wait_for_task(task_id, timeout=2))
 
@@ -6511,7 +7208,9 @@ class BotTests(unittest.TestCase):
                 reply3 = runtime.bot.handle_text(user_id="123", session_id="s1", text="/voice off")
                 self.assertIn("desactivado", reply3)
                 self.assertIsNone(runtime.bot.is_voice_mode("s1"))
-                reply4 = runtime.bot.handle_text(user_id="123", session_id="s1", text="/voice invalid")
+                reply4 = runtime.bot.handle_text(
+                    user_id="123", session_id="s1", text="/voice invalid"
+                )
                 self.assertIn("inválida", reply4)
 
     def test_brain_delegation_tool_path_creates_ledger_task_and_returns_ack(self) -> None:

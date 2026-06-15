@@ -13,6 +13,7 @@ Design constraints from Hector 2026-05-26:
 This module is the data layer + pure-function evaluator. F1+F2 only:
 nothing here touches the runtime task ledger, real tools, or external services.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -63,10 +64,11 @@ class FileIntegrityCheck:
     """F3a-ext.1 — Re-hash + re-size a file produced by the tool and assert
     the values match the declared ones. Reads at most `max_bytes` from disk.
     """
-    path_field: str                                       # key in tool_result holding the local path
-    hash_field: str = ""                                  # key holding the expected sha256 (64 hex)
-    size_field: str = ""                                  # key holding the expected size in bytes
-    max_bytes: int = 64 * 1024 * 1024                     # safety cap: don't hash huge files
+
+    path_field: str  # key in tool_result holding the local path
+    hash_field: str = ""  # key holding the expected sha256 (64 hex)
+    size_field: str = ""  # key holding the expected size in bytes
+    max_bytes: int = 64 * 1024 * 1024  # safety cap: don't hash huge files
 
 
 @dataclass(slots=True, frozen=True)
@@ -98,8 +100,8 @@ class SuccessCondition:
     # generated file actually landed.
     must_be_existing_path: tuple[str, ...] = ()
     # F3a-ext.1 — semantic hardening (offline-safe).
-    must_be_nonempty_str: tuple[str, ...] = ()             # value must be non-blank str
-    cross_field_equality: tuple[tuple[str, str], ...] = () # (a, b) → result[a] == result[b]
+    must_be_nonempty_str: tuple[str, ...] = ()  # value must be non-blank str
+    cross_field_equality: tuple[tuple[str, str], ...] = ()  # (a, b) → result[a] == result[b]
     cross_field_inequality: tuple[tuple[str, str], ...] = ()  # (a, b) → result[a] != result[b]
     forbidden_field_values: dict[str, tuple[str, ...]] = field(default_factory=dict)
     verify_file_integrity: tuple[FileIntegrityCheck, ...] = ()
@@ -208,7 +210,9 @@ def validate_success_condition(
                 if bad and bad in body_text:
                     errors.append(f"forbidden_phrase_present:{bad}")
             for path, expected in (condition.external_check.json_path_equals or {}).items():
-                actual = obs.get("json", {}).get(path) if isinstance(obs.get("json"), dict) else None
+                actual = (
+                    obs.get("json", {}).get(path) if isinstance(obs.get("json"), dict) else None
+                )
                 if actual != expected:
                     errors.append(f"json_path_mismatch:{path}")
 
@@ -270,7 +274,7 @@ def validate_success_condition(
                 return True
         return False
 
-    for key in (condition.must_be_existing_path or ()):
+    for key in condition.must_be_existing_path or ():
         path_value = tool_result.get(key)
         if not isinstance(path_value, str) or not path_value:
             errors.append(f"path_field_missing:{key}")
@@ -286,19 +290,19 @@ def validate_success_condition(
             errors.append(f"path_file_not_found:{key}")
 
     # F3a-ext.1 — must_be_nonempty_str (rejects "", "   ", whitespace-only)
-    for key in (condition.must_be_nonempty_str or ()):
+    for key in condition.must_be_nonempty_str or ():
         value = tool_result.get(key)
         if not isinstance(value, str) or not value.strip():
             errors.append(f"must_be_nonempty_str_violated:{key}")
 
     # F3a-ext.1 — cross-field equality / inequality
-    for a, b in (condition.cross_field_equality or ()):
+    for a, b in condition.cross_field_equality or ():
         if a not in tool_result or b not in tool_result:
             errors.append(f"cross_field_equality_missing:{a}={b}")
             continue
         if tool_result[a] != tool_result[b]:
             errors.append(f"cross_field_equality_violated:{a}={b}")
-    for a, b in (condition.cross_field_inequality or ()):
+    for a, b in condition.cross_field_inequality or ():
         if a not in tool_result or b not in tool_result:
             errors.append(f"cross_field_inequality_missing:{a}!={b}")
             continue
@@ -315,7 +319,7 @@ def validate_success_condition(
             errors.append(f"forbidden_field_value:{key}={value}")
 
     # F3a-ext.1 — verify_file_integrity (re-hash + re-size files; respects allowed_path_roots)
-    for check in (condition.verify_file_integrity or ()):
+    for check in condition.verify_file_integrity or ():
         path = tool_result.get(check.path_field)
         if not isinstance(path, str) or not path:
             errors.append(f"integrity_path_field_missing:{check.path_field}")

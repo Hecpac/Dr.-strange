@@ -9,6 +9,7 @@
 3. Multi-round tool turns meter usage/cost from every round, not just the
    final response.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -37,7 +38,9 @@ class _RecordingObserve:
         return [name for name, _ in self.events]
 
 
-def _window(now: list[float], threshold: float = 1.0) -> tuple[ObservationWindowState, _RecordingObserve]:
+def _window(
+    now: list[float], threshold: float = 1.0
+) -> tuple[ObservationWindowState, _RecordingObserve]:
     observe = _RecordingObserve()
     window = ObservationWindowState(
         observe=observe,
@@ -72,7 +75,9 @@ class CostBreakerBlocksLlmTests(unittest.TestCase):
             for name, payload in observe.events
             if name == "observation_window_freeze_auto_cleared"
         ]
-        self.assertTrue(any(p.get("stale_reason") == "circuit_breaker:cost_per_hour" for p in cleared))
+        self.assertTrue(
+            any(p.get("stale_reason") == "circuit_breaker:cost_per_hour" for p in cleared)
+        )
 
     def test_notional_subscription_costs_do_not_trip_breaker(self) -> None:
         now = [1_000.0]
@@ -87,7 +92,12 @@ class CostBreakerBlocksLlmTests(unittest.TestCase):
             clock=lambda: now[0],
         )
         window.handle_llm_audit_event(
-            {"action": "llm_response", "cost_estimate": 50.0, "provider": "anthropic", "lane": "brain"}
+            {
+                "action": "llm_response",
+                "cost_estimate": 50.0,
+                "provider": "anthropic",
+                "lane": "brain",
+            }
         )
         self.assertFalse(window.frozen)
         self.assertIn("llm_notional_cost_ignored", observe.types())
@@ -149,7 +159,9 @@ class OpenAIBudgetEnforcementTests(unittest.TestCase):
         return OpenAIAdapter(
             api_key="sk-test",
             tool_executor=lambda _name, _args: {"ok": True},
-            tool_schemas=[{"type": "function", "name": "shell.run", "parameters": {"type": "object"}}],
+            tool_schemas=[
+                {"type": "function", "name": "shell.run", "parameters": {"type": "object"}}
+            ],
         )
 
     def test_tool_loop_aborts_when_max_budget_exceeded(self) -> None:
@@ -159,7 +171,11 @@ class OpenAIBudgetEnforcementTests(unittest.TestCase):
         rounds = [_fake_round(calls=1, usage_tokens=10), _fake_round(calls=1), _fake_round(calls=0)]
         client = _FakeToolClient(rounds)
         adapter = self._adapter()
-        with patch.object(OpenAIAdapter, "_load_sdk", staticmethod(lambda: SimpleNamespace(OpenAI=lambda **kw: client))):
+        with patch.object(
+            OpenAIAdapter,
+            "_load_sdk",
+            staticmethod(lambda: SimpleNamespace(OpenAI=lambda **kw: client)),
+        ):
             with self.assertRaises(AdapterError) as ctx:
                 adapter.complete(_tool_request(max_budget=0.01))
         self.assertEqual(ctx.exception.metadata.get("reason"), "budget_exceeded")
@@ -171,7 +187,11 @@ class OpenAIBudgetEnforcementTests(unittest.TestCase):
         rounds = [_fake_round(calls=0, usage_tokens=50_000_000)]
         client = _FakeToolClient(rounds)
         adapter = OpenAIAdapter(api_key="sk-test")
-        with patch.object(OpenAIAdapter, "_load_sdk", staticmethod(lambda: SimpleNamespace(OpenAI=lambda **kw: client))):
+        with patch.object(
+            OpenAIAdapter,
+            "_load_sdk",
+            staticmethod(lambda: SimpleNamespace(OpenAI=lambda **kw: client)),
+        ):
             with self.assertRaises(AdapterError) as ctx:
                 adapter.complete(_tool_request(max_budget=0.01))
         self.assertEqual(ctx.exception.metadata.get("reason"), "budget_exceeded")
@@ -182,7 +202,11 @@ class OpenAIBudgetEnforcementTests(unittest.TestCase):
         rounds = [_fake_round(calls=1, usage_tokens=1000), _fake_round(calls=0, usage_tokens=1000)]
         client = _FakeToolClient(rounds)
         adapter = self._adapter()
-        with patch.object(OpenAIAdapter, "_load_sdk", staticmethod(lambda: SimpleNamespace(OpenAI=lambda **kw: client))):
+        with patch.object(
+            OpenAIAdapter,
+            "_load_sdk",
+            staticmethod(lambda: SimpleNamespace(OpenAI=lambda **kw: client)),
+        ):
             with self.assertRaises(AdapterError) as ctx:
                 adapter.complete(_tool_request(max_budget=5.0, model="gpt-unpriced-xyz"))
         self.assertEqual(ctx.exception.metadata.get("reason"), "cost_metering_unknown")
@@ -191,7 +215,11 @@ class OpenAIBudgetEnforcementTests(unittest.TestCase):
         rounds = [_fake_round(calls=1, usage_tokens=1000), _fake_round(calls=0, usage_tokens=1000)]
         client = _FakeToolClient(rounds)
         adapter = self._adapter()
-        with patch.object(OpenAIAdapter, "_load_sdk", staticmethod(lambda: SimpleNamespace(OpenAI=lambda **kw: client))):
+        with patch.object(
+            OpenAIAdapter,
+            "_load_sdk",
+            staticmethod(lambda: SimpleNamespace(OpenAI=lambda **kw: client)),
+        ):
             response = adapter.complete(_tool_request(max_budget=5.0))
         usage = response.artifacts["usage"]
         self.assertEqual(usage["input_tokens"], 2000)

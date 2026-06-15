@@ -8,6 +8,7 @@ Implements a lightweight A2A endpoint so Claw can:
 Based on the open A2A protocol (Google, 50+ partners).
 Transport: HTTP + JSON-RPC + SSE.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -33,13 +34,20 @@ _DEFAULT_A2A_ROOT = Path.home() / ".claw" / "a2a"
 @dataclass(slots=True)
 class AgentCard:
     """Agent Card — public identity and capabilities advertisement."""
+
     name: str = "Dr. Strange"
     description: str = "Autonomous personal agent for Hector Pachano (Pachano Design)"
     version: str = "2.0"
-    capabilities: list[str] = field(default_factory=lambda: [
-        "wiki_search", "web_research", "code_analysis", "site_monitoring",
-        "social_publishing", "task_execution",
-    ])
+    capabilities: list[str] = field(
+        default_factory=lambda: [
+            "wiki_search",
+            "web_research",
+            "code_analysis",
+            "site_monitoring",
+            "social_publishing",
+            "task_execution",
+        ]
+    )
     protocols: list[str] = field(default_factory=lambda: ["a2a/1.0", "mcp/1.0"])
     endpoint: str = ""
     owner: str = "Pachano Design"
@@ -51,6 +59,7 @@ class AgentCard:
 @dataclass(slots=True)
 class A2ATask:
     """A task received from or sent to another agent."""
+
     id: str
     from_agent: str
     to_agent: str
@@ -148,7 +157,9 @@ class A2AService:
 
     # --- Peer Management ---
 
-    def register_peer(self, name: str, endpoint: str, capabilities: list[str] | None = None) -> dict:
+    def register_peer(
+        self, name: str, endpoint: str, capabilities: list[str] | None = None
+    ) -> dict:
         """Register an external agent as a known peer."""
         with self._lock:
             self._peers[name] = AgentCard(
@@ -161,8 +172,10 @@ class A2AService:
         return {"registered": name, "endpoint": endpoint}
 
     def list_peers(self) -> list[dict[str, Any]]:
-        return [{"name": c.name, "endpoint": c.endpoint, "capabilities": c.capabilities}
-                for c in self._peers.values()]
+        return [
+            {"name": c.name, "endpoint": c.endpoint, "capabilities": c.capabilities}
+            for c in self._peers.values()
+        ]
 
     # --- Task Exchange ---
 
@@ -186,6 +199,7 @@ class A2AService:
         # HTTP POST to peer's A2A endpoint
         try:
             import httpx
+
             resp = httpx.post(
                 f"{peer.endpoint}/a2a/tasks",
                 json={
@@ -238,8 +252,13 @@ class A2AService:
             self._inbox.append(task)
             self._save_inbox()
 
-        logger.info("A2A task received: %s from %s (action=%s, status=%s)",
-                     task.id, task.from_agent, task.action, task.status)
+        logger.info(
+            "A2A task received: %s from %s (action=%s, status=%s)",
+            task.id,
+            task.from_agent,
+            task.action,
+            task.status,
+        )
         return {"task_id": task.id, "status": task.status}
 
     def process_inbox(self) -> dict:

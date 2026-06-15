@@ -24,15 +24,21 @@ class ObservabilityDashboard:
             params = _parse_query(query)
             event_type = params.get("event_type") or None
             limit = _coerce_int(params.get("limit"), 50)
-            return self._json(start_response, 200, self._window.events_payload(limit=limit, event_type=event_type))
+            return self._json(
+                start_response, 200, self._window.events_payload(limit=limit, event_type=event_type)
+            )
         if path == "/observability/freeze":
             if method != "POST":
-                return self._json(start_response, 405, {"error": "method not allowed", "allowed": ["POST"]})
+                return self._json(
+                    start_response, 405, {"error": "method not allowed", "allowed": ["POST"]}
+                )
             self._window.freeze(reason="manual_dashboard", actor="dashboard")
             return self._json(start_response, 200, self._window.status_payload())
         if path == "/observability/unfreeze":
             if method != "POST":
-                return self._json(start_response, 405, {"error": "method not allowed", "allowed": ["POST"]})
+                return self._json(
+                    start_response, 405, {"error": "method not allowed", "allowed": ["POST"]}
+                )
             self._window.unfreeze(actor="dashboard")
             return self._json(start_response, 200, self._window.status_payload())
         return self._json(start_response, 404, {"error": f"not found: {path}"})
@@ -48,7 +54,9 @@ class ObservabilityDashboard:
         )
         return [body]
 
-    def _json(self, start_response: StartResponse, status_code: int, payload: dict[str, Any]) -> list[bytes]:
+    def _json(
+        self, start_response: StartResponse, status_code: int, payload: dict[str, Any]
+    ) -> list[bytes]:
         body = json.dumps(payload, indent=2, sort_keys=True, default=str).encode("utf-8")
         start_response(
             f"{status_code} {_reason(status_code)}",

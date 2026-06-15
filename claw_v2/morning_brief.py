@@ -282,14 +282,10 @@ class MorningBriefService:
                 facts["weather"] = _trim(weather, 220)
         except Exception:
             pass
-        cal = self._safe_external_value(
-            self.settings.calendar_command, self.calendar_fetcher
-        )
+        cal = self._safe_external_value(self.settings.calendar_command, self.calendar_fetcher)
         if cal:
             facts["calendar"] = cal
-        mail = self._safe_external_value(
-            self.settings.email_command, self.email_fetcher
-        )
+        mail = self._safe_external_value(self.settings.email_command, self.email_fetcher)
         if mail:
             facts["email"] = mail
         work = self._safe_work_facts()
@@ -658,7 +654,9 @@ class MorningBriefService:
         )
         touched_at = max(timestamps) if timestamps else 0.0
         return {
-            "objective": _sanitize_public_brief_text(_safe_text(getattr(task, "objective", ""), 180)),
+            "objective": _sanitize_public_brief_text(
+                _safe_text(getattr(task, "objective", ""), 180)
+            ),
             "status": _public_task_state(getattr(task, "status", "unknown")),
             "verification": _public_task_state(getattr(task, "verification_status", "unknown")),
             "runtime": _public_runtime_name(getattr(task, "runtime", "unknown")),
@@ -667,7 +665,11 @@ class MorningBriefService:
         }
 
     def _job_entry(self, job: Any, *, now: datetime) -> dict[str, str]:
-        detail = getattr(job, "error", "") or getattr(job, "result", "") or getattr(job, "checkpoint", "")
+        detail = (
+            getattr(job, "error", "")
+            or getattr(job, "result", "")
+            or getattr(job, "checkpoint", "")
+        )
         timestamps = self._record_timestamps(
             job, ("updated_at", "completed_at", "started_at", "created_at")
         )
@@ -698,10 +700,16 @@ class MorningBriefService:
         entries: list[dict[str, str]] = []
         for state in states:
             current_goal = _sanitize_public_brief_text(_safe_text(state.get("current_goal"), 160))
-            pending_action = _sanitize_public_brief_text(_safe_text(state.get("pending_action"), 160))
+            pending_action = _sanitize_public_brief_text(
+                _safe_text(state.get("pending_action"), 160)
+            )
             verification = _public_task_state(state.get("verification_status"))
-            task_queue = state.get("task_queue") if isinstance(state.get("task_queue"), list) else []
-            if not (current_goal or pending_action or task_queue or verification not in {"", "unknown"}):
+            task_queue = (
+                state.get("task_queue") if isinstance(state.get("task_queue"), list) else []
+            )
+            if not (
+                current_goal or pending_action or task_queue or verification not in {"", "unknown"}
+            ):
                 continue
             entries.append(
                 {
@@ -729,10 +737,7 @@ class MorningBriefService:
         title = "Bitácora verificada" if hard_evidence else "Diario operacional del agente"
         lines = [
             f"{title}:",
-            (
-                f"- Fecha: {journal.get('today_date', '')}. "
-                f"Ventana: {journal.get('label', '')}."
-            ),
+            (f"- Fecha: {journal.get('today_date', '')}. Ventana: {journal.get('label', '')}."),
         ]
         touched = list(journal.get("tasks_touched") or [])
         carryover = list(journal.get("carryover_tasks") or [])
@@ -749,7 +754,9 @@ class MorningBriefService:
             preview = self._summarize_task_objectives(carryover, limit=4)
             extra = carryover_total - min(len(preview), 4) if preview else carryover_total
             suffix = f" y {extra} más" if extra > 0 else ""
-            preview_text = ("; ".join(preview) + suffix) if preview else f"{carryover_total} en total"
+            preview_text = (
+                ("; ".join(preview) + suffix) if preview else f"{carryover_total} en total"
+            )
             label = journal.get("continuation_label", "continuar")
             lines.append(f"- Para {label} ({carryover_total}): {preview_text}.")
         if sessions:
@@ -814,7 +821,9 @@ class MorningBriefService:
                     lines.append("  - " + "; ".join(bits[:4]))
         return "\n".join(lines)
 
-    def _format_task_entries(self, entries: list[dict[str, str]], *, indent: str = "  - ") -> list[str]:
+    def _format_task_entries(
+        self, entries: list[dict[str, str]], *, indent: str = "  - "
+    ) -> list[str]:
         lines: list[str] = []
         for entry in entries:
             objective = entry.get("objective") or "(sin objetivo)"
@@ -827,7 +836,9 @@ class MorningBriefService:
             lines.append(f"{indent}{status} / {verification} - {objective}{suffix}{when}")
         return lines
 
-    def _format_job_entries(self, entries: list[dict[str, str]], *, indent: str = "  - ") -> list[str]:
+    def _format_job_entries(
+        self, entries: list[dict[str, str]], *, indent: str = "  - "
+    ) -> list[str]:
         lines: list[str] = []
         for entry in entries:
             kind = entry.get("kind") or "job"
@@ -844,7 +855,9 @@ class MorningBriefService:
 
     def _weather_line(self) -> str:
         try:
-            result = self.weather_fetcher(self.settings.weather_location, self.settings.command_timeout_seconds)
+            result = self.weather_fetcher(
+                self.settings.weather_location, self.settings.command_timeout_seconds
+            )
         except Exception as exc:
             logger.warning("morning brief weather unavailable: %s", exc)
             self._record_source("clima", "wttr.in", "unavailable", type(exc).__name__)
@@ -861,13 +874,17 @@ class MorningBriefService:
             result = self.command_runner(command, self.settings.command_timeout_seconds)
         except Exception as exc:
             logger.warning("morning brief command failed: %s", exc)
-            self._record_source(name, f"command:{_trim(command, 80)}", "unavailable", type(exc).__name__)
+            self._record_source(
+                name, f"command:{_trim(command, 80)}", "unavailable", type(exc).__name__
+            )
             return ""
         value = (result or "").strip()
         if not value:
             self._record_source(name, f"command:{_trim(command, 80)}", "empty", "")
             return ""
-        self._record_source(name, f"command:{_trim(command, 80)}", self._source_status(name, value), "")
+        self._record_source(
+            name, f"command:{_trim(command, 80)}", self._source_status(name, value), ""
+        )
         return value
 
     def _calendar_line(self) -> str:
@@ -928,10 +945,18 @@ class MorningBriefService:
                 if status in ACTIVE_TASK_STATUSES:
                     active_descriptions.append(objective)
                     continue
-                touched = max(self._record_timestamps(task, ("updated_at", "completed_at", "started_at", "created_at")) or [0.0])
+                touched = max(
+                    self._record_timestamps(
+                        task, ("updated_at", "completed_at", "started_at", "created_at")
+                    )
+                    or [0.0]
+                )
                 if touched < cutoff_ts:
                     continue
-                if status in ATTENTION_TASK_STATUSES or verification in ATTENTION_VERIFICATION_STATUSES:
+                if (
+                    status in ATTENTION_TASK_STATUSES
+                    or verification in ATTENTION_VERIFICATION_STATUSES
+                ):
                     attention_descriptions.append(objective)
                 elif status in RECENT_DONE_TASK_STATUSES:
                     done_descriptions.append(objective)
@@ -942,7 +967,9 @@ class MorningBriefService:
             lines.append("Corriendo ahora: " + "; ".join(active_descriptions) + ".")
             work_items += len(active_descriptions)
         if attention_descriptions:
-            lines.append("Quedaron sin cerrar en las últimas 48h: " + "; ".join(attention_descriptions) + ".")
+            lines.append(
+                "Quedaron sin cerrar en las últimas 48h: " + "; ".join(attention_descriptions) + "."
+            )
             work_items += len(attention_descriptions)
         if done_descriptions:
             lines.append("Cerradas recientes: " + "; ".join(done_descriptions) + ".")
@@ -1018,14 +1045,15 @@ class MorningBriefService:
         ]
         seen_actions: set[str] = set()
         for item in approvals[:5]:
-            summary = _safe_text(item.get("summary") or item.get("action") or "aprobacion pendiente", 160)
+            summary = _safe_text(
+                item.get("summary") or item.get("action") or "aprobacion pendiente", 160
+            )
             age_hours = self._approval_age_hours(item, now=now)
             classification = self._classify_approval(item, now=now, seen_actions=seen_actions)
             related = self._approval_related_context(item)
             suffix = f"; {related}" if related else ""
             lines.append(
-                f"- {classification}: {summary} (edad ~{age_hours:.1f}h{suffix}). "
-                "No auto-apruebo."
+                f"- {classification}: {summary} (edad ~{age_hours:.1f}h{suffix}). No auto-apruebo."
             )
         return "\n".join(lines)
 
@@ -1043,12 +1071,18 @@ class MorningBriefService:
             current_goal = _safe_text(state.get("current_goal"), 120)
             pending_action = _safe_text(state.get("pending_action"), 120)
             verification = _safe_text(state.get("verification_status"), 60)
-            active_object = state.get("active_object") if isinstance(state.get("active_object"), dict) else {}
+            active_object = (
+                state.get("active_object") if isinstance(state.get("active_object"), dict) else {}
+            )
             mission = active_object.get("active_mission") or active_object.get("_mission") or {}
             mission_goal = ""
             if isinstance(mission, dict):
-                mission_goal = _safe_text(mission.get("last_user_goal") or mission.get("objective"), 120)
-            task_queue = state.get("task_queue") if isinstance(state.get("task_queue"), list) else []
+                mission_goal = _safe_text(
+                    mission.get("last_user_goal") or mission.get("objective"), 120
+                )
+            task_queue = (
+                state.get("task_queue") if isinstance(state.get("task_queue"), list) else []
+            )
             if current_goal:
                 details.append(f"objetivo={current_goal}")
             if pending_action:
@@ -1109,7 +1143,9 @@ class MorningBriefService:
             alert_total = sum(alert_counts.values())
             self._brief_counts["alert_items"] = alert_total
             if alert_counts:
-                shown = ", ".join(f"{name}={count}" for name, count in list(alert_counts.items())[:5])
+                shown = ", ".join(
+                    f"{name}={count}" for name, count in list(alert_counts.items())[:5]
+                )
                 parts.append(f"Alertas recientes: {shown}")
             else:
                 parts.append("0 alertas recientes")
@@ -1202,11 +1238,16 @@ class MorningBriefService:
         if "medium" in raw or "tier_2" in raw or "tier2" in raw:
             return "medium"
         action = str(item.get("action") or item.get("summary") or "").lower()
-        if any(token in action for token in ("deploy", "publish", "publicar", "delete", "borrar", "merge", "push")):
+        if any(
+            token in action
+            for token in ("deploy", "publish", "publicar", "delete", "borrar", "merge", "push")
+        ):
             return "critical"
         return "low"
 
-    def _classify_approval(self, item: dict[str, Any], *, now: datetime, seen_actions: set[str]) -> str:
+    def _classify_approval(
+        self, item: dict[str, Any], *, now: datetime, seen_actions: set[str]
+    ) -> str:
         status = str(item.get("status") or "")
         if status == "expired":
             return "expired"
@@ -1224,7 +1265,9 @@ class MorningBriefService:
             return "stale"
         return "still_needed"
 
-    def _classify_pending_approvals(self, approvals: list[dict[str, Any]], *, now: datetime) -> dict[str, int]:
+    def _classify_pending_approvals(
+        self, approvals: list[dict[str, Any]], *, now: datetime
+    ) -> dict[str, int]:
         counts = {
             "still_needed": 0,
             "stale": 0,

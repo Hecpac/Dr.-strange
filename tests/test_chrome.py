@@ -22,7 +22,9 @@ class ManagedChromeTests(unittest.TestCase):
         self.mock_cdp_ready = self._cdp_ready_patcher.start()
         self.addCleanup(self._cdp_ready_patcher.stop)
 
-        self._profile_pids_patcher = patch("claw_v2.chrome._profile_user_data_pids", return_value=[])
+        self._profile_pids_patcher = patch(
+            "claw_v2.chrome._profile_user_data_pids", return_value=[]
+        )
         self.mock_profile_user_data_pids = self._profile_pids_patcher.start()
         self.addCleanup(self._profile_pids_patcher.stop)
 
@@ -44,9 +46,7 @@ class ManagedChromeTests(unittest.TestCase):
         args = mock_popen.call_args[0][0]
         self.assertIn("--remote-debugging-port=9250", args)
         # Origin allowlist scoped to the loopback client, never "*".
-        self.assertIn(
-            "--remote-allow-origins=http://127.0.0.1:9250,http://localhost:9250", args
-        )
+        self.assertIn("--remote-allow-origins=http://127.0.0.1:9250,http://localhost:9250", args)
         self.assertNotIn("--remote-allow-origins=*", args)
         self.assertIn(f"--user-data-dir={Path('/tmp/test-profile').resolve(strict=False)}", args)
         self.assertNotIn("--headless=new", args)
@@ -60,7 +60,9 @@ class ManagedChromeTests(unittest.TestCase):
     @patch("claw_v2.chrome._wait_for_port_free")
     @patch("subprocess.Popen")
     @patch("claw_v2.chrome._wait_for_cdp_ready")
-    def test_start_kills_existing_chrome(self, mock_ready, mock_popen, mock_wait, mock_kill, mock_pids) -> None:
+    def test_start_kills_existing_chrome(
+        self, mock_ready, mock_popen, mock_wait, mock_kill, mock_pids
+    ) -> None:
         mock_pids.return_value = [(1234, "Google Chrome")]
         # PID 1234 holds OUR managed profile, so it is reclaimable. Subsequent
         # lookups (wait_for_profile_free, _reclaim_profile_if_busy) see it gone.
@@ -126,7 +128,9 @@ class ManagedChromeTests(unittest.TestCase):
     @patch("claw_v2.chrome._check_port_pids")
     @patch("claw_v2.chrome._pid_is_headless", return_value=False)
     @patch("subprocess.Popen")
-    def test_start_reuses_existing_ready_cdp_chrome(self, mock_popen, mock_is_headless, mock_pids) -> None:
+    def test_start_reuses_existing_ready_cdp_chrome(
+        self, mock_popen, mock_is_headless, mock_pids
+    ) -> None:
         mock_pids.return_value = [(1234, "Google Chrome")]
         # The ready CDP Chrome is running OUR managed profile, so it is reused.
         self.mock_profile_user_data_pids.return_value = [1234]
@@ -199,7 +203,10 @@ class ManagedChromeTests(unittest.TestCase):
     @patch("claw_v2.chrome._check_port_pids")
     @patch("claw_v2.chrome._pid_is_headless", return_value=False)
     @patch("claw_v2.chrome._focus_existing_cdp_page", return_value=False)
-    @patch("claw_v2.chrome._cdp_page_targets", return_value=[{"type": "page", "url": "https://www.google.com/"}])
+    @patch(
+        "claw_v2.chrome._cdp_page_targets",
+        return_value=[{"type": "page", "url": "https://www.google.com/"}],
+    )
     @patch("claw_v2.chrome._open_cdp_target")
     @patch("subprocess.Popen")
     def test_start_does_not_create_extra_tab_when_ready_cdp_already_has_pages(
@@ -254,7 +261,9 @@ class ManagedChromeTests(unittest.TestCase):
 
     @patch("claw_v2.chrome._check_port_pids")
     @patch("subprocess.Popen")
-    def test_start_refuses_ready_cdp_chrome_with_different_profile(self, mock_popen, mock_pids) -> None:
+    def test_start_refuses_ready_cdp_chrome_with_different_profile(
+        self, mock_popen, mock_pids
+    ) -> None:
         # A ready CDP Chrome on the port that is NOT our managed profile must
         # not be hijacked: refuse rather than attach to a foreign profile.
         mock_pids.return_value = [(1234, "Google Chrome")]
@@ -269,7 +278,9 @@ class ManagedChromeTests(unittest.TestCase):
 
     @patch("claw_v2.chrome._check_port_pids")
     @patch("claw_v2.chrome._kill_pid")
-    def test_start_refuses_to_kill_chrome_with_different_profile(self, mock_kill, mock_pids) -> None:
+    def test_start_refuses_to_kill_chrome_with_different_profile(
+        self, mock_kill, mock_pids
+    ) -> None:
         # A Chrome on the port that is NOT our managed profile must not be
         # killed (it could be the user's own Chrome bound to that port).
         mock_pids.return_value = [(1234, "Google Chrome")]
@@ -365,6 +376,7 @@ class ManagedChromeAttachStopTests(unittest.TestCase):
             self.assertEqual(mc._attached_pid, 9999)
 
             killed: list[tuple[int, int]] = []
+
             def fake_kill(pid: int, sig: int) -> None:
                 killed.append((pid, sig))
 
@@ -431,6 +443,7 @@ class ManagedChromeAttachStopKillAttachedTests(unittest.TestCase):
     def test_stop_kill_attached_true_kills_attached_pid(self) -> None:
         """stop(kill_attached=True) must send SIGTERM to the attached pid (existing contract)."""
         import signal
+
         with tempfile.TemporaryDirectory() as tmpdir:
             mc = self._make_mc(tmpdir)
             self._attach_mc(mc, 8888)
@@ -446,6 +459,7 @@ class ManagedChromeAttachStopKillAttachedTests(unittest.TestCase):
         """If SIGTERM doesn't free the port (_wait_for_port_free raises), stop() must
         still escalate to SIGKILL, not propagate ChromeStartError, and clear the pid."""
         import signal
+
         with tempfile.TemporaryDirectory() as tmpdir:
             mc = self._make_mc(tmpdir)
             self._attach_mc(mc, 7777)

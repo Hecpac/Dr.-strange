@@ -72,10 +72,18 @@ class AutoDreamService:
         """Execute the full dream cycle: import → orient → gather → consolidate → export → prune."""
         should, reason = self.should_dream()
         if not should:
-            return DreamResult(pruned=0, consolidated=0, duration_seconds=0, skipped=True, reason="conditions_not_met")
+            return DreamResult(
+                pruned=0,
+                consolidated=0,
+                duration_seconds=0,
+                skipped=True,
+                reason="conditions_not_met",
+            )
 
         if not _acquire_lock():
-            return DreamResult(pruned=0, consolidated=0, duration_seconds=0, skipped=True, reason="lock_held")
+            return DreamResult(
+                pruned=0, consolidated=0, duration_seconds=0, skipped=True, reason="lock_held"
+            )
 
         start = time.time()
         try:
@@ -95,23 +103,33 @@ class AutoDreamService:
                 consolidated=consolidated,
                 duration_seconds=time.time() - start,
             )
-            self.observe.emit("auto_dream_complete", payload={
-                "agent_name": self.agent_name,
-                "pruned": result.pruned,
-                "consolidated": result.consolidated,
-                "imported": len(cross_agent_facts),
-                "duration": result.duration_seconds,
-            })
+            self.observe.emit(
+                "auto_dream_complete",
+                payload={
+                    "agent_name": self.agent_name,
+                    "pruned": result.pruned,
+                    "consolidated": result.consolidated,
+                    "imported": len(cross_agent_facts),
+                    "duration": result.duration_seconds,
+                },
+            )
             return result
         except Exception:
             logger.exception("autoDream failed")
-            return DreamResult(pruned=0, consolidated=0, duration_seconds=time.time() - start, skipped=True, reason="error")
+            return DreamResult(
+                pruned=0,
+                consolidated=0,
+                duration_seconds=time.time() - start,
+                skipped=True,
+                reason="error",
+            )
         finally:
             _release_lock()
 
     def _export_shared(self, facts: list[dict]) -> int:
         """Post-consolidation: write high-confidence facts to shared-memory exports."""
         import json as _json
+
         self.shared_memory_root.mkdir(parents=True, exist_ok=True)
         export_path = self.shared_memory_root / f"{self.agent_name}_exports.jsonl"
         count = 0
@@ -124,7 +142,9 @@ class AutoDreamService:
                         "source_agent": self.agent_name,
                         "confidence": fact.get("confidence", 0),
                         "timestamp": time.time(),
-                        "tags": list(fact.get("entity_tags", [])) if isinstance(fact.get("entity_tags"), (list, tuple)) else [],
+                        "tags": list(fact.get("entity_tags", []))
+                        if isinstance(fact.get("entity_tags"), (list, tuple))
+                        else [],
                     }
                     f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
                     count += 1
@@ -133,10 +153,16 @@ class AutoDreamService:
     def _import_shared(self) -> list[dict]:
         """Pre-orient: read exports from other agents, filtered by tags."""
         import json as _json
+
         if not self.shared_memory_root.exists():
             return []
         imported: list[dict] = []
-        existing_keys = {f.get("key") for f in self.memory.search_facts("", limit=self.max_facts * 2, agent_name=self.agent_name)}
+        existing_keys = {
+            f.get("key")
+            for f in self.memory.search_facts(
+                "", limit=self.max_facts * 2, agent_name=self.agent_name
+            )
+        }
         for export_file in self.shared_memory_root.glob("*_exports.jsonl"):
             if export_file.stem.replace("_exports", "") == self.agent_name:
                 continue
@@ -168,7 +194,12 @@ class AutoDreamService:
         events = self.observe.recent_events(limit=100)
         signals = []
         for event in events:
-            if event.get("event_type") in ("llm_response", "morning_brief", "sub_agents_discovered", "self_improve_agent_done"):
+            if event.get("event_type") in (
+                "llm_response",
+                "morning_brief",
+                "sub_agents_discovered",
+                "self_improve_agent_done",
+            ):
                 signals.append(event)
         logger.info("autoDream gather: %d signals from recent events", len(signals))
         return signals
@@ -182,15 +213,16 @@ class AutoDreamService:
             f"- [{f.get('key', '?')}] {f.get('value', '')[:200]} (confidence={f.get('confidence', 0)}, source={f.get('source', '?')})"
             for f in existing_facts[:50]
         )
-        signals_text = "\n".join(
-            f"- [{s.get('event_type', '?')}] {str(s.get('payload', ''))[:200]}"
-            for s in new_signals[:20]
-        ) if new_signals else "(no new signals)"
-
-        evidence = (
-            f"EXISTING FACTS:\n{facts_text}\n\n"
-            f"RECENT SIGNALS:\n{signals_text}"
+        signals_text = (
+            "\n".join(
+                f"- [{s.get('event_type', '?')}] {str(s.get('payload', ''))[:200]}"
+                for s in new_signals[:20]
+            )
+            if new_signals
+            else "(no new signals)"
         )
+
+        evidence = f"EXISTING FACTS:\n{facts_text}\n\nRECENT SIGNALS:\n{signals_text}"
 
         prompt = (
             "You are a memory consolidation agent. Review the supplied evidence and output a JSON array of actions.\n\n"
@@ -243,7 +275,9 @@ class AutoDreamService:
                     self.memory.delete_fact(key)
                     count += 1
                 else:
-                    logger.info("autoDream: skipped delete of '%s' (not found or confidence >= 0.6)", key)
+                    logger.info(
+                        "autoDream: skipped delete of '%s' (not found or confidence >= 0.6)", key
+                    )
             elif act == "update" and action.get("value"):
                 # Verify: only update if original fact exists.
                 existing = self.memory.search_facts(key, limit=1)
@@ -256,7 +290,12 @@ class AutoDreamService:
                 # Verify: don't create duplicates.
                 existing = self.memory.search_facts(key, limit=1)
                 if not existing or existing[0].get("key") != key:
-                    self.memory.store_fact(key, action.get("value", ""), source=action.get("source", "dream"), confidence=0.5)
+                    self.memory.store_fact(
+                        key,
+                        action.get("value", ""),
+                        source=action.get("source", "dream"),
+                        confidence=0.5,
+                    )
                     count += 1
                 else:
                     logger.info("autoDream: skipped create of '%s' (already exists)", key)
@@ -278,7 +317,12 @@ class AutoDreamService:
             if key and not key.startswith("profile."):
                 self.memory.delete_fact(key)
                 pruned += 1
-        logger.info("autoDream prune: removed %d facts (had %d, max %d)", pruned, len(all_facts), self.max_facts)
+        logger.info(
+            "autoDream prune: removed %d facts (had %d, max %d)",
+            pruned,
+            len(all_facts),
+            self.max_facts,
+        )
         return pruned
 
 
