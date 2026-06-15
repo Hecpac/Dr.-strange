@@ -19,6 +19,7 @@ from claw_v2.memory_retention import (
 )
 from claw_v2.sqlite_runtime import (
     WAL_HEAL_RETRY_LIMIT,
+    RuntimeDb,
     connect_runtime_sqlite,
     heal_wal_after_closed_connection,
     heal_wal_after_disk_io,
@@ -454,7 +455,7 @@ def _synchronized(method):
 
 
 class MemoryStore:
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(self, db_path: Path | str, *, runtime_db: RuntimeDb | None = None) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # Apply any pending checkpoint restore before opening the persistent connection.
@@ -464,12 +465,26 @@ class MemoryStore:
             _apply_pending_restore(self.db_path)
         except Exception:
             logger.debug("Pending restore check failed", exc_info=True)
-        self._conn = connect_runtime_sqlite(self.db_path)
-        register_wal_heal(self.db_path, make_store_wal_heal(self))
+        if runtime_db is not None:
+            # F1.1a1 production path: share the single RuntimeDb connection + lock.
+            # Do NOT open/own a connection or register WAL-heal — RuntimeDb owns
+            # the connection lifecycle and the one heal handle. self._conn is a
+            # dynamic handle that always targets RuntimeDb's current connection,
+            # so a heal reopen never leaves a stale connection here.
+            self._db: RuntimeDb | None = runtime_db
+            self._conn = runtime_db.connection_handle(row_factory=True)
+            self._lock = runtime_db.lock
+        else:
+            # Transitional test/back-compat path (runtime_db=None): own the
+            # connection + lock + heal registration as before. main.py always
+            # injects the shared RuntimeDb, so this is never the production path.
+            self._db = None
+            self._conn = connect_runtime_sqlite(self.db_path)
+            register_wal_heal(self.db_path, make_store_wal_heal(self))
+            # RLock (not Lock): read methods are @_synchronized and may be called
+            # from within already-locked write paths; reentrancy avoids deadlock.
+            self._lock = threading.RLock()
         self._conn.executescript(SCHEMA)
-        # RLock (not Lock): read methods are @_synchronized and may be called
-        # from within already-locked write paths; reentrancy avoids deadlock.
-        self._lock = threading.RLock()
         # Optional ObserveStream, attached post-construction (main._setup_core_state)
         # to break the memory↔observe construction-order cycle.
         self.observe: Any | None = None
@@ -2081,9 +2096,10 @@ class MemoryStore:
 
     def backfill_embeddings(self, embed_fn: Callable[..., list[float]] | None = None) -> int:
         embedder = embed_fn or _simple_embedding
-        rows = self._conn.execute(
-            "SELECT id, key, value FROM facts WHERE id NOT IN (SELECT fact_id FROM fact_embeddings)"
-        ).fetchall()
+        with self._lock:  # F1.1a1: fetch under the shared lock
+            rows = self._conn.execute(
+                "SELECT id, key, value FROM facts WHERE id NOT IN (SELECT fact_id FROM fact_embeddings)"
+            ).fetchall()
         with self._lock:
             for row in rows:
                 embedding = embedder(f"{row['key']} {row['value']}")
@@ -2099,11 +2115,12 @@ class MemoryStore:
         embed_fn: Callable[..., list[float]] | None = None,
     ) -> int:
         embedder = embed_fn or _simple_embedding
-        rows = self._conn.execute(
-            "SELECT id, description, approach, lesson, error_snippet "
-            "FROM task_outcomes "
-            "WHERE id NOT IN (SELECT outcome_id FROM outcome_embeddings)"
-        ).fetchall()
+        with self._lock:  # F1.1a1: fetch under the shared lock
+            rows = self._conn.execute(
+                "SELECT id, description, approach, lesson, error_snippet "
+                "FROM task_outcomes "
+                "WHERE id NOT IN (SELECT outcome_id FROM outcome_embeddings)"
+            ).fetchall()
         with self._lock:
             for row in rows:
                 text = f"{row['description']} | {row['approach']} | {row['lesson']}"
@@ -2121,11 +2138,12 @@ class MemoryStore:
         """Populate outcome_entity_edges from task_outcomes.tags JSON for any rows
         that have tags but no edges. Returns count of outcomes backfilled.
         """
-        rows = self._conn.execute(
-            "SELECT id, tags FROM task_outcomes "
-            "WHERE id NOT IN (SELECT DISTINCT outcome_id FROM outcome_entity_edges) "
-            "AND tags IS NOT NULL AND tags != '[]'"
-        ).fetchall()
+        with self._lock:  # F1.1a1: fetch under the shared lock
+            rows = self._conn.execute(
+                "SELECT id, tags FROM task_outcomes "
+                "WHERE id NOT IN (SELECT DISTINCT outcome_id FROM outcome_entity_edges) "
+                "AND tags IS NOT NULL AND tags != '[]'"
+            ).fetchall()
         backfilled = 0
         with self._lock:
             for row in rows:
@@ -2613,12 +2631,13 @@ class MemoryStore:
         return row["id"] if row else None
 
     def outcomes_without_feedback(self, *, limit: int = 10) -> list[dict]:
-        rows = self._conn.execute(
-            """
-            SELECT id, task_type, task_id, description, outcome, lesson, created_at
-            FROM task_outcomes WHERE feedback IS NULL
-            ORDER BY id DESC LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        with self._lock:  # F1.1a1: fetch under the shared lock; build dicts outside
+            rows = self._conn.execute(
+                """
+                SELECT id, task_type, task_id, description, outcome, lesson, created_at
+                FROM task_outcomes WHERE feedback IS NULL
+                ORDER BY id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
         return [dict(row) for row in rows]

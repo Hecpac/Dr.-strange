@@ -323,6 +323,7 @@ class HeyGenReadOnlyAdapter:
         rate_limiter: HeyGenReadOnlyRateLimiter | None = None,
         clock: Callable[[], float] | None = None,
         allow_legacy_v1: bool = False,
+        runtime_db: Any | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root or Path.cwd()).resolve()
         self.evidence_root = Path(
@@ -331,6 +332,10 @@ class HeyGenReadOnlyAdapter:
         self.db_path = Path(db_path or os.getenv("DB_PATH", "data/claw.db"))
         self.observe = observe
         self.approval_store = approval_store
+        # F1.1a1: when provided (production, via the tool registry), the lazily
+        # built CapabilityGrantStore shares this single RuntimeDb connection
+        # instead of opening its own claw.db connection (second-writer bug).
+        self.runtime_db = runtime_db
         self.key_reader = key_reader
         self.dns_resolver = dns_resolver
         self.urlopen = urlopen
@@ -604,7 +609,9 @@ class HeyGenReadOnlyAdapter:
         if store is None:
             from claw_v2.capability_grants import CapabilityGrantStore
 
-            store = CapabilityGrantStore(self.db_path, observe=self.observe)
+            store = CapabilityGrantStore(
+                self.db_path, observe=self.observe, runtime_db=self.runtime_db
+            )
         now = float(self.clock())
         try:
             grants = store.find_grants_for(kind="tool", target=READ_ONLY_TOOL, now=now)

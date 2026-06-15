@@ -380,6 +380,10 @@ class ToolRegistry:
         self.workspace_root = Path(workspace_root)
         self.memory = memory
         self.observe = observe
+        # F1.1a1: set post-construction by build_runtime so tool paths that build
+        # runtime stores on-demand (HeyGen -> CapabilityGrantStore) share the one
+        # RuntimeDb instead of opening their own claw.db connection in production.
+        self.runtime_db: object | None = None
         self.telemetry_root = (
             Path(telemetry_root).expanduser() if telemetry_root is not None else None
         )
@@ -1491,6 +1495,7 @@ class ToolRegistry:
                     workspace_root=registry.workspace_root,
                     observe=registry.observe,
                     allow_legacy_v1=bool(args.get("allow_legacy_v1")),
+                    runtime_db=registry.runtime_db,
                 )
                 return adapter.read_only_call(endpoint, params).to_dict()
 

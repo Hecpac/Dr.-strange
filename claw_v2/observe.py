@@ -10,6 +10,7 @@ from typing import Callable
 
 from claw_v2.sqlite_runtime import (
     WAL_HEAL_RETRY_LIMIT,
+    RuntimeDb,
     connect_runtime_sqlite,
     heal_orphaned_wal,
     heal_wal_after_closed_connection,
@@ -83,16 +84,28 @@ OBSERVE_MAX_TOTAL_ROWS = 50_000
 
 
 class ObserveStream:
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(self, db_path: Path | str, *, runtime_db: RuntimeDb | None = None) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = connect_runtime_sqlite(self.db_path, row_factory=False)
-        register_wal_heal(self.db_path, make_store_wal_heal(self, row_factory=False))
-        # Observe events are diagnostic. If another runtime writer owns the DB,
-        # drop the event quickly instead of blocking the chat/event loop.
-        self._conn.execute(f"PRAGMA busy_timeout={OBSERVE_SQLITE_BUSY_TIMEOUT_MS}")
+        if runtime_db is not None:
+            # F1.1a1 production path: share the single RuntimeDb connection + lock
+            # (row_factory=False — observe rows are positional tuples). Do NOT set
+            # observe's short busy_timeout here: it would change the SHARED
+            # connection's timeout for every store. Fast-drop on contention is
+            # provided instead by RuntimeDb.try_acquire in _persist_event.
+            self._db: RuntimeDb | None = runtime_db
+            self._conn = runtime_db.connection_handle(row_factory=False)
+            self._lock = runtime_db.lock
+        else:
+            # Transitional test/back-compat path (not used by main.py).
+            self._db = None
+            self._conn = connect_runtime_sqlite(self.db_path, row_factory=False)
+            register_wal_heal(self.db_path, make_store_wal_heal(self, row_factory=False))
+            # Observe events are diagnostic. If another runtime writer owns the DB,
+            # drop the event quickly instead of blocking the chat/event loop.
+            self._conn.execute(f"PRAGMA busy_timeout={OBSERVE_SQLITE_BUSY_TIMEOUT_MS}")
+            self._lock = threading.Lock()
         self._conn.executescript(OBSERVE_SCHEMA)
-        self._lock = threading.Lock()
         self._subscribers: dict[str, list[EventCallback]] = {}
         self._ensure_schema()
 
@@ -193,6 +206,23 @@ class ObserveStream:
         clean_payload: dict,
     ) -> bool:
         payload_json = json.dumps(clean_payload)
+        if self._db is not None:
+            # F1.1a1 production path: write through the shared RuntimeDb
+            # connection with fast-drop-on-contention (try_acquire), so a busy
+            # store never blocks the chat/event loop on the shared lock.
+            return self._persist_event_shared(
+                event_type,
+                payload_json,
+                lane=lane,
+                provider=provider,
+                model=model,
+                trace_id=trace_id,
+                root_trace_id=root_trace_id,
+                span_id=span_id,
+                parent_span_id=parent_span_id,
+                job_id=job_id,
+                artifact_id=artifact_id,
+            )
         # M5: bounded heal burst — concurrent heals can re-close the connection
         # during a post-heal retry, so tolerate a run of heals (not exactly one)
         # before dropping. Heals coalesce, so the run converges quickly.
@@ -292,6 +322,68 @@ class ObserveStream:
                     attempt = 0
                     continue
                 raise
+        return False
+
+    def _persist_event_shared(
+        self, event_type: str, payload_json: str, **columns: str | None
+    ) -> bool:
+        """Persist via the shared RuntimeDb connection (F1.1a1 production path).
+
+        Acquire the shared lock NON-BLOCKING (``try_acquire``) so a busy store
+        never blocks the chat/event loop. A bounded run of attempts gives brief
+        contention a chance to clear; if the lock stays held — or the write
+        errors — spill the event to JSONL (recoverable; the audit-trail
+        invariant) and drop, rather than blocking indefinitely or losing it.
+        """
+        for attempt in range(1, OBSERVE_LOCKED_RETRY_ATTEMPTS + 1):
+            with self._db.try_acquire() as acquired:  # type: ignore[union-attr]
+                if acquired:
+                    try:
+                        self._conn.execute(
+                            """
+                            INSERT INTO observe_stream (
+                                event_type, lane, provider, model,
+                                trace_id, root_trace_id, span_id, parent_span_id, job_id, artifact_id,
+                                payload
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                event_type,
+                                columns.get("lane"),
+                                columns.get("provider"),
+                                columns.get("model"),
+                                columns.get("trace_id"),
+                                columns.get("root_trace_id"),
+                                columns.get("span_id"),
+                                columns.get("parent_span_id"),
+                                columns.get("job_id"),
+                                columns.get("artifact_id"),
+                                payload_json,
+                            ),
+                        )
+                        self._conn.commit()
+                        if wal_generation_stamp_missing(self.db_path):
+                            note_wal_generation(self.db_path)
+                        elif wal_sidecars_orphaned(self.db_path):
+                            heal_orphaned_wal(self.db_path)
+                        return True
+                    except sqlite3.Error:
+                        try:
+                            self._conn.rollback()
+                        except Exception:
+                            logger.debug("observe rollback failed (shared conn)", exc_info=True)
+                        logger.warning(
+                            "dropping observe event after shared-connection write error: %s",
+                            event_type,
+                            exc_info=True,
+                        )
+                        break  # a real write error: spill rather than spin
+            # Lock contended — brief bounded backoff, then retry. Never block
+            # indefinitely; exhausting the attempts spills below.
+            if attempt < OBSERVE_LOCKED_RETRY_ATTEMPTS:
+                time.sleep(OBSERVE_LOCKED_RETRY_DELAY_SECONDS * attempt)
+        self._spill_dropped_event(event_type, payload_json=payload_json, **columns)
         return False
 
     def _spill_dropped_event(

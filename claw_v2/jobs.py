@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 from claw_v2.sqlite_runtime import (
     WAL_HEAL_RETRY_LIMIT,
+    RuntimeDb,
     connect_runtime_sqlite,
     heal_wal_after_closed_connection,
     heal_wal_after_disk_io,
@@ -87,13 +88,28 @@ class JobRecord:
 class JobService:
     """Durable generic job registry for resumable background work."""
 
-    def __init__(self, db_path: Path | str, *, observe: Any | None = None) -> None:
+    def __init__(
+        self,
+        db_path: Path | str,
+        *,
+        observe: Any | None = None,
+        runtime_db: RuntimeDb | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.observe = observe
-        self._conn = connect_runtime_sqlite(self.db_path)
-        register_wal_heal(self.db_path, make_store_wal_heal(self))
-        self._lock = threading.Lock()
+        if runtime_db is not None:
+            # F1.1a1 production path: share the single RuntimeDb connection +
+            # lock; RuntimeDb owns the connection lifecycle and the heal handle.
+            self._db: RuntimeDb | None = runtime_db
+            self._conn = runtime_db.connection_handle(row_factory=True)
+            self._lock = runtime_db.lock
+        else:
+            # Transitional test/back-compat path (not used by main.py).
+            self._db = None
+            self._conn = connect_runtime_sqlite(self.db_path)
+            register_wal_heal(self.db_path, make_store_wal_heal(self))
+            self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(JOBS_TABLE_SCHEMA)
             self._migrate_resume_key_uniqueness()

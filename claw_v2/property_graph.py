@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from claw_v2.sqlite_runtime import (
+    RuntimeDb,
     connect_runtime_sqlite,
     make_store_wal_heal,
     register_wal_heal,
@@ -82,23 +83,37 @@ class MaterializationResult:
 
 
 class PropertyGraphProjection:
-    """SQLite property graph projection over existing durable runtime records."""
+    """SQLite property graph projection over existing durable runtime records.
 
-    def __init__(self, db_path: Path | str) -> None:
+    F1.1a1 status: RuntimeDb-CAPABLE (accepts ``runtime_db=`` and, when given,
+    shares the single connection + lock with its reads and writes wrapped) but
+    NOT production-wired, because nothing constructs it in the running daemon
+    (it is dormant). The ``test_property_graph_is_not_production_constructed``
+    tripwire fails if a production constructor is added — at which point it must
+    be built with ``runtime_db=`` (and keep its read/write gap wrapping) before
+    it touches ``claw.db``.
+    """
+
+    def __init__(self, db_path: Path | str, *, runtime_db: RuntimeDb | None = None) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = connect_runtime_sqlite(self.db_path)
-        # PR #97/#98 review: the heal handle swaps _conn under this lock so
-        # the swap itself is atomic. This is a LOW-traffic store (off-tick
-        # graph materialization, not a hot path); its query methods are not
-        # individually locked — wrapping the long materialize() under the
-        # lock would block the heal for its whole duration. A heal only fires
-        # during a sidecar-orphan incident where this store is ALREADY failing
-        # locked, so a transient ProgrammingError before the reopen is
-        # acceptable and strictly better than staying wedged (same rationale
-        # accepted for capability_grants in #97).
-        self._lock = threading.Lock()
-        register_wal_heal(self.db_path, make_store_wal_heal(self))
+        if runtime_db is not None:
+            # F1.1a1 production path: share the single RuntimeDb connection + lock.
+            # On the shared connection every read/write must be serialized, so —
+            # unlike the legacy path — this store's query and mutation methods now
+            # acquire the shared lock (RLock: materialize() holds it while its
+            # nested upsert_node/upsert_edge calls re-acquire it).
+            self._db: RuntimeDb | None = runtime_db
+            self._conn = runtime_db.connection_handle(row_factory=True)
+            self._lock = runtime_db.lock
+        else:
+            # Transitional test/back-compat path (not used by main.py). RLock
+            # (was Lock): F1.1a1 wraps reads + writes under self._lock, and
+            # materialize() nests upsert_*; reentrancy avoids self-deadlock.
+            self._db = None
+            self._conn = connect_runtime_sqlite(self.db_path)
+            self._lock = threading.RLock()
+            register_wal_heal(self.db_path, make_store_wal_heal(self))
         self._batch_mode = False
         self.ensure_schema()
 
@@ -123,27 +138,28 @@ class PropertyGraphProjection:
             label=str(label or ""),
             created_at=str(created_at or now_iso()),
         )
-        self._conn.execute(
-            """
-            INSERT INTO graph_nodes (id, kind, ref_table, ref_id, label, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                kind = excluded.kind,
-                ref_table = excluded.ref_table,
-                ref_id = excluded.ref_id,
-                label = CASE
-                    WHEN excluded.label = '' THEN graph_nodes.label
-                    WHEN excluded.label = excluded.ref_id
-                         AND graph_nodes.label != ''
-                         AND graph_nodes.label != graph_nodes.ref_id
-                    THEN graph_nodes.label
-                    ELSE excluded.label
-                END
-            """,
-            (node.id, node.kind, node.ref_table, node.ref_id, node.label, node.created_at),
-        )
-        if not self._batch_mode:
-            self._conn.commit()
+        with self._lock:  # F1.1a1: write+commit atomic on the shared connection
+            self._conn.execute(
+                """
+                INSERT INTO graph_nodes (id, kind, ref_table, ref_id, label, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    kind = excluded.kind,
+                    ref_table = excluded.ref_table,
+                    ref_id = excluded.ref_id,
+                    label = CASE
+                        WHEN excluded.label = '' THEN graph_nodes.label
+                        WHEN excluded.label = excluded.ref_id
+                             AND graph_nodes.label != ''
+                             AND graph_nodes.label != graph_nodes.ref_id
+                        THEN graph_nodes.label
+                        ELSE excluded.label
+                    END
+                """,
+                (node.id, node.kind, node.ref_table, node.ref_id, node.label, node.created_at),
+            )
+            if not self._batch_mode:
+                self._conn.commit()
         return self.get_node(node.id) or node
 
     def upsert_edge(
@@ -163,20 +179,21 @@ class PropertyGraphProjection:
             evidence_ref=str(evidence_ref) if evidence_ref is not None else None,
             created_at=str(created_at or now_iso()),
         )
-        self._conn.execute(
-            """
-            INSERT INTO graph_edges (id, src_id, dst_id, kind, evidence_ref, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                src_id = excluded.src_id,
-                dst_id = excluded.dst_id,
-                kind = excluded.kind,
-                evidence_ref = excluded.evidence_ref
-            """,
-            (edge.id, edge.src_id, edge.dst_id, edge.kind, edge.evidence_ref, edge.created_at),
-        )
-        if not self._batch_mode:
-            self._conn.commit()
+        with self._lock:  # F1.1a1: write+commit atomic on the shared connection
+            self._conn.execute(
+                """
+                INSERT INTO graph_edges (id, src_id, dst_id, kind, evidence_ref, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    src_id = excluded.src_id,
+                    dst_id = excluded.dst_id,
+                    kind = excluded.kind,
+                    evidence_ref = excluded.evidence_ref
+                """,
+                (edge.id, edge.src_id, edge.dst_id, edge.kind, edge.evidence_ref, edge.created_at),
+            )
+            if not self._batch_mode:
+                self._conn.commit()
         return self.get_edge(edge.id) or edge
 
     def materialize(
@@ -186,38 +203,49 @@ class PropertyGraphProjection:
         wiki_root: Path | str | None = None,
     ) -> MaterializationResult:
         result = MaterializationResult()
-        was_batching = self._batch_mode
-        self._batch_mode = True
-        try:
-            if telemetry_root is not None:
-                self._materialize_goals_and_claims(Path(telemetry_root), result)
-            self._materialize_sqlite_runtime(result)
-            if wiki_root is not None:
-                self._materialize_wiki_pages(Path(wiki_root), result)
-        except Exception:
-            if not was_batching:
-                self._conn.rollback()
-            raise
-        else:
-            if not was_batching:
-                self._conn.commit()
-            return result
-        finally:
-            self._batch_mode = was_batching
+        # F1.1a1: the whole batch is one transaction on the shared connection,
+        # so hold the lock for its duration. The RLock lets the nested
+        # upsert_node/upsert_edge calls re-acquire it without deadlock.
+        with self._lock:
+            was_batching = self._batch_mode
+            self._batch_mode = True
+            try:
+                if telemetry_root is not None:
+                    self._materialize_goals_and_claims(Path(telemetry_root), result)
+                self._materialize_sqlite_runtime(result)
+                if wiki_root is not None:
+                    self._materialize_wiki_pages(Path(wiki_root), result)
+            except Exception:
+                if not was_batching:
+                    self._conn.rollback()
+                raise
+            else:
+                if not was_batching:
+                    self._conn.commit()
+                return result
+            finally:
+                self._batch_mode = was_batching
 
     def get_node(self, graph_id: str) -> GraphNode | None:
-        row = self._conn.execute("SELECT * FROM graph_nodes WHERE id = ?", (graph_id,)).fetchone()
+        with self._lock:  # F1.1a1: fetch under the shared lock; parse outside
+            row = self._conn.execute(
+                "SELECT * FROM graph_nodes WHERE id = ?", (graph_id,)
+            ).fetchone()
         return _node_from_row(row) if row is not None else None
 
     def get_edge(self, graph_id: str) -> GraphEdge | None:
-        row = self._conn.execute("SELECT * FROM graph_edges WHERE id = ?", (graph_id,)).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM graph_edges WHERE id = ?", (graph_id,)
+            ).fetchone()
         return _edge_from_row(row) if row is not None else None
 
     def get_node_by_ref(self, ref_table: str, ref_id: str) -> GraphNode | None:
-        row = self._conn.execute(
-            "SELECT * FROM graph_nodes WHERE ref_table = ? AND ref_id = ?",
-            (ref_table, str(ref_id)),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM graph_nodes WHERE ref_table = ? AND ref_id = ?",
+                (ref_table, str(ref_id)),
+            ).fetchone()
         return _node_from_row(row) if row is not None else None
 
     def list_nodes(self, *, kind: str | None = None, limit: int = 100) -> list[GraphNode]:
@@ -227,10 +255,11 @@ class PropertyGraphProjection:
             where = "WHERE kind = ?"
             params.append(kind)
         params.append(_bounded_limit(limit))
-        rows = self._conn.execute(
-            f"SELECT * FROM graph_nodes {where} ORDER BY created_at DESC, id DESC LIMIT ?",
-            params,
-        ).fetchall()
+        with self._lock:  # F1.1a1: fetch under the shared lock; build rows outside
+            rows = self._conn.execute(
+                f"SELECT * FROM graph_nodes {where} ORDER BY created_at DESC, id DESC LIMIT ?",
+                params,
+            ).fetchall()
         return [_node_from_row(row) for row in rows]
 
     def list_edges(self, *, kind: str | None = None, limit: int = 100) -> list[GraphEdge]:
@@ -240,10 +269,11 @@ class PropertyGraphProjection:
             where = "WHERE kind = ?"
             params.append(kind)
         params.append(_bounded_limit(limit))
-        rows = self._conn.execute(
-            f"SELECT * FROM graph_edges {where} ORDER BY created_at DESC, id DESC LIMIT ?",
-            params,
-        ).fetchall()
+        with self._lock:  # F1.1a1: fetch under the shared lock; build rows outside
+            rows = self._conn.execute(
+                f"SELECT * FROM graph_edges {where} ORDER BY created_at DESC, id DESC LIMIT ?",
+                params,
+            ).fetchall()
         return [_edge_from_row(row) for row in rows]
 
     def neighbors(
@@ -255,18 +285,19 @@ class PropertyGraphProjection:
             kind_clause = "AND e.kind = ?"
             params.append(edge_kind)
         params.append(_bounded_limit(limit))
-        rows = self._conn.execute(
-            f"""
-            SELECT n.*
-            FROM graph_edges e
-            JOIN graph_nodes n ON n.id = e.dst_id
-            WHERE e.src_id = ?
-              {kind_clause}
-            ORDER BY e.created_at DESC, e.id DESC
-            LIMIT ?
-            """,
-            params,
-        ).fetchall()
+        with self._lock:  # F1.1a1: fetch under the shared lock; build rows outside
+            rows = self._conn.execute(
+                f"""
+                SELECT n.*
+                FROM graph_edges e
+                JOIN graph_nodes n ON n.id = e.dst_id
+                WHERE e.src_id = ?
+                  {kind_clause}
+                ORDER BY e.created_at DESC, e.id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
         return [_node_from_row(row) for row in rows]
 
     def _materialize_goals_and_claims(

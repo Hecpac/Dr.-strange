@@ -238,5 +238,85 @@ class RuntimeDbTests(unittest.TestCase):
             db.close()  # idempotent
 
 
+class RuntimeDbHandleTests(unittest.TestCase):
+    """F1.1a1: RuntimeDb exposes the shared RLock (`.lock`) and a non-owning
+    dynamic connection handle (`connection_handle`) that lets stores keep
+    `self._conn.execute(...)` while the real connection lives in RuntimeDb."""
+
+    def _db(self, tmpdir: str, **kwargs) -> RuntimeDb:
+        db = RuntimeDb(Path(tmpdir) / "claw.db", **kwargs)
+        self.addCleanup(db.close)
+        return db
+
+    def test_lock_property_is_stable_reentrant_and_the_shared_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._db(tmpdir)
+            self.assertIs(db.lock, db.lock)  # same object each call
+            with db.lock:  # re-entrant (RLock): nested acquire on same thread
+                with db.lock:
+                    pass
+            # It is THE lock try_acquire/cursor use: holding it in another thread
+            # makes try_acquire fail.
+            held, release = threading.Event(), threading.Event()
+
+            def hold() -> None:
+                with db.lock:
+                    held.set()
+                    release.wait(2)
+
+            t = threading.Thread(target=hold)
+            t.start()
+            try:
+                self.assertTrue(held.wait(2))
+                with db.try_acquire() as acquired:
+                    self.assertFalse(acquired)
+            finally:
+                release.set()
+                t.join(2)
+
+    def test_connection_handle_delegates_execute_script_commit_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._db(tmpdir)
+            h = db.connection_handle()
+            with db.lock:
+                h.executescript("CREATE TABLE t (v TEXT)")
+                h.execute("INSERT INTO t (v) VALUES ('x')")
+                h.commit()
+                rows = h.execute("SELECT v FROM t").fetchall()
+            self.assertEqual([r["v"] for r in rows], ["x"])
+            with db.lock:  # rollback delegates too
+                h.execute("INSERT INTO t (v) VALUES ('y')")
+                h.rollback()
+                self.assertEqual(h.execute("SELECT COUNT(*) FROM t").fetchone()[0], 1)
+
+    def test_handle_row_factory_is_per_handle_on_one_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._db(tmpdir)
+            row_h = db.connection_handle(row_factory=True)
+            tuple_h = db.connection_handle(row_factory=False)
+            with db.lock:
+                row_h.executescript("CREATE TABLE t (v TEXT)")
+                row_h.execute("INSERT INTO t (v) VALUES ('x')")
+                row_h.commit()
+                self.assertEqual(row_h.execute("SELECT v FROM t").fetchone()["v"], "x")  # Row
+                self.assertIsInstance(tuple_h.execute("SELECT v FROM t").fetchone(), tuple)  # tuple
+
+    def test_handle_uses_new_connection_after_heal_reopen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._db(tmpdir)
+            h = db.connection_handle()
+            with db.lock:
+                h.executescript("CREATE TABLE t (v TEXT)")
+                h.execute("INSERT INTO t (v) VALUES ('a')")
+                h.commit()
+            old = db._current_connection_for_tests()
+            old_id = db.current_connection_id()
+            db._simulate_wal_heal_reopen_for_tests()
+            self.assertNotEqual(old_id, db.current_connection_id())
+            self.assertIsNot(db._current_connection_for_tests(), old)
+            with db.lock:  # handle delegates to the NEW connection; data persisted in file
+                self.assertEqual([r["v"] for r in h.execute("SELECT v FROM t").fetchall()], ["a"])
+
+
 if __name__ == "__main__":
     unittest.main()
