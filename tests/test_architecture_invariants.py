@@ -4,6 +4,7 @@ import ast
 import inspect
 import os
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -60,6 +61,127 @@ SLOW_SCHEDULER_AGENT_JOBS = {
 # Invariant 1 is fully closed, and the backstop below fails if ANY scheduler
 # job (including a newly-added one) runs heavy work inline in daemon.tick.
 _PENDING_INLINE_MIGRATION: frozenset[str] = frozenset()
+
+
+# F1.1b read-lock discipline (RAÍZ #1) -----------------------------------------
+# Every SQL execution on a RuntimeDb-backed store's shared connection
+# (``self._conn`` — the RuntimeDb connection handle) must hold the shared lock,
+# so the single connection never sees concurrent access. "Holds the lock" =
+# lexically inside ``with self._lock:`` or a ``self._db.<cursor|transaction|
+# try_cursor|try_acquire>()`` block, or in an ``@_synchronized`` method.
+_POLICED_CONN_SQL_ATTRS = frozenset(
+    {"execute", "executescript", "executemany", "cursor", "commit", "rollback"}
+)
+_RUNTIMEDB_LOCK_CTX_ATTRS = frozenset({"cursor", "transaction", "try_cursor", "try_acquire"})
+
+
+def _is_runtime_conn(node: ast.AST) -> bool:
+    """True for ``self._conn`` (the RuntimeDb connection handle) or
+    ``self._db._conn`` (reaching past the handle to the raw connection — the
+    handle exposes no public cursor, so this is the tempting bypass).
+
+    SYNTACTIC match only. A connection bound to a local alias
+    (``c = self._conn; c.execute(...)``) or a cursor captured under the lock and
+    iterated/fetched outside it are out of this detector's scope; those are
+    covered dynamically by
+    tests/test_sqlite_runtime.py::RuntimeDbConcurrencyTests. No store uses
+    either pattern today (verified in the F1.1b audit)."""
+    if not (isinstance(node, ast.Attribute) and node.attr == "_conn"):
+        return False
+    base = node.value
+    if isinstance(base, ast.Name) and base.id == "self":
+        return True  # self._conn
+    return (
+        isinstance(base, ast.Attribute)
+        and base.attr == "_db"
+        and isinstance(base.value, ast.Name)
+        and base.value.id == "self"
+    )  # self._db._conn
+
+
+def _with_holds_store_lock(node: ast.With | ast.AsyncWith) -> bool:
+    """True if a ``with`` acquires the store's serialization lock:
+    ``with self._lock:`` or ``with self._db.<cursor|transaction|try_cursor|
+    try_acquire>() [as ...]:`` (all hold the shared RuntimeDb lock)."""
+    for item in node.items:
+        ctx = item.context_expr
+        if (
+            isinstance(ctx, ast.Attribute)
+            and ctx.attr == "_lock"
+            and isinstance(ctx.value, ast.Name)
+            and ctx.value.id == "self"
+        ):
+            return True
+        if (
+            isinstance(ctx, ast.Call)
+            and isinstance(ctx.func, ast.Attribute)
+            and ctx.func.attr in _RUNTIMEDB_LOCK_CTX_ATTRS
+            and isinstance(ctx.func.value, ast.Attribute)
+            and ctx.func.value.attr == "_db"
+            and isinstance(ctx.func.value.value, ast.Name)
+            and ctx.func.value.value.id == "self"
+        ):
+            return True
+    return False
+
+
+def _method_holds_lock_via_decorator(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    """True if the method is decorated ``@_synchronized`` (acquires self._lock)."""
+    for dec in func.decorator_list:
+        name = dec.attr if isinstance(dec, ast.Attribute) else getattr(dec, "id", None)
+        if name == "_synchronized":
+            return True
+    return False
+
+
+def _bare_conn_sql_offenders(source: str, *, exempt_methods: set[str]) -> list[str]:
+    """Return ``Class.method:line`` for every ``self._conn`` / ``self._db._conn``
+    SQL call executed WITHOUT the store's serialization lock held — not lexically
+    inside ``with self._lock:`` / ``self._db.<ctx>()``, not in an
+    ``@_synchronized`` method, not in ``exempt_methods``. SQL on any other object
+    (e.g. a dedicated local connection for ``maintenance_vacuum``) is not policed.
+
+    Exemptions are keyed by ``Class.method`` (NOT bare method name), so a new
+    class reusing a generic allowlisted name (``__init__``, ``ensure_schema``,
+    ``_table_exists``) does not silently inherit another class's exemption."""
+    tree = ast.parse(source)
+    offenders: list[str] = []
+
+    def process(node: ast.AST, *, lock_held: bool, method: str) -> None:
+        # Nested function defs have their own (separate) lock scope.
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            held = lock_held or _with_holds_store_lock(node)
+            for item in node.items:
+                process(item.context_expr, lock_held=lock_held, method=method)
+            for stmt in node.body:
+                process(stmt, lock_held=held, method=method)
+            return
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _POLICED_CONN_SQL_ATTRS
+            and _is_runtime_conn(node.func.value)
+            and not lock_held
+            and method not in exempt_methods
+        ):
+            offenders.append(f"{method}:{node.lineno}")
+        for child in ast.iter_child_nodes(node):
+            process(child, lock_held=lock_held, method=method)
+
+    for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+        for member in cls.body:
+            if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if _method_holds_lock_via_decorator(member):
+                continue
+            qualname = f"{cls.name}.{member.name}"
+            for stmt in member.body:
+                process(stmt, lock_held=False, method=qualname)
+    return offenders
 
 
 class _HeavyInlineCall(BaseException):
@@ -1086,6 +1208,146 @@ def _node_mentions(node: ast.AST, names: set[str]) -> bool:
         if isinstance(child, ast.Attribute) and child.attr in names:
             return True
     return False
+
+
+class RuntimeDbReadLockDisciplineTests(unittest.TestCase):
+    """F1.1b: enforce that the single-writer read-lock discipline (every SQL on
+    the shared ``self._conn`` runs under the shared lock) cannot silently
+    regress, and that the detector backing the tripwire actually has teeth."""
+
+    def test_bare_conn_detector_has_teeth(self) -> None:
+        """The detector must flag an unguarded ``self._conn`` / ``self._db._conn``
+        SQL call, clear it when the call is under ``with self._lock:`` /
+        ``self._db.try_acquire()`` or in an ``@_synchronized`` method, and honor
+        a ``Class.method`` allowlist (NOT a bare method name). Without teeth the
+        tripwire below would be a no-op."""
+        source = textwrap.dedent(
+            """
+            class S:
+                def read_bad(self):
+                    return self._conn.execute("SELECT 1").fetchone()
+
+                def reach_through(self):
+                    # bypasses the handle to the raw connection, no lock held
+                    self._db._conn.execute("DELETE FROM t")
+
+                def read_lock(self):
+                    with self._lock:
+                        return self._conn.execute("SELECT 1").fetchone()
+
+                def emit_try(self):
+                    with self._db.try_acquire() as acquired:
+                        if acquired:
+                            self._conn.execute("INSERT INTO t VALUES (1)")
+                            self._conn.commit()
+
+                @_synchronized
+                def read_sync(self):
+                    return self._conn.execute("SELECT 1").fetchone()
+
+                def vacuum(self):
+                    conn = connect()  # dedicated local connection, not self._conn
+                    conn.execute("VACUUM")
+
+                def write_after_lock(self):
+                    self._conn.execute("PRAGMA x")  # bare, before the lock block
+                    with self._lock:
+                        self._conn.commit()
+
+            class Other:
+                def __init__(self):
+                    self._conn.execute("DELETE FROM facts")  # bare in a 2nd class
+            """
+        )
+        offenders = _bare_conn_sql_offenders(source, exempt_methods=set())
+        named = {o.split(":")[0] for o in offenders}
+        # Bare calls are caught (incl. self._db._conn reach-through and a bare
+        # call in a SECOND class); guarded / synchronized / dedicated-conn are not.
+        self.assertIn("S.read_bad", named)
+        self.assertIn("S.reach_through", named)
+        self.assertIn("S.write_after_lock", named)
+        self.assertIn("Other.__init__", named)
+        self.assertNotIn("S.read_lock", named)
+        self.assertNotIn("S.emit_try", named)
+        self.assertNotIn("S.read_sync", named)
+        self.assertNotIn("S.vacuum", named)
+        # Allowlist is keyed by Class.method: exempting one class's method does
+        # NOT exempt a same-named method on another class.
+        partial = _bare_conn_sql_offenders(
+            source, exempt_methods={"S.read_bad", "S.reach_through", "S.write_after_lock"}
+        )
+        self.assertEqual({o.split(":")[0] for o in partial}, {"Other.__init__"})
+        # Fully exempting every flagged Class.method clears the detector.
+        cleared = _bare_conn_sql_offenders(
+            source,
+            exempt_methods={
+                "S.read_bad",
+                "S.reach_through",
+                "S.write_after_lock",
+                "Other.__init__",
+            },
+        )
+        self.assertEqual(cleared, [])
+
+    def test_no_bare_conn_execute_outside_runtimedb_cursor(self) -> None:
+        """Every ``self._conn`` / ``self._db._conn`` SQL call in a RuntimeDb-backed
+        store runs under the shared lock. The allowlist (keyed by ``Class.method``)
+        names methods that are safe for one of two audited reasons (F1.1b read-lock
+        audit): they run single-threaded at construction (schema/migration), or
+        they are private helpers invoked only from a caller that already holds the
+        lock (the ``_locked``/``_unlocked`` and ``_materialize_*`` helpers). A NEW
+        store method doing bare ``self._conn`` SQL belongs UNDER the lock — not in
+        this allowlist."""
+        allowlist: dict[str, set[str]] = {
+            "claw_v2/memory.py": {
+                "MemoryStore.__init__",  # schema executescript, single-threaded at build
+                "MemoryStore._migrate",  # one-time migrations, single-threaded at build
+                # one-time outcomes-table migration; called only from _migrate
+                "MemoryStore._ensure_task_outcome_usable_reply_unverified_locked",
+                "MemoryStore._outcome_graph_neighbors",  # read helper; caller holds lock
+                "MemoryStore._index_outcome_tags",  # write helper; caller holds lock
+                "MemoryStore._update_session_state_locked",  # caller holds lock
+                "MemoryStore._mark_provider_session_reset_locked",  # caller holds lock
+                "MemoryStore._clear_provider_sessions_for_app_locked",  # caller holds lock
+            },
+            "claw_v2/observe.py": {
+                "ObserveStream.__init__",  # schema executescript, single-threaded at build
+                "ObserveStream._ensure_schema",  # one-time migration, single-threaded at build
+            },
+            "claw_v2/jobs.py": {
+                "JobService._get_active_by_resume_key_unlocked",  # caller holds lock
+                "JobService._migrate_resume_key_uniqueness",  # one-time migration under __init__ lock
+            },
+            "claw_v2/orchestration.py": {
+                "OrchestrationStore._next_version_unlocked",  # caller holds lock
+                "OrchestrationStore._insert_event_unlocked",  # caller holds lock
+            },
+            "claw_v2/task_ledger.py": {
+                # one-time migration under __init__ lock
+                "TaskLedger._ensure_completed_unverified_status_locked",
+            },
+            "claw_v2/capability_grants.py": set(),
+            "claw_v2/property_graph.py": {
+                "PropertyGraphProjection.ensure_schema",  # schema executescript, single-threaded
+                "PropertyGraphProjection._materialize_tasks",  # read helper; materialize() holds lock
+                "PropertyGraphProjection._materialize_observe_events",  # read helper; materialize() holds lock
+                "PropertyGraphProjection._materialize_task_outcomes",  # read helper; materialize() holds lock
+                "PropertyGraphProjection._materialize_facts",  # read helper; materialize() holds lock
+                "PropertyGraphProjection._table_exists",  # read helper; materialize()/ensure_schema holds lock
+            },
+        }
+        offenders: dict[str, list[str]] = {}
+        for rel_path, exempt in allowlist.items():
+            source = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+            bad = _bare_conn_sql_offenders(source, exempt_methods=exempt)
+            if bad:
+                offenders[rel_path] = bad
+        self.assertEqual(
+            offenders,
+            {},
+            "bare self._conn SQL outside the shared lock (RAÍZ #1 read-lock "
+            f"discipline regressed): {offenders}",
+        )
 
 
 if __name__ == "__main__":
