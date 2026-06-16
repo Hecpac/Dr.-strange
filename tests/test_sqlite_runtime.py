@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+import traceback
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from claw_v2.sqlite_runtime import (
     SQLITE_BUSY_TIMEOUT_MS,
     RuntimeDatabaseError,
     RuntimeDb,
+    StoreWalHealHandle,
     _registry_key,
     _WAL_HEAL_REGISTRY,
     check_runtime_sqlite_health,
@@ -316,6 +318,135 @@ class RuntimeDbHandleTests(unittest.TestCase):
             self.assertIsNot(db._current_connection_for_tests(), old)
             with db.lock:  # handle delegates to the NEW connection; data persisted in file
                 self.assertEqual([r["v"] for r in h.execute("SELECT v FROM t").fetchall()], ["a"])
+
+
+class RuntimeDbConcurrencyTests(unittest.TestCase):
+    """F1.1b: the whole point of the single-writer collapse (RAÍZ #1) is that
+    the five core stores share ONE connection serialized by ONE lock, so SQLite
+    never sees concurrent access. Under a barrier-synchronized 20-thread mix of
+    reads and writes across all five stores, the shared wiring must serialize
+    cleanly: ZERO 'database is locked' errors, ZERO WAL-heal reopens, no hung
+    thread, the single connection identity unchanged, and exact final row counts.
+
+    This proves the CURRENT wiring is correct and deadlock/heal-free; it is the
+    dynamic backstop for lock-discipline gaps the AST tripwire can't see
+    (aliasing, lazy cursor consumption). It does NOT by itself reproduce the
+    pre-F1 7-connection storm — SQLite's busy_timeout absorbs contention at this
+    scale. The detector's teeth are proven separately by removing serialization
+    entirely (no-op lock), which surfaces sqlite3 errors immediately.
+
+    Deterministic: every write uses a unique key/id, so all writes land and the
+    final row counts are exact regardless of thread interleaving."""
+
+    THREADS = 20
+    ITERATIONS = 15
+
+    def _build_shared_stores(self, db: RuntimeDb):
+        from claw_v2.jobs import JobService
+        from claw_v2.memory import MemoryStore
+        from claw_v2.observe import ObserveStream
+        from claw_v2.orchestration import OrchestrationStore
+        from claw_v2.task_ledger import TaskLedger
+
+        memory = MemoryStore(db.db_path, runtime_db=db)
+        observe = ObserveStream(db.db_path, runtime_db=db)
+        jobs = JobService(db.db_path, observe=observe, runtime_db=db)
+        orchestration = OrchestrationStore(db.db_path, observe=observe, runtime_db=db)
+        task_ledger = TaskLedger(db.db_path, observe=observe, runtime_db=db)
+        return memory, observe, jobs, orchestration, task_ledger
+
+    def test_20_threads_across_stores_zero_locked_errors_zero_heals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = RuntimeDb(Path(tmpdir) / "claw.db")
+            self.addCleanup(db.close)
+
+            # Count every real heal (connection swap / degrade) at the class-level
+            # chokepoint, regardless of how stores import the heal helpers.
+            heal_calls: list[str] = []
+            orig_reopen = StoreWalHealHandle.reopen
+            orig_degrade = StoreWalHealHandle.mark_degraded
+
+            def _counting_reopen(handle: StoreWalHealHandle) -> None:
+                heal_calls.append("reopen")
+                return orig_reopen(handle)
+
+            def _counting_degrade(handle: StoreWalHealHandle, error) -> None:
+                heal_calls.append("mark_degraded")
+                return orig_degrade(handle, error)
+
+            StoreWalHealHandle.reopen = _counting_reopen  # type: ignore[assignment]
+            StoreWalHealHandle.mark_degraded = _counting_degrade  # type: ignore[assignment]
+            self.addCleanup(setattr, StoreWalHealHandle, "reopen", orig_reopen)
+            self.addCleanup(setattr, StoreWalHealHandle, "mark_degraded", orig_degrade)
+
+            stores = self._build_shared_stores(db)
+            memory, observe, jobs, orchestration, task_ledger = stores
+
+            # All five stores resolve to the ONE shared connection + lock.
+            for store in stores:
+                self.assertIs(store._conn._db, db)
+                self.assertIs(store._lock, db.lock)
+
+            conn_id_before = db.current_connection_id()
+            barrier = threading.Barrier(self.THREADS)
+            errors: list[tuple[int, str, str]] = []
+            errors_lock = threading.Lock()
+
+            def worker(t: int) -> None:
+                try:
+                    barrier.wait()
+                    for i in range(self.ITERATIONS):
+                        # Writes — one per store (blocking lock; observe drops on
+                        # contention by design, never errors).
+                        memory.store_fact(key=f"k-{t}-{i}", value="v", source="stress")
+                        observe.emit("stress_event", payload={"t": t, "i": i})
+                        jobs.enqueue(kind="stress", payload={"t": t, "i": i})
+                        orchestration.begin_run(task_id=f"task-{t}-{i}", objective="stress")
+                        task_ledger.create(
+                            task_id=f"tl-{t}-{i}",
+                            session_id=f"s-{t}",
+                            objective="stress",
+                            runtime="test",
+                        )
+                        # Reads — concurrent with the writes above.
+                        memory.search_facts("k-", limit=3)
+                        observe.recent_events(limit=3)
+                        jobs.get(f"missing-{t}-{i}")
+                        orchestration.get_run(f"run:task-{t}-{i}")
+                        task_ledger.get(f"tl-{t}-{i}")
+                except BaseException as exc:  # capture EVERYTHING per thread
+                    with errors_lock:
+                        errors.append((t, repr(exc), traceback.format_exc()))
+
+            threads = [threading.Thread(target=worker, args=(t,)) for t in range(self.THREADS)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join(60)
+
+            # 1. No thread raised — in particular, no 'database is locked'.
+            self.assertEqual(errors, [], f"worker threads raised: {errors}")
+            self.assertFalse(any(th.is_alive() for th in threads), "a worker thread hung")
+
+            # 2. Zero WAL-heal: no reopen/degrade fired, and the single
+            #    connection identity is unchanged across the whole run.
+            self.assertEqual(heal_calls, [], f"WAL-heal fired under single-writer: {heal_calls}")
+            self.assertEqual(db.current_connection_id(), conn_id_before)
+
+            # 3. Determinism: every unique-keyed blocking write landed exactly once.
+            expected = self.THREADS * self.ITERATIONS
+            with db.cursor() as cur:
+                self.assertEqual(cur.execute("SELECT COUNT(*) FROM facts").fetchone()[0], expected)
+                self.assertEqual(
+                    cur.execute("SELECT COUNT(*) FROM agent_jobs").fetchone()[0], expected
+                )
+                self.assertEqual(
+                    cur.execute("SELECT COUNT(*) FROM orchestration_runs").fetchone()[0],
+                    expected,
+                )
+                self.assertEqual(
+                    cur.execute("SELECT COUNT(*) FROM agent_tasks").fetchone()[0], expected
+                )
 
 
 if __name__ == "__main__":

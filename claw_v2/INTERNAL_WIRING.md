@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12+telegram-t1-t12-2026-06-12+m2-pre-brain-browse-ops-gate-2026-06-14+f0-3c-dispatch-decision-consolidation-2026-06-15
-doc_version: 2.23
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12+telegram-t1-t12-2026-06-12+m2-pre-brain-browse-ops-gate-2026-06-14+f0-3c-dispatch-decision-consolidation-2026-06-15+f1-1b-readlock-tripwire-stress-2026-06-15
+doc_version: 2.24
 last_verified: 2026-06-15
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -47,6 +47,31 @@ invariants:
          touch the production DB again.
     enforced_by:
       - tests/test_sqlite_wal_heal.py
+
+  runtime_db_read_lock_discipline:
+    rule: The five core stores wired in build_runtime (memory, observe, jobs,
+          orchestration, task_ledger; capability_grants joins via the tool path)
+          share ONE RuntimeDb — a single sqlite3 connection plus a single
+          re-entrant lock (RuntimeDb.lock). Every SQL call on a store's shared
+          connection (self._conn, the RuntimeDb connection handle) runs while
+          that lock is held: lexically inside `with self._lock:` or a
+          self._db.cursor()/transaction()/try_cursor()/try_acquire() block, or
+          in an @_synchronized method. observe.emit keeps its non-blocking
+          try_acquire fast-drop so a busy store never blocks the event loop;
+          observe.maintenance_vacuum runs on a dedicated short-lived connection
+          (the only sanctioned non-self._conn SQL). Schema/migration and
+          under-caller-lock helpers are allowlisted in the tripwire by name.
+    why: RAÍZ #1 — 7 long-lived connections + 7 locks against one claw.db
+         produced a "database is locked" storm and a WAL-heal cascade that left
+         the DB write-dead. Collapsing to one serialized connection (F1.1a)
+         means SQLite never sees concurrent access; a bare self._conn SQL call
+         outside the lock re-opens that race. Single-conn+lock is intra-process
+         only — the watchdog stale-event filter (F1.4) covers multi-daemon
+         overlap; the WAL-heal cascade is retired only in F1.3.
+    enforced_by:
+      - tests/test_architecture_invariants.py::RuntimeDbReadLockDisciplineTests::test_no_bare_conn_execute_outside_runtimedb_cursor
+      - tests/test_architecture_invariants.py::RuntimeDbReadLockDisciplineTests::test_bare_conn_detector_has_teeth
+      - tests/test_sqlite_runtime.py::RuntimeDbConcurrencyTests::test_20_threads_across_stores_zero_locked_errors_zero_heals
 
   audit_trail:
     rule: Every decision emits an event
