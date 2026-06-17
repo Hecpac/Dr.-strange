@@ -21,8 +21,14 @@ import unittest
 
 _FOREIGN_LIVE_PID = 1  # launchd/init: always alive, never a pytest descendant
 
+# When pytest itself runs as PID 1 (e.g. pytest launched directly as a container's
+# entrypoint), pid 1 is *us*, not a foreign process, so the pid-1 block tests
+# would pass a real terminating signal to the test runner. Skip them there.
+_PYTEST_IS_PID1 = os.getpid() == 1
+
 
 class ForeignKillGuardTests(unittest.TestCase):
+    @unittest.skipIf(_PYTEST_IS_PID1, "pytest runs as PID 1; pid 1 is self, not foreign")
     def test_terminating_signal_to_live_foreign_pid_is_blocked(self) -> None:
         # If the guard let this through, the real os.kill(1, SIGTERM) would raise
         # PermissionError; the guard raises AssertionError BEFORE the real call.
@@ -30,6 +36,7 @@ class ForeignKillGuardTests(unittest.TestCase):
             os.kill(_FOREIGN_LIVE_PID, signal.SIGTERM)
         self.assertIn("[foreign-kill-guard]", str(cm.exception))
 
+    @unittest.skipIf(_PYTEST_IS_PID1, "pytest runs as PID 1; pid 1 is self, not foreign")
     def test_block_message_identifies_the_offending_test(self) -> None:
         with self.assertRaises(AssertionError) as cm:
             os.kill(_FOREIGN_LIVE_PID, signal.SIGKILL)
@@ -59,6 +66,7 @@ class ForeignKillGuardTests(unittest.TestCase):
         self.assertIsNotNone(child.returncode)
 
     @unittest.skipUnless(hasattr(os, "killpg"), "os.killpg unavailable on this platform")
+    @unittest.skipIf(_PYTEST_IS_PID1, "pytest runs as PID 1; pgid 1 is self, not foreign")
     def test_terminating_killpg_to_foreign_group_is_blocked(self) -> None:
         with self.assertRaises(AssertionError) as cm:
             os.killpg(_FOREIGN_LIVE_PID, signal.SIGTERM)

@@ -141,6 +141,10 @@ def _guard_proc_alive(pid: int) -> bool:
 
 
 def _guard_ppid_of(pid: int) -> int | None:
+    # No cross-call PPID cache on purpose: this is a safety guard, and a stale
+    # cached PPID after PID reuse could misclassify a live foreign process as a
+    # pytest descendant and ALLOW a kill of the production daemon. Terminating-
+    # kill attempts in the suite are rare, so the per-call `ps` cost is fine.
     try:
         completed = _GUARD_REAL_RUN(
             ["ps", "-o", "ppid=", "-p", str(pid)],
@@ -230,6 +234,8 @@ def _guard_kill(pid: int, sig: int) -> None:
         return _GUARD_REAL_KILL(pid, sig)  # dead -> real ProcessLookupError, harmless
     if _guard_is_descendant_of_pytest(pid):
         return _GUARD_REAL_KILL(pid, sig)
+    if not _guard_proc_alive(pid):
+        return _GUARD_REAL_KILL(pid, sig)  # died during the ancestry check -> harmless
     _guard_block(sig_int, pid, "live foreign pid (outside pytest process tree)")
 
 
@@ -240,10 +246,20 @@ def _guard_killpg(pgid: int, sig: int) -> None:
     leader = abs(pgid)
     if leader == 0:
         _guard_block(sig_int, -leader, "own/broadcast process group (pgid 0)")
+    # Dead group leader -> allow the real killpg (harmless ProcessLookupError on
+    # an empty group). A *foreign* group whose leader has exited but whose
+    # members linger is a known, accepted blind spot: once a leader dies its
+    # children reparent to init, so ancestry can no longer prove ownership either
+    # way, and blocking here would break legitimate cleanup of a test's own child
+    # group (subprocess_runner SIGKILLs a group after SIGTERM). This guard targets
+    # the observed failure mode (terminating a *live* foreign process / live-
+    # leader group); it is a test safety net, not a security boundary.
     if not _guard_proc_alive(leader):
         return _GUARD_REAL_KILLPG(pgid, sig)
     if _guard_is_descendant_of_pytest(leader):
         return _GUARD_REAL_KILLPG(pgid, sig)
+    if not _guard_proc_alive(leader):
+        return _GUARD_REAL_KILLPG(pgid, sig)  # died during the ancestry check
     _guard_block(sig_int, -leader, "live foreign process group (killpg)")
 
 
