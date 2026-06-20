@@ -24,6 +24,8 @@ from claw_v2.jobs import JobService
 from claw_v2.main import build_runtime
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
+from claw_v2.orchestration import OrchestrationStore
+from claw_v2.property_graph import PropertyGraphProjection
 from claw_v2.sqlite_runtime import RuntimeDb, _RuntimeConnHandle, _registry_key, _WAL_HEAL_REGISTRY
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.types import LLMResponse
@@ -177,6 +179,28 @@ class ProductionNoFallbackTripwires(unittest.TestCase):
             f"production store construction not RuntimeDb-wired: {offenders}",
         )
 
+    def test_capability_grants_lazy_production_constructor_threads_runtime_db(self) -> None:
+        tree = ast.parse((REPO_ROOT / "claw_v2" / "heygen_readonly.py").read_text(encoding="utf-8"))
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "CapabilityGrantStore"
+            ):
+                continue
+            kw = next((k for k in node.keywords if k.arg == "runtime_db"), None)
+            if kw is None:
+                offenders.append(f"CapabilityGrantStore:{node.lineno} missing runtime_db=")
+            elif not (
+                isinstance(kw.value, ast.Attribute)
+                and kw.value.attr == "runtime_db"
+                and isinstance(kw.value.value, ast.Name)
+                and kw.value.value.id == "self"
+            ):
+                offenders.append(f"CapabilityGrantStore:{node.lineno} not self.runtime_db")
+        self.assertEqual(offenders, [])
+
     def test_property_graph_is_not_production_constructed(self) -> None:
         # property_graph (PropertyGraphProjection) is dormant in production. If a
         # production constructor is added, it MUST be wired with RuntimeDb and have
@@ -199,6 +223,56 @@ class ProductionNoFallbackTripwires(unittest.TestCase):
             f"with RuntimeDb (runtime_db=) before it touches claw.db: {offenders}",
         )
 
+    def test_runtime_store_connection_openers_are_allowlisted(self) -> None:
+        """No production helper/factory path may bypass RuntimeDb and open a
+        long-lived claw.db connection. The only allowed store-level call sites
+        are legacy constructors and observe's dedicated maintenance VACUUM."""
+
+        allowlist = {
+            "claw_v2/memory.py": {"MemoryStore.__init__"},
+            "claw_v2/observe.py": {"ObserveStream.__init__", "ObserveStream.maintenance_vacuum"},
+            "claw_v2/jobs.py": {"JobService.__init__"},
+            "claw_v2/orchestration.py": {"OrchestrationStore.__init__"},
+            "claw_v2/task_ledger.py": {"TaskLedger.__init__"},
+            "claw_v2/capability_grants.py": {"CapabilityGrantStore.__init__"},
+            "claw_v2/property_graph.py": {"PropertyGraphProjection.__init__"},
+        }
+        offenders: list[str] = []
+
+        def visit(node: ast.AST, qualname: str) -> None:
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "connect_runtime_sqlite"
+                and qualname not in allowed
+            ):
+                offenders.append(f"{rel_path}:{qualname}:{node.lineno}")
+            for child in ast.iter_child_nodes(node):
+                visit(child, qualname)
+
+        for rel_path, allowed in allowlist.items():
+            tree = ast.parse((REPO_ROOT / rel_path).read_text(encoding="utf-8"))
+            for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+                for member in cls.body:
+                    if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    qualname = f"{cls.name}.{member.name}"
+                    visit(member, qualname)
+        self.assertEqual(offenders, [])
+
+    def test_sqlite_synchronous_full_has_no_normal_carveout(self) -> None:
+        source = (REPO_ROOT / "claw_v2" / "sqlite_runtime.py").read_text(encoding="utf-8")
+        self.assertIn("PRAGMA journal_mode=WAL", source)
+        self.assertIn("PRAGMA synchronous=FULL", source)
+        self.assertNotIn("PRAGMA synchronous=NORMAL", source)
+        self.assertNotIn("synchronous=normal", source.lower())
+
+    def test_buddy_db_remains_separate_and_out_of_runtimedb_scope(self) -> None:
+        source = (REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
+        self.assertIn('BuddyService(config.db_path.parent / "buddy.db")', source)
+        self.assertNotIn('RuntimeDb(config.db_path.parent / "buddy.db")', source)
+        self.assertNotIn("runtime_db=buddy", source)
+
 
 class OptionalInjectionBackCompatTests(unittest.TestCase):
     def test_runtime_db_none_keeps_legacy_own_connection(self) -> None:
@@ -215,8 +289,52 @@ class OptionalInjectionBackCompatTests(unittest.TestCase):
             self.assertIsNone(store._db)
             self.assertTrue(_live_wal_heal_handles(db_path))
 
+    def test_runtime_db_none_keeps_legacy_wal_heal_registration_for_all_stores(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            constructors = {
+                "memory": lambda path: MemoryStore(path),
+                "observe": lambda path: ObserveStream(path),
+                "task_ledger": lambda path: TaskLedger(path),
+                "job_service": lambda path: JobService(path),
+                "orchestration": lambda path: OrchestrationStore(path),
+                "capability_grants": lambda path: CapabilityGrantStore(path),
+                "property_graph": lambda path: PropertyGraphProjection(path),
+            }
+            stores = {}
+            for name, construct in constructors.items():
+                db_path = Path(tmpdir) / f"{name}.db"
+                store = construct(db_path)
+                stores[name] = store
+                self.addCleanup(store._conn.close)
+                self.assertIsNone(store._db, f"{name} unexpectedly RuntimeDb-backed")
+                self.assertNotIsInstance(store._conn, _RuntimeConnHandle, name)
+                self.assertEqual(
+                    len(_live_wal_heal_handles(db_path)),
+                    1,
+                    f"{name} legacy path did not register exactly one heal handle",
+                )
+
 
 class RuntimeDbBackedStoresNoWalHealTests(unittest.TestCase):
+    def test_runtime_db_backed_stores_register_no_wal_heal_handles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = RuntimeDb(Path(tmpdir) / "claw.db")
+            self.addCleanup(db.close)
+            stores = {
+                "memory": MemoryStore(db.db_path, runtime_db=db),
+                "observe": ObserveStream(db.db_path, runtime_db=db),
+                "task_ledger": TaskLedger(db.db_path, runtime_db=db),
+                "job_service": JobService(db.db_path, runtime_db=db),
+                "orchestration": OrchestrationStore(db.db_path, runtime_db=db),
+                "capability_grants": CapabilityGrantStore(db.db_path, runtime_db=db),
+                "property_graph": PropertyGraphProjection(db.db_path, runtime_db=db),
+            }
+            for name, store in stores.items():
+                self.assertIs(store._db, db, f"{name} not RuntimeDb-backed")
+                self.assertIs(store._lock, db.lock, f"{name} not on RuntimeDb lock")
+                self.assertIsInstance(store._conn, _RuntimeConnHandle, name)
+            self.assertEqual(_live_wal_heal_handles(db.db_path), [])
+
     def test_observe_shared_emit_does_not_probe_or_heal_wal_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = RuntimeDb(Path(tmpdir) / "claw.db")
