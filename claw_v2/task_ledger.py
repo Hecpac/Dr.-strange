@@ -347,15 +347,23 @@ class TaskLedger:
                 except Exception:
                     pass
                 if "locked" not in str(exc).lower():
-                    if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_disk_io(
-                        self.db_path, exc, context="TaskLedger.mark_terminal"
+                    if (
+                        self._db is None
+                        and heals < WAL_HEAL_RETRY_LIMIT
+                        and heal_wal_after_disk_io(
+                            self.db_path, exc, context="TaskLedger.mark_terminal"
+                        )
                     ):
                         heals += 1
                         write_attempt = 0
                         continue
                     raise
                 if write_attempt >= _TERMINAL_WRITE_LOCKED_ATTEMPTS:
-                    if heals < WAL_HEAL_RETRY_LIMIT and heal_orphaned_wal(self.db_path):
+                    if (
+                        self._db is None
+                        and heals < WAL_HEAL_RETRY_LIMIT
+                        and heal_orphaned_wal(self.db_path)
+                    ):
                         heals += 1
                         write_attempt = 0
                         continue
@@ -379,8 +387,12 @@ class TaskLedger:
                         self._conn.rollback()
                 except Exception:
                     pass
-                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_closed_connection(
-                    self.db_path, exc, context="TaskLedger.mark_terminal"
+                if (
+                    self._db is None
+                    and heals < WAL_HEAL_RETRY_LIMIT
+                    and heal_wal_after_closed_connection(
+                        self.db_path, exc, context="TaskLedger.mark_terminal"
+                    )
                 ):
                     heals += 1
                     write_attempt = 0
@@ -448,7 +460,8 @@ class TaskLedger:
                 ),
             )
             self._conn.commit()
-        note_wal_generation(self.db_path)
+        if self._db is None:
+            note_wal_generation(self.db_path)
         return None
 
     def mark_running_checkpoint(

@@ -444,8 +444,12 @@ def _synchronized(method):
                 with self._lock:
                     return method(self, *args, **kwargs)
             except sqlite3.ProgrammingError as exc:
-                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_closed_connection(
-                    self.db_path, exc, context=f"MemoryStore.{method.__name__}"
+                if (
+                    getattr(self, "_db", None) is None
+                    and heals < WAL_HEAL_RETRY_LIMIT
+                    and heal_wal_after_closed_connection(
+                        self.db_path, exc, context=f"MemoryStore.{method.__name__}"
+                    )
                 ):
                     heals += 1
                     continue
@@ -467,10 +471,9 @@ class MemoryStore:
             logger.debug("Pending restore check failed", exc_info=True)
         if runtime_db is not None:
             # F1.1a1 production path: share the single RuntimeDb connection + lock.
-            # Do NOT open/own a connection or register WAL-heal — RuntimeDb owns
-            # the connection lifecycle and the one heal handle. self._conn is a
-            # dynamic handle that always targets RuntimeDb's current connection,
-            # so a heal reopen never leaves a stale connection here.
+            # Do NOT open/own a connection or register WAL-heal. RuntimeDb owns
+            # the connection lifecycle; self._conn is a dynamic handle that
+            # always targets RuntimeDb's current connection.
             self._db: RuntimeDb | None = runtime_db
             self._conn = runtime_db.connection_handle(row_factory=True)
             self._lock = runtime_db.lock
@@ -1154,8 +1157,12 @@ class MemoryStore:
                         "session_state rollback failed after disk I/O error", exc_info=True
                     )
                 # M5: bounded heal burst (concurrent heals can re-close mid-retry).
-                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_disk_io(
-                    self.db_path, exc, context="MemoryStore.update_session_state"
+                if (
+                    self._db is None
+                    and heals < WAL_HEAL_RETRY_LIMIT
+                    and heal_wal_after_disk_io(
+                        self.db_path, exc, context="MemoryStore.update_session_state"
+                    )
                 ):
                     heals += 1
                     continue
@@ -1165,8 +1172,12 @@ class MemoryStore:
                 # heal that closed the shared connection surfaces here. Handle
                 # closed-db with the same bounded heal+retry as the other writers
                 # instead of relying on get_session_state's shield.
-                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_closed_connection(
-                    self.db_path, exc, context="MemoryStore.update_session_state"
+                if (
+                    self._db is None
+                    and heals < WAL_HEAL_RETRY_LIMIT
+                    and heal_wal_after_closed_connection(
+                        self.db_path, exc, context="MemoryStore.update_session_state"
+                    )
                 ):
                     heals += 1
                     continue

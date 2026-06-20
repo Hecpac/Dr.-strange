@@ -363,10 +363,6 @@ class ObserveStream:
                             ),
                         )
                         self._conn.commit()
-                        if wal_generation_stamp_missing(self.db_path):
-                            note_wal_generation(self.db_path)
-                        elif wal_sidecars_orphaned(self.db_path):
-                            heal_orphaned_wal(self.db_path)
                         return True
                     except sqlite3.Error:
                         try:

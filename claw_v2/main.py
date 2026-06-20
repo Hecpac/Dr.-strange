@@ -2125,10 +2125,11 @@ def build_runtime(
     config.ensure_directories()
     check_runtime_sqlite_health(config.db_path, thorough=True)
 
-    # F1.1a1: ONE RuntimeDb owns the single claw.db connection + shared lock for
-    # every runtime store. Built once here and injected into all production
+    # F1.2/F1.3: ONE RuntimeDb owns the single claw.db connection + shared lock
+    # for every runtime store. Built once here and injected into all production
     # stores so the daemon is a single writer (RAÍZ #1). No production store
-    # falls back to its own connection (runtime_db=None is test-only).
+    # falls back to its own connection or per-store WAL-heal registration
+    # (runtime_db=None is legacy/test-only).
     runtime_db = RuntimeDb(config.db_path)
     memory, observe, metrics, approvals, bus, agent_store = _setup_core_state(
         config, runtime_db=runtime_db
@@ -2207,7 +2208,7 @@ def build_runtime(
         codex_transport=codex_transport,
         observation_window=observation_window,
     )
-    # F1.1a1: capability_grants is built on-demand by the HeyGen read-only tool
+    # F1.2/F1.3: capability_grants is built on-demand by the HeyGen read-only tool
     # path (tools.py -> HeyGenReadOnlyAdapter -> CapabilityGrantStore). Expose
     # the shared RuntimeDb on the registry so that store joins the single writer
     # instead of opening its own claw.db connection in production.

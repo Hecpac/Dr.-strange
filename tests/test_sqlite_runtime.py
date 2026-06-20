@@ -86,9 +86,10 @@ class RuntimeSqliteTests(unittest.TestCase):
 
 
 class RuntimeDbTests(unittest.TestCase):
-    """F1.1a0: RuntimeDb is the single owner of a runtime SQLite connection +
-    a shared re-entrant lock. Exercised in isolation — not wired into any store
-    or main.py yet, so it must be fully correct on its own."""
+    """RuntimeDb is the single production owner of the runtime SQLite
+    connection plus shared re-entrant lock. F1.2/F1.3 retires the WAL-heal
+    registry from this production path; reconnect is explicit owner lifecycle,
+    not a registered conservative-heal callback."""
 
     def _runtime_db(self, tmpdir: str, **kwargs) -> RuntimeDb:
         db = RuntimeDb(Path(tmpdir) / "claw.db", **kwargs)
@@ -211,32 +212,32 @@ class RuntimeDbTests(unittest.TestCase):
                     with db.transaction():
                         pass
 
-    def test_heal_reopen_swaps_connection_and_later_access_uses_new(self) -> None:
+    def test_direct_reconnect_swaps_connection_and_later_access_uses_new(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = self._runtime_db(tmpdir)
             old = db._current_connection_for_tests()  # hold ref so id() can't be reused
             old_id = db.current_connection_id()
-            db._simulate_wal_heal_reopen_for_tests()
+            db._reconnect_for_tests()
             self.assertNotEqual(old_id, db.current_connection_id())
             self.assertIsNot(db._current_connection_for_tests(), old)
             with db.cursor() as cur:  # works on the NEW connection
                 self.assertEqual(cur.execute("SELECT COUNT(*) FROM t").fetchone()[0], 0)
 
-    def test_runtimedb_is_registered_as_heal_target(self) -> None:
+    def test_runtimedb_does_not_register_wal_heal_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = self._runtime_db(tmpdir)
             handles = _WAL_HEAL_REGISTRY.get(_registry_key(db.db_path), [])
-            self.assertTrue(any(h is db._heal_handle for h in handles))
+            self.assertEqual([h for h in handles if h.alive], [])
+            self.assertFalse(hasattr(db, "_heal_handle"))
 
-    def test_close_unregisters_heal_handle_no_registry_leak(self) -> None:
+    def test_close_does_not_touch_wal_heal_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "claw.db"
             db = RuntimeDb(path)
             key = _registry_key(path)
-            self.assertIn(key, _WAL_HEAL_REGISTRY)
-            handle = db._heal_handle
+            self.assertEqual([h for h in _WAL_HEAL_REGISTRY.get(key, []) if h.alive], [])
             db.close()
-            self.assertFalse(any(h is handle for h in _WAL_HEAL_REGISTRY.get(key, [])))
+            self.assertEqual([h for h in _WAL_HEAL_REGISTRY.get(key, []) if h.alive], [])
             db.close()  # idempotent
 
 
@@ -303,7 +304,7 @@ class RuntimeDbHandleTests(unittest.TestCase):
                 self.assertEqual(row_h.execute("SELECT v FROM t").fetchone()["v"], "x")  # Row
                 self.assertIsInstance(tuple_h.execute("SELECT v FROM t").fetchone(), tuple)  # tuple
 
-    def test_handle_uses_new_connection_after_heal_reopen(self) -> None:
+    def test_handle_uses_new_connection_after_owner_reconnect(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = self._db(tmpdir)
             h = db.connection_handle()
@@ -313,7 +314,7 @@ class RuntimeDbHandleTests(unittest.TestCase):
                 h.commit()
             old = db._current_connection_for_tests()
             old_id = db.current_connection_id()
-            db._simulate_wal_heal_reopen_for_tests()
+            db._reconnect_for_tests()
             self.assertNotEqual(old_id, db.current_connection_id())
             self.assertIsNot(db._current_connection_for_tests(), old)
             with db.lock:  # handle delegates to the NEW connection; data persisted in file

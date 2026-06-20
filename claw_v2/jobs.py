@@ -100,7 +100,7 @@ class JobService:
         self.observe = observe
         if runtime_db is not None:
             # F1.1a1 production path: share the single RuntimeDb connection +
-            # lock; RuntimeDb owns the connection lifecycle and the heal handle.
+            # lock; RuntimeDb owns the connection lifecycle.
             self._db: RuntimeDb | None = runtime_db
             self._conn = runtime_db.connection_handle(row_factory=True)
             self._lock = runtime_db.lock
@@ -125,15 +125,19 @@ class JobService:
             try:
                 return callback()
             except sqlite3.OperationalError as exc:
-                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_disk_io(
-                    self.db_path, exc, context=operation
+                if (
+                    self._db is None
+                    and heals < WAL_HEAL_RETRY_LIMIT
+                    and heal_wal_after_disk_io(self.db_path, exc, context=operation)
                 ):
                     heals += 1
                     continue
                 raise
             except sqlite3.ProgrammingError as exc:
-                if heals < WAL_HEAL_RETRY_LIMIT and heal_wal_after_closed_connection(
-                    self.db_path, exc, context=operation
+                if (
+                    self._db is None
+                    and heals < WAL_HEAL_RETRY_LIMIT
+                    and heal_wal_after_closed_connection(self.db_path, exc, context=operation)
                 ):
                     heals += 1
                     continue
