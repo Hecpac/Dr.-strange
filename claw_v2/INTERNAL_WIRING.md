@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12+telegram-t1-t12-2026-06-12+m2-pre-brain-browse-ops-gate-2026-06-14+f0-3c-dispatch-decision-consolidation-2026-06-15+f1-1b-readlock-tripwire-stress-2026-06-15
-doc_version: 2.24
-last_verified: 2026-06-15
+describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12+telegram-t1-t12-2026-06-12+m2-pre-brain-browse-ops-gate-2026-06-14+f0-3c-dispatch-decision-consolidation-2026-06-15+f1-1b-readlock-tripwire-stress-2026-06-15+f1-2-f1-3-runtimedb-wal-heal-retired
+doc_version: 2.25
+last_verified: 2026-06-20
 verification_method: manual + pytest + AST sentinel cross-check
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -30,23 +30,26 @@ tests pass. Defend them.
 ```yaml
 invariants:
   wal_generation_guard:
-    rule: Every store holding a long-lived SQLite connection to the runtime DB
-          (observe, memory, task_ledger, jobs, orchestration, capability_grants,
-          property_graph) registers a StoreWalHealHandle; writers that exhaust
-          locked retries call sqlite_runtime.heal_orphaned_wal, which — only
-          when the -wal sidecar is gone from disk — closes ALL registered
-          connections, clears an empty recreated -wal husk, and reopens them
-          together so the process rejoins ONE WAL generation.
+    rule: The production runtime DB path does not use the legacy WAL-heal
+          registry. RuntimeDb is the sole long-lived production owner of the
+          `claw.db` connection, and RuntimeDb-backed stores (observe, memory,
+          task_ledger, jobs, orchestration, capability_grants) do not register
+          StoreWalHealHandle callbacks or call the conservative heal helpers.
+          The legacy `runtime_db=None` back-compat/test seams still register
+          StoreWalHealHandle and retain the WAL generation guard behavior.
     why: 2026-06-12 incident — pytest run from the production repo root (by the
          runtime agent itself) unlinked data/claw.db-wal/-shm under the live
          daemon; every writer then failed "database is locked" forever and
          messages/events/task closes silently stopped persisting while the bot
          kept chatting. Two concurrent WAL generations writing the same DB risk
-         corruption, so the heal is registry-wide and two-phase, never
-         per-store. tests/conftest.py isolates DB_PATH so the suite can never
-         touch the production DB again.
+         corruption. F1.1 collapsed production to one RuntimeDb connection and
+         F1.1b passed H24 cleanly, so F1.3 retires active production WAL-heal
+         instead of preserving a registry-wide close/reopen cascade. Legacy
+         tests keep the old guard available for non-production seams.
     enforced_by:
       - tests/test_sqlite_wal_heal.py
+      - tests/test_runtimedb_wiring.py::BuildRuntimeIdentityTests::test_build_runtime_registers_no_wal_heal_handles_for_runtime_db_path
+      - tests/test_runtimedb_wiring.py::RuntimeDbBackedStoresNoWalHealTests
 
   runtime_db_read_lock_discipline:
     rule: The five core stores wired in build_runtime (memory, observe, jobs,
@@ -67,7 +70,8 @@ invariants:
          means SQLite never sees concurrent access; a bare self._conn SQL call
          outside the lock re-opens that race. Single-conn+lock is intra-process
          only — the watchdog stale-event filter (F1.4) covers multi-daemon
-         overlap; the WAL-heal cascade is retired only in F1.3.
+         overlap; the WAL-heal cascade is retired from the production RuntimeDb
+         path in F1.3.
     enforced_by:
       - tests/test_architecture_invariants.py::RuntimeDbReadLockDisciplineTests::test_no_bare_conn_execute_outside_runtimedb_cursor
       - tests/test_architecture_invariants.py::RuntimeDbReadLockDisciplineTests::test_bare_conn_detector_has_teeth

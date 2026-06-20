@@ -119,13 +119,7 @@ def register_wal_heal(db_path: Path | str, handle: "StoreWalHealHandle") -> None
 
 
 def unregister_wal_heal(db_path: Path | str, handle: "StoreWalHealHandle") -> None:
-    """Drop a previously registered heal handle (clean owner teardown).
-
-    Additive counterpart to :func:`register_wal_heal`: an owner (e.g.
-    ``RuntimeDb``) removes its handle on ``close()`` so the registry does not
-    accumulate live handles across many construct/close cycles (tests). Heal
-    behavior for every other registered handle is unchanged.
-    """
+    """Drop a previously registered legacy heal handle (clean owner teardown)."""
     key = _registry_key(db_path)
     with _WAL_HEAL_REGISTRY_LOCK:
         bucket = _WAL_HEAL_REGISTRY.get(key)
@@ -579,16 +573,13 @@ _RUNTIME_DB_DEFAULT_ROW_FACTORY = object()
 class RuntimeDb:
     """Single owner of a runtime SQLite connection + a shared re-entrant lock.
 
-    Foundation for the single-writer collapse of ``claw.db`` (F1.1a0, RAÍZ #1).
-    In F1.1a0 this is deliberately NOT constructed in ``main.py`` and NOT
-    injected into any store — it exists and is exercised only in isolation by
-    tests. Production stores keep their own connections, locks, and per-store
-    WAL-heal registrations until F1.1a1 wires them onto this.
+    Foundation for the single-writer collapse of ``claw.db`` (F1.1/F1.2,
+    RAÍZ #1). Production stores share this one connection and lock; legacy
+    ``runtime_db=None`` stores keep their own connections for tests/back-compat.
 
     The connection is owned privately: callers serialize through
     :meth:`cursor` / :meth:`transaction` / :meth:`try_cursor` (all under the
-    shared lock) and must NOT cache a raw connection — a WAL-heal reopen that
-    swaps the connection is then invisible to them. There is intentionally no
+    shared lock) and must NOT cache a raw connection. There is intentionally no
     public ``.conn`` accessor; tests use :meth:`current_connection_id` /
     :meth:`_current_connection_for_tests`.
 
@@ -609,12 +600,6 @@ class RuntimeDb:
         # runtime pragmas (WAL, synchronous=FULL, busy_timeout, foreign_keys)
         # are preserved unchanged.
         self._conn = connect_runtime_sqlite(self.db_path, row_factory=row_factory)
-        # One heal handle for the single connection. StoreWalHealHandle reopens
-        # via ``self.db_path`` and swaps ``self._conn`` under ``self._lock`` —
-        # exactly the conventional store shape, reused as-is. Reopen leaves
-        # later access pointed at the new connection automatically.
-        self._heal_handle = make_store_wal_heal(self, row_factory=row_factory)
-        register_wal_heal(self.db_path, self._heal_handle)
 
     # -- identity / test seams (no public .conn for stores to cache) ----------
     def current_connection_id(self) -> int:
@@ -627,10 +612,22 @@ class RuntimeDb:
         with self._lock:
             return self._conn
 
-    def _simulate_wal_heal_reopen_for_tests(self) -> None:
-        """Run the owned heal handle's reopen (the same swap the real
-        ``heal_orphaned_wal`` path performs on this registered handle)."""
-        self._heal_handle.reopen()
+    def _reconnect_for_tests(self) -> None:
+        """Swap the owned connection directly under the RuntimeDb lock.
+
+        F1.3 removes RuntimeDb from the legacy WAL-heal registry; this seam
+        keeps dynamic-handle tests able to prove stores follow the owner after
+        an owner-controlled reconnect.
+        """
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("RuntimeDb is closed")
+            old_conn = self._conn
+            self._conn = connect_runtime_sqlite(self.db_path, row_factory=self._row_factory)
+            try:
+                old_conn.close()
+            except Exception:
+                logger.debug("RuntimeDb old connection close failed", exc_info=True)
 
     # -- store wiring (F1.1a1) ------------------------------------------------
     @property
@@ -646,8 +643,9 @@ class RuntimeDb:
         connection. A store assigns it to ``self._conn`` and keeps using
         ``self._conn.execute(...)`` / ``.executescript()`` / ``.commit()`` /
         ``.rollback()`` unchanged, while the real connection lives here and a
-        WAL-heal reopen that swaps it stays invisible (no stale connection). The
-        store must hold :attr:`lock` around its access, exactly as before."""
+        RuntimeDb-owned reconnect that swaps it stays invisible (no stale
+        connection). The store must hold :attr:`lock` around its access, exactly
+        as before."""
         return _RuntimeConnHandle(self, row_factory=row_factory)
 
     # -- access ---------------------------------------------------------------
@@ -739,12 +737,11 @@ class RuntimeDb:
             return False
 
     def close(self) -> None:
-        """Close the connection and unregister the heal handle. Idempotent."""
+        """Close the owned connection. Idempotent."""
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            unregister_wal_heal(self.db_path, self._heal_handle)
             try:
                 self._conn.close()
             except Exception:
@@ -758,16 +755,15 @@ class _RuntimeConnHandle:
     A runtime store assigns this to ``self._conn`` and keeps calling the four
     connection methods it already uses — ``execute``, ``executescript``,
     ``commit``, ``rollback`` — each delegating to RuntimeDb's CURRENT connection.
-    A WAL-heal reopen swaps that connection under the shared lock, and because
-    the handle resolves ``self._db._conn`` on every call it never holds a stale
+    RuntimeDb can swap that connection under the shared lock, and because the
+    handle resolves ``self._db._conn`` on every call it never holds a stale
     connection. ``execute`` shapes its result rows per handle (``Row`` or tuple)
     on a fresh cursor, never mutating the shared connection's ``row_factory``.
 
     It deliberately exposes NO ``close``/``cursor``/``.conn`` and does not own
-    the connection: RuntimeDb is the sole owner of the connection lifecycle and
-    of WAL-heal registration. Callers must hold ``RuntimeDb.lock`` around their
-    access (the store keeps its existing ``with self._lock:`` blocks, now bound
-    to the shared lock)."""
+    the connection: RuntimeDb is the sole owner of the connection lifecycle.
+    Callers must hold ``RuntimeDb.lock`` around their access (the store keeps
+    its existing ``with self._lock:`` blocks, now bound to the shared lock)."""
 
     __slots__ = ("_db", "_row_factory")
 

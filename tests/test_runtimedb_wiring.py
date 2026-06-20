@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,9 +20,12 @@ from unittest.mock import patch
 from claw_v2.adapters.base import LLMRequest
 from claw_v2.capability_grants import CapabilityGrantStore
 from claw_v2.heygen_readonly import HeyGenReadOnlyAdapter
+from claw_v2.jobs import JobService
 from claw_v2.main import build_runtime
 from claw_v2.memory import MemoryStore
+from claw_v2.observe import ObserveStream
 from claw_v2.sqlite_runtime import RuntimeDb, _RuntimeConnHandle, _registry_key, _WAL_HEAL_REGISTRY
+from claw_v2.task_ledger import TaskLedger
 from claw_v2.types import LLMResponse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -56,10 +60,29 @@ def _build_runtime(tmpdir: str):
         return build_runtime(anthropic_executor=_fake)
 
 
+def _add_runtime_cleanup(test_case: unittest.TestCase, rt) -> None:
+    shared = getattr(rt.memory, "_db", None)
+    if isinstance(shared, RuntimeDb):
+        test_case.addCleanup(shared.close)
+
+
+def _live_wal_heal_handles(db_path: Path) -> list[object]:
+    return [h for h in _WAL_HEAL_REGISTRY.get(_registry_key(db_path), []) if h.alive]
+
+
+class _DiskIoConn:
+    def execute(self, *args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    def rollback(self) -> None:
+        return None
+
+
 class BuildRuntimeIdentityTests(unittest.TestCase):
     def test_five_core_stores_share_one_runtimedb_lock_and_connection(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             rt = _build_runtime(tmpdir)
+            _add_runtime_cleanup(self, rt)
             stores = {
                 "memory": rt.memory,
                 "observe": rt.observe,
@@ -80,7 +103,16 @@ class BuildRuntimeIdentityTests(unittest.TestCase):
     def test_tool_registry_carries_the_shared_runtimedb(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             rt = _build_runtime(tmpdir)
+            _add_runtime_cleanup(self, rt)
             self.assertIs(rt.tool_registry.runtime_db, rt.memory._db)
+
+    def test_build_runtime_registers_no_wal_heal_handles_for_runtime_db_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rt = _build_runtime(tmpdir)
+            _add_runtime_cleanup(self, rt)
+            shared = rt.memory._db
+            self.assertIsInstance(shared, RuntimeDb)
+            self.assertEqual(_live_wal_heal_handles(shared.db_path), [])
 
 
 class HeyGenCapabilityGrantsWiringTests(unittest.TestCase):
@@ -91,9 +123,9 @@ class HeyGenCapabilityGrantsWiringTests(unittest.TestCase):
             store = CapabilityGrantStore(rt_db.db_path, runtime_db=rt_db)
             self.assertIs(store._db, rt_db)
             self.assertIsInstance(store._conn, _RuntimeConnHandle)
-            # No second heal registration: only the RuntimeDb's own handle.
-            handles = _WAL_HEAL_REGISTRY.get(_registry_key(rt_db.db_path), [])
-            self.assertEqual(sum(1 for h in handles if h.alive), 1)
+            # RuntimeDb-backed production stores do not participate in the
+            # legacy per-store WAL-heal registry.
+            self.assertEqual(_live_wal_heal_handles(rt_db.db_path), [])
 
     def test_heygen_adapter_threads_runtime_db_into_lazy_capability_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -175,6 +207,111 @@ class OptionalInjectionBackCompatTests(unittest.TestCase):
             self.assertIsNone(store._db)
             # Legacy path owns a real connection, not the dynamic handle.
             self.assertNotIsInstance(store._conn, _RuntimeConnHandle)
+
+    def test_runtime_db_none_keeps_legacy_wal_heal_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            store = MemoryStore(db_path)  # runtime_db=None (legacy)
+            self.assertIsNone(store._db)
+            self.assertTrue(_live_wal_heal_handles(db_path))
+
+
+class RuntimeDbBackedStoresNoWalHealTests(unittest.TestCase):
+    def test_observe_shared_emit_does_not_probe_or_heal_wal_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = RuntimeDb(Path(tmpdir) / "claw.db")
+            self.addCleanup(db.close)
+            observe = ObserveStream(db.db_path, runtime_db=db)
+
+            with (
+                patch(
+                    "claw_v2.observe.wal_generation_stamp_missing",
+                    side_effect=AssertionError("shared observe must not probe WAL generation"),
+                ),
+                patch(
+                    "claw_v2.observe.note_wal_generation",
+                    side_effect=AssertionError("shared observe must not stamp WAL generation"),
+                ),
+                patch(
+                    "claw_v2.observe.heal_orphaned_wal",
+                    side_effect=AssertionError("shared observe must not WAL-heal"),
+                ),
+            ):
+                observe.emit("f1_3_probe", payload={"ok": True})
+
+            self.assertEqual(observe.recent_events(limit=1)[0]["event_type"], "f1_3_probe")
+
+    def test_task_ledger_runtime_db_terminal_write_does_not_stamp_or_heal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = RuntimeDb(Path(tmpdir) / "claw.db")
+            self.addCleanup(db.close)
+            observe = ObserveStream(db.db_path, runtime_db=db)
+            ledger = TaskLedger(db.db_path, observe=observe, runtime_db=db)
+            ledger.create(
+                task_id="task-f1-3",
+                session_id="s1",
+                objective="runtime db no heal",
+                runtime="test",
+                status="running",
+            )
+
+            with (
+                patch(
+                    "claw_v2.task_ledger.note_wal_generation",
+                    side_effect=AssertionError("RuntimeDb terminal write must not stamp WAL"),
+                ),
+                patch(
+                    "claw_v2.task_ledger.heal_orphaned_wal",
+                    side_effect=AssertionError("RuntimeDb terminal write must not WAL-heal"),
+                ),
+                patch(
+                    "claw_v2.task_ledger.heal_wal_after_disk_io",
+                    side_effect=AssertionError("RuntimeDb disk I/O path must not WAL-heal"),
+                ),
+                patch(
+                    "claw_v2.task_ledger.heal_wal_after_closed_connection",
+                    side_effect=AssertionError("RuntimeDb closed-conn path must not WAL-heal"),
+                ),
+            ):
+                record = ledger.mark_terminal(
+                    "task-f1-3",
+                    status="failed",
+                    summary="done",
+                    error="expected",
+                    verification_status="failed",
+                )
+
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.status, "failed")
+
+    def test_runtime_db_backed_job_errors_do_not_invoke_legacy_heal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = RuntimeDb(Path(tmpdir) / "claw.db")
+            self.addCleanup(db.close)
+            jobs = JobService(db.db_path, runtime_db=db)
+            jobs._conn = _DiskIoConn()
+
+            with patch(
+                "claw_v2.jobs.heal_wal_after_disk_io",
+                side_effect=AssertionError("RuntimeDb-backed jobs must not WAL-heal"),
+            ):
+                with self.assertRaises(sqlite3.OperationalError):
+                    jobs.summary()
+
+    def test_runtime_db_backed_memory_errors_do_not_invoke_legacy_heal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = RuntimeDb(Path(tmpdir) / "claw.db")
+            self.addCleanup(db.close)
+            memory = MemoryStore(db.db_path, runtime_db=db)
+            memory._conn = _DiskIoConn()
+
+            with patch(
+                "claw_v2.memory.heal_wal_after_disk_io",
+                side_effect=AssertionError("RuntimeDb-backed memory must not WAL-heal"),
+            ):
+                with self.assertRaises(sqlite3.OperationalError):
+                    memory.update_session_state("s1", verification_status="running")
 
 
 if __name__ == "__main__":
