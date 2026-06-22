@@ -4,11 +4,13 @@ import asyncio
 import base64
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from claw_v2 import liveness
 from claw_v2.computer import ComputerSession
 from claw_v2.computer_handler import ComputerHandler
 from claw_v2.diagnostics import collect_diagnostics
@@ -49,6 +51,23 @@ def _healthy_runner(args: list[str], **_: object) -> subprocess.CompletedProcess
     if args and args[0] == "lsof":
         return _completed(args, 0, "Python 123 user 3u IPv4 TCP 127.0.0.1:8765 (LISTEN)\n")
     return _completed(args, 1, "", "unknown command")
+
+
+def _seed_current_daemon_window(observe: ObserveStream, db_path: Path) -> None:
+    observe.emit(
+        "agent_startup_context",
+        payload={"pid": 123, "boot_id": "boot-current", "code_version": "test-code"},
+    )
+    liveness.write_liveness(
+        liveness.liveness_sink_path(db_path.parent),
+        {
+            "pid": 123,
+            "boot_id": "boot-current",
+            "ts": time.time(),
+            "web_transport_serving": True,
+            "source": "test",
+        },
+    )
 
 
 class ComputerDiagnosticsTests(unittest.TestCase):
@@ -157,6 +176,7 @@ class ComputerDiagnosticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "claw.db"
             observe = ObserveStream(db_path)
+            _seed_current_daemon_window(observe, db_path)
             observe.emit(
                 "computer_browser_use_timeout",
                 payload={"backend": "browser_use", "timeout_seconds": 180},
@@ -174,6 +194,7 @@ class ComputerDiagnosticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "claw.db"
             observe = ObserveStream(db_path)
+            _seed_current_daemon_window(observe, db_path)
             observe.emit(
                 "error",
                 payload={
