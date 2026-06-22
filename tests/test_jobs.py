@@ -329,6 +329,118 @@ class JobServiceTests(unittest.TestCase):
             self.assertIsNotNone(out)
             self.assertEqual(out.status, "completed")
 
+    def test_recover_stale_running_job_retries_below_attempt_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            service = JobService(Path(tmpdir) / "claw.db", observe=observe)
+            now = time.time()
+            created = service.enqueue(kind="notebooklm.research", max_attempts=3)
+            claimed = service.claim(created.job_id, worker_id="notebooklm", now=now)
+            self.assertEqual(claimed.status, "running")
+
+            recovered = service.recover_stale_running(
+                kinds=("notebooklm.research",),
+                stale_after_seconds=60,
+                now=now + 120,
+            )
+
+            self.assertEqual(len(recovered), 1)
+            job = service.get(created.job_id)
+            self.assertEqual(job.status, "retrying")
+            self.assertEqual(job.error, "stale_running_timeout")
+            self.assertEqual(job.attempts, 1)
+            self.assertEqual(
+                job.checkpoint["stale_running_recovery"]["previous_worker_id"],
+                "notebooklm",
+            )
+            events = [event["event_type"] for event in observe.job_events(created.job_id)]
+            self.assertIn("job_retrying", events)
+            self.assertIn("stale_running_job_recovered", events)
+
+    def test_recover_stale_running_job_fails_at_attempt_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            service = JobService(Path(tmpdir) / "claw.db", observe=observe)
+            now = time.time()
+            created = service.enqueue(kind="coordinator.autonomous_task", max_attempts=1)
+            service.claim(created.job_id, worker_id="coordinator", now=now)
+
+            recovered = service.recover_stale_running(
+                kinds=("coordinator.autonomous_task",),
+                stale_after_seconds=60,
+                now=now + 120,
+            )
+
+            self.assertEqual(len(recovered), 1)
+            job = service.get(created.job_id)
+            self.assertEqual(job.status, "failed")
+            self.assertEqual(job.error, "stale_running_timeout")
+            self.assertIsNotNone(job.completed_at)
+            events = [event["event_type"] for event in observe.job_events(created.job_id)]
+            self.assertIn("job_failed", events)
+            self.assertIn("stale_running_job_recovered", events)
+
+    def test_recover_stale_running_accepts_single_kind_string(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db")
+            target = service.enqueue(kind="coordinator.autonomous_task", max_attempts=3)
+            unrelated = service.enqueue(kind="c", max_attempts=3)
+            service.claim(target.job_id, worker_id="coordinator", now=1000.0)
+            service.claim(unrelated.job_id, worker_id="letter-runner", now=1000.0)
+
+            recovered = service.recover_stale_running(
+                kinds="coordinator.autonomous_task",
+                stale_after_seconds=60,
+                now=2000.0,
+            )
+
+            self.assertEqual([job.job_id for job in recovered], [target.job_id])
+            self.assertEqual(service.get(target.job_id).status, "retrying")
+            self.assertEqual(service.get(unrelated.job_id).status, "running")
+
+    def test_recover_stale_running_preserves_zero_updated_at(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db")
+            created = service.enqueue(kind="coordinator.autonomous_task", max_attempts=3)
+            service.claim(created.job_id, worker_id="coordinator", now=100.0)
+            with service._lock:
+                service._conn.execute(
+                    """
+                    UPDATE agent_jobs
+                    SET updated_at = ?, started_at = ?, created_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (0.0, 100.0, 200.0, created.job_id),
+                )
+                service._conn.commit()
+
+            recovered = service.recover_stale_running(
+                kinds=("coordinator.autonomous_task",),
+                stale_after_seconds=60,
+                now=120.0,
+            )
+
+            self.assertEqual([job.job_id for job in recovered], [created.job_id])
+            job = service.get(created.job_id)
+            self.assertEqual(job.status, "retrying")
+            self.assertEqual(job.checkpoint["stale_running_recovery"]["age_seconds"], 120.0)
+
+    def test_recover_stale_running_job_leaves_recent_running_job_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db")
+            now = time.time()
+            created = service.enqueue(kind="notebooklm.research", max_attempts=3)
+            service.claim(created.job_id, worker_id="notebooklm", now=now)
+
+            recovered = service.recover_stale_running(
+                kinds=("notebooklm.research",),
+                stale_after_seconds=60,
+                now=now + 10,
+            )
+
+            self.assertEqual(recovered, [])
+            self.assertEqual(service.get(created.job_id).status, "running")
+
 
 if __name__ == "__main__":
     unittest.main()

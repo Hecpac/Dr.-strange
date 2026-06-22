@@ -11,7 +11,13 @@ import unittest
 from pathlib import Path
 
 from claw_v2 import liveness
-from claw_v2.diagnostics import acknowledge_events, collect_diagnostics, format_text
+from claw_v2.diagnostics import (
+    AUTONOMY_SCHEDULED_SKIP_ATTENTION_THRESHOLD,
+    AUTONOMY_STALE_RUNNING_JOB_SECONDS,
+    acknowledge_events,
+    collect_diagnostics,
+    format_text,
+)
 from claw_v2.jobs import JobService
 from claw_v2.observe import ObserveStream
 from claw_v2.task_ledger import TaskLedger
@@ -308,6 +314,149 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertNotIn("sk-test-very-secret-token", text)
             self.assertNotIn("secret-token-123456789", text)
             self.assertIn("[REDACTED]", rendered)
+
+    def test_autonomous_maintenance_disabled_surfaces_as_attention_not_restartable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(db_path)
+            _seed_current_daemon_window(db_path)
+            observe.emit(
+                "scheduled_job_skipped",
+                payload={"job": "pipeline_poll", "reason": "autonomous_maintenance_disabled"},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "attention")
+            self.assertEqual(report["checks"]["autonomy_objective_status"], "attention")
+            self.assertTrue(report["checks"]["autonomous_maintenance_disabled"])
+            self.assertEqual(report["checks"]["autonomous_maintenance_disabled_skips_24h"], 1)
+            blockers = report["checks"]["autonomy_objective_blockers"]
+            self.assertEqual(blockers[0]["code"], "autonomous_maintenance_disabled")
+            self.assertFalse(is_restartable(report["checks"]))
+
+    def test_excessive_scheduled_job_skips_surface_as_autonomy_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(db_path)
+            _seed_current_daemon_window(db_path)
+            for _ in range(AUTONOMY_SCHEDULED_SKIP_ATTENTION_THRESHOLD):
+                observe.emit(
+                    "scheduled_job_skipped",
+                    payload={"job": "pipeline_poll", "reason": "git_unavailable"},
+                )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "attention")
+            self.assertEqual(
+                report["checks"]["scheduled_job_skipped_24h"],
+                AUTONOMY_SCHEDULED_SKIP_ATTENTION_THRESHOLD,
+            )
+            blockers = report["checks"]["autonomy_objective_blockers"]
+            self.assertEqual(blockers[0]["code"], "scheduled_job_skipped_excessive")
+            self.assertFalse(is_restartable(report["checks"]))
+
+    def test_stale_running_jobs_surface_as_autonomy_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path)
+            jobs = JobService(db_path)
+            created = jobs.enqueue(kind="notebooklm.research", max_attempts=3)
+            jobs.claim(created.job_id, worker_id="notebooklm", now=time.time() - 7 * 60 * 60)
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "attention")
+            self.assertEqual(report["checks"]["stale_running_jobs"], 1)
+            self.assertEqual(
+                report["database"]["autonomy"]["stale_running_jobs"][0]["job_id"],
+                created.job_id,
+            )
+            blockers = report["checks"]["autonomy_objective_blockers"]
+            self.assertEqual(blockers[0]["code"], "stale_running_jobs")
+            self.assertFalse(is_restartable(report["checks"]))
+
+    def test_stale_running_jobs_preserve_zero_updated_at_age(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path)
+            jobs = JobService(db_path)
+            created = jobs.enqueue(kind="notebooklm.research", max_attempts=3)
+            recent = time.time() - 10
+            jobs.claim(created.job_id, worker_id="notebooklm", now=recent)
+            with jobs._lock:
+                jobs._conn.execute(
+                    """
+                    UPDATE agent_jobs
+                    SET updated_at = ?, started_at = ?, created_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (0.0, recent, recent, created.job_id),
+                )
+                jobs._conn.commit()
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            job = report["database"]["autonomy"]["stale_running_jobs"][0]
+            self.assertEqual(job["updated_at"], 0.0)
+            self.assertGreater(job["age_seconds"], AUTONOMY_STALE_RUNNING_JOB_SECONDS)
+            self.assertEqual(report["checks"]["stale_running_jobs"], 1)
+            self.assertFalse(is_restartable(report["checks"]))
+
+    def test_completed_unverified_overdue_backlog_surfaces_as_autonomy_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path)
+            ledger = TaskLedger(db_path)
+            ledger.create(
+                task_id="task-unverified",
+                session_id="s1",
+                objective="lookup",
+                runtime="brain",
+                status="running",
+            )
+            ledger.mark_terminal(
+                "task-unverified",
+                status="completed_unverified",
+                verification_status="needs_verification",
+                summary="lookup finished without final verifier",
+                artifacts={"evidence_manifest": {"tools_run": ["Read"]}},
+            )
+            overdue = time.time() - 2 * 24 * 60 * 60
+            with ledger._lock:
+                ledger._conn.execute(
+                    """
+                    UPDATE agent_tasks
+                    SET completed_at = ?, updated_at = ?
+                    WHERE task_id = ?
+                    """,
+                    (overdue, overdue, "task-unverified"),
+                )
+                ledger._conn.commit()
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "attention")
+            self.assertEqual(report["checks"]["completed_unverified_backlog"], 1)
+            self.assertEqual(report["checks"]["completed_unverified_overdue"], 1)
+            blockers = report["checks"]["autonomy_objective_blockers"]
+            self.assertEqual(blockers[0]["code"], "completed_unverified_overdue")
+            self.assertFalse(is_restartable(report["checks"]))
+
+    def test_clear_autonomy_objectives_keep_diagnostics_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path)
+            JobService(db_path)
+            TaskLedger(db_path)
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "healthy")
+            self.assertEqual(report["checks"]["autonomy_objective_status"], "healthy")
+            self.assertEqual(report["checks"]["autonomy_objective_blockers"], [])
+            self.assertFalse(is_restartable(report["checks"]))
 
 
 class HeartbeatTests(unittest.TestCase):

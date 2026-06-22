@@ -132,6 +132,13 @@ from claw_v2.skill_expand_jobs import SkillExpandJobRunner, enqueue_skill_expand
 
 logger = logging.getLogger(__name__)
 
+AUTONOMY_STALE_RUNNING_JOB_KINDS = (
+    # NotebookLM jobs do not have a daemon-registered retry consumer yet.
+    # Keep stale rows visible in diagnostics until that durable lane exists.
+    "coordinator.autonomous_task",
+)
+AUTONOMY_STALE_RUNNING_JOB_SECONDS = 6 * 60 * 60
+
 
 @dataclass(slots=True)
 class HealthcheckResult:
@@ -1594,6 +1601,31 @@ def _setup_scheduler(
                 handler=recovery_drain_runner.run_once,
                 interval=300.0,
             )
+
+        def _autonomy_stale_job_recovery_handler() -> int:
+            recovered = job_service.recover_stale_running(
+                kinds=AUTONOMY_STALE_RUNNING_JOB_KINDS,
+                stale_after_seconds=AUTONOMY_STALE_RUNNING_JOB_SECONDS,
+                error="stale_running_timeout",
+                event_type="autonomy_stale_running_job_recovered",
+            )
+            if recovered:
+                observe.emit(
+                    "autonomy_stale_running_jobs_recovered",
+                    payload={
+                        "count": len(recovered),
+                        "kinds": sorted({job.kind for job in recovered}),
+                        "job_ids": [job.job_id for job in recovered[:20]],
+                        "stale_after_seconds": AUTONOMY_STALE_RUNNING_JOB_SECONDS,
+                    },
+                )
+            return len(recovered)
+
+        daemon.register_background_job_runner(
+            name="autonomy_stale_running_job_recovery",
+            handler=_autonomy_stale_job_recovery_handler,
+            interval=300.0,
+        )
 
     scheduler.register(
         ScheduledJob(
