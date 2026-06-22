@@ -26,6 +26,11 @@ DEFAULT_DB_PATH = Path("data/claw.db")
 DEFAULT_ACK_PATH = Path("data/diagnostics_acks.json")
 HEARTBEAT_STALE_AFTER_S = 180.0
 CLOCK_SKEW_TOLERANCE_S = 60.0
+AUTONOMY_SKIP_WINDOW_HOURS = 24
+AUTONOMY_SCHEDULED_SKIP_ATTENTION_THRESHOLD = 20
+AUTONOMY_STALE_RUNNING_JOB_SECONDS = 6 * 60 * 60
+AUTONOMY_COMPLETED_UNVERIFIED_DEADLINE_SECONDS = 24 * 60 * 60
+AUTONOMY_FAILED_TASK_WARNING_THRESHOLD = 50
 ACTIONABLE_OBSERVE_EVENT_TYPES = (
     "scheduled_job_error",
     "daemon_tick_error",
@@ -182,6 +187,7 @@ def _database_summary(
                 summary["tasks"] = {"present": False}
             if _table_exists(conn, "cron_state"):
                 summary["cron"] = _cron_state(conn, limit=limit)
+            summary["autonomy"] = _autonomy_summary(conn, limit=limit)
             return summary
         except sqlite3.Error as exc:
             return {"present": True, "error": str(exc)}
@@ -658,6 +664,220 @@ def _cron_state(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, Any]]
     return [_redacted_row_dict(row) for row in rows]
 
 
+def _autonomy_summary(conn: sqlite3.Connection, *, limit: int) -> dict[str, Any]:
+    now = time.time()
+    summary: dict[str, Any] = {
+        "status": "healthy",
+        "scheduled_job_skipped_24h": 0,
+        "autonomous_maintenance_disabled_skips_24h": 0,
+        "top_scheduled_job_skips_24h": [],
+        "stale_running_job_threshold_s": AUTONOMY_STALE_RUNNING_JOB_SECONDS,
+        "stale_running_jobs": [],
+        "stale_running_jobs_count": 0,
+        "completed_unverified_backlog": 0,
+        "completed_unverified_overdue": 0,
+        "completed_unverified_deadline_s": AUTONOMY_COMPLETED_UNVERIFIED_DEADLINE_SECONDS,
+        "lost_tasks": 0,
+        "failed_tasks": 0,
+        "objective_blockers": [],
+        "objective_warnings": [],
+    }
+
+    if _table_exists(conn, "observe_stream"):
+        skip_summary = _scheduled_skip_summary(conn, limit=limit)
+        summary.update(skip_summary)
+
+    if _table_exists(conn, "agent_jobs"):
+        stale_jobs = _stale_running_jobs(
+            conn,
+            now=now,
+            stale_after_seconds=AUTONOMY_STALE_RUNNING_JOB_SECONDS,
+            limit=limit,
+        )
+        summary["stale_running_jobs"] = stale_jobs
+        summary["stale_running_jobs_count"] = len(stale_jobs)
+
+    if _table_exists(conn, "agent_tasks"):
+        task_summary = _autonomy_task_summary(conn, now=now)
+        summary.update(task_summary)
+
+    blockers: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    disabled_skips = int(summary.get("autonomous_maintenance_disabled_skips_24h") or 0)
+    total_skips = int(summary.get("scheduled_job_skipped_24h") or 0)
+    stale_running = int(summary.get("stale_running_jobs_count") or 0)
+    completed_unverified_overdue = int(summary.get("completed_unverified_overdue") or 0)
+    lost_tasks = int(summary.get("lost_tasks") or 0)
+    failed_tasks = int(summary.get("failed_tasks") or 0)
+
+    if disabled_skips:
+        blockers.append(
+            {
+                "code": "autonomous_maintenance_disabled",
+                "category": "AUTONOMY_BLOCKER",
+                "count": disabled_skips,
+                "message": (
+                    "Scheduled autonomous maintenance is disabled by runtime configuration."
+                ),
+                "operational_change_required": (
+                    "Enable CLAW_AUTONOMOUS_MAINTENANCE/CLAW_AUTONOMOUS_MAINTENANCE_ENABLED "
+                    "in the daemon environment, then perform an authorized restart."
+                ),
+            }
+        )
+    elif total_skips >= AUTONOMY_SCHEDULED_SKIP_ATTENTION_THRESHOLD:
+        blockers.append(
+            {
+                "code": "scheduled_job_skipped_excessive",
+                "category": "AUTONOMY_BLOCKER",
+                "count": total_skips,
+                "threshold": AUTONOMY_SCHEDULED_SKIP_ATTENTION_THRESHOLD,
+                "message": "Scheduled job skips exceed the autonomy attention threshold.",
+            }
+        )
+
+    if stale_running:
+        blockers.append(
+            {
+                "code": "stale_running_jobs",
+                "category": "STATE_BLOCKER",
+                "count": stale_running,
+                "threshold_s": AUTONOMY_STALE_RUNNING_JOB_SECONDS,
+                "message": "Running background jobs are older than the stale threshold.",
+            }
+        )
+
+    if completed_unverified_overdue:
+        blockers.append(
+            {
+                "code": "completed_unverified_overdue",
+                "category": "STATE_BLOCKER",
+                "count": completed_unverified_overdue,
+                "threshold_s": AUTONOMY_COMPLETED_UNVERIFIED_DEADLINE_SECONDS,
+                "message": "Completed-unverified task backlog is overdue.",
+            }
+        )
+
+    if lost_tasks:
+        warnings.append({"code": "lost_task_backlog", "count": lost_tasks})
+    if failed_tasks >= AUTONOMY_FAILED_TASK_WARNING_THRESHOLD:
+        warnings.append(
+            {
+                "code": "failed_task_backlog",
+                "count": failed_tasks,
+                "threshold": AUTONOMY_FAILED_TASK_WARNING_THRESHOLD,
+            }
+        )
+
+    summary["objective_blockers"] = blockers
+    summary["objective_warnings"] = warnings
+    summary["status"] = "attention" if blockers else "healthy"
+    return summary
+
+
+def _scheduled_skip_summary(conn: sqlite3.Connection, *, limit: int) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT payload, COUNT(*) AS count
+        FROM observe_stream
+        WHERE event_type = 'scheduled_job_skipped'
+          AND timestamp >= datetime('now', ?)
+        GROUP BY payload
+        ORDER BY count DESC
+        """,
+        (f"-{AUTONOMY_SKIP_WINDOW_HOURS} hours",),
+    ).fetchall()
+    total = 0
+    disabled = 0
+    grouped: dict[tuple[str, str], int] = {}
+    for row in rows:
+        count = int(row["count"])
+        payload = _loads_json(row["payload"])
+        if not isinstance(payload, dict):
+            payload = {}
+        job = str(payload.get("job") or "unknown")
+        reason = str(payload.get("reason") or "unknown")
+        total += count
+        if reason == "autonomous_maintenance_disabled":
+            disabled += count
+        grouped[(job, reason)] = grouped.get((job, reason), 0) + count
+    top = [
+        {"job": job, "reason": reason, "count": count}
+        for (job, reason), count in sorted(grouped.items(), key=lambda item: item[1], reverse=True)[
+            : max(1, int(limit))
+        ]
+    ]
+    return {
+        "scheduled_job_skipped_24h": total,
+        "autonomous_maintenance_disabled_skips_24h": disabled,
+        "top_scheduled_job_skips_24h": top,
+    }
+
+
+def _stale_running_jobs(
+    conn: sqlite3.Connection,
+    *,
+    now: float,
+    stale_after_seconds: float,
+    limit: int,
+) -> list[dict[str, Any]]:
+    cutoff = now - max(0.001, float(stale_after_seconds))
+    rows = conn.execute(
+        """
+        SELECT job_id, kind, status, attempts, max_attempts, worker_id,
+               created_at, started_at, updated_at, error
+        FROM agent_jobs
+        WHERE status = 'running'
+          AND COALESCE(updated_at, started_at, created_at) <= ?
+        ORDER BY COALESCE(updated_at, started_at, created_at) ASC
+        LIMIT ?
+        """,
+        (cutoff, max(1, int(limit))),
+    ).fetchall()
+    jobs: list[dict[str, Any]] = []
+    for row in rows:
+        data = _redacted_row_dict(row)
+        reference = data.get("updated_at") or data.get("started_at") or data.get("created_at")
+        if isinstance(reference, (int, float)):
+            data["age_seconds"] = max(0.0, now - float(reference))
+        jobs.append(data)
+    return jobs
+
+
+def _autonomy_task_summary(conn: sqlite3.Connection, *, now: float) -> dict[str, int]:
+    overdue_before = now - AUTONOMY_COMPLETED_UNVERIFIED_DEADLINE_SECONDS
+    completed_unverified = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM agent_tasks
+        WHERE status = 'completed_unverified'
+          AND verification_status IN ('needs_verification', 'needs_verify')
+        """
+    ).fetchone()
+    completed_unverified_overdue = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM agent_tasks
+        WHERE status = 'completed_unverified'
+          AND verification_status IN ('needs_verification', 'needs_verify')
+          AND COALESCE(completed_at, updated_at, created_at, 0) <= ?
+        """,
+        (overdue_before,),
+    ).fetchone()
+    lost = conn.execute(
+        "SELECT COUNT(*) AS count FROM agent_tasks WHERE status = 'lost'"
+    ).fetchone()
+    failed = conn.execute(
+        "SELECT COUNT(*) AS count FROM agent_tasks WHERE status = 'failed'"
+    ).fetchone()
+    return {
+        "completed_unverified_backlog": int(completed_unverified["count"]),
+        "completed_unverified_overdue": int(completed_unverified_overdue["count"]),
+        "lost_tasks": int(lost["count"]),
+        "failed_tasks": int(failed["count"]),
+    }
+
+
 def _redacted_row_dict(row: sqlite3.Row) -> dict[str, Any]:
     return redact_sensitive(dict(row), limit=4000)
 
@@ -805,6 +1025,8 @@ def _checks(
     unknown_errors = len(observe.get("unknown_relevance_errors") or [])
     narrative_matches = len(observe.get("narrative_non_error_matches") or [])
     acknowledged_errors = len(observe.get("acknowledged_errors") or [])
+    autonomy = database.get("autonomy") or {}
+    autonomy_blockers = list(autonomy.get("objective_blockers") or [])
     current_window = observe.get("current_daemon_window") or {}
     heartbeat = database.get("heartbeat") or {}
     heartbeat_age = heartbeat.get("age_s")
@@ -828,6 +1050,7 @@ def _checks(
         and launchd_ok
         and latest_errors == 0
         and unknown_errors == 0
+        and not autonomy_blockers
         and not heartbeat_stale
         and not web_thread_dead
         else "attention"
@@ -853,6 +1076,22 @@ def _checks(
         "unknown_relevance_error_events": unknown_errors,
         "narrative_non_error_matches": narrative_matches,
         "acknowledged_error_events": acknowledged_errors,
+        "autonomy_objective_status": autonomy.get("status", "unknown"),
+        "autonomy_objective_blockers": autonomy_blockers,
+        "autonomous_maintenance_disabled": bool(
+            autonomy.get("autonomous_maintenance_disabled_skips_24h")
+        ),
+        "scheduled_job_skipped_24h": int(autonomy.get("scheduled_job_skipped_24h") or 0),
+        "autonomous_maintenance_disabled_skips_24h": int(
+            autonomy.get("autonomous_maintenance_disabled_skips_24h") or 0
+        ),
+        "stale_running_jobs": int(autonomy.get("stale_running_jobs_count") or 0),
+        "completed_unverified_backlog": int(
+            autonomy.get("completed_unverified_backlog") or 0
+        ),
+        "completed_unverified_overdue": int(autonomy.get("completed_unverified_overdue") or 0),
+        "lost_tasks": int(autonomy.get("lost_tasks") or 0),
+        "failed_tasks": int(autonomy.get("failed_tasks") or 0),
         "current_daemon_window_known": bool(current_window.get("known")),
         "current_daemon_window_missing_reason": current_window.get("missing_reason"),
         "heartbeat_present": heartbeat_present,

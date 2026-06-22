@@ -526,6 +526,142 @@ class JobService:
             statuses=("queued", "running", "waiting_approval", "retrying"), limit=limit
         )
 
+    def recover_stale_running(
+        self,
+        *,
+        stale_after_seconds: float,
+        kinds: Iterable[str] | None = None,
+        now: float | None = None,
+        limit: int = 100,
+        retry_delay_seconds: float = 0.0,
+        error: str = "stale_running_timeout",
+        event_type: str = "stale_running_job_recovered",
+    ) -> list[JobRecord]:
+        """Move stale running jobs back to retrying, or failed at max attempts.
+
+        This is intentionally generic and bounded so daemon recovery lanes can
+        reclaim jobs that were claimed by a worker/thread that disappeared.
+        Recent running jobs are ignored; terminal jobs are never resurrected.
+        """
+        current = time.time() if now is None else float(now)
+        cutoff = current - max(0.001, float(stale_after_seconds))
+        kind_list = [kind for kind in (kinds or []) if kind]
+        where = "status = 'running' AND COALESCE(updated_at, started_at, created_at) <= ?"
+        params: list[Any] = [cutoff]
+        if kind_list:
+            placeholders = ", ".join("?" for _ in kind_list)
+            where += f" AND kind IN ({placeholders})"
+            params.extend(kind_list)
+        params.append(max(1, min(int(limit), 100)))
+
+        def candidate_ids_once() -> list[str]:
+            with self._lock:
+                rows = self._conn.execute(
+                    f"""
+                    SELECT job_id
+                    FROM agent_jobs
+                    WHERE {where}
+                    ORDER BY COALESCE(updated_at, started_at, created_at) ASC
+                    LIMIT ?
+                    """,
+                    params,
+                ).fetchall()
+            return [str(row["job_id"]) for row in rows]
+
+        job_ids = self._retry_after_disk_io(
+            "JobService.recover_stale_running.candidates",
+            candidate_ids_once,
+        )
+        recovered: list[JobRecord] = []
+        for job_id in job_ids:
+            record = self._recover_stale_running_job(
+                job_id,
+                cutoff=cutoff,
+                now=current,
+                retry_delay_seconds=retry_delay_seconds,
+                error=error,
+            )
+            if record is None:
+                continue
+            recovered.append(record)
+            self._emit("job_retrying" if record.status == "retrying" else "job_failed", record)
+            self._emit(event_type, record)
+        return recovered
+
+    def _recover_stale_running_job(
+        self,
+        job_id: str,
+        *,
+        cutoff: float,
+        now: float,
+        retry_delay_seconds: float,
+        error: str,
+    ) -> JobRecord | None:
+        def recover_once() -> sqlite3.Row | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    row = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    if row is None or row["status"] != "running":
+                        self._conn.commit()
+                        return None
+                    reference = float(row["updated_at"] or row["started_at"] or row["created_at"])
+                    if reference > cutoff:
+                        self._conn.commit()
+                        return None
+                    attempts = int(row["attempts"] or 0)
+                    max_attempts = int(row["max_attempts"] or 1)
+                    should_retry = attempts < max_attempts
+                    status = "retrying" if should_retry else "failed"
+                    completed_at = None if should_retry else now
+                    next_run_at = (
+                        now + max(0.0, retry_delay_seconds) if should_retry else row["next_run_at"]
+                    )
+                    checkpoint = _loads_json(row["checkpoint_json"])
+                    checkpoint["stale_running_recovery"] = {
+                        "recovered_at": now,
+                        "age_seconds": max(0.0, now - reference),
+                        "previous_worker_id": row["worker_id"] or "",
+                        "reason": error,
+                    }
+                    self._conn.execute(
+                        """
+                        UPDATE agent_jobs
+                        SET status = ?,
+                            error = ?,
+                            checkpoint_json = ?,
+                            next_run_at = ?,
+                            completed_at = ?,
+                            updated_at = ?
+                        WHERE job_id = ?
+                          AND status = 'running'
+                        """,
+                        (
+                            status,
+                            error,
+                            json.dumps(checkpoint, sort_keys=True),
+                            next_run_at,
+                            completed_at,
+                            now,
+                            job_id,
+                        ),
+                    )
+                    updated = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    self._conn.commit()
+                    return updated
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        row = self._retry_after_disk_io("JobService.recover_stale_running", recover_once)
+        return self._row_to_record(row) if row is not None else None
+
     def _update(
         self,
         job_id: str,

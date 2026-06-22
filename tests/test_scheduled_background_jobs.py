@@ -574,6 +574,54 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(queued_scrape[0].status, "queued")
                 self.assertEqual(len(queued_perf), 1)
                 self.assertEqual(queued_perf[0].status, "queued")
+                disabled_skips = [
+                    event
+                    for event in runtime.observe.recent_events(limit=20)
+                    if event["event_type"] == "scheduled_job_skipped"
+                    and event["payload"].get("reason") == "autonomous_maintenance_disabled"
+                ]
+                self.assertEqual(disabled_skips, [])
+
+    def test_runtime_scheduler_handlers_skip_when_maintenance_disabled(self) -> None:
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+                "CLAW_AUTONOMOUS_MAINTENANCE": "false",
+                "CLAW_AUTONOMOUS_MAINTENANCE_ENABLED": "false",
+                "EVAL_ON_SELF_IMPROVE": "false",
+            }
+
+            with patch.dict("os.environ", env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+
+                jobs["kairos_tick"].handler()
+
+                queued_kairos = runtime.job_service.list(kinds=(KAIROS_TICK_JOB_KIND,), limit=10)
+                self.assertEqual(queued_kairos, [])
+                skips = [
+                    event
+                    for event in runtime.observe.recent_events(limit=20)
+                    if event["event_type"] == "scheduled_job_skipped"
+                ]
+                self.assertEqual(len(skips), 1)
+                self.assertEqual(skips[0]["payload"]["job"], "kairos_tick")
+                self.assertEqual(
+                    skips[0]["payload"]["reason"],
+                    "autonomous_maintenance_disabled",
+                )
 
     async def test_run_loop_processes_kairos_tick_job_outside_tick(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
