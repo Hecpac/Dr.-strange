@@ -847,6 +847,172 @@ class TaskLedger:
             "max_apply": max_apply,
         }
 
+    def reconcile_failed_unverified(
+        self,
+        *,
+        deadline_seconds: float | None = None,
+        apply: bool = False,
+        max_scan: int | None = None,
+        max_apply: int | None = None,
+    ) -> dict[str, Any]:
+        """Bounded review lane for failed ``completed_unverified`` rows.
+
+        A non-empty ``error`` already means the execution did not finish cleanly.
+        If such a row is still parked in ``completed_unverified`` past the
+        reconciliation deadline, this lane can safely move it to the existing
+        terminal ``status='failed'`` / ``verification_status='failed'``. It never
+        marks success, never auto-closes no-error evidence-review cases, and
+        re-reads/re-classifies every row under the ledger lock before applying.
+        """
+        from claw_v2.reconciliation import (
+            DEFAULT_RECONCILIATION_DEADLINE_SECONDS,
+            RECONCILIATION_SCAN_LIMIT,
+            _tools_from_record,
+            recommend_reconciliation_action,
+        )
+
+        if deadline_seconds is None:
+            deadline_seconds = DEFAULT_RECONCILIATION_DEADLINE_SECONDS
+        if max_scan is None:
+            max_scan = RECONCILIATION_SCAN_LIMIT
+        now = time.time()
+        overdue_before = now - float(deadline_seconds)
+        records, scan_capped = self._scan_drainable_candidates(max_scan=max_scan)
+        scanned = len(records)
+
+        skipped_not_failure = 0
+        skipped_not_overdue = 0
+        eligible_ids: list[str] = []
+        for record in records:
+            action = recommend_reconciliation_action(
+                tools=_tools_from_record(record), error=str(record.error or "")
+            )
+            if action != "investigate_failure":
+                skipped_not_failure += 1
+                continue
+            if record.completed_at is not None and float(record.completed_at) < overdue_before:
+                eligible_ids.append(record.task_id)
+            else:
+                skipped_not_overdue += 1
+
+        if max_apply is not None:
+            to_apply = eligible_ids[: max(0, int(max_apply))]
+        else:
+            to_apply = list(eligible_ids)
+        skipped_over_max_apply = len(eligible_ids) - len(to_apply)
+
+        reconciled: list[str] = []
+        reconciled_events: list[dict[str, Any]] = []
+        skipped_state_changed = 0
+        skipped_classification_changed = 0
+        if apply and to_apply:
+            pending = tuple(sorted(NEEDS_VERIFICATION_STATUSES))
+            pending_placeholders = ", ".join("?" for _ in pending)
+            with self._lock:
+                try:
+                    for task_id in to_apply:
+                        row = self._conn.execute(
+                            "SELECT * FROM agent_tasks WHERE task_id = ? "
+                            "AND status = 'completed_unverified' "
+                            f"AND verification_status IN ({pending_placeholders}) "
+                            "AND completed_at < ?",
+                            (task_id, *pending, overdue_before),
+                        ).fetchone()
+                        if row is None:
+                            skipped_state_changed += 1
+                            continue
+                        record = self._row_to_record(row)
+                        if (
+                            recommend_reconciliation_action(
+                                tools=_tools_from_record(record),
+                                error=str(record.error or ""),
+                            )
+                            != "investigate_failure"
+                        ):
+                            skipped_classification_changed += 1
+                            continue
+                        previous_verification = record.verification_status
+                        metadata = dict(record.metadata or {})
+                        metadata.update(
+                            {
+                                "reconciled_failure_review": True,
+                                "failure_review_from_status": "completed_unverified",
+                                "failure_review_from_verification_status": previous_verification,
+                                "failure_review_reason": (
+                                    "error-bearing completed_unverified past "
+                                    "reconciliation deadline"
+                                ),
+                                "failure_review_recommended_action": "investigate_failure",
+                                "failure_reviewed_at": now,
+                            }
+                        )
+                        self._conn.execute(
+                            "UPDATE agent_tasks SET status = 'failed', "
+                            "verification_status = 'failed', metadata_json = ?, updated_at = ? "
+                            "WHERE task_id = ?",
+                            (json.dumps(metadata, sort_keys=True), now, task_id),
+                        )
+                        reconciled.append(task_id)
+                        reconciled_events.append(
+                            {
+                                "task_id": task_id,
+                                "previous_status": "completed_unverified",
+                                "previous_verification_status": previous_verification,
+                                "new_status": "failed",
+                                "new_verification_status": "failed",
+                                "age_seconds": int(now - float(record.completed_at or now)),
+                                "recommended_action": "investigate_failure",
+                                "reason": (
+                                    "reconciled error-bearing completed_unverified row "
+                                    "to failed"
+                                ),
+                                "apply": True,
+                                "dry_run": False,
+                            }
+                        )
+                    if reconciled:
+                        self._conn.commit()
+                except Exception:
+                    self._conn.rollback()
+                    raise
+            for event in reconciled_events:
+                self._emit("pending_verification_failure_reconciled", event)
+
+        summary = {
+            "eligible": len(eligible_ids),
+            "reconciled": len(reconciled),
+            "skipped_not_failure": skipped_not_failure,
+            "skipped_not_overdue": skipped_not_overdue,
+            "skipped_state_changed": skipped_state_changed,
+            "skipped_classification_changed": skipped_classification_changed,
+            "skipped_over_max_apply": skipped_over_max_apply,
+            "scanned": scanned,
+            "scan_capped": scan_capped,
+            "limit": int(max_scan),
+            "max_apply": max_apply,
+            "deadline_seconds": float(deadline_seconds),
+            "apply": apply,
+            "dry_run": not apply,
+        }
+        self._emit("pending_verification_failure_review_summary", summary)
+        return {
+            "apply": apply,
+            "deadline_seconds": float(deadline_seconds),
+            "eligible_task_ids": eligible_ids,
+            "eligible_count": len(eligible_ids),
+            "reconciled_task_ids": reconciled,
+            "reconciled_count": len(reconciled),
+            "skipped_not_failure": skipped_not_failure,
+            "skipped_not_overdue": skipped_not_overdue,
+            "skipped_state_changed": skipped_state_changed,
+            "skipped_classification_changed": skipped_classification_changed,
+            "skipped_over_max_apply": skipped_over_max_apply,
+            "scanned": scanned,
+            "scan_capped": scan_capped,
+            "limit": int(max_scan),
+            "max_apply": max_apply,
+        }
+
     def get(self, task_id: str) -> TaskRecord | None:
         with self._lock:
             row = self._conn.execute(
