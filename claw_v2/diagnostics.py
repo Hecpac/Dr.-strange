@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -24,6 +25,7 @@ DEFAULT_PORT = 8765
 DEFAULT_DB_PATH = Path("data/claw.db")
 DEFAULT_ACK_PATH = Path("data/diagnostics_acks.json")
 HEARTBEAT_STALE_AFTER_S = 180.0
+CLOCK_SKEW_TOLERANCE_S = 60.0
 ACTIONABLE_OBSERVE_EVENT_TYPES = (
     "scheduled_job_error",
     "daemon_tick_error",
@@ -142,6 +144,7 @@ def _database_summary(
                     latest_error_candidates,
                     current_window=current_window,
                     limit=limit,
+                    now=time.time(),
                 )
                 actionable_errors, acknowledged_errors = _partition_acknowledged_events(
                     classified_errors["actionable"],
@@ -289,12 +292,36 @@ def _current_daemon_window(
         }
 
     payload = startup["payload"] if isinstance(startup.get("payload"), dict) else {}
+    boot_timestamp = startup["timestamp"]
+    boot_epoch_s = _parse_observe_timestamp(boot_timestamp)
+    if boot_epoch_s is None:
+        return {
+            "known": False,
+            "source": heartbeat.get("source"),
+            "missing_reason": "invalid_current_boot_timestamp",
+            "startup_event_id": int(startup["id"]),
+            "boot_timestamp": boot_timestamp,
+            "pid": pid,
+            "boot_id": boot_id,
+        }
+    if boot_epoch_s > time.time() + CLOCK_SKEW_TOLERANCE_S:
+        return {
+            "known": False,
+            "source": heartbeat.get("source"),
+            "missing_reason": "future_current_boot_timestamp",
+            "startup_event_id": int(startup["id"]),
+            "boot_timestamp": boot_timestamp,
+            "boot_timestamp_epoch_s": boot_epoch_s,
+            "pid": pid,
+            "boot_id": boot_id,
+        }
     code_version = payload.get("code_version") or payload.get("startup_marker")
     return {
         "known": True,
         "source": heartbeat.get("source"),
         "startup_event_id": int(startup["id"]),
-        "boot_timestamp": startup["timestamp"],
+        "boot_timestamp": boot_timestamp,
+        "boot_timestamp_epoch_s": boot_epoch_s,
         "startup_event_type": startup["event_type"],
         "pid": pid,
         "boot_id": boot_id,
@@ -353,6 +380,7 @@ def _classify_error_events(
     *,
     current_window: dict[str, Any],
     limit: int,
+    now: float | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     buckets: dict[str, list[dict[str, Any]]] = {
         "actionable": [],
@@ -365,12 +393,20 @@ def _classify_error_events(
         buckets["unknown"] = events[:limit]
         return buckets
 
-    boot_timestamp = str(current_window.get("boot_timestamp") or "")
+    boot_epoch_s = current_window.get("boot_timestamp_epoch_s")
+    if not isinstance(boot_epoch_s, (int, float)):
+        buckets["unknown"] = events[:limit]
+        return buckets
     startup_event_id = int(current_window.get("startup_event_id") or 0)
+    current = time.time() if now is None else now
     for event in events:
-        if _event_precedes_current_boot(
+        event_epoch_s = _parse_observe_timestamp(event.get("timestamp"))
+        if event_epoch_s is None or event_epoch_s > current + CLOCK_SKEW_TOLERANCE_S:
+            buckets["unknown"].append(event)
+        elif _event_precedes_current_boot(
             event,
-            boot_timestamp=boot_timestamp,
+            boot_epoch_s=float(boot_epoch_s),
+            event_epoch_s=event_epoch_s,
             startup_event_id=startup_event_id,
         ) or _event_identity_mismatch(event, current_window=current_window):
             buckets["stale"].append(event)
@@ -382,17 +418,32 @@ def _classify_error_events(
 def _event_precedes_current_boot(
     event: dict[str, Any],
     *,
-    boot_timestamp: str,
+    boot_epoch_s: float,
+    event_epoch_s: float,
     startup_event_id: int,
 ) -> bool:
     try:
         event_id = int(event["id"])
     except (KeyError, TypeError, ValueError):
         event_id = 0
-    event_timestamp = str(event.get("timestamp") or "")
-    return event_id <= startup_event_id or (
-        bool(event_timestamp and boot_timestamp) and event_timestamp < boot_timestamp
-    )
+    return event_id <= startup_event_id or event_epoch_s < boot_epoch_s
+
+
+def _parse_observe_timestamp(raw: Any) -> float | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.timestamp()
 
 
 def _event_identity_mismatch(
