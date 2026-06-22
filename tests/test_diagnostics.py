@@ -10,10 +10,12 @@ import time
 import unittest
 from pathlib import Path
 
+from claw_v2 import liveness
 from claw_v2.diagnostics import acknowledge_events, collect_diagnostics, format_text
 from claw_v2.jobs import JobService
 from claw_v2.observe import ObserveStream
 from claw_v2.task_ledger import TaskLedger
+from claw_v2.watchdog import is_restartable
 
 
 def _completed(
@@ -77,11 +79,70 @@ def _leaky_runner(args: list[str], **_: object) -> subprocess.CompletedProcess[s
     return _completed(args, 1, "", "ANTHROPIC_API_KEY=sk-ant-api03-secret-token-123456789\n")
 
 
+def _insert_event_at(
+    db_path: Path,
+    event_type: str,
+    timestamp_modifier: str,
+    payload: dict[str, object],
+) -> int:
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            INSERT INTO observe_stream (timestamp, event_type, payload)
+            VALUES (datetime('now', ?), ?, ?)
+            RETURNING id
+            """,
+            (timestamp_modifier, event_type, json.dumps(payload)),
+        ).fetchone()
+        conn.commit()
+    assert row is not None
+    return int(row[0])
+
+
+def _set_event_timestamp(db_path: Path, event_id: int, timestamp: str) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE observe_stream SET timestamp = ? WHERE id = ?",
+            (timestamp, event_id),
+        )
+        conn.commit()
+
+
+def _seed_current_daemon_window(
+    db_path: Path,
+    *,
+    pid: int = 123,
+    boot_id: str = "boot-current",
+    code_version: str = "test-code",
+    startup_modifier: str = "-10 minutes",
+    sink_ts: float | None = None,
+    web_transport_serving: bool = True,
+) -> None:
+    ObserveStream(db_path)
+    _insert_event_at(
+        db_path,
+        "agent_startup_context",
+        startup_modifier,
+        {"pid": pid, "boot_id": boot_id, "code_version": code_version},
+    )
+    liveness.write_liveness(
+        liveness.liveness_sink_path(db_path.parent),
+        {
+            "pid": pid,
+            "boot_id": boot_id,
+            "ts": time.time() if sink_ts is None else sink_ts,
+            "web_transport_serving": web_transport_serving,
+            "source": "test",
+        },
+    )
+
+
 class DiagnosticsTests(unittest.TestCase):
     def test_collects_process_port_database_jobs_tasks_and_actionable_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "claw.db"
             observe = ObserveStream(db_path)
+            _seed_current_daemon_window(db_path)
             observe.emit(
                 "llm_circuit_open",
                 lane="brain",
@@ -199,6 +260,7 @@ class DiagnosticsTests(unittest.TestCase):
             db_path = Path(tmpdir) / "claw.db"
             ack_path = Path(tmpdir) / "acks.json"
             observe = ObserveStream(db_path)
+            _seed_current_daemon_window(db_path)
             observe.emit("firecrawl_paused", payload={"reason": "insufficient_credits"})
 
             attention = collect_diagnostics(
@@ -482,6 +544,385 @@ class HeartbeatSinkTests(unittest.TestCase):
             self.assertEqual(report["checks"]["status"], "healthy")
             self.assertFalse(report["checks"]["heartbeat_present"])
             self.assertFalse(report["checks"]["heartbeat_stale"])
+
+
+class CurrentDaemonWindowErrorFilteringTests(unittest.TestCase):
+    def test_stale_pre_boot_database_lock_is_not_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path, startup_modifier="-10 minutes")
+            _insert_event_at(
+                db_path,
+                "daemon_tick_error",
+                "-20 minutes",
+                {"error": "database is locked", "pid": 123, "boot_id": "boot-current"},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "healthy")
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["stale_error_events"], 1)
+            self.assertFalse(is_restartable(report["checks"]))
+            self.assertEqual(report["database"]["observe"]["latest_errors"], [])
+            self.assertEqual(
+                report["database"]["observe"]["stale_historical_errors"][0]["event_type"],
+                "daemon_tick_error",
+            )
+
+    def test_stale_pre_boot_traceback_is_not_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path, startup_modifier="-10 minutes")
+            _insert_event_at(
+                db_path,
+                "scheduled_job_error",
+                "-30 minutes",
+                {"traceback": "Traceback: RuntimeError before this daemon boot"},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "healthy")
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["stale_error_events"], 1)
+            self.assertFalse(is_restartable(report["checks"]))
+
+    def test_post_boot_database_lock_is_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path, startup_modifier="-10 minutes")
+            _insert_event_at(
+                db_path,
+                "daemon_tick_error",
+                "-5 minutes",
+                {"error": "database is locked", "pid": 123, "boot_id": "boot-current"},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "attention")
+            self.assertEqual(report["checks"]["recent_error_events"], 1)
+            self.assertEqual(report["checks"]["stale_error_events"], 0)
+            self.assertEqual(
+                report["database"]["observe"]["latest_errors"][0]["payload"]["error"],
+                "database is locked",
+            )
+
+    def test_post_boot_daemon_lifecycle_error_is_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path, startup_modifier="-10 minutes")
+            _insert_event_at(
+                db_path,
+                "daemon_tick_error",
+                "-5 minutes",
+                {"error": "tick failed", "traceback": "Traceback: RuntimeError"},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "attention")
+            self.assertEqual(report["checks"]["recent_error_events"], 1)
+            self.assertEqual(
+                report["database"]["observe"]["latest_errors"][0]["event_type"],
+                "daemon_tick_error",
+            )
+
+    def test_llm_narrative_database_lock_match_is_not_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path, startup_modifier="-10 minutes")
+            _insert_event_at(
+                db_path,
+                "llm_response",
+                "-5 minutes",
+                {"text": "The previous incident said database is locked, but this is prose."},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "healthy")
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["narrative_non_error_matches"], 1)
+            self.assertEqual(
+                report["database"]["observe"]["narrative_non_error_matches"][0]["event_type"],
+                "llm_response",
+            )
+
+    def test_fresh_liveness_with_stale_historical_errors_is_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path, startup_modifier="-10 minutes")
+            for index in range(5):
+                _insert_event_at(
+                    db_path,
+                    "daemon_tick_error",
+                    "-20 minutes",
+                    {"error": "database is locked", "sequence": index},
+                )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "healthy")
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["stale_error_events"], 5)
+            self.assertFalse(report["checks"]["heartbeat_stale"])
+
+    def test_stale_liveness_is_actionable_even_without_observe_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path, sink_ts=time.time() - 600)
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "critical")
+            self.assertTrue(report["checks"]["heartbeat_stale"])
+            self.assertTrue(is_restartable(report["checks"]))
+
+    def test_current_pid_and_boot_reset_the_relevant_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            ObserveStream(db_path)
+            _insert_event_at(
+                db_path,
+                "agent_startup_context",
+                "-30 minutes",
+                {"pid": 111, "boot_id": "old-boot", "code_version": "old"},
+            )
+            _insert_event_at(
+                db_path,
+                "daemon_tick_error",
+                "-20 minutes",
+                {"error": "old daemon failed", "pid": 111, "boot_id": "old-boot"},
+            )
+            _seed_current_daemon_window(
+                db_path,
+                pid=222,
+                boot_id="new-boot",
+                code_version="new",
+                startup_modifier="-10 minutes",
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertTrue(report["checks"]["current_daemon_window_known"])
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["stale_error_events"], 1)
+            self.assertEqual(
+                report["database"]["observe"]["current_daemon_window"]["pid"],
+                222,
+            )
+
+    def test_identity_mismatch_after_boot_is_stale_not_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(
+                db_path,
+                pid=222,
+                boot_id="new-boot",
+                code_version="new",
+                startup_modifier="-10 minutes",
+            )
+            _insert_event_at(
+                db_path,
+                "daemon_tick_error",
+                "-5 minutes",
+                {
+                    "error": "previous boot emitted late",
+                    "pid": 111,
+                    "boot_id": "old-boot",
+                    "code_version": "old",
+                },
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["stale_error_events"], 1)
+
+    def test_missing_current_window_marks_error_relevance_unknown_not_restartable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            ObserveStream(db_path)
+            _insert_event_at(
+                db_path,
+                "daemon_tick_error",
+                "-5 minutes",
+                {"error": "database is locked"},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "attention")
+            self.assertFalse(report["checks"]["current_daemon_window_known"])
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["unknown_relevance_error_events"], 1)
+            self.assertFalse(is_restartable(report["checks"]))
+
+    def test_corrupt_liveness_sink_marks_error_relevance_unknown_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            ObserveStream(db_path)
+            liveness.liveness_sink_path(db_path.parent).write_text("{not-json", encoding="utf-8")
+            _insert_event_at(
+                db_path,
+                "daemon_tick_error",
+                "-5 minutes",
+                {"error": "database is locked"},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "attention")
+            self.assertFalse(report["checks"]["current_daemon_window_known"])
+            self.assertEqual(
+                report["checks"]["current_daemon_window_missing_reason"],
+                "missing_current_daemon_identity",
+            )
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["unknown_relevance_error_events"], 1)
+            self.assertFalse(is_restartable(report["checks"]))
+
+    def test_malformed_event_timestamp_is_unknown_not_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path, startup_modifier="-10 minutes")
+            event_id = _insert_event_at(
+                db_path,
+                "daemon_tick_error",
+                "-5 minutes",
+                {"error": "database is locked"},
+            )
+            _set_event_timestamp(db_path, event_id, "not-a-timestamp")
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "attention")
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["unknown_relevance_error_events"], 1)
+            self.assertFalse(is_restartable(report["checks"]))
+
+    def test_future_skewed_event_timestamp_is_unknown_not_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path, startup_modifier="-10 minutes")
+            _insert_event_at(
+                db_path,
+                "daemon_tick_error",
+                "+1 day",
+                {"error": "database is locked"},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "attention")
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["unknown_relevance_error_events"], 1)
+            self.assertFalse(is_restartable(report["checks"]))
+
+    def test_malformed_current_boot_timestamp_makes_window_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path, startup_modifier="-10 minutes")
+            startup_id = 1
+            _set_event_timestamp(db_path, startup_id, "bad-startup-timestamp")
+            _insert_event_at(
+                db_path,
+                "daemon_tick_error",
+                "-5 minutes",
+                {"error": "database is locked"},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertFalse(report["checks"]["current_daemon_window_known"])
+            self.assertEqual(
+                report["checks"]["current_daemon_window_missing_reason"],
+                "invalid_current_boot_timestamp",
+            )
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["unknown_relevance_error_events"], 1)
+
+    def test_future_current_boot_timestamp_makes_window_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path, startup_modifier="+1 day")
+            _insert_event_at(
+                db_path,
+                "daemon_tick_error",
+                "-5 minutes",
+                {"error": "database is locked"},
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertFalse(report["checks"]["current_daemon_window_known"])
+            self.assertEqual(
+                report["checks"]["current_daemon_window_missing_reason"],
+                "future_current_boot_timestamp",
+            )
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["unknown_relevance_error_events"], 1)
+
+    def test_current_startup_event_only_establishes_window_without_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path, startup_modifier="-10 minutes")
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "healthy")
+            self.assertTrue(report["checks"]["current_daemon_window_known"])
+            self.assertEqual(report["checks"]["recent_error_events"], 0)
+            self.assertEqual(report["checks"]["stale_error_events"], 0)
+            self.assertEqual(report["checks"]["unknown_relevance_error_events"], 0)
+
+    def test_filter_report_separates_actionable_stale_narrative_and_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            known_db = Path(tmpdir) / "known.db"
+            _seed_current_daemon_window(known_db, startup_modifier="-10 minutes")
+            _insert_event_at(
+                known_db,
+                "scheduled_job_error",
+                "-20 minutes",
+                {"error": "stale"},
+            )
+            _insert_event_at(
+                known_db,
+                "daemon_tick_error",
+                "-5 minutes",
+                {"error": "current"},
+            )
+            _insert_event_at(
+                known_db,
+                "llm_decision",
+                "-5 minutes",
+                {"thought": "database is locked appears in narrative"},
+            )
+
+            known = collect_diagnostics(
+                db_path=known_db, port=8765, runner=_healthy_runner, limit=10
+            )
+
+            self.assertEqual(known["checks"]["recent_error_events"], 1)
+            self.assertEqual(known["checks"]["stale_error_events"], 1)
+            self.assertEqual(known["checks"]["narrative_non_error_matches"], 1)
+
+            unknown_db = Path(tmpdir) / "unknown.db"
+            ObserveStream(unknown_db)
+            _insert_event_at(
+                unknown_db,
+                "daemon_tick_error",
+                "-5 minutes",
+                {"error": "unclassified"},
+            )
+            unknown = collect_diagnostics(
+                db_path=unknown_db, port=8765, runner=_healthy_runner, limit=10
+            )
+
+            self.assertEqual(unknown["checks"]["unknown_relevance_error_events"], 1)
+            self.assertEqual(unknown["checks"]["recent_error_events"], 0)
 
 
 class AcknowledgementConcurrencyTests(unittest.TestCase):

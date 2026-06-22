@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -24,6 +25,32 @@ DEFAULT_PORT = 8765
 DEFAULT_DB_PATH = Path("data/claw.db")
 DEFAULT_ACK_PATH = Path("data/diagnostics_acks.json")
 HEARTBEAT_STALE_AFTER_S = 180.0
+CLOCK_SKEW_TOLERANCE_S = 60.0
+ACTIONABLE_OBSERVE_EVENT_TYPES = (
+    "scheduled_job_error",
+    "daemon_tick_error",
+    "llm_circuit_open",
+    "llm_circuit_blocked",
+    "nlm_research_failed",
+    "nlm_research_degraded",
+    "firecrawl_paused",
+    "auto_research_adapter_error",
+    "perf_optimizer_paused",
+    "pipeline_poll_degraded",
+    "telegram_transport_stop_error",
+    "computer_session_failed",
+    "computer_browser_use_timeout",
+    "computer_screenshot_failed",
+    "computer_approval_screenshot_failed",
+)
+NARRATIVE_EVENT_TYPES = ("llm_decision", "llm_response")
+NARRATIVE_ERROR_PATTERNS = (
+    "database is locked",
+    "runtime_db",
+    "runtimedb",
+    "sqlite",
+    "wal",
+)
 
 
 def collect_diagnostics(
@@ -99,42 +126,42 @@ def _database_summary(
         try:
             summary: dict[str, Any] = {"present": True}
             if _table_exists(conn, "observe_stream"):
-                summary["heartbeat"] = _heartbeat_summary(conn)
-                latest_errors = _latest_events(
+                heartbeat = _heartbeat_summary(conn)
+                summary["heartbeat"] = heartbeat
+                current_window = _current_daemon_window(conn, heartbeat=heartbeat)
+                latest_error_candidates = _latest_events(
                     conn,
-                    event_types=(
-                        "scheduled_job_error",
-                        "daemon_tick_error",
-                        "llm_circuit_open",
-                        "llm_circuit_blocked",
-                        "nlm_research_failed",
-                        "nlm_research_degraded",
-                        "firecrawl_paused",
-                        "auto_research_adapter_error",
-                        "perf_optimizer_paused",
-                        "pipeline_poll_degraded",
-                        "telegram_transport_stop_error",
-                        "computer_session_failed",
-                        "computer_browser_use_timeout",
-                        "computer_screenshot_failed",
-                        "computer_approval_screenshot_failed",
-                    ),
-                    limit=limit,
+                    event_types=ACTIONABLE_OBSERVE_EVENT_TYPES,
+                    limit=limit * 5,
                     hours=24,
                 )
-                latest_errors = _merge_events(
-                    latest_errors,
-                    _latest_computer_use_errors(conn, limit=limit, hours=24),
+                latest_error_candidates = _merge_events(
+                    latest_error_candidates,
+                    _latest_computer_use_errors(conn, limit=limit * 5, hours=24),
+                    limit=limit * 5,
+                )
+                classified_errors = _classify_error_events(
+                    latest_error_candidates,
+                    current_window=current_window,
                     limit=limit,
+                    now=time.time(),
                 )
                 actionable_errors, acknowledged_errors = _partition_acknowledged_events(
-                    latest_errors,
+                    classified_errors["actionable"],
                     acknowledgements or {},
                 )
                 summary["observe"] = {
                     "recent_events": _recent_events(conn, limit=limit),
                     "event_counts_24h": _event_counts_24h(conn),
+                    "current_daemon_window": current_window,
                     "latest_errors": actionable_errors,
+                    "stale_historical_errors": classified_errors["stale"],
+                    "unknown_relevance_errors": classified_errors["unknown"],
+                    "narrative_non_error_matches": _latest_narrative_error_mentions(
+                        conn,
+                        limit=limit,
+                        hours=24,
+                    ),
                     "acknowledged_errors": acknowledged_errors,
                 }
             else:
@@ -238,6 +265,233 @@ def _latest_computer_use_errors(
     return [_event_row(row) for row in rows]
 
 
+def _current_daemon_window(
+    conn: sqlite3.Connection,
+    *,
+    heartbeat: dict[str, Any],
+) -> dict[str, Any]:
+    pid = heartbeat.get("pid")
+    boot_id = heartbeat.get("boot_id")
+    if pid is None and not boot_id:
+        return {
+            "known": False,
+            "source": heartbeat.get("source"),
+            "missing_reason": "missing_current_daemon_identity",
+            "pid": pid,
+            "boot_id": boot_id,
+        }
+
+    startup = _find_current_startup_event(conn, pid=pid, boot_id=boot_id)
+    if startup is None:
+        return {
+            "known": False,
+            "source": heartbeat.get("source"),
+            "missing_reason": "missing_current_startup_event",
+            "pid": pid,
+            "boot_id": boot_id,
+        }
+
+    payload = startup["payload"] if isinstance(startup.get("payload"), dict) else {}
+    boot_timestamp = startup["timestamp"]
+    boot_epoch_s = _parse_observe_timestamp(boot_timestamp)
+    if boot_epoch_s is None:
+        return {
+            "known": False,
+            "source": heartbeat.get("source"),
+            "missing_reason": "invalid_current_boot_timestamp",
+            "startup_event_id": int(startup["id"]),
+            "boot_timestamp": boot_timestamp,
+            "pid": pid,
+            "boot_id": boot_id,
+        }
+    if boot_epoch_s > time.time() + CLOCK_SKEW_TOLERANCE_S:
+        return {
+            "known": False,
+            "source": heartbeat.get("source"),
+            "missing_reason": "future_current_boot_timestamp",
+            "startup_event_id": int(startup["id"]),
+            "boot_timestamp": boot_timestamp,
+            "boot_timestamp_epoch_s": boot_epoch_s,
+            "pid": pid,
+            "boot_id": boot_id,
+        }
+    code_version = payload.get("code_version") or payload.get("startup_marker")
+    return {
+        "known": True,
+        "source": heartbeat.get("source"),
+        "startup_event_id": int(startup["id"]),
+        "boot_timestamp": boot_timestamp,
+        "boot_timestamp_epoch_s": boot_epoch_s,
+        "startup_event_type": startup["event_type"],
+        "pid": pid,
+        "boot_id": boot_id,
+        "code_version": code_version,
+    }
+
+
+def _find_current_startup_event(
+    conn: sqlite3.Connection,
+    *,
+    pid: Any,
+    boot_id: Any,
+) -> dict[str, Any] | None:
+    for event_type in ("agent_startup_context", "startup_healthcheck_ok"):
+        row = _find_startup_event(conn, event_type=event_type, pid=pid, boot_id=boot_id)
+        if row is not None:
+            return _event_row(row)
+    return None
+
+
+def _find_startup_event(
+    conn: sqlite3.Connection,
+    *,
+    event_type: str,
+    pid: Any,
+    boot_id: Any,
+) -> sqlite3.Row | None:
+    identity_filters: list[str] = []
+    params: list[Any] = [event_type]
+    if pid is not None:
+        identity_filters.append("CAST(json_extract(payload, '$.pid') AS TEXT) = ?")
+        params.append(str(pid))
+    if boot_id:
+        identity_filters.append(
+            "(json_extract(payload, '$.boot_id') IS NULL "
+            "OR CAST(json_extract(payload, '$.boot_id') AS TEXT) = ?)"
+        )
+        params.append(str(boot_id))
+    if not identity_filters:
+        return None
+    where = " AND ".join(["event_type = ?", *identity_filters])
+    return conn.execute(
+        f"""
+        SELECT id, timestamp, event_type, lane, provider, model, trace_id, job_id, artifact_id, payload
+        FROM observe_stream
+        WHERE {where}
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        params,
+    ).fetchone()
+
+
+def _classify_error_events(
+    events: list[dict[str, Any]],
+    *,
+    current_window: dict[str, Any],
+    limit: int,
+    now: float | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "actionable": [],
+        "stale": [],
+        "unknown": [],
+    }
+    if not events:
+        return buckets
+    if not current_window.get("known"):
+        buckets["unknown"] = events[:limit]
+        return buckets
+
+    boot_epoch_s = current_window.get("boot_timestamp_epoch_s")
+    if not isinstance(boot_epoch_s, (int, float)):
+        buckets["unknown"] = events[:limit]
+        return buckets
+    startup_event_id = int(current_window.get("startup_event_id") or 0)
+    current = time.time() if now is None else now
+    for event in events:
+        event_epoch_s = _parse_observe_timestamp(event.get("timestamp"))
+        if event_epoch_s is None or event_epoch_s > current + CLOCK_SKEW_TOLERANCE_S:
+            buckets["unknown"].append(event)
+        elif _event_precedes_current_boot(
+            event,
+            boot_epoch_s=float(boot_epoch_s),
+            event_epoch_s=event_epoch_s,
+            startup_event_id=startup_event_id,
+        ) or _event_identity_mismatch(event, current_window=current_window):
+            buckets["stale"].append(event)
+        else:
+            buckets["actionable"].append(event)
+    return {name: values[:limit] for name, values in buckets.items()}
+
+
+def _event_precedes_current_boot(
+    event: dict[str, Any],
+    *,
+    boot_epoch_s: float,
+    event_epoch_s: float,
+    startup_event_id: int,
+) -> bool:
+    try:
+        event_id = int(event["id"])
+    except (KeyError, TypeError, ValueError):
+        event_id = 0
+    return event_id <= startup_event_id or event_epoch_s < boot_epoch_s
+
+
+def _parse_observe_timestamp(raw: Any) -> float | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.timestamp()
+
+
+def _event_identity_mismatch(
+    event: dict[str, Any],
+    *,
+    current_window: dict[str, Any],
+) -> bool:
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    for key in ("pid", "boot_id", "code_version"):
+        event_value = payload.get(key)
+        window_value = current_window.get(key)
+        if event_value is None or window_value is None:
+            continue
+        if str(event_value) != str(window_value):
+            return True
+    return False
+
+
+def _latest_narrative_error_mentions(
+    conn: sqlite3.Connection,
+    *,
+    limit: int,
+    hours: int | None = None,
+) -> list[dict[str, Any]]:
+    params: list[Any] = [*NARRATIVE_EVENT_TYPES]
+    age_filter = ""
+    if hours is not None:
+        age_filter = "AND timestamp >= datetime('now', ?)"
+        params.append(f"-{hours} hours")
+    pattern_filter = " OR ".join("lower(payload) LIKE ?" for _ in NARRATIVE_ERROR_PATTERNS)
+    params.extend(f"%{pattern}%" for pattern in NARRATIVE_ERROR_PATTERNS)
+    params.append(limit)
+    placeholders = ",".join("?" for _ in NARRATIVE_EVENT_TYPES)
+    rows = conn.execute(
+        f"""
+        SELECT id, timestamp, event_type, lane, provider, model, trace_id, job_id, artifact_id, payload
+        FROM observe_stream
+        WHERE event_type IN ({placeholders})
+          {age_filter}
+          AND ({pattern_filter})
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [_event_row(row) for row in rows]
+
+
 def _merge_events(*event_groups: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     by_id: dict[int, dict[str, Any]] = {}
     for group in event_groups:
@@ -321,6 +575,8 @@ def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) ->
         "ts": raw_ts,
         "age_s": age_s,
         "web_transport_serving": web_serving,
+        "pid": payload.get("pid") if isinstance(payload, dict) else None,
+        "boot_id": payload.get("boot_id") if isinstance(payload, dict) else None,
         "source": "observe_stream",
     }
 
@@ -543,8 +799,13 @@ def _checks(
     db_ok = bool(database.get("present")) and not database.get("error")
     active_jobs = len((database.get("jobs") or {}).get("active") or [])
     active_tasks = len((database.get("tasks") or {}).get("active") or [])
-    latest_errors = len((database.get("observe") or {}).get("latest_errors") or [])
-    acknowledged_errors = len((database.get("observe") or {}).get("acknowledged_errors") or [])
+    observe = database.get("observe") or {}
+    latest_errors = len(observe.get("latest_errors") or [])
+    stale_errors = len(observe.get("stale_historical_errors") or [])
+    unknown_errors = len(observe.get("unknown_relevance_errors") or [])
+    narrative_matches = len(observe.get("narrative_non_error_matches") or [])
+    acknowledged_errors = len(observe.get("acknowledged_errors") or [])
+    current_window = observe.get("current_daemon_window") or {}
     heartbeat = database.get("heartbeat") or {}
     heartbeat_age = heartbeat.get("age_s")
     heartbeat_present = bool(heartbeat.get("present"))
@@ -566,6 +827,7 @@ def _checks(
         and db_ok
         and launchd_ok
         and latest_errors == 0
+        and unknown_errors == 0
         and not heartbeat_stale
         and not web_thread_dead
         else "attention"
@@ -587,7 +849,12 @@ def _checks(
         "active_jobs": active_jobs,
         "active_tasks": active_tasks,
         "recent_error_events": latest_errors,
+        "stale_error_events": stale_errors,
+        "unknown_relevance_error_events": unknown_errors,
+        "narrative_non_error_matches": narrative_matches,
         "acknowledged_error_events": acknowledged_errors,
+        "current_daemon_window_known": bool(current_window.get("known")),
+        "current_daemon_window_missing_reason": current_window.get("missing_reason"),
         "heartbeat_present": heartbeat_present,
         "heartbeat_age_s": heartbeat_age,
         "heartbeat_stale": heartbeat_stale,
@@ -633,10 +900,36 @@ def format_text(report: dict[str, Any]) -> str:
             f"Heartbeat: age={age_text} web_transport_serving={heartbeat.get('web_transport_serving')}"
         )
     observe = database.get("observe") or {}
+    current_window = observe.get("current_daemon_window") or {}
+    if current_window:
+        lines.append("")
+        lines.append(
+            "Current daemon window: "
+            f"known={current_window.get('known')} "
+            f"pid={current_window.get('pid')} "
+            f"boot_id={current_window.get('boot_id')} "
+            f"boot_timestamp={current_window.get('boot_timestamp')} "
+            f"missing_reason={current_window.get('missing_reason')}"
+        )
     if observe.get("latest_errors"):
         lines.append("")
         lines.append("Recent actionable events:")
         for event in observe["latest_errors"][:5]:
+            lines.append(f"- {event['timestamp']} {event['event_type']} {event['payload']}")
+    if observe.get("stale_historical_errors"):
+        lines.append("")
+        lines.append("Stale historical events:")
+        for event in observe["stale_historical_errors"][:5]:
+            lines.append(f"- {event['timestamp']} {event['event_type']} {event['payload']}")
+    if observe.get("unknown_relevance_errors"):
+        lines.append("")
+        lines.append("Unknown-relevance events:")
+        for event in observe["unknown_relevance_errors"][:5]:
+            lines.append(f"- {event['timestamp']} {event['event_type']} {event['payload']}")
+    if observe.get("narrative_non_error_matches"):
+        lines.append("")
+        lines.append("Narrative non-error matches:")
+        for event in observe["narrative_non_error_matches"][:5]:
             lines.append(f"- {event['timestamp']} {event['event_type']} {event['payload']}")
     if observe.get("acknowledged_errors"):
         lines.append("")
