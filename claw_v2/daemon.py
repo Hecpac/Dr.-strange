@@ -559,23 +559,29 @@ class PendingVerificationReconciliationJobRunner:
         if not drain_apply:
             return result
 
+        drain_max_scan = int(payload.get("drain_max_scan", 500))
+        drain_max_apply = int(payload.get("drain_max_apply", 10))
         try:
             drain_result = self.task_ledger.drain_reconcilable_unverified(
                 apply=True,
-                max_scan=int(payload.get("drain_max_scan", 500)),
-                max_apply=int(payload.get("drain_max_apply", 10)),
+                max_scan=drain_max_scan,
+                max_apply=drain_max_apply,
             )
         except Exception as exc:
             logger.exception("pending verification drain failed")
             result["drain_error"] = str(exc)
             return result
 
-        result["drain_result"] = _compact_drain_result(drain_result)
+        compact_drain_result = _compact_drain_result(drain_result)
+        result["drain_result"] = compact_drain_result
+        remaining_apply_budget = max(
+            0, drain_max_apply - _applied_count_from_drain_result(compact_drain_result)
+        )
         try:
             failure_review_result = self.task_ledger.reconcile_failed_unverified(
                 apply=True,
-                max_scan=int(payload.get("drain_max_scan", 500)),
-                max_apply=int(payload.get("drain_max_apply", 10)),
+                max_scan=drain_max_scan,
+                max_apply=remaining_apply_budget,
             )
         except Exception as exc:
             logger.exception("pending verification failure review failed")
@@ -721,6 +727,18 @@ def _compact_drain_result(value: Any) -> dict[str, Any]:
         if isinstance(raw, (str, int, float, bool, list, dict)) or raw is None:
             compact[key] = raw
     return compact
+
+
+def _applied_count_from_drain_result(value: dict[str, Any]) -> int:
+    for key in ("drained_count", "closed", "applied"):
+        raw = value.get(key)
+        if raw is None:
+            continue
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 0
+    return 0
 
 
 def _safe_error_preview(exc: BaseException) -> str:

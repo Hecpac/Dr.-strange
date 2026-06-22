@@ -244,6 +244,40 @@ class DaemonTickTests(unittest.TestCase):
             self.assertEqual(job.result["drain_result"], {"applied": 0})
             self.assertEqual(job.result["failure_review_result"], {"reconciled_count": 0})
 
+    def test_drain_enabled_shares_apply_cap_across_reconciliation_lanes(self) -> None:
+        # FIX1: the daemon-level max_apply is an aggregate budget across the
+        # read-only drain and failure-review lanes, not a per-lane multiplier.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            ledger.list.return_value = []
+            ledger.drain_reconcilable_unverified.return_value = {"drained_count": 7}
+            ledger.reconcile_failed_unverified.return_value = {"reconciled_count": 3}
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(
+                ledger,
+                job_service=jobs,
+                pending_verification_drain_apply=True,
+                pending_verification_drain_max_apply=10,
+            )
+            daemon.tick(now=1_000_000)
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+            )
+
+            self.assertTrue(runner.run_once())
+
+            _, drain_kwargs = ledger.drain_reconcilable_unverified.call_args
+            _, failure_kwargs = ledger.reconcile_failed_unverified.call_args
+            self.assertEqual(drain_kwargs["max_apply"], 10)
+            self.assertEqual(failure_kwargs["max_apply"], 3)
+            job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "completed")
+            self.assertEqual(job.result["drain_result"], {"drained_count": 7})
+            self.assertEqual(job.result["failure_review_result"], {"reconciled_count": 3})
+
     def test_drain_failure_does_not_crash_tick(self) -> None:
         # D: a drain exception must be contained in the job result.
         with tempfile.TemporaryDirectory() as tmpdir:
