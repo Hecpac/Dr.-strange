@@ -571,6 +571,18 @@ class PendingVerificationReconciliationJobRunner:
             return result
 
         result["drain_result"] = _compact_drain_result(drain_result)
+        try:
+            failure_review_result = self.task_ledger.reconcile_failed_unverified(
+                apply=True,
+                max_scan=int(payload.get("drain_max_scan", 500)),
+                max_apply=int(payload.get("drain_max_apply", 10)),
+            )
+        except Exception as exc:
+            logger.exception("pending verification failure review failed")
+            result["failure_review_error"] = str(exc)
+            return result
+
+        result["failure_review_result"] = _compact_drain_result(failure_review_result)
         return result
 
     def _should_stop(self) -> bool:

@@ -201,6 +201,7 @@ class DaemonTickTests(unittest.TestCase):
             self.assertTrue(runner.run_once())
 
             ledger.drain_reconcilable_unverified.assert_not_called()
+            ledger.reconcile_failed_unverified.assert_not_called()
             job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
             self.assertEqual(job.status, "completed")
             self.assertFalse(job.result["drain_apply"])
@@ -212,6 +213,7 @@ class DaemonTickTests(unittest.TestCase):
             ledger.mark_stale_running_lost.return_value = 0
             ledger.list.return_value = []
             ledger.drain_reconcilable_unverified.return_value = {"applied": 0}
+            ledger.reconcile_failed_unverified.return_value = {"reconciled_count": 0}
             jobs = JobService(Path(tmpdir) / "claw.db")
             daemon, observe = self._make_daemon_with_ledger(
                 ledger,
@@ -232,9 +234,15 @@ class DaemonTickTests(unittest.TestCase):
             self.assertTrue(kwargs["apply"])
             self.assertEqual(kwargs["max_apply"], 10)
             self.assertEqual(kwargs["max_scan"], 500)
+            ledger.reconcile_failed_unverified.assert_called_once()
+            _, failure_kwargs = ledger.reconcile_failed_unverified.call_args
+            self.assertTrue(failure_kwargs["apply"])
+            self.assertEqual(failure_kwargs["max_apply"], 10)
+            self.assertEqual(failure_kwargs["max_scan"], 500)
             job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
             self.assertEqual(job.status, "completed")
             self.assertEqual(job.result["drain_result"], {"applied": 0})
+            self.assertEqual(job.result["failure_review_result"], {"reconciled_count": 0})
 
     def test_drain_failure_does_not_crash_tick(self) -> None:
         # D: a drain exception must be contained in the job result.
@@ -261,6 +269,35 @@ class DaemonTickTests(unittest.TestCase):
             job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
             self.assertEqual(job.status, "completed")
             self.assertEqual(job.result["drain_error"], "boom")
+            ledger.reconcile_failed_unverified.assert_not_called()
+
+    def test_failure_review_failure_does_not_crash_tick(self) -> None:
+        # O3B: failure-review exceptions are contained in the job result.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            ledger.list.return_value = []
+            ledger.drain_reconcilable_unverified.return_value = {"applied": 0}
+            ledger.reconcile_failed_unverified.side_effect = RuntimeError("review boom")
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            daemon, observe = self._make_daemon_with_ledger(
+                ledger,
+                job_service=jobs,
+                pending_verification_drain_apply=True,
+            )
+            daemon.tick(now=1_000_000)
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+            )
+
+            self.assertTrue(runner.run_once())
+
+            job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "completed")
+            self.assertEqual(job.result["drain_result"], {"applied": 0})
+            self.assertEqual(job.result["failure_review_error"], "review boom")
 
     def test_stale_running_reconciliation_job_is_reclaimed_and_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

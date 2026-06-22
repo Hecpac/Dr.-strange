@@ -450,6 +450,71 @@ class DrainReconcilableUnverifiedTests(unittest.TestCase):
         self.assertEqual(result2["drained_count"], 0)
         self.assertEqual(result2["eligible_task_ids"], [])
 
+    def test_failure_review_reconciles_only_error_bearing_rows(self) -> None:
+        self._seed_unverified("mut-error", ["Bash", "Write"], error="write failed")
+        self._seed_unverified("readonly-error", ["Read"], error="lookup failed")
+        self._seed_unverified("delegate-review", ["mcp__claw__delegate_task"])
+        self._seed_unverified("mut-no-error", ["Bash", "Write"])
+
+        result = self.ledger.reconcile_failed_unverified(apply=True)
+
+        self.assertEqual(result["eligible_task_ids"], ["mut-error", "readonly-error"])
+        self.assertEqual(result["reconciled_count"], 2)
+        self.assertEqual(self.ledger.get("mut-error").status, "failed")
+        self.assertEqual(self._verification_status("mut-error"), "failed")
+        self.assertTrue(self.ledger.get("mut-error").metadata.get("reconciled_failure_review"))
+        self.assertEqual(self.ledger.get("readonly-error").status, "failed")
+        self.assertEqual(self.ledger.get("delegate-review").status, "completed_unverified")
+        self.assertEqual(self._verification_status("delegate-review"), "needs_verification")
+        self.assertEqual(self.ledger.get("mut-no-error").status, "completed_unverified")
+
+        events = self._payloads("pending_verification_failure_reconciled")
+        self.assertEqual({event["task_id"] for event in events}, {"mut-error", "readonly-error"})
+        self.assertTrue(all(event["new_status"] == "failed" for event in events))
+
+    def test_failure_review_dry_run_lists_without_mutation(self) -> None:
+        self._seed_unverified("mut-error", ["Bash", "Write"], error="write failed")
+
+        result = self.ledger.reconcile_failed_unverified(apply=False)
+
+        self.assertEqual(result["eligible_task_ids"], ["mut-error"])
+        self.assertEqual(result["reconciled_count"], 0)
+        self.assertEqual(self.ledger.get("mut-error").status, "completed_unverified")
+        self.assertEqual(self._payloads("pending_verification_failure_reconciled"), [])
+        summaries = self._payloads("pending_verification_failure_review_summary")
+        self.assertEqual(summaries[-1]["eligible"], 1)
+        self.assertFalse(summaries[-1]["apply"])
+
+    def test_failure_review_revalidates_classification_under_lock(self) -> None:
+        self._seed_unverified("delegate-review", ["mcp__claw__delegate_task"])
+        with mock.patch.object(
+            self.ledger,
+            "_scan_drainable_candidates",
+            return_value=(
+                [self._fake_scan_record("delegate-review", ["Read"], error="stale error")],
+                False,
+            ),
+        ):
+            result = self.ledger.reconcile_failed_unverified(apply=True)
+
+        self.assertEqual(result["eligible_count"], 1)
+        self.assertEqual(result["reconciled_count"], 0)
+        self.assertEqual(result["skipped_classification_changed"], 1)
+        self.assertEqual(self.ledger.get("delegate-review").status, "completed_unverified")
+        self.assertEqual(self._payloads("pending_verification_failure_reconciled"), [])
+
+    def test_failure_review_max_apply_caps_reconciliations(self) -> None:
+        for i in range(3):
+            self._seed_unverified(f"err{i}", ["Bash"], error=f"boom {i}")
+
+        result = self.ledger.reconcile_failed_unverified(apply=True, max_apply=2)
+
+        self.assertEqual(result["eligible_count"], 3)
+        self.assertEqual(result["reconciled_count"], 2)
+        self.assertEqual(result["skipped_over_max_apply"], 1)
+        failed = sum(1 for i in range(3) if self.ledger.get(f"err{i}").status == "failed")
+        self.assertEqual(failed, 2)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
