@@ -837,7 +837,11 @@ def _stale_running_jobs(
     jobs: list[dict[str, Any]] = []
     for row in rows:
         data = _redacted_row_dict(row)
-        reference = data.get("updated_at") or data.get("started_at") or data.get("created_at")
+        reference = _first_not_none(
+            data.get("updated_at"),
+            data.get("started_at"),
+            data.get("created_at"),
+        )
         if isinstance(reference, (int, float)):
             data["age_seconds"] = max(0.0, now - float(reference))
         jobs.append(data)
@@ -889,6 +893,13 @@ def _loads_json(raw: Any) -> Any:
         return json.loads(str(raw))
     except json.JSONDecodeError:
         return {"raw": str(raw)[:1000]}
+
+
+def _first_not_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 
 def _load_acknowledgements(path: Path, *, now: float | None = None) -> dict[int, dict[str, Any]]:

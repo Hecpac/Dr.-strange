@@ -256,6 +256,8 @@ class JobService:
         now: float | None = None,
     ) -> JobRecord | None:
         now = time.time() if now is None else now
+        if isinstance(kinds, str):
+            kinds = (kinds,)
         kind_list = [kind for kind in (kinds or []) if kind]
         where = "status IN ('queued', 'retrying') AND COALESCE(next_run_at, 0) <= ?"
         params: list[Any] = [now]
@@ -545,6 +547,8 @@ class JobService:
         """
         current = time.time() if now is None else float(now)
         cutoff = current - max(0.001, float(stale_after_seconds))
+        if isinstance(kinds, str):
+            kinds = (kinds,)
         kind_list = [kind for kind in (kinds or []) if kind]
         where = "status = 'running' AND COALESCE(updated_at, started_at, created_at) <= ?"
         params: list[Any] = [cutoff]
@@ -608,7 +612,13 @@ class JobService:
                     if row is None or row["status"] != "running":
                         self._conn.commit()
                         return None
-                    reference = float(row["updated_at"] or row["started_at"] or row["created_at"])
+                    reference = float(
+                        _first_not_none(
+                            row["updated_at"],
+                            row["started_at"],
+                            row["created_at"],
+                        )
+                    )
                     if reference > cutoff:
                         self._conn.commit()
                         return None
@@ -887,3 +897,10 @@ def _as_optional_float(value: Any) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _first_not_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None

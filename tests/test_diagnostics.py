@@ -13,6 +13,7 @@ from pathlib import Path
 from claw_v2 import liveness
 from claw_v2.diagnostics import (
     AUTONOMY_SCHEDULED_SKIP_ATTENTION_THRESHOLD,
+    AUTONOMY_STALE_RUNNING_JOB_SECONDS,
     acknowledge_events,
     collect_diagnostics,
     format_text,
@@ -374,6 +375,33 @@ class DiagnosticsTests(unittest.TestCase):
             )
             blockers = report["checks"]["autonomy_objective_blockers"]
             self.assertEqual(blockers[0]["code"], "stale_running_jobs")
+            self.assertFalse(is_restartable(report["checks"]))
+
+    def test_stale_running_jobs_preserve_zero_updated_at_age(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            _seed_current_daemon_window(db_path)
+            jobs = JobService(db_path)
+            created = jobs.enqueue(kind="notebooklm.research", max_attempts=3)
+            recent = time.time() - 10
+            jobs.claim(created.job_id, worker_id="notebooklm", now=recent)
+            with jobs._lock:
+                jobs._conn.execute(
+                    """
+                    UPDATE agent_jobs
+                    SET updated_at = ?, started_at = ?, created_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (0.0, recent, recent, created.job_id),
+                )
+                jobs._conn.commit()
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            job = report["database"]["autonomy"]["stale_running_jobs"][0]
+            self.assertEqual(job["updated_at"], 0.0)
+            self.assertGreater(job["age_seconds"], AUTONOMY_STALE_RUNNING_JOB_SECONDS)
+            self.assertEqual(report["checks"]["stale_running_jobs"], 1)
             self.assertFalse(is_restartable(report["checks"]))
 
     def test_completed_unverified_overdue_backlog_surfaces_as_autonomy_blocker(self) -> None:

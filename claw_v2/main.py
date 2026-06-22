@@ -133,8 +133,8 @@ from claw_v2.skill_expand_jobs import SkillExpandJobRunner, enqueue_skill_expand
 logger = logging.getLogger(__name__)
 
 AUTONOMY_STALE_RUNNING_JOB_KINDS = (
-    "notebooklm.research",
-    "notebooklm.orchestrate",
+    # NotebookLM jobs do not have a daemon-registered retry consumer yet.
+    # Keep stale rows visible in diagnostics until that durable lane exists.
     "coordinator.autonomous_task",
 )
 AUTONOMY_STALE_RUNNING_JOB_SECONDS = 6 * 60 * 60
