@@ -97,6 +97,7 @@ class BrowserToolSession:
     refs: dict[str, BrowserElementRef]
     ref_version: int
     last_used_at: float
+    action_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
@@ -148,10 +149,9 @@ class BrowserToolService:
         self._backend = backend
         self._cdp_endpoint = cdp_endpoint
         self._sessions: dict[str, BrowserToolSession] = {}
-        # Protects only the session registry; the broader action lock still
-        # serializes backend/CDP calls until the follow-up concurrency PR.
+        # Protects only the session registry; action serialization lives on
+        # each BrowserToolSession.action_lock.
         self._sessions_lock = threading.Lock()
-        self._lock = threading.Lock()
         self.observe: Any | None = None
 
     def _session(self, session_id: str) -> BrowserToolSession:
@@ -247,8 +247,8 @@ class BrowserToolService:
         )
         fail: tuple[BrowserToolResult, str] | None = None
         result: BrowserToolResult | None = None
-        with self._lock:
-            sess = self._session(session_id)
+        sess = self._session(session_id)
+        with sess.action_lock:
             try:
                 page = self._backend.navigate(url)
             except Exception as exc:
@@ -285,8 +285,8 @@ class BrowserToolService:
         )
         fail: tuple[BrowserToolResult, str] | None = None
         result: BrowserToolResult | None = None
-        with self._lock:
-            sess = self._session(session_id)
+        sess = self._session(session_id)
+        with sess.action_lock:
             try:
                 page = self._backend.snapshot(full=full)
             except Exception as exc:
@@ -323,8 +323,8 @@ class BrowserToolService:
         )
         fail: tuple[BrowserToolResult, str] | None = None
         result: BrowserToolResult | None = None
-        with self._lock:
-            sess = self._session(session_id)
+        sess = self._session(session_id)
+        with sess.action_lock:
             target = sess.refs.get(ref)
             if target is None or not target.selector:
                 fail = (
@@ -451,15 +451,21 @@ class ChromeCdpBrowserBackend:
     def __init__(self, *, cdp_endpoint: str, nav_timeout_ms: int = 45000) -> None:
         self._endpoint = cdp_endpoint
         self._nav_timeout = nav_timeout_ms
+        # PR #138 should assign page/context ownership per browser session. Until
+        # then the real CDP backend is conservative because it reuses Chrome's
+        # first context/page below; fake/isolated backends can run sessions in
+        # parallel through BrowserToolService.
+        self._page_lock = threading.Lock()
 
     def _with_page(self, fn):
         from claw_v2.browser import _cdp_connect, _require_sync_playwright
 
-        with _require_sync_playwright() as pw:
-            browser = _cdp_connect(pw, self._endpoint, enable_downloads=False)
-            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            return fn(page)
+        with self._page_lock:
+            with _require_sync_playwright() as pw:
+                browser = _cdp_connect(pw, self._endpoint, enable_downloads=False)
+                ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                return fn(page)
 
     def _read_page(self, page) -> RawPage:
         data = page.evaluate(_SNAPSHOT_JS)
