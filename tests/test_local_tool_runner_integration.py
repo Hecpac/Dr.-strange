@@ -15,6 +15,8 @@ sockets/urllib. NO X/LinkedIn/HeyGen/deploy/GitHub remote, no browser/CDP.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from claw_v2.tools import ToolDefinition, ToolRegistry
@@ -22,7 +24,11 @@ from claw_v2.verification.local_tool_contracts import LOCAL_TOOL_SUCCESS_CONDITI
 from claw_v2.verification.local_tool_runner import (
     ARTIFACT_RESULT_KEY,
     CONTRACT_REQUIRED_KEY,
+    consume_current_tool_contract_result,
+    current_tool_contract_result,
     lift_artifact_to_checkpoint,
+    remember_tool_contract_result,
+    reset_current_tool_contract_result,
 )
 from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
 
@@ -121,6 +127,97 @@ def _registry_with(tool_name: str, handler, *, workspace_root=None):
         )
     )
     return reg
+
+
+def test_contract_result_cross_thread_session_store_is_one_shot():
+    session_id = "session-A"
+    reset_current_tool_contract_result(session_id=session_id)
+    payload = {
+        CONTRACT_REQUIRED_KEY: True,
+        ARTIFACT_RESULT_KEY: {"tool_name": "Write"},
+        "_artifact_build_error": "RuntimeError: simulated",
+        "full_output": "this must not be stored at top level",
+    }
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(remember_tool_contract_result, payload, session_id=session_id).result()
+
+    stored = consume_current_tool_contract_result(session_id=session_id)
+
+    assert stored is not None
+    assert stored[CONTRACT_REQUIRED_KEY] is True
+    assert stored[ARTIFACT_RESULT_KEY] == {"tool_name": "Write"}
+    assert stored["_artifact_build_error"] == "RuntimeError: simulated"
+    assert "full_output" not in stored
+    assert consume_current_tool_contract_result(session_id=session_id) is None
+
+
+def test_contract_result_session_isolation_and_reset_are_session_scoped():
+    session_a = "session-A"
+    session_b = "session-B"
+    reset_current_tool_contract_result(session_id=session_a)
+    reset_current_tool_contract_result(session_id=session_b)
+    payload_a = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "Write"}}
+    payload_b = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "Bash"}}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pool.submit(remember_tool_contract_result, payload_a, session_id=session_a).result()
+        pool.submit(remember_tool_contract_result, payload_b, session_id=session_b).result()
+
+    assert consume_current_tool_contract_result(session_id=session_a) == payload_a
+    assert current_tool_contract_result(session_id=session_b) == payload_b
+
+    reset_current_tool_contract_result(session_id=session_a)
+
+    assert current_tool_contract_result(session_id=session_b) == payload_b
+    assert consume_current_tool_contract_result(session_id=session_b) == payload_b
+    assert consume_current_tool_contract_result(session_id=session_b) is None
+
+
+def test_contract_result_context_fallback_still_works_without_session_id():
+    reset_current_tool_contract_result()
+    payload = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "WikiLint"}}
+
+    remember_tool_contract_result(payload)
+
+    assert current_tool_contract_result() == payload
+    assert consume_current_tool_contract_result() == payload
+    assert consume_current_tool_contract_result() is None
+
+
+def test_tool_registry_execute_stores_minimal_contract_result_by_session(tmp_path):
+    session_id = "session-A"
+    reset_current_tool_contract_result(session_id=session_id)
+    target = tmp_path / "out.txt"
+    payload = "secret payload must not be copied outside the artifact"
+    reg = _registry_with(
+        "Write",
+        _fake_write_handler_factory(str(target), payload),
+        workspace_root=tmp_path,
+    )
+
+    result = reg.execute(
+        "Write",
+        {"path": str(target), "content": payload},
+        agent_class="operator",
+        session_id=session_id,
+    )
+    stored = consume_current_tool_contract_result(session_id=session_id)
+
+    assert result[CONTRACT_REQUIRED_KEY] is True
+    assert ARTIFACT_RESULT_KEY in result
+    assert stored is not None
+    assert set(stored).issubset(
+        {
+            CONTRACT_REQUIRED_KEY,
+            ARTIFACT_RESULT_KEY,
+            "_artifact_build_error",
+            "_pre_state_error",
+        }
+    )
+    assert stored[CONTRACT_REQUIRED_KEY] is True
+    assert stored[ARTIFACT_RESULT_KEY]["tool_name"] == "Write"
+    assert payload not in str(stored)
 
 
 # ---------------------------------------------------------------------------

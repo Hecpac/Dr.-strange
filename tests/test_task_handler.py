@@ -378,6 +378,7 @@ class TaskHandlerTests(unittest.TestCase):
                         "Write",
                         {"path": str(root / "claimed.txt"), "content": "not actually written"},
                         agent_class="operator",
+                        session_id="s1",
                     )
                     return CoordinatorResult(
                         task_id=task_id,
@@ -419,6 +420,13 @@ class TaskHandlerTests(unittest.TestCase):
             assert record is not None
             self.assertEqual(record.status, "failed")
             self.assertEqual(record.verification_status, "failed")
+            state = memory.get_session_state("s1")
+            self.assertEqual(state["verification_status"], "failed")
+            checkpoint = state["last_checkpoint"]
+            self.assertEqual(checkpoint["verification_status"], "failed")
+            self.assertEqual(checkpoint["promote_gate_reason"], "success_condition_violated")
+            self.assertIn("success_condition_artifact", checkpoint)
+            self.assertEqual(state["active_object"]["active_task"]["status"], "failed")
             events = [event["event_type"] for event in observe.recent_events(limit=80)]
             self.assertIn("promote_gate_degraded", events)
             self.assertIn("autonomous_task_failed", events)

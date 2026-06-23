@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 import hashlib
+import threading
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -36,10 +37,20 @@ from claw_v2.verification.local_tool_contracts import (
 # consumers (brain / task_handler) lift these into the checkpoint.
 ARTIFACT_RESULT_KEY = "_success_condition_artifact"
 CONTRACT_REQUIRED_KEY = "_contract_required"
+_ARTIFACT_BUILD_ERROR_KEY = "_artifact_build_error"
+_PRE_STATE_ERROR_KEY = "_pre_state_error"
+_LIFTABLE_RESULT_KEYS = (
+    CONTRACT_REQUIRED_KEY,
+    ARTIFACT_RESULT_KEY,
+    _ARTIFACT_BUILD_ERROR_KEY,
+    _PRE_STATE_ERROR_KEY,
+)
 _CURRENT_CONTRACT_TOOL_RESULT: ContextVar[dict[str, Any] | None] = ContextVar(
     "claw_current_contract_tool_result",
     default=None,
 )
+_SESSION_CONTRACT_TOOL_RESULTS: dict[str, dict[str, Any]] = {}
+_SESSION_CONTRACT_TOOL_RESULTS_LOCK = threading.Lock()
 
 
 def _safe_path(args: Mapping[str, Any]) -> Path | None:
@@ -199,34 +210,72 @@ def attach_artifact_to_result(
     return result
 
 
-def remember_tool_contract_result(tool_result: Mapping[str, Any]) -> None:
-    """Remember the latest contract-bearing result for the task completion path."""
+def _liftable_contract_result(tool_result: Mapping[str, Any]) -> dict[str, Any] | None:
     if not isinstance(tool_result, Mapping):
-        return
+        return None
     required = bool(tool_result.get(CONTRACT_REQUIRED_KEY))
     artifact_present = ARTIFACT_RESULT_KEY in tool_result
     if not required and not artifact_present:
-        return
+        return None
     liftable: dict[str, Any] = {}
-    if required:
-        liftable[CONTRACT_REQUIRED_KEY] = True
-    if artifact_present:
-        liftable[ARTIFACT_RESULT_KEY] = tool_result.get(ARTIFACT_RESULT_KEY)
-    _CURRENT_CONTRACT_TOOL_RESULT.set(liftable)
+    for key in _LIFTABLE_RESULT_KEYS:
+        if key in tool_result:
+            liftable[key] = tool_result.get(key)
+    return liftable
 
 
-def consume_current_tool_contract_result() -> dict[str, Any] | None:
-    """Return and clear the latest contract-bearing result for this context."""
+def remember_tool_contract_result(
+    tool_result: Mapping[str, Any],
+    *,
+    session_id: str | None = None,
+) -> None:
+    """Remember the latest contract-bearing result for the task completion path."""
+    liftable = _liftable_contract_result(tool_result)
+    if liftable is None:
+        return
+    _CURRENT_CONTRACT_TOOL_RESULT.set(dict(liftable))
+    if session_id:
+        with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
+            _SESSION_CONTRACT_TOOL_RESULTS[session_id] = dict(liftable)
+
+
+def current_tool_contract_result(*, session_id: str | None = None) -> dict[str, Any] | None:
+    """Return the latest contract-bearing result without clearing it."""
+    if session_id:
+        with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
+            result = _SESSION_CONTRACT_TOOL_RESULTS.get(session_id)
+        if isinstance(result, Mapping):
+            return dict(result)
     result = _CURRENT_CONTRACT_TOOL_RESULT.get()
-    _CURRENT_CONTRACT_TOOL_RESULT.set(None)
     if not isinstance(result, Mapping):
         return None
     return dict(result)
 
 
-def reset_current_tool_contract_result() -> None:
+def consume_current_tool_contract_result(
+    *,
+    session_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return and clear the latest contract-bearing result for this context."""
+    session_result: dict[str, Any] | None = None
+    if session_id:
+        with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
+            session_result = _SESSION_CONTRACT_TOOL_RESULTS.pop(session_id, None)
+    context_result = _CURRENT_CONTRACT_TOOL_RESULT.get()
+    _CURRENT_CONTRACT_TOOL_RESULT.set(None)
+    if isinstance(session_result, Mapping):
+        return dict(session_result)
+    if not isinstance(context_result, Mapping):
+        return None
+    return dict(context_result)
+
+
+def reset_current_tool_contract_result(*, session_id: str | None = None) -> None:
     """Clear any contract-bearing result from the current execution context."""
     _CURRENT_CONTRACT_TOOL_RESULT.set(None)
+    if session_id:
+        with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
+            _SESSION_CONTRACT_TOOL_RESULTS.pop(session_id, None)
 
 
 def lift_artifact_to_checkpoint(

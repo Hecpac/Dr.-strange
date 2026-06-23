@@ -296,6 +296,7 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
     def test_task_handler_lifts_contract_artifact_before_promote_gate(self) -> None:
         source = inspect.getsource(TaskHandler._run_autonomous_task)
+        tools_source = (REPO_ROOT / "claw_v2" / "tools.py").read_text(encoding="utf-8")
         consume_idx = source.find("consume_current_tool_contract_result")
         lift_idx = source.find("lift_artifact_to_checkpoint")
         gate_idx = source.find("apply_promote_gate_to_checkpoint")
@@ -305,6 +306,20 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertGreaterEqual(gate_idx, 0)
         self.assertLess(consume_idx, gate_idx)
         self.assertLess(lift_idx, gate_idx)
+        self.assertIn(
+            "reset_current_tool_contract_result(session_id=session_id)",
+            source,
+        )
+        self.assertIn(
+            "consume_current_tool_contract_result(session_id=session_id)",
+            source,
+        )
+        self.assertIn(
+            "remember_tool_contract_result(result, session_id=session_id)",
+            tools_source,
+        )
+        self.assertIn("verification_status=verification_status", source)
+        self.assertIn("last_checkpoint=completed_checkpoint", source)
 
     def test_computer_module_does_not_import_pyautogui_at_module_scope(self) -> None:
         tree = ast.parse((REPO_ROOT / "claw_v2" / "computer.py").read_text(encoding="utf-8"))

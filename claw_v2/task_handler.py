@@ -878,7 +878,7 @@ class TaskHandler:
         )
         from claw_v2.verification.local_tool_runner import reset_current_tool_contract_result
 
-        reset_current_tool_contract_result()
+        reset_current_tool_contract_result(session_id=session_id)
         try:
             if self._is_cancelled(task_id):
                 self._mark_cancelled_task_state(
@@ -1015,7 +1015,7 @@ class TaskHandler:
             )
             from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
 
-            contract_tool_result = consume_current_tool_contract_result()
+            contract_tool_result = consume_current_tool_contract_result(session_id=session_id)
             if contract_tool_result is not None:
                 completed_checkpoint = lift_artifact_to_checkpoint(
                     completed_checkpoint,
@@ -1121,7 +1121,13 @@ class TaskHandler:
                     active_task["pending_action"] = pending_action
                     active_task["verification_deferrals"] = deferrals
                     active_task["updated_at"] = time.time()
-                    self._write_active_task(session_id, active_task, active_object)
+                    self._write_active_task(
+                        session_id,
+                        active_task,
+                        active_object,
+                        verification_status=verification_status,
+                        last_checkpoint=completed_checkpoint,
+                    )
                 self._defer_autonomous_job(
                     task_id=task_id,
                     job_id=job_id,
@@ -1180,7 +1186,13 @@ class TaskHandler:
                 active_task["completed_at"] = time.time()
                 if checkpoint_error and terminal_status == "failed":
                     active_task["error"] = checkpoint_error
-                self._write_active_task(session_id, active_task, active_object)
+                self._write_active_task(
+                    session_id,
+                    active_task,
+                    active_object,
+                    verification_status=verification_status,
+                    last_checkpoint=completed_checkpoint,
+                )
             if terminal_status == "succeeded":
                 self._complete_autonomous_job(
                     task_id=task_id,
@@ -1354,7 +1366,7 @@ class TaskHandler:
                 },
             )
         finally:
-            reset_current_tool_contract_result()
+            reset_current_tool_contract_result(session_id=session_id)
             with self._task_lock:
                 self._task_threads.pop(task_id, None)
                 self._cancelled_tasks.discard(task_id)

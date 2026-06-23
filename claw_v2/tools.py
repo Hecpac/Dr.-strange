@@ -621,7 +621,7 @@ class ToolRegistry:
                 # error field instead of silently swallowing.
                 logger.exception("attach_artifact_to_result failed for tool %s", definition.name)
                 result["_artifact_build_error"] = f"{type(exc).__name__}: {exc}"[:200]
-            remember_tool_contract_result(result)
+            remember_tool_contract_result(result, session_id=session_id)
         if definition.ingests_external_content and isinstance(result, dict):
             return sanitize_tool_output(definition, result, agent_class=agent_class)
         return result
