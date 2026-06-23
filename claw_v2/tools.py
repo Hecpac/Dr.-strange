@@ -480,6 +480,7 @@ class ToolRegistry:
         approval_gate: ApprovalGate | None = None,
         goal_id: str | None = None,
         session_id: str | None = None,
+        contract_scope_id: str | None = None,
     ) -> dict:
         definition = self.get(name)
         if agent_class not in definition.allowed_agent_classes:
@@ -598,6 +599,7 @@ class ToolRegistry:
             from claw_v2.verification.local_tool_runner import (
                 CONTRACT_REQUIRED_KEY,
                 attach_artifact_to_result,
+                remember_tool_contract_result,
             )
 
             result[CONTRACT_REQUIRED_KEY] = True
@@ -620,6 +622,11 @@ class ToolRegistry:
                 # error field instead of silently swallowing.
                 logger.exception("attach_artifact_to_result failed for tool %s", definition.name)
                 result["_artifact_build_error"] = f"{type(exc).__name__}: {exc}"[:200]
+            remember_tool_contract_result(
+                result,
+                session_id=session_id,
+                scope_id=contract_scope_id,
+            )
         if definition.ingests_external_content and isinstance(result, dict):
             return sanitize_tool_output(definition, result, agent_class=agent_class)
         return result
@@ -635,6 +642,7 @@ class ToolRegistry:
         approval_gate: ApprovalGate | None = None,
         goal_id: str | None = None,
         session_id: str | None = None,
+        contract_scope_id: str | None = None,
         alternatives: list[str] | None = None,
     ) -> dict:
         """Execute a tool with automatic pivot to alternatives on tool-specific blocks.
@@ -671,6 +679,7 @@ class ToolRegistry:
                     approval_gate=approval_gate,
                     goal_id=goal_id,
                     session_id=session_id,
+                    contract_scope_id=contract_scope_id,
                 )
             except PermissionError as exc:
                 last_error = exc

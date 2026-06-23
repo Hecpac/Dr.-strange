@@ -729,6 +729,8 @@ def _setup_llm_stack(
     telegram_gate = build_telegram_approval_gate(approvals)
 
     def openai_tool_executor(name: str, args: dict) -> dict:
+        from claw_v2.verification.local_tool_runner import current_contract_artifact_scope
+
         registry_tool_name = tool_registry.original_tool_name_from_openai(name)
         daemon_reason = current_daemon_reason()
         if daemon_reason is not None and daemon_can_auto_approve(registry_tool_name):
@@ -741,6 +743,7 @@ def _setup_llm_stack(
             agent_class="operator",
             policy=tool_sandbox_policy,
             approval_gate=gate,
+            contract_scope_id=current_contract_artifact_scope(),
         )
 
     router = LLMRouter.default(

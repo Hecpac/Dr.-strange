@@ -32,6 +32,7 @@ from claw_v2.scheduled_background_jobs import (
 )
 from claw_v2.skill_expand_jobs import SKILL_EXPAND_JOB_KIND
 from claw_v2.skills import CodeSkillGovernancePolicy, Skill
+from claw_v2.task_handler import TaskHandler
 from claw_v2.workspace import StartupContextReport
 
 
@@ -292,6 +293,48 @@ class ArchitectureInvariantTests(unittest.TestCase):
         main_source = (REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
         self.assertIn("RecoveryJobDrainRunner", main_source)
         self.assertIn('name="recovery_drain"', main_source)
+
+    def test_task_handler_lifts_contract_artifact_before_promote_gate(self) -> None:
+        source = inspect.getsource(TaskHandler._run_autonomous_task)
+        coordinator_source = (REPO_ROOT / "claw_v2" / "coordinator.py").read_text(encoding="utf-8")
+        runner_source = (REPO_ROOT / "claw_v2" / "verification" / "local_tool_runner.py").read_text(
+            encoding="utf-8"
+        )
+        tools_source = (REPO_ROOT / "claw_v2" / "tools.py").read_text(encoding="utf-8")
+        main_source = (REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
+        consume_idx = source.find("consume_current_tool_contract_results")
+        lift_idx = source.find("lift_artifacts_to_checkpoint")
+        gate_idx = source.find("apply_promote_gate_to_checkpoint")
+
+        self.assertGreaterEqual(consume_idx, 0)
+        self.assertGreaterEqual(lift_idx, 0)
+        self.assertGreaterEqual(gate_idx, 0)
+        self.assertLess(consume_idx, lift_idx)
+        self.assertLess(consume_idx, gate_idx)
+        self.assertLess(lift_idx, gate_idx)
+        self.assertIn(
+            "reset_current_tool_contract_results(session_id=session_id, scope_id=task_id)",
+            source,
+        )
+        self.assertIn(
+            "consume_current_tool_contract_results(",
+            source,
+        )
+        self.assertIn("scope_id=task_id", source)
+        self.assertIn("contract_artifact_scope(task_id)", source)
+        self.assertIn("contract_artifact_scope(worker_contract_scope)", coordinator_source)
+        self.assertNotIn("defensive optional verification import", coordinator_source)
+        self.assertNotIn("contract_artifact_scope = None", coordinator_source)
+        self.assertIn(
+            "remember_tool_contract_result(",
+            tools_source,
+        )
+        self.assertIn("scope_id=contract_scope_id", tools_source)
+        self.assertIn("contract_scope_id=current_contract_artifact_scope()", main_source)
+        self.assertIn("_SCOPE_CONTRACT_TOOL_RESULTS: dict[str, list", runner_source)
+        self.assertIn("setdefault(effective_scope_id, []).append", runner_source)
+        self.assertIn("verification_status=verification_status", source)
+        self.assertIn("last_checkpoint=completed_checkpoint", source)
 
     def test_computer_module_does_not_import_pyautogui_at_module_scope(self) -> None:
         tree = ast.parse((REPO_ROOT / "claw_v2" / "computer.py").read_text(encoding="utf-8"))
