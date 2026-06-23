@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: "4a1e624 main baseline + db73736 verified live baseline + #128 C4 + #132 F0.2d"
-doc_version: 2.29
+describes_commit: "901fd72 live baseline + #128 C4 + #132 F0.2d + #131 watchdog smoke/runbook"
+doc_version: 2.30
 last_verified: 2026-06-23
 verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + repo/code inspection + existing pytest/AST sentinel cross-checks"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -20,50 +20,64 @@ If `git rev-parse HEAD` diverges substantially from `describes_commit`,
 assume parts of this doc may be stale. The invariants below are the most
 stable section; the layer detail decays fastest.
 
-## 4a1e624 audit status
+## 901fd72 audit status
 
 ```yaml
-main_head: 4a1e624
+main_head: 901fd72
+main_commit: 901fd72146fbf48590bc36513ae25c87b5c2606b
 live_daemon_field_verification:
   source: operator-reported observe_stream agent_startup_context payload.code_version
-  event_id: 265792
-  code_version: db73736
-  pid: 25684
-  boot_time_utc: "2026-06-23 15:53:58"
+  event_id: 266236
+  code_version: 901fd72
+  pid: 55176
+  boot_time_utc: "2026-06-23 16:55:10"
   scope: code_version/boot evidence only; does not verify every production state surface
-  post_132_live_verification: not performed; live daemon remains db73736 unless a later agent_startup_context proves code_version 4a1e624
+  post_132_live_verification: performed; F0.2d is live at 901fd72
 merged_lanes:
   - "#125 / F1.4 watchdog stale-event filter"
   - "#126 autonomy recovery wave A"
   - "#127 O3 verification reconciliation lane"
   - "#128 C4 promote-gate artifact lift"
+  - "#130 internal wiring docs"
+  - "#131 read-only watchdog stale-filter smoke/runbook"
   - "#132 F0.2d llm_decision snapshot minimization"
 f1_source_status:
   F1.1: complete; production runtime uses one RuntimeDb owner/lock for core stores
   F1.2_F1.3: complete; production RuntimeDb path no longer registers WAL-heal handles
   F1.4: complete/deployed through c42ae47; diagnostics classifies historical/stale observe errors as non-actionable
-  C4: complete/deployed through #128 / db73736; field-verified live
-  F0_2d: fixed in main by #132 / 4a1e624; not live unless daemon code_version later matches 4a1e624
+  C4: complete/deployed through #128; field-verified live at 901fd72
+  F0_2d: fixed by #132; field-verified live at 901fd72
 f1_live_status:
   RuntimeDb_single_writer: field-verified live at c42ae47
   watchdog_stale_event_filter: field-verified live at c42ae47
-  included_live_lanes: ["#126 autonomy recovery wave A", "#127 O3 verification reconciliation lane", "#128 C4 promote-gate artifact lift"]
-  watchdog_reload_reenable: pending operator decision; operational gate, not a code bug
+  included_live_lanes: ["#126 autonomy recovery wave A", "#127 O3 verification reconciliation lane", "#128 C4 promote-gate artifact lift", "#132 F0.2d llm_decision snapshot minimization"]
+  watchdog_reload_reenable: complete; watchdog re-enabled safely after PASS smoke
+  watchdog_reenable_evidence:
+    command: launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.pachano.claw-watchdog.plist"
+    rollback: launchctl bootout "gui/$(id -u)/com.pachano.claw-watchdog"
+    status_command: launchctl print "gui/$(id -u)/com.pachano.claw-watchdog"
+    status: loaded LaunchAgent; interval 300s; last exit code 0; idle between runs
+    preflight_smoke: safe_candidate/PASS at expected_code_version 901fd72
+    post_enable_smoke: safe_candidate/PASS at expected_code_version 901fd72
+    observe_window_checked: events 266365-266434
+    RuntimeDb_WAL_SQLite_database_locked_errors: 0
+    stale_event_action_attempts: 0
+    unexpected_historical_stale_resume_enqueue: 0
+    rollback_needed: false
+  next_recommended_check: 1h and 24h read-only observe soak; rerun watchdog smoke with expected_code_version 901fd72
 operational_status:
   source_integrated_on_main: true
   live_daemon_code_version_field_verified: true
-  watchdog_reenabled_by_this_doc: false
-  watchdog_gate: watchdog remains not re-enabled; reload/reenable decision remains operational; do not claim reenabled without field evidence
+  watchdog_reenabled_field_verified: true
+  watchdog_gate: complete; continue read-only 1h/24h soak monitoring
 pending_remediation_notes:
-  C4_promote_gate_bypass: fixed in main by #128 / db73736 and field-verified live via agent_startup_context event 265792
+  C4_promote_gate_bypass: fixed in main by #128 and field-verified live via agent_startup_context event 266236
   browser_tools_PR_112: pending browser security/concurrency review; draft PR #129 remains unmerged
-  watchdog_smoke_runbook_PR_131: pending
   PR_92: stale/draft/conflicting/obsolete; superseded by focused #128 C4 fix
-  F0_2d: fixed in main by #132 / 4a1e624; not live unless daemon code_version later matches 4a1e624
+  F0_2d: fixed in main by #132 and field-verified live at 901fd72
   F2: design exists in draft #133; design-only; not implemented
 draft_prs:
   "#129": browser tools security patch against PR #112 branch; draft, not merged
-  "#131": watchdog smoke/runbook; pending
   "#133": F2 design; draft, design-only, not implemented
 ```
 

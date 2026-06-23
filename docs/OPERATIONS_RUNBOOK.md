@@ -101,6 +101,44 @@ This smoke does not reload launchd, does not restart Claw, does not run
 `not_executed_commands` output lists the launchd commands an operator may run or
 roll back manually after reviewing the report.
 
+## Watchdog Current Status
+
+As of the 2026-06-23 operator check, the watchdog is re-enabled safely after a
+read-only stale-filter smoke PASS against live code_version `901fd72`.
+
+- Live daemon: startup event `266236`, pid `55176`, code_version `901fd72`
+  (`901fd72146fbf48590bc36513ae25c87b5c2606b`).
+- C4 and F0.2d are live in that daemon version.
+- Portable enable command form:
+
+```bash
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.pachano.claw-watchdog.plist"
+```
+
+- Portable rollback command form:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.pachano.claw-watchdog"
+```
+
+- Portable status command form:
+
+```bash
+launchctl print "gui/$(id -u)/com.pachano.claw-watchdog"
+```
+
+- Post-enable status: loaded LaunchAgent, interval `300s`, last exit code `0`,
+  idle between interval runs.
+- Post-enable smoke: `safe_candidate` / `PASS`, `database_open_mode=read_only`,
+  `expected_code_version=901fd72`, `latest_startup_code_version=901fd72`.
+- 10-minute observe window checked: events `266365`-`266434`; RuntimeDb/WAL/
+  SQLite/database-lock errors `0`; stale-event action attempts `0`; unexpected
+  historical stale resume/enqueue `0`.
+
+Next recommended check: run a 1h and 24h read-only observe soak. Re-run the
+watchdog smoke with `--expected-code-version 901fd72`; do not treat this docs
+update as a new deploy.
+
 ## Restart
 
 Prefer the repo restart wrapper:
