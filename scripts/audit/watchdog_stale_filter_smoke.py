@@ -73,16 +73,17 @@ def collect_smoke_report(
         report["error"] = "database not found"
         return _finalize_report(report)
 
+    conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 5000")
-    except sqlite3.Error as exc:
-        report["status"] = "db_open_error"
-        report["error"] = str(exc)
-        return _finalize_report(report)
+        try:
+            conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 5000")
+        except sqlite3.Error as exc:
+            report["status"] = "db_open_error"
+            report["error"] = str(exc)
+            return _finalize_report(report)
 
-    try:
         if not _table_exists(conn, "observe_stream"):
             report["status"] = "missing_observe_stream"
             report["error"] = "observe_stream table not found"
@@ -152,7 +153,8 @@ def collect_smoke_report(
         report["error"] = str(exc)
         return _finalize_report(report)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def format_text(report: dict[str, Any]) -> str:

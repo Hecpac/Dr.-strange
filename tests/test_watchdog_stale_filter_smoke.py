@@ -23,23 +23,29 @@ def _insert_event_at(
     timestamp_modifier: str,
     payload: dict[str, object],
 ) -> int:
-    with sqlite3.connect(db_path) as conn:
-        row = conn.execute(
-            """
-            INSERT INTO observe_stream (timestamp, event_type, payload)
-            VALUES (datetime('now', ?), ?, ?)
-            RETURNING id
-            """,
-            (timestamp_modifier, event_type, json.dumps(payload)),
-        ).fetchone()
-        conn.commit()
-    assert row is not None
-    return int(row[0])
+    conn = sqlite3.connect(db_path)
+    try:
+        with conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO observe_stream (timestamp, event_type, payload)
+                VALUES (datetime('now', ?), ?, ?)
+                """,
+                (timestamp_modifier, event_type, json.dumps(payload)),
+            )
+            row_id = cursor.lastrowid
+        assert row_id is not None
+        return int(row_id)
+    finally:
+        conn.close()
 
 
 def _row_count(db_path: Path) -> int:
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         return int(conn.execute("SELECT COUNT(*) FROM observe_stream").fetchone()[0])
+    finally:
+        conn.close()
 
 
 class WatchdogStaleFilterSmokeTests(unittest.TestCase):
