@@ -404,59 +404,215 @@ from claw_v2.browser_tools import ChromeCdpBrowserBackend, SNAPSHOT_MAX_ELEMENTS
 
 
 class ChromeCdpConnectionCleanupTests(unittest.TestCase):
-    def _run_with_fake_cdp(self, callback):
-        closed: list[str] = []
+    def _run_with_fake_cdp(self, callback, *, connect_error: Exception | None = None):
+        events: list[str] = []
 
         class _FakePage:
-            marker = "page"
+            def __init__(self, context, marker: str) -> None:
+                self.context = context
+                self.marker = marker
+                self.url = "about:blank"
+                self.closed = False
+
+            def goto(self, url, wait_until=None, timeout=None):
+                self.url = url
+
+            def wait_for_load_state(self, state, timeout=None):
+                return None
+
+            def evaluate(self, script):
+                label = self.url.removeprefix("https://").split(".", 1)[0] or self.marker
+                return {
+                    "url": self.url,
+                    "title": self.url,
+                    "text": f"text {label}",
+                    "elements": [
+                        {
+                            "selector": f"#{label}",
+                            "role": "button",
+                            "label": label.upper(),
+                            "text": label.upper(),
+                            "href": None,
+                            "input_type": None,
+                        }
+                    ],
+                }
+
+            def click(self, selector, timeout=None):
+                return None
+
+            def fill(self, selector, text, timeout=None):
+                return None
+
+            def screenshot(self, path, full_page=True):
+                events.append(f"screenshot:{self.marker}:{path}")
+
+            def is_closed(self):
+                return self.closed
 
         class _FakeContext:
-            pages = [_FakePage()]
+            def __init__(self, index: int) -> None:
+                self.index = index
+                self.pages: list[_FakePage] = []
+                self.closed = False
 
             def new_page(self):
-                raise AssertionError("existing page should be used")
-
-        class _FakeBrowser:
-            contexts = [_FakeContext()]
+                page = _FakePage(self, f"page-{self.index}-{len(self.pages) + 1}")
+                self.pages.append(page)
+                return page
 
             def close(self):
-                closed.append("closed")
+                if self.closed:
+                    return
+                self.closed = True
+                for page in self.pages:
+                    page.closed = True
+                events.append(f"context.close:{self.index}")
+
+        class _FakeBrowser:
+            def __init__(self) -> None:
+                self.contexts: list[_FakeContext] = []
+                self.closed = False
+
+            def new_context(self, **kwargs):
+                context = _FakeContext(len(self.contexts) + 1)
+                self.contexts.append(context)
+                return context
+
+            def is_connected(self):
+                return not self.closed
+
+            def close(self):
+                self.closed = True
+                events.append("browser.close")
 
         class _FakePlaywright:
             pass
 
         class _FakePlaywrightManager:
-            def __enter__(self):
+            def start(self):
+                events.append("playwright.start")
                 return _FakePlaywright()
 
-            def __exit__(self, exc_type, exc, tb):
-                return False
+            def stop(self):
+                events.append("playwright.stop")
+
+        def _connect(*args, **kwargs):
+            if connect_error is not None:
+                raise connect_error
+            return fake_browser
 
         fake_browser = _FakeBrowser()
         with (
             patch("claw_v2.browser._require_sync_playwright", return_value=_FakePlaywrightManager()),
-            patch("claw_v2.browser._cdp_connect", return_value=fake_browser),
+            patch("claw_v2.browser._cdp_connect", side_effect=_connect),
         ):
-            return callback(ChromeCdpBrowserBackend(cdp_endpoint="http://127.0.0.1:0"), closed)
+            backend = ChromeCdpBrowserBackend(cdp_endpoint="http://127.0.0.1:0")
+            try:
+                return callback(backend, fake_browser, events)
+            finally:
+                backend.close()
 
-    def test_with_page_closes_cdp_connection_after_success(self) -> None:
-        def _case(backend, closed):
-            result = backend._with_page(lambda page: page.marker)
-            self.assertEqual(result, "page")
-            return closed
+    def test_service_sessions_get_distinct_cdp_contexts_and_pages(self) -> None:
+        def _case(backend, fake_browser, events):
+            svc = BrowserToolService(backend=backend)
 
-        self.assertEqual(self._run_with_fake_cdp(_case), ["closed"])
+            a = svc.navigate("session-a", "https://a.test")
+            b = svc.navigate("session-b", "https://b.test")
 
-    def test_with_page_closes_cdp_connection_after_callback_error(self) -> None:
-        def _case(backend, closed):
+            self.assertTrue(a.success)
+            self.assertTrue(b.success)
+            self.assertEqual(svc._session("session-a").refs["@e1"].selector, "#a")
+            self.assertEqual(svc._session("session-b").refs["@e1"].selector, "#b")
+            self.assertEqual(len(fake_browser.contexts), 2)
+            self.assertIsNot(fake_browser.contexts[0], fake_browser.contexts[1])
+            self.assertIsNot(fake_browser.contexts[0].pages[0], fake_browser.contexts[1].pages[0])
+
+        self._run_with_fake_cdp(_case)
+
+    def test_same_session_reuses_owned_cdp_page(self) -> None:
+        def _case(backend, fake_browser, events):
+            first = backend._with_page("same", lambda page: page)
+            second = backend._with_page("same", lambda page: page)
+
+            self.assertIs(first, second)
+            self.assertEqual(len(fake_browser.contexts), 1)
+
+        self._run_with_fake_cdp(_case)
+
+    def test_different_sessions_are_serialized_on_cdp_worker_with_distinct_pages(self) -> None:
+        def _case(backend, fake_browser, events):
+            entered_first = threading.Event()
+            entered_second = threading.Event()
+            release_first = threading.Event()
+            pages = []
+
+            def first(page):
+                pages.append(page)
+                entered_first.set()
+                self.assertTrue(release_first.wait(timeout=2))
+                return page.marker
+
+            def second(page):
+                pages.append(page)
+                entered_second.set()
+                return page.marker
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                first_future = executor.submit(backend._with_page, "session-a", first)
+                self.assertTrue(entered_first.wait(timeout=1))
+                second_future = executor.submit(backend._with_page, "session-b", second)
+                time.sleep(0.05)
+                self.assertFalse(entered_second.is_set())
+                release_first.set()
+                self.assertEqual(first_future.result(timeout=2), "page-1-1")
+                self.assertEqual(second_future.result(timeout=2), "page-2-1")
+
+            self.assertEqual(len(pages), 2)
+            self.assertIsNot(pages[0], pages[1])
+
+        self._run_with_fake_cdp(_case)
+
+    def test_with_page_does_not_discard_session_on_callback_error(self) -> None:
+        def _case(backend, fake_browser, events):
+            seen = []
+
             def boom(page):
+                seen.append(page)
                 raise RuntimeError("callback failed")
 
             with self.assertRaises(RuntimeError):
-                backend._with_page(boom)
-            return closed
+                backend._with_page("same", boom)
 
-        self.assertEqual(self._run_with_fake_cdp(_case), ["closed"])
+            self.assertFalse(seen[0].is_closed())
+            self.assertNotIn("context.close:1", events)
+            recovered = backend._with_page("same", lambda page: page)
+            self.assertIs(recovered, seen[0])
+            self.assertEqual(len(fake_browser.contexts), 1)
+
+        self._run_with_fake_cdp(_case)
+
+    def test_connect_failure_stops_playwright_manager(self) -> None:
+        def _case(backend, fake_browser, events):
+            with self.assertRaisesRegex(RuntimeError, "connect failed"):
+                backend._with_page("same", lambda page: page)
+            self.assertIn("playwright.start", events)
+            self.assertIn("playwright.stop", events)
+            self.assertNotIn("browser.close", events)
+
+        self._run_with_fake_cdp(_case, connect_error=RuntimeError("connect failed"))
+
+    def test_close_cleans_cdp_browser_connection_and_playwright(self) -> None:
+        def _case(backend, fake_browser, events):
+            self.assertEqual(backend._with_page("same", lambda page: page.marker), "page-1-1")
+
+            backend.close()
+
+            self.assertIn("context.close:1", events)
+            self.assertIn("browser.close", events)
+            self.assertIn("playwright.stop", events)
+
+        self._run_with_fake_cdp(_case)
 
 
 class SafetyCapsTests(unittest.TestCase):
