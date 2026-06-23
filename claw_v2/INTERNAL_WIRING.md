@@ -53,8 +53,9 @@ f1_live_status:
   included_live_lanes: ["#126 autonomy recovery wave A", "#127 O3 verification reconciliation lane", "#128 C4 promote-gate artifact lift", "#132 F0.2d llm_decision snapshot minimization"]
   watchdog_reload_reenable: complete; watchdog re-enabled safely after PASS smoke
   watchdog_reenable_evidence:
-    command: launchctl bootstrap "gui/501" "/Users/hector/Library/LaunchAgents/com.pachano.claw-watchdog.plist"
-    rollback: launchctl bootout "gui/501/com.pachano.claw-watchdog"
+    command: launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.pachano.claw-watchdog.plist"
+    rollback: launchctl bootout "gui/$(id -u)/com.pachano.claw-watchdog"
+    status_command: launchctl print "gui/$(id -u)/com.pachano.claw-watchdog"
     status: loaded LaunchAgent; interval 300s; last exit code 0; idle between runs
     preflight_smoke: safe_candidate/PASS at expected_code_version 901fd72
     post_enable_smoke: safe_candidate/PASS at expected_code_version 901fd72

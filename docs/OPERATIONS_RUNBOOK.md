@@ -109,16 +109,22 @@ read-only stale-filter smoke PASS against live code_version `901fd72`.
 - Live daemon: startup event `266236`, pid `55176`, code_version `901fd72`
   (`901fd72146fbf48590bc36513ae25c87b5c2606b`).
 - C4 and F0.2d are live in that daemon version.
-- Enable command used:
+- Portable enable command form:
 
 ```bash
-launchctl bootstrap "gui/501" "/Users/hector/Library/LaunchAgents/com.pachano.claw-watchdog.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.pachano.claw-watchdog.plist"
 ```
 
-- Rollback command:
+- Portable rollback command form:
 
 ```bash
-launchctl bootout "gui/501/com.pachano.claw-watchdog"
+launchctl bootout "gui/$(id -u)/com.pachano.claw-watchdog"
+```
+
+- Portable status command form:
+
+```bash
+launchctl print "gui/$(id -u)/com.pachano.claw-watchdog"
 ```
 
 - Post-enable status: loaded LaunchAgent, interval `300s`, last exit code `0`,
