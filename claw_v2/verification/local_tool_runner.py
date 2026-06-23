@@ -251,14 +251,30 @@ def remember_tool_contract_result(
     session_id: str | None = None,
     scope_id: str | None = None,
 ) -> None:
-    """Remember the latest contract-bearing result for the task completion path."""
+    """Remember an ordered contract-bearing result for the task completion path."""
     liftable = _liftable_contract_result(tool_result)
     if liftable is None:
         return
     effective_scope_id = scope_id or current_contract_artifact_scope()
     entry = dict(liftable)
+    context_payload = _CURRENT_CONTRACT_TOOL_RESULTS.get()
+    context_results: list[dict[str, Any]] = []
+    if (
+        isinstance(context_payload, Mapping)
+        and context_payload.get("scope_id") == effective_scope_id
+        and context_payload.get("session_id") == session_id
+        and isinstance(context_payload.get("results"), list)
+    ):
+        context_results = [
+            dict(item) for item in context_payload["results"] if isinstance(item, Mapping)
+        ]
+    context_results.append(dict(entry))
     _CURRENT_CONTRACT_TOOL_RESULTS.set(
-        {"scope_id": effective_scope_id, "session_id": session_id, "results": [dict(entry)]}
+        {
+            "scope_id": effective_scope_id,
+            "session_id": session_id,
+            "results": context_results,
+        }
     )
     if effective_scope_id:
         with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
@@ -422,6 +438,13 @@ def lift_artifacts_to_checkpoint(
     """Move runtime-attached artifact markers from multiple results into a checkpoint."""
     base = dict(checkpoint or {})
     artifacts: list[Any] = []
+    existing_artifacts = base.get("success_condition_artifacts")
+    if isinstance(existing_artifacts, list):
+        artifacts.extend(existing_artifacts)
+    else:
+        existing_artifact = base.get("success_condition_artifact")
+        if existing_artifact is not None:
+            artifacts.append(existing_artifact)
     required = bool(base.get("contract_required"))
     for tool_result in tool_results:
         if not isinstance(tool_result, Mapping):

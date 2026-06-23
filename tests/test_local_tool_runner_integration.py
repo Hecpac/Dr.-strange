@@ -193,6 +193,37 @@ def test_contract_result_worker_thread_uses_rebound_task_scope_without_session_i
     assert stored[0][ARTIFACT_RESULT_KEY]["tool_name"] == "Write"
 
 
+def test_tool_registry_execute_stores_worker_result_by_explicit_task_scope_without_session_id(
+    tmp_path,
+):
+    scope_id = "task-scope-explicit-worker"
+    target = tmp_path / "explicit-worker.txt"
+    reset_current_tool_contract_results(scope_id=scope_id)
+    reg = _registry_with(
+        "Write",
+        _fake_write_handler_factory(str(target), "from explicit worker scope"),
+        workspace_root=tmp_path,
+    )
+
+    def _worker_tool_call():
+        reg.execute(
+            "Write",
+            {"path": str(target), "content": "from explicit worker scope"},
+            agent_class="operator",
+            contract_scope_id=scope_id,
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(_worker_tool_call).result()
+
+    stored = consume_current_tool_contract_results(scope_id=scope_id)
+
+    assert len(stored) == 1
+    assert stored[0][CONTRACT_REQUIRED_KEY] is True
+    assert stored[0][ARTIFACT_RESULT_KEY]["tool_name"] == "Write"
+    assert consume_current_tool_contract_results(scope_id=scope_id) == []
+
+
 def test_coordinator_worker_dispatch_rebinds_contract_scope_for_tool_calls(tmp_path):
     scope_id = "task-scope-coordinator-worker"
     target = tmp_path / "coordinator-worker.txt"
@@ -297,11 +328,14 @@ def test_contract_result_scope_isolation_and_multi_artifact_order():
 def test_contract_result_context_fallback_still_works_without_session_id():
     reset_current_tool_contract_result()
     payload = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "WikiLint"}}
+    second = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "Bash"}}
 
     remember_tool_contract_result(payload)
+    remember_tool_contract_result(second)
 
-    assert current_tool_contract_result() == payload
-    assert consume_current_tool_contract_result() == payload
+    assert current_tool_contract_results() == [payload, second]
+    assert current_tool_contract_result() == second
+    assert consume_current_tool_contract_results() == [payload, second]
     assert consume_current_tool_contract_result() is None
 
 
@@ -350,6 +384,27 @@ def test_lift_artifacts_to_checkpoint_preserves_multiple_artifacts():
     assert checkpoint["success_condition_artifact"] == {"tool_name": "Write"}
     assert checkpoint["success_condition_artifacts"] == [
         {"tool_name": "Write"},
+        {"tool_name": "Bash"},
+    ]
+
+
+def test_lift_artifacts_to_checkpoint_appends_without_overwriting_existing_artifacts():
+    existing = {"tool_name": "Write", "status": "failed"}
+    later = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "Bash"}}
+
+    checkpoint = lift_artifacts_to_checkpoint(
+        {
+            "verification_status": "passed",
+            "success_condition_artifact": existing,
+            "success_condition_artifacts": [existing],
+        },
+        [later],
+    )
+
+    assert checkpoint["contract_required"] is True
+    assert checkpoint["success_condition_artifact"] == existing
+    assert checkpoint["success_condition_artifacts"] == [
+        existing,
         {"tool_name": "Bash"},
     ]
 
@@ -468,6 +523,31 @@ def test_multi_artifact_gate_blocked_artifact_blocks(tmp_path):
     assert terminal == ""
     assert verification == "blocked"
     assert new_checkpoint["promote_gate_reason"] == "multi_artifact_blocked"
+
+
+def test_multi_artifact_gate_failed_takes_precedence_over_blocked(tmp_path):
+    failed_artifact, bash_artifact = _write_and_bash_artifacts(
+        tmp_path,
+        write_handler=_fake_write_handler_says_ok_but_writes_nothing,
+    )
+    blocked_artifact = copy.deepcopy(bash_artifact)
+    blocked_artifact["tier"] = 3
+    checkpoint = {
+        "verification_status": "passed",
+        "contract_required": True,
+        "success_condition_artifact": failed_artifact,
+        "success_condition_artifacts": [failed_artifact, blocked_artifact],
+    }
+
+    terminal, verification, new_checkpoint, _events = apply_promote_gate_to_checkpoint(
+        raw_terminal_status="succeeded",
+        raw_verification_status="passed",
+        completed_checkpoint=checkpoint,
+    )
+
+    assert terminal == "failed"
+    assert verification == "failed"
+    assert new_checkpoint["promote_gate_reason"] == "multi_artifact_failed"
 
 
 def test_contract_required_with_empty_artifact_list_blocks():

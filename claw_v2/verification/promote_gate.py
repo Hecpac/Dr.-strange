@@ -151,6 +151,8 @@ def gate_terminal_status(
     checkpoint = dict(completed_checkpoint or {})
     artifacts = checkpoint.get(_ARTIFACTS_KEY)
     artifact = checkpoint.get(_ARTIFACT_KEY)
+    if isinstance(artifacts, list) and len(artifacts) == 1 and artifact is None:
+        artifact = artifacts[0]
 
     if raw_terminal_status != "succeeded":
         return GateOutcome(
@@ -192,15 +194,6 @@ def gate_terminal_status(
             (out.envelope for out in outcomes if out.envelope is not None),
             None,
         )
-        if any(out.verification_status == "blocked" for out in outcomes):
-            return GateOutcome(
-                terminal_status="",
-                verification_status="blocked",
-                envelope=first_envelope,
-                degraded=True,
-                reason="multi_artifact_blocked",
-                envelopes=envelopes,
-            )
         if any(
             out.terminal_status == "failed" or out.verification_status == "failed"
             for out in outcomes
@@ -211,6 +204,15 @@ def gate_terminal_status(
                 envelope=first_envelope,
                 degraded=True,
                 reason="multi_artifact_failed",
+                envelopes=envelopes,
+            )
+        if any(out.verification_status == "blocked" for out in outcomes):
+            return GateOutcome(
+                terminal_status="",
+                verification_status="blocked",
+                envelope=first_envelope,
+                degraded=True,
+                reason="multi_artifact_blocked",
                 envelopes=envelopes,
             )
         if any(out.verification_status == "pending_verification" for out in outcomes):

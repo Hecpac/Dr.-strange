@@ -301,6 +301,7 @@ class ArchitectureInvariantTests(unittest.TestCase):
             encoding="utf-8"
         )
         tools_source = (REPO_ROOT / "claw_v2" / "tools.py").read_text(encoding="utf-8")
+        main_source = (REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
         consume_idx = source.find("consume_current_tool_contract_results")
         lift_idx = source.find("lift_artifacts_to_checkpoint")
         gate_idx = source.find("apply_promote_gate_to_checkpoint")
@@ -323,9 +324,11 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIn("contract_artifact_scope(task_id)", source)
         self.assertIn("contract_artifact_scope(worker_contract_scope)", coordinator_source)
         self.assertIn(
-            "remember_tool_contract_result(result, session_id=session_id)",
+            "remember_tool_contract_result(",
             tools_source,
         )
+        self.assertIn("scope_id=contract_scope_id", tools_source)
+        self.assertIn("contract_scope_id=current_contract_artifact_scope()", main_source)
         self.assertIn("_SCOPE_CONTRACT_TOOL_RESULTS: dict[str, list", runner_source)
         self.assertIn("setdefault(effective_scope_id, []).append", runner_source)
         self.assertIn("verification_status=verification_status", source)
