@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import concurrent.futures
+import threading
+import time
 import unittest
 
+import claw_v2.browser_tools as browser_tools_mod
 from claw_v2.browser_tools import (
     BrowserElementRef,
     BrowserToolResult,
@@ -108,9 +112,9 @@ class NavigateRefTests(unittest.TestCase):
         p2 = _page("https://b.test", RawElement("#b", "button", "B", "B", None, None))
         svc = BrowserToolService(backend=_FakeBackend([p1, p2]))
         svc.navigate("sess1", "https://a.test")
-        v1 = svc._sessions["sess1"].ref_version
+        v1 = svc._session("sess1").ref_version
         svc.navigate("sess1", "https://b.test")
-        sess = svc._sessions["sess1"]
+        sess = svc._session("sess1")
         self.assertGreater(sess.ref_version, v1)
         self.assertIn("@e1", sess.refs)
         self.assertEqual(sess.refs["@e1"].selector, "#b")
@@ -162,6 +166,84 @@ class NavigateRefTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(backend.navigated, ["https://example.com"])
+
+
+class SessionRegistryThreadSafetyTests(unittest.TestCase):
+    def test_concurrent_same_session_creates_one_session(self) -> None:
+        svc = BrowserToolService(backend=_FakeBackend([_page("https://x.test")]))
+        original_session_type = browser_tools_mod.BrowserToolSession
+        entered_constructor = threading.Event()
+        release_constructor = threading.Event()
+        start_contenders = threading.Event()
+        constructor_count = 0
+        count_lock = threading.Lock()
+
+        def slow_session_constructor(*args, **kwargs):
+            nonlocal constructor_count
+            with count_lock:
+                constructor_count += 1
+                current = constructor_count
+            if current == 1:
+                entered_constructor.set()
+                if not release_constructor.wait(timeout=2):
+                    raise AssertionError("timed out waiting to release session constructor")
+            return original_session_type(*args, **kwargs)
+
+        def get_same_session():
+            self.assertTrue(start_contenders.wait(timeout=2))
+            return svc._session("same")
+
+        browser_tools_mod.BrowserToolSession = slow_session_constructor
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=9)
+        try:
+            first = executor.submit(svc._session, "same")
+            self.assertTrue(entered_constructor.wait(timeout=1))
+            contenders = [executor.submit(get_same_session) for _ in range(8)]
+            start_contenders.set()
+
+            time.sleep(0.02)
+            with count_lock:
+                self.assertEqual(constructor_count, 1)
+
+            release_constructor.set()
+            sessions = [first.result(timeout=2), *(f.result(timeout=2) for f in contenders)]
+        finally:
+            release_constructor.set()
+            start_contenders.set()
+            browser_tools_mod.BrowserToolSession = original_session_type
+            executor.shutdown(wait=True, cancel_futures=True)
+
+        self.assertEqual({id(sess) for sess in sessions}, {id(sessions[0])})
+        with svc._sessions_lock:
+            self.assertEqual(set(svc._sessions), {"same"})
+
+    def test_concurrent_different_session_ids_do_not_corrupt_registry(self) -> None:
+        svc = BrowserToolService(backend=_FakeBackend([_page("https://x.test")]))
+        session_ids = [f"s{i}" for i in range(32)]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
+            sessions = list(executor.map(svc._session, session_ids))
+
+        self.assertEqual({sess.session_id for sess in sessions}, set(session_ids))
+        self.assertEqual(len({id(sess) for sess in sessions}), len(session_ids))
+        with svc._sessions_lock:
+            self.assertEqual(set(svc._sessions), set(session_ids))
+
+    def test_ref_maps_remain_isolated_per_session(self) -> None:
+        p1 = _page("https://a.test", RawElement("#a", "button", "A", "A", None, None))
+        p2 = _page("https://b.test", RawElement("#b", "button", "B", "B", None, None))
+        svc = BrowserToolService(backend=_FakeBackend([p1, p2]))
+
+        svc.navigate("session-a", "https://a.test")
+        svc.navigate("session-b", "https://b.test")
+
+        session_a = svc._session("session-a")
+        session_b = svc._session("session-b")
+        self.assertIsNot(session_a, session_b)
+        self.assertEqual(session_a.refs["@e1"].selector, "#a")
+        self.assertEqual(session_b.refs["@e1"].selector, "#b")
+        self.assertEqual(session_a.ref_version, 1)
+        self.assertEqual(session_b.ref_version, 1)
 
 
 class InteractionTests(unittest.TestCase):
