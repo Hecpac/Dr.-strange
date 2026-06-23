@@ -43,7 +43,7 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"AIza[0-9A-Za-z_\-]{20,}"), "[REDACTED]"),
     (re.compile(r"Bearer\s+[A-Za-z0-9._\-]{16,}"), "[REDACTED]"),
     (re.compile(r"(?i)\b((?:set-)?cookie)\s*:\s*[^\r\n]+"), r"\1: [REDACTED]"),
-    (re.compile(r"(?i)\bcookie\s*=\s*['\"]?[^'\"\s;]+['\"]?"), "cookie=[REDACTED]"),
+    (re.compile(r"(?i)\bcookie\s*=\s*(?:['\"][^'\"]*['\"]|[^'\"\s;]+)"), "cookie=[REDACTED]"),
     (
         re.compile(r"(?i)([?&](?:token|key|api_key|access_token|approval_token)=)[^&\s]+"),
         "[REDACTED]",

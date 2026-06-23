@@ -697,13 +697,13 @@ class DecisionLoggerTests(unittest.TestCase):
             "eyJpc3MiOiJ0ZXN0Iiwic3ViIjoiZmFrZSIsImV4cCI6MTIzNDU2Nzg5MH0."
             "AbcDefGhIjKlMnOpQrStUvWxYz1234567890"
         )
-        cookie_value = "sessionid=secret-cookie-value"
+        cookie_value = "sessionid=secret cookie value"
         payload = self._emit_and_read_payload(
             self._bounded_request(
-                prompt=f"use {api_key} and Cookie: {cookie_value}",
+                prompt=f'use {api_key} and cookie="{cookie_value}"',
                 system_prompt=f"Bearer {jwt}",
                 evidence_pack={
-                    "cookie": cookie_value,
+                    "cookie": f'cookie="{cookie_value}"',
                     "api_key": api_key,
                     "notes": f"token={jwt}",
                 },
