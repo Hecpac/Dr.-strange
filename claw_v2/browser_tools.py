@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 SNAPSHOT_MAX_ELEMENTS = 150
 SNAPSHOT_MAX_TEXT_CHARS = 2000
+SNAPSHOT_BACKEND_TEXT_CHARS = 4000
+SNAPSHOT_FULL_TEXT_CHARS = 1_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +81,9 @@ class BrowserToolBackend(Protocol):
 
     def navigate(self, url: str) -> RawPage: ...
     def snapshot(self, full: bool = False) -> RawPage: ...
-    def act(self, selector: str, action: str, text: str | None = None) -> RawPage: ...
+    def act(
+        self, selector: str, action: str, text: str | None = None, *, clear: bool = True
+    ) -> RawPage: ...
     def screenshot(self, path: str) -> bool: ...
     def console(self, clear: bool = False) -> list[str]: ...
 
@@ -172,7 +176,9 @@ class BrowserToolService:
                 self._sessions[session_id] = sess
             return sess
 
-    def _ingest(self, sess: BrowserToolSession, page: RawPage) -> BrowserToolResult:
+    def _ingest(
+        self, sess: BrowserToolSession, page: RawPage, *, full: bool = False
+    ) -> BrowserToolResult:
         # Refs expire when a new snapshot is captured: replace the whole map and
         # bump the version so stale @eN refs from before are detectable.
         refs: dict[str, BrowserElementRef] = {}
@@ -199,7 +205,7 @@ class BrowserToolService:
         sess.ref_version += 1
         sess.current_url = page.url
         sess.last_used_at = _time.time()
-        body = page.text[:SNAPSHOT_MAX_TEXT_CHARS]
+        body = page.text if full else page.text[:SNAPSHOT_MAX_TEXT_CHARS]
         snapshot = (
             f"URL: {page.url[:300]}\nTITLE: {page.title[:200]}\n\n{body}\n\nELEMENTS ({len(refs)}):\n"
             + "\n".join(lines)
@@ -264,12 +270,18 @@ class BrowserToolService:
         return self._backend.snapshot(full=full)
 
     def _act_backend(
-        self, sess: BrowserToolSession, selector: str, action: str, text: str | None
+        self,
+        sess: BrowserToolSession,
+        selector: str,
+        action: str,
+        text: str | None,
+        *,
+        clear: bool = True,
     ) -> RawPage:
         act_for_session = getattr(self._backend, "act_for_session", None)
         if callable(act_for_session):
-            return act_for_session(sess.session_id, selector, action, text)
-        return self._backend.act(selector, action, text)
+            return act_for_session(sess.session_id, selector, action, text, clear=clear)
+        return self._backend.act(selector, action, text, clear=clear)
 
     def _screenshot_backend(self, sess: BrowserToolSession, path: str) -> bool:
         screenshot_for_session = getattr(self._backend, "screenshot_for_session", None)
@@ -355,7 +367,7 @@ class BrowserToolService:
                     _redact_err(str(exc)),
                 )
             else:
-                result = self._ingest(sess, page)
+                result = self._ingest(sess, page, full=full)
         if fail is not None:
             res, emsg = fail
             self._emit(
@@ -384,6 +396,7 @@ class BrowserToolService:
         action: str,
         text: str | None = None,
         *,
+        clear: bool = True,
         observe: Any | None = None,
     ) -> BrowserToolResult:
         fail: tuple[BrowserToolResult, str] | None = None
@@ -411,7 +424,9 @@ class BrowserToolService:
                 )
             else:
                 try:
-                    page = self._act_backend(sess, target.selector, action, text)
+                    page = self._act_backend(
+                        sess, target.selector, action, text, clear=clear
+                    )
                 except Exception as exc:
                     fail = (
                         BrowserToolResult(
@@ -457,7 +472,7 @@ class BrowserToolService:
         *,
         observe: Any | None = None,
     ) -> BrowserToolResult:
-        return self._act(session_id, ref, "type", text, observe=observe)
+        return self._act(session_id, ref, "type", text, clear=clear, observe=observe)
 
     def screenshot(
         self, session_id: str, path: str | None = None, *, observe: Any | None = None
@@ -518,7 +533,9 @@ _LOGIN_MARKERS = (
 )
 
 _SNAPSHOT_JS = r"""
-() => {
+(limit) => {
+  const rawLimit = Number(limit);
+  const textLimit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 4000;
   const sel = (el) => {
     if (el.id) return '#' + CSS.escape(el.id);
     const nm = el.getAttribute && el.getAttribute('name');
@@ -555,7 +572,7 @@ _SNAPSHOT_JS = r"""
   return {
     url: location.href,
     title: document.title,
-    text: (document.body ? document.body.innerText : '').slice(0, 4000),
+    text: (document.body ? document.body.innerText : '').slice(0, textLimit),
     elements: out,
   };
 }
@@ -601,8 +618,8 @@ class ChromeCdpBrowserBackend:
         with self._lifecycle_lock:
             if self._closed:
                 raise RuntimeError("chrome_cdp_backend_closed")
-            executor = self._executor
-        return executor.submit(fn).result()
+            future = self._executor.submit(fn)
+        return future.result()
 
     def _browser_connected(self) -> bool:
         if self._browser is None:
@@ -619,20 +636,20 @@ class ChromeCdpBrowserBackend:
         for owned in list(self._owned_pages.values()):
             try:
                 owned.context.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - best-effort browser cleanup must continue
+                logger.debug("failed to close owned browser context", exc_info=True)
         self._owned_pages.clear()
         if self._browser is not None:
             try:
                 self._browser.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - best-effort browser cleanup must continue
+                logger.debug("failed to close CDP browser", exc_info=True)
             self._browser = None
         if self._pw_manager is not None:
             try:
                 self._pw_manager.stop()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - best-effort browser cleanup must continue
+                logger.debug("failed to stop Playwright manager", exc_info=True)
             self._pw_manager = None
         self._pw = None
 
@@ -665,8 +682,8 @@ class ChromeCdpBrowserBackend:
             return
         try:
             owned.context.close()
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - best-effort browser cleanup must continue
+            logger.debug("failed to close discarded browser context", exc_info=True)
 
     def _owned_page_worker(self, session_id: str) -> _ChromeCdpOwnedPage:
         self._ensure_connected_worker()
@@ -683,8 +700,11 @@ class ChromeCdpBrowserBackend:
             if context is not None:
                 try:
                     context.close()
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001 - best-effort browser cleanup must continue
+                    logger.debug(
+                        "failed to close partially-created browser context",
+                        exc_info=True,
+                    )
             raise RuntimeError(
                 "cdp_session_isolation_unavailable: could not create isolated browser context"
             ) from exc
@@ -706,8 +726,9 @@ class ChromeCdpBrowserBackend:
 
         return self._run_on_worker(_work)
 
-    def _read_page(self, page) -> RawPage:
-        data = page.evaluate(_SNAPSHOT_JS)
+    def _read_page(self, page, *, full: bool = False) -> RawPage:
+        text_limit = SNAPSHOT_FULL_TEXT_CHARS if full else SNAPSHOT_BACKEND_TEXT_CHARS
+        data = page.evaluate(_SNAPSHOT_JS, text_limit)
         text = str(data.get("text") or "")
         login = any(m in text.lower() for m in _LOGIN_MARKERS)
         elements = [
@@ -747,19 +768,28 @@ class ChromeCdpBrowserBackend:
         return self.navigate_for_session("brain", url)
 
     def snapshot_for_session(self, session_id: str, full: bool = False) -> RawPage:
-        return self._with_page(session_id, self._read_page)
+        return self._with_page(session_id, lambda page: self._read_page(page, full=full))
 
     def snapshot(self, full: bool = False) -> RawPage:
         return self.snapshot_for_session("brain", full=full)
 
     def act_for_session(
-        self, session_id: str, selector: str, action: str, text: str | None = None
+        self,
+        session_id: str,
+        selector: str,
+        action: str,
+        text: str | None = None,
+        *,
+        clear: bool = True,
     ) -> RawPage:
         def _do(page):
             if action == "click":
                 page.click(selector, timeout=10000)
             elif action == "type":
-                page.fill(selector, text or "", timeout=10000)
+                if clear:
+                    page.fill(selector, text or "", timeout=10000)
+                else:
+                    page.type(selector, text or "", timeout=10000)
             else:
                 raise ValueError(f"unsupported action: {action}")
             try:
@@ -770,8 +800,10 @@ class ChromeCdpBrowserBackend:
 
         return self._with_page(session_id, _do)
 
-    def act(self, selector: str, action: str, text: str | None = None) -> RawPage:
-        return self.act_for_session("brain", selector, action, text)
+    def act(
+        self, selector: str, action: str, text: str | None = None, *, clear: bool = True
+    ) -> RawPage:
+        return self.act_for_session("brain", selector, action, text, clear=clear)
 
     def screenshot_for_session(self, session_id: str, path: str) -> bool:
         def _shot(page):
