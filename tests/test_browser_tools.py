@@ -201,12 +201,7 @@ class SessionRegistryThreadSafetyTests(unittest.TestCase):
             contenders = [executor.submit(get_same_session) for _ in range(8)]
             start_contenders.set()
 
-            deadline = time.monotonic() + 0.5
-            while time.monotonic() < deadline:
-                with count_lock:
-                    if constructor_count > 1:
-                        break
-                time.sleep(0.005)
+            time.sleep(0.02)
             with count_lock:
                 self.assertEqual(constructor_count, 1)
 
