@@ -74,6 +74,33 @@ Chrome CDP is managed by `ops/chrome-cdp-launcher.sh` when installed via
 `ops/com.claw.chrome-cdp.plist`. The launcher reuses a healthy CDP process and
 refuses to remove `SingletonLock` while the configured profile is active.
 
+## Watchdog Stale-Filter Smoke (Dry Run)
+
+Before reactivating or reloading the watchdog after F1.4 stale-event filtering,
+run the read-only smoke script against the target runtime DB:
+
+```bash
+.venv/bin/python scripts/audit/watchdog_stale_filter_smoke.py \
+  --db data/claw.db \
+  --expected-code-version c42ae47
+```
+
+The script opens SQLite with `mode=ro`, reads `observe_stream`, and reports:
+
+- The latest `agent_startup_context` payload and whether its `code_version`
+  matches `c42ae47`.
+- Recent watchdog-relevant observe errors classified as actionable, stale
+  historical, or unknown relevance using the same current-daemon-window rules as
+  diagnostics.
+- Whether stale historical events are non-actionable under the F1.4 filter.
+- Whether the result is a reload-safe candidate for an operator to review.
+- A `PASS` / `REVIEW` / `FAIL` recommendation and `next_manual_step`.
+
+This smoke does not reload launchd, does not restart Claw, does not run
+`ops/claw-watchdog.sh`, and does not write diagnostics acknowledgements. Its
+`not_executed_commands` output lists the launchd commands an operator may run or
+roll back manually after reviewing the report.
+
 ## Restart
 
 Prefer the repo restart wrapper:
