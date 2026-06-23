@@ -102,14 +102,25 @@ class EvalHarness:
             )
         payload = decision_event["payload"]
         prompt_snapshot = payload.get("prompt_snapshot")
+        compact_payload = prompt_snapshot is None
+        if compact_payload:
+            prompt_snapshot = payload.get("prompt_preview_redacted")
         if prompt_snapshot is None:
-            raise ValueError(f"trace {trace_id} is missing prompt_snapshot")
+            raise ValueError(
+                f"trace {trace_id} is missing prompt_snapshot or prompt_preview_redacted"
+            )
+        system_prompt = payload.get("system_prompt_snapshot")
+        if system_prompt is None and compact_payload:
+            system_prompt = payload.get("system_prompt_preview_redacted") or None
+        evidence_pack = payload.get("evidence_pack_snapshot")
+        if evidence_pack is None and compact_payload:
+            evidence_pack = _compact_replay_evidence_pack(payload)
         return EvalCase(
             name=name or f"trace-{trace_id[:12]}",
             prompt=prompt_snapshot,
             lane=decision_event["lane"] or "judge",
-            evidence_pack=payload.get("evidence_pack_snapshot") or {},
-            system_prompt=payload.get("system_prompt_snapshot"),
+            evidence_pack=evidence_pack or {},
+            system_prompt=system_prompt,
             expected_response=response_event["payload"].get("response_text")
             or response_event["payload"].get("content")
             or None,
@@ -118,6 +129,9 @@ class EvalHarness:
                 "provider": decision_event.get("provider"),
                 "model": decision_event.get("model"),
                 "artifact_id": decision_event.get("artifact_id"),
+                "source_payload_format": "compact" if compact_payload else "snapshot",
+                "prompt_hash": payload.get("prompt_hash"),
+                "evidence_pack_hash": payload.get("evidence_pack_hash"),
             },
         )
 
@@ -138,3 +152,15 @@ class EvalHarness:
 
 def _normalize_text(value: str) -> str:
     return " ".join(value.split())
+
+
+def _compact_replay_evidence_pack(payload: dict[str, Any]) -> dict[str, Any]:
+    preview = payload.get("evidence_pack_preview_redacted")
+    if not preview:
+        return {}
+    return {
+        "evidence_pack_preview_redacted": preview,
+        "evidence_pack_hash": payload.get("evidence_pack_hash"),
+        "evidence_pack_chars": payload.get("evidence_pack_chars"),
+        "evidence_pack_item_count": payload.get("evidence_pack_item_count"),
+    }

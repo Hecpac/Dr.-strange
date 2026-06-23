@@ -85,10 +85,19 @@ class EvalHarnessTests(unittest.TestCase):
             self.assertEqual(response.content, "openai:judge:gpt-5.4-mini")
 
             trace_id = observe.recent_events(limit=1)[0]["trace_id"]
+            decision_payload = next(
+                event["payload"]
+                for event in observe.trace_events(trace_id)
+                if event["event_type"] == "llm_decision"
+            )
+            self.assertNotIn("prompt_snapshot", decision_payload)
+            self.assertIn("prompt_preview_redacted", decision_payload)
             case = harness.capture_trace_case(observe, trace_id, name="captured")
             self.assertEqual(case.prompt, "classify this")
             self.assertEqual(case.expected_response, "openai:judge:gpt-5.4-mini")
             self.assertEqual(case.metadata["trace_id"], trace_id)
+            self.assertEqual(case.metadata["source_payload_format"], "compact")
+            self.assertEqual(case.metadata["prompt_hash"], decision_payload["prompt_hash"])
 
             saved = harness.save_case(case, root / "cases")
             loaded = harness.load_case(saved)

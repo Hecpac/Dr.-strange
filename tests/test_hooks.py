@@ -698,9 +698,10 @@ class DecisionLoggerTests(unittest.TestCase):
             "AbcDefGhIjKlMnOpQrStUvWxYz1234567890"
         )
         cookie_value = "sessionid=secret cookie value"
+        cookie_pairs = "session=abc; csrftoken=def"
         payload = self._emit_and_read_payload(
             self._bounded_request(
-                prompt=f'use {api_key} and cookie="{cookie_value}"',
+                prompt=f'use {api_key} and cookie="{cookie_value}" and cookie={cookie_pairs}',
                 system_prompt=f"Bearer {jwt}",
                 evidence_pack={
                     "cookie": f'cookie="{cookie_value}"',
@@ -714,6 +715,8 @@ class DecisionLoggerTests(unittest.TestCase):
         self.assertNotIn(api_key, serialized)
         self.assertNotIn(jwt, serialized)
         self.assertNotIn(cookie_value, serialized)
+        self.assertNotIn(cookie_pairs, serialized)
+        self.assertNotIn("csrftoken=def", serialized)
         self.assertIn("[REDACTED]", serialized)
 
     def test_multimodal_preview_omits_media_payloads(self) -> None:
