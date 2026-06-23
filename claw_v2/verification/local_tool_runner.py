@@ -313,16 +313,17 @@ def current_tool_contract_results(
 ) -> list[dict[str, Any]]:
     """Return remembered contract-bearing results without clearing them."""
     effective_scope_id = scope_id or current_contract_artifact_scope()
+    collected: list[dict[str, Any]] = []
     if effective_scope_id:
         with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
             results = _SCOPE_CONTRACT_TOOL_RESULTS.get(effective_scope_id, [])
-        if results:
-            return [dict(item) for item in results]
+        collected.extend(dict(item) for item in results if isinstance(item, Mapping))
     if session_id:
         with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
             results = _SESSION_CONTRACT_TOOL_RESULTS.get(session_id, [])
-        if results:
-            return [dict(item) for item in results]
+        collected.extend(dict(item) for item in results if isinstance(item, Mapping))
+    if collected:
+        return collected
     return _context_results_for(session_id=session_id, scope_id=effective_scope_id)
 
 
@@ -365,18 +366,19 @@ def consume_current_tool_contract_results(
 ) -> list[dict[str, Any]]:
     """Return and clear contract-bearing results for this task/session scope."""
     effective_scope_id = scope_id or current_contract_artifact_scope()
+    collected: list[dict[str, Any]] = []
     if effective_scope_id:
         with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
             scope_results = _SCOPE_CONTRACT_TOOL_RESULTS.pop(effective_scope_id, [])
+        collected.extend(dict(item) for item in scope_results if isinstance(item, Mapping))
         _clear_context_results_for(scope_id=effective_scope_id)
-        if scope_results:
-            return [dict(item) for item in scope_results]
     if session_id:
         with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
             session_results = _SESSION_CONTRACT_TOOL_RESULTS.pop(session_id, [])
+        collected.extend(dict(item) for item in session_results if isinstance(item, Mapping))
         _clear_context_results_for(session_id=session_id)
-        if session_results:
-            return [dict(item) for item in session_results]
+    if collected:
+        return collected
     context_results = _context_results_for(session_id=session_id, scope_id=effective_scope_id)
     _clear_context_results_for(session_id=session_id, scope_id=effective_scope_id)
     return context_results

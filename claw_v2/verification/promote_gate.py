@@ -186,44 +186,45 @@ def gate_terminal_status(
             )
 
         envelopes = [out.envelope.to_dict() if out.envelope else None for out in outcomes]
-        degraded_envelope = next(
-            (out.envelope for out in outcomes if out.degraded and out.envelope is not None),
-            None,
-        )
-        first_envelope = degraded_envelope or next(
-            (out.envelope for out in outcomes if out.envelope is not None),
-            None,
-        )
-        if any(
-            out.terminal_status == "failed" or out.verification_status == "failed"
+
+        def _first_envelope(selected: list[GateOutcome]) -> VerificationResult | None:
+            return next((out.envelope for out in selected if out.envelope is not None), None)
+
+        failed = [
+            out
             for out in outcomes
-        ):
+            if out.terminal_status == "failed" or out.verification_status == "failed"
+        ]
+        if failed:
             return GateOutcome(
                 terminal_status="failed",
                 verification_status="failed",
-                envelope=first_envelope,
+                envelope=_first_envelope(failed),
                 degraded=True,
                 reason="multi_artifact_failed",
                 envelopes=envelopes,
             )
-        if any(out.verification_status == "blocked" for out in outcomes):
+        blocked = [out for out in outcomes if out.verification_status == "blocked"]
+        if blocked:
             return GateOutcome(
                 terminal_status="",
                 verification_status="blocked",
-                envelope=first_envelope,
+                envelope=_first_envelope(blocked),
                 degraded=True,
                 reason="multi_artifact_blocked",
                 envelopes=envelopes,
             )
-        if any(out.verification_status == "pending_verification" for out in outcomes):
+        pending = [out for out in outcomes if out.verification_status == "pending_verification"]
+        if pending:
             return GateOutcome(
                 terminal_status="",
                 verification_status="pending_verification",
-                envelope=first_envelope,
+                envelope=_first_envelope(pending),
                 degraded=True,
                 reason="multi_artifact_pending_verification",
                 envelopes=envelopes,
             )
+        first_envelope = _first_envelope(outcomes)
         return GateOutcome(
             terminal_status="succeeded",
             verification_status="passed",
@@ -405,10 +406,7 @@ def apply_promote_gate_to_checkpoint(
     """
     checkpoint = dict(completed_checkpoint or {})
     raw_artifacts = checkpoint.get(_ARTIFACTS_KEY)
-    artifacts_present = (
-        isinstance(raw_artifacts, list)
-        and any(isinstance(item, Mapping) for item in raw_artifacts)
-    )
+    artifacts_present = isinstance(raw_artifacts, list) and bool(raw_artifacts)
     artifact_present = checkpoint.get(_ARTIFACT_KEY) is not None or artifacts_present
     is_promoting = raw_terminal_status == "succeeded"
     events: list[tuple[str, dict]] = []

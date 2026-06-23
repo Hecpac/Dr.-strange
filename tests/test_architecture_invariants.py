@@ -323,6 +323,8 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIn("scope_id=task_id", source)
         self.assertIn("contract_artifact_scope(task_id)", source)
         self.assertIn("contract_artifact_scope(worker_contract_scope)", coordinator_source)
+        self.assertNotIn("defensive optional verification import", coordinator_source)
+        self.assertNotIn("contract_artifact_scope = None", coordinator_source)
         self.assertIn(
             "remember_tool_contract_result(",
             tools_source,

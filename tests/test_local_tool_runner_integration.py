@@ -268,6 +268,31 @@ def test_coordinator_worker_dispatch_rebinds_contract_scope_for_tool_calls(tmp_p
     assert stored[0][ARTIFACT_RESULT_KEY]["tool_name"] == "Write"
 
 
+def test_coordinator_worker_dispatch_fails_closed_when_scope_lookup_fails(monkeypatch, tmp_path):
+    import claw_v2.verification.local_tool_runner as ltr
+
+    def _boom():
+        raise RuntimeError("contract scope lookup failed")
+
+    class _RouterMustNotRun:
+        def ask(self, prompt, **kwargs):
+            raise AssertionError("worker ran without contract scope")
+
+    monkeypatch.setattr(ltr, "current_contract_artifact_scope", _boom)
+    coordinator = CoordinatorService(
+        router=_RouterMustNotRun(),
+        observe=_NoopObserve(),
+        scratch_root=tmp_path / "scratch",
+        max_workers=1,
+    )
+
+    with pytest.raises(RuntimeError, match="contract scope lookup failed"):
+        coordinator._dispatch_parallel(
+            [WorkerTask(name="implementation-worker", instruction="write file", lane="worker")],
+            trace_context={"trace_id": "t", "root_trace_id": "t", "span_id": "s"},
+        )
+
+
 def test_contract_result_session_isolation_and_reset_are_session_scoped():
     session_a = "session-A"
     session_b = "session-B"
@@ -323,6 +348,29 @@ def test_contract_result_scope_isolation_and_multi_artifact_order():
     assert current_tool_contract_results(scope_id=scope_b) == [only_b]
     reset_current_tool_contract_results(scope_id=scope_a)
     assert consume_current_tool_contract_results(scope_id=scope_b) == [only_b]
+
+
+def test_contract_result_combined_scope_and_session_consume_is_one_shot():
+    scope_id = "task-combined"
+    session_id = "session-combined"
+    reset_current_tool_contract_results(scope_id=scope_id, session_id=session_id)
+    scoped = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "Write"}}
+    session = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "Bash"}}
+
+    remember_tool_contract_result(scoped, scope_id=scope_id)
+    remember_tool_contract_result(session, session_id=session_id)
+
+    assert current_tool_contract_results(scope_id=scope_id, session_id=session_id) == [
+        scoped,
+        session,
+    ]
+    assert consume_current_tool_contract_results(scope_id=scope_id, session_id=session_id) == [
+        scoped,
+        session,
+    ]
+    assert consume_current_tool_contract_results(scope_id=scope_id, session_id=session_id) == []
+    assert current_tool_contract_results(scope_id=scope_id) == []
+    assert current_tool_contract_results(session_id=session_id) == []
 
 
 def test_contract_result_context_fallback_still_works_without_session_id():
@@ -498,6 +546,8 @@ def test_multi_artifact_gate_pending_artifact_keeps_task_pending(tmp_path):
     assert terminal == ""
     assert verification == "pending_verification"
     assert new_checkpoint["promote_gate_reason"] == "multi_artifact_pending_verification"
+    assert new_checkpoint["promote_gate_envelope"] is None
+    assert len(new_checkpoint["promote_gate_envelopes"]) == 2
 
 
 def test_multi_artifact_gate_blocked_artifact_blocks(tmp_path):
@@ -550,6 +600,32 @@ def test_multi_artifact_gate_failed_takes_precedence_over_blocked(tmp_path):
     assert new_checkpoint["promote_gate_reason"] == "multi_artifact_failed"
 
 
+def test_multi_artifact_gate_malformed_artifact_does_not_persist_passed_singular_envelope(
+    tmp_path,
+):
+    _write_artifact, bash_artifact = _write_and_bash_artifacts(
+        tmp_path,
+        write_handler=_fake_write_handler_factory(str(tmp_path / "out.txt"), "hello"),
+    )
+    checkpoint = {
+        "verification_status": "passed",
+        "contract_required": True,
+        "success_condition_artifacts": ["bad", bash_artifact],
+    }
+
+    terminal, verification, new_checkpoint, _events = apply_promote_gate_to_checkpoint(
+        raw_terminal_status="succeeded",
+        raw_verification_status="passed",
+        completed_checkpoint=checkpoint,
+    )
+
+    assert terminal == "failed"
+    assert verification == "failed"
+    assert new_checkpoint["promote_gate_reason"] == "multi_artifact_failed"
+    assert new_checkpoint["promote_gate_envelope"] is None
+    assert len(new_checkpoint["promote_gate_envelopes"]) == 2
+
+
 def test_contract_required_with_empty_artifact_list_blocks():
     terminal, verification, new_checkpoint, events = apply_promote_gate_to_checkpoint(
         raw_terminal_status="succeeded",
@@ -561,6 +637,19 @@ def test_contract_required_with_empty_artifact_list_blocks():
     assert verification == "blocked"
     assert new_checkpoint["promote_gate_reason"] == "contract_required_artifact_missing"
     assert any(name == "promote_gate_contract_bypass_detected" for name, _payload in events)
+
+
+def test_contract_required_with_malformed_nonempty_artifact_list_is_malformed():
+    terminal, verification, new_checkpoint, events = apply_promote_gate_to_checkpoint(
+        raw_terminal_status="succeeded",
+        raw_verification_status="passed",
+        completed_checkpoint={"contract_required": True, "success_condition_artifacts": ["bad"]},
+    )
+
+    assert terminal == "failed"
+    assert verification == "failed"
+    assert new_checkpoint["promote_gate_reason"] == "malformed_success_condition_artifact"
+    assert not any(name == "promote_gate_contract_bypass_detected" for name, _payload in events)
 
 
 # ---------------------------------------------------------------------------
