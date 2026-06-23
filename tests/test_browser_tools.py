@@ -404,7 +404,7 @@ from claw_v2.browser_tools import ChromeCdpBrowserBackend, SNAPSHOT_MAX_ELEMENTS
 
 
 class ChromeCdpConnectionCleanupTests(unittest.TestCase):
-    def _run_with_fake_cdp(self, callback):
+    def _run_with_fake_cdp(self, callback, *, connect_error: Exception | None = None):
         events: list[str] = []
 
         class _FakePage:
@@ -487,18 +487,25 @@ class ChromeCdpConnectionCleanupTests(unittest.TestCase):
                 events.append("browser.close")
 
         class _FakePlaywright:
-            def stop(self):
-                events.append("playwright.stop")
+            pass
 
         class _FakePlaywrightManager:
             def start(self):
                 events.append("playwright.start")
                 return _FakePlaywright()
 
+            def stop(self):
+                events.append("playwright.stop")
+
+        def _connect(*args, **kwargs):
+            if connect_error is not None:
+                raise connect_error
+            return fake_browser
+
         fake_browser = _FakeBrowser()
         with (
             patch("claw_v2.browser._require_sync_playwright", return_value=_FakePlaywrightManager()),
-            patch("claw_v2.browser._cdp_connect", return_value=fake_browser),
+            patch("claw_v2.browser._cdp_connect", side_effect=_connect),
         ):
             backend = ChromeCdpBrowserBackend(cdp_endpoint="http://127.0.0.1:0")
             try:
@@ -566,7 +573,7 @@ class ChromeCdpConnectionCleanupTests(unittest.TestCase):
 
         self._run_with_fake_cdp(_case)
 
-    def test_with_page_closes_owned_context_after_callback_error_and_recovers(self) -> None:
+    def test_with_page_does_not_discard_session_on_callback_error(self) -> None:
         def _case(backend, fake_browser, events):
             seen = []
 
@@ -577,13 +584,23 @@ class ChromeCdpConnectionCleanupTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 backend._with_page("same", boom)
 
-            self.assertTrue(seen[0].is_closed())
-            self.assertIn("context.close:1", events)
+            self.assertFalse(seen[0].is_closed())
+            self.assertNotIn("context.close:1", events)
             recovered = backend._with_page("same", lambda page: page)
-            self.assertIsNot(recovered, seen[0])
-            self.assertEqual(len(fake_browser.contexts), 2)
+            self.assertIs(recovered, seen[0])
+            self.assertEqual(len(fake_browser.contexts), 1)
 
         self._run_with_fake_cdp(_case)
+
+    def test_connect_failure_stops_playwright_manager(self) -> None:
+        def _case(backend, fake_browser, events):
+            with self.assertRaisesRegex(RuntimeError, "connect failed"):
+                backend._with_page("same", lambda page: page)
+            self.assertIn("playwright.start", events)
+            self.assertIn("playwright.stop", events)
+            self.assertNotIn("browser.close", events)
+
+        self._run_with_fake_cdp(_case, connect_error=RuntimeError("connect failed"))
 
     def test_close_cleans_cdp_browser_connection_and_playwright(self) -> None:
         def _case(backend, fake_browser, events):

@@ -496,6 +496,7 @@ class ChromeCdpBrowserBackend:
         )
         self._lifecycle_lock = threading.Lock()
         self._closed = False
+        self._pw_manager: Any | None = None
         self._pw: Any | None = None
         self._browser: Any | None = None
         self._owned_pages: dict[str, _ChromeCdpOwnedPage] = {}
@@ -531,12 +532,13 @@ class ChromeCdpBrowserBackend:
             except Exception:
                 pass
             self._browser = None
-        if self._pw is not None:
+        if self._pw_manager is not None:
             try:
-                self._pw.stop()
+                self._pw_manager.stop()
             except Exception:
                 pass
-            self._pw = None
+            self._pw_manager = None
+        self._pw = None
 
     def _ensure_connected_worker(self) -> None:
         from claw_v2.browser import _cdp_connect, _require_sync_playwright
@@ -544,8 +546,8 @@ class ChromeCdpBrowserBackend:
         if self._browser_connected():
             return
         self._cleanup_worker()
-        pw_manager = _require_sync_playwright()
-        self._pw = pw_manager.start()
+        self._pw_manager = _require_sync_playwright()
+        self._pw = self._pw_manager.start()
         try:
             self._browser = _cdp_connect(self._pw, self._endpoint, enable_downloads=False)
         except Exception:
@@ -604,11 +606,7 @@ class ChromeCdpBrowserBackend:
 
         def _work():
             owned = self._owned_page_worker(session_id)
-            try:
-                return callback(owned.page)
-            except Exception:
-                self._discard_session_worker(session_id)
-                raise
+            return callback(owned.page)
 
         return self._run_on_worker(_work)
 
