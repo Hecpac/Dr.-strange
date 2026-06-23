@@ -551,7 +551,13 @@ class InteractionTests(unittest.TestCase):
         self.assertEqual(calls, [("session-a", shot_path)])
 
 
-from claw_v2.browser_tools import ChromeCdpBrowserBackend, SNAPSHOT_MAX_ELEMENTS, SNAPSHOT_MAX_TEXT_CHARS
+from claw_v2.browser_tools import (
+    SNAPSHOT_BACKEND_TEXT_CHARS,
+    SNAPSHOT_FULL_TEXT_CHARS,
+    SNAPSHOT_MAX_ELEMENTS,
+    SNAPSHOT_MAX_TEXT_CHARS,
+    ChromeCdpBrowserBackend,
+)
 
 
 class ChromeCdpConnectionCleanupTests(unittest.TestCase):
@@ -571,7 +577,7 @@ class ChromeCdpConnectionCleanupTests(unittest.TestCase):
             def wait_for_load_state(self, state, timeout=None):
                 return None
 
-            def evaluate(self, script):
+            def evaluate(self, script, limit=None):
                 label = self.url.removeprefix("https://").split(".", 1)[0] or self.marker
                 return {
                     "url": self.url,
@@ -718,6 +724,32 @@ class ChromeCdpConnectionCleanupTests(unittest.TestCase):
             real_executor.shutdown(wait=False, cancel_futures=True)
 
         self.assertEqual(submit_lock_states, [True])
+
+    def test_read_page_uses_full_text_limit_when_requested(self) -> None:
+        backend = ChromeCdpBrowserBackend(cdp_endpoint="http://127.0.0.1:0")
+        marker = "END-MARKER"
+        body = ("x" * (SNAPSHOT_BACKEND_TEXT_CHARS + 50)) + marker
+        limits: list[int] = []
+
+        class _FakePage:
+            def evaluate(self, script, limit):
+                limits.append(limit)
+                return {
+                    "url": "https://x.test",
+                    "title": "Example",
+                    "text": body[:limit],
+                    "elements": [],
+                }
+
+        try:
+            capped = backend._read_page(_FakePage(), full=False)
+            full = backend._read_page(_FakePage(), full=True)
+        finally:
+            backend.close()
+
+        self.assertEqual(limits, [SNAPSHOT_BACKEND_TEXT_CHARS, SNAPSHOT_FULL_TEXT_CHARS])
+        self.assertNotIn(marker, capped.text)
+        self.assertIn(marker, full.text)
 
     def test_different_sessions_are_serialized_on_cdp_worker_with_distinct_pages(self) -> None:
         def _case(backend, fake_browser, events):

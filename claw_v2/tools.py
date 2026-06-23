@@ -368,7 +368,7 @@ def _browser_type(args: dict) -> dict:
             str(args.get("session_id") or "brain"),
             str(args["ref"]),
             str(text),
-            clear=bool(args.get("clear", True)),
+            clear=args.get("clear") is not False,
             observe=observe,
         )
 

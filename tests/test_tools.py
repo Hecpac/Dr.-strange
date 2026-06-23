@@ -634,6 +634,46 @@ class BrowserReadToolsTests(unittest.TestCase):
             ["gate:BrowserClick", "backend:click", "gate:BrowserType", "backend:type"],
         )
 
+    def test_browser_type_clear_defaults_true_except_explicit_false(self) -> None:
+        import claw_v2.tools as tools_mod
+        from claw_v2.browser_tools import BrowserToolResult
+
+        calls: list[bool] = []
+
+        class _FakeSvc:
+            def type(self, session_id, ref, text, *, clear=True, observe=None):
+                calls.append(clear)
+                return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace, autoexec_max_tier=2)
+            policy = SandboxPolicy(workspace_root=workspace)
+
+            orig = tools_mod._browser_tool_service
+            tools_mod._browser_tool_service = lambda observe=None: _FakeSvc()
+            try:
+                cases = (
+                    ({"ref": "@e1", "text": "hello"}, True),
+                    ({"ref": "@e1", "text": "hello", "clear": None}, True),
+                    ({"ref": "@e1", "text": "hello", "clear": False}, False),
+                )
+                for args, expected in cases:
+                    with self.subTest(args=args):
+                        registry.execute(
+                            "BrowserType",
+                            args,
+                            agent_class="operator",
+                            policy=policy,
+                            approval_gate=lambda definition, args: None,
+                        )
+                        self.assertEqual(calls[-1], expected)
+            finally:
+                tools_mod._browser_tool_service = orig
+
+        self.assertEqual(calls, [True, True, False])
+
     def test_browser_type_requires_text_and_does_not_call_backend_when_missing(self) -> None:
         import claw_v2.tools as tools_mod
 

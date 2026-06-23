@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 SNAPSHOT_MAX_ELEMENTS = 150
 SNAPSHOT_MAX_TEXT_CHARS = 2000
+SNAPSHOT_BACKEND_TEXT_CHARS = 4000
+SNAPSHOT_FULL_TEXT_CHARS = 1_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +533,9 @@ _LOGIN_MARKERS = (
 )
 
 _SNAPSHOT_JS = r"""
-() => {
+(limit) => {
+  const rawLimit = Number(limit);
+  const textLimit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 4000;
   const sel = (el) => {
     if (el.id) return '#' + CSS.escape(el.id);
     const nm = el.getAttribute && el.getAttribute('name');
@@ -568,7 +572,7 @@ _SNAPSHOT_JS = r"""
   return {
     url: location.href,
     title: document.title,
-    text: (document.body ? document.body.innerText : '').slice(0, 4000),
+    text: (document.body ? document.body.innerText : '').slice(0, textLimit),
     elements: out,
   };
 }
@@ -722,8 +726,9 @@ class ChromeCdpBrowserBackend:
 
         return self._run_on_worker(_work)
 
-    def _read_page(self, page) -> RawPage:
-        data = page.evaluate(_SNAPSHOT_JS)
+    def _read_page(self, page, *, full: bool = False) -> RawPage:
+        text_limit = SNAPSHOT_FULL_TEXT_CHARS if full else SNAPSHOT_BACKEND_TEXT_CHARS
+        data = page.evaluate(_SNAPSHOT_JS, text_limit)
         text = str(data.get("text") or "")
         login = any(m in text.lower() for m in _LOGIN_MARKERS)
         elements = [
@@ -763,7 +768,7 @@ class ChromeCdpBrowserBackend:
         return self.navigate_for_session("brain", url)
 
     def snapshot_for_session(self, session_id: str, full: bool = False) -> RawPage:
-        return self._with_page(session_id, self._read_page)
+        return self._with_page(session_id, lambda page: self._read_page(page, full=full))
 
     def snapshot(self, full: bool = False) -> RawPage:
         return self.snapshot_for_session("brain", full=full)
