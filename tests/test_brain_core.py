@@ -781,6 +781,21 @@ class ExperienceReplayObserveTests(unittest.TestCase):
         self.assertNotIn("experience_replay_retrieved", kinds)
 
 
+class BrowserDelegationRuleTests(unittest.TestCase):
+    def test_brain_prompt_carves_out_atomic_browser_reads(self) -> None:
+        from claw_v2.brain import BROWSER_DELEGATION_RULE
+
+        txt = BROWSER_DELEGATION_RULE
+        self.assertIn("BrowserNavigate", txt)
+        self.assertIn("BrowserSnapshot", txt)
+        self.assertIn("inline", txt.lower())
+
+    def test_browser_delegation_rule_in_delegation_contract(self) -> None:
+        from claw_v2.brain import DELEGATION_CONTRACT, BROWSER_DELEGATION_RULE
+
+        self.assertIn(BROWSER_DELEGATION_RULE, DELEGATION_CONTRACT)
+
+
 class TestRiskRank(unittest.TestCase):
     # Regression: only one _risk_rank definition should exist (the one that delegates
     # to _RISK_RANK + _normalize_risk_level). The dead inline version at the old

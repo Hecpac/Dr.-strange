@@ -4,7 +4,9 @@ import hashlib
 import json
 import logging
 import re
+import secrets
 import subprocess
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -218,7 +220,168 @@ DEFAULT_TOOL_AGENT_CLASSES: dict[str, tuple[AgentClass, ...]] = {
     "SocialCaptionScaffold": ("researcher", "operator", "deployer"),
     "SocialReplyScaffold": ("researcher", "operator", "deployer"),
     "SocialCompetitorResearch": ("researcher", "operator", "deployer"),
+    "BrowserNavigate": ("researcher", "operator", "deployer"),
+    "BrowserSnapshot": ("researcher", "operator", "deployer"),
+    "BrowserScreenshot": ("researcher", "operator", "deployer"),
+    "BrowserClick": ("operator", "deployer"),
+    "BrowserType": ("operator", "deployer"),
 }
+
+
+_browser_svc = None
+_browser_svc_lock = threading.Lock()
+
+
+def _browser_tool_service(observe: object | None = None):
+    # Process-wide singleton: the @eN ref map lives in BrowserToolService._sessions,
+    # so navigate/click/type must share one instance or refs go stale. Also avoids
+    # re-running ensure_ready() (which focuses/launches Chrome) on every tool call.
+    # Lazy + lock-guarded; never caches on failure so the handler try/except still degrades.
+    global _browser_svc
+    if _browser_svc is not None:
+        return _browser_svc
+    with _browser_svc_lock:
+        if _browser_svc is None:
+            from claw_v2.browser_capability import BrowserCapability
+            from claw_v2.browser_tools import build_chrome_cdp_service
+
+            endpoint = BrowserCapability(observe=observe).ensure_ready(visible=True)
+            _browser_svc = build_chrome_cdp_service(cdp_endpoint=endpoint, observe=observe)
+    return _browser_svc
+
+
+def _run_off_loop(fn, *a, **kw):
+    # Sync callers run inline. Async callers must use ToolRegistry.execute_async,
+    # which already delegates sync handlers through asyncio.to_thread.
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return fn(*a, **kw)
+
+    raise RuntimeError(
+        "browser tool sync handler called from an active event loop; use ToolRegistry.execute_async"
+    )
+
+
+def _browser_navigate(args: dict) -> dict:
+    def _work():
+        observe = args.get("_observe")
+        svc = _browser_tool_service(observe=observe)
+        return svc.navigate(
+            str(args.get("session_id") or "brain"), str(args["url"]), observe=observe
+        )
+
+    try:
+        r = _run_off_loop(_work)
+    except Exception as exc:  # noqa: BLE001 - browser tools degrade service failures to {ok: False}
+        return {"ok": False, "error": str(exc)[:300]}
+    return {
+        "ok": r.success,
+        "url": r.url,
+        "title": r.title,
+        "snapshot": r.snapshot,
+        "element_count": r.element_count,
+        "error": r.error,
+    }
+
+
+def _browser_snapshot(args: dict) -> dict:
+    def _work():
+        observe = args.get("_observe")
+        svc = _browser_tool_service(observe=observe)
+        return svc.snapshot(
+            str(args.get("session_id") or "brain"),
+            bool(args.get("full", False)),
+            observe=observe,
+        )
+
+    try:
+        r = _run_off_loop(_work)
+    except Exception as exc:  # noqa: BLE001 - browser tools degrade service failures to {ok: False}
+        return {"ok": False, "error": str(exc)[:300]}
+    return {
+        "ok": r.success,
+        "url": r.url,
+        "snapshot": r.snapshot,
+        "element_count": r.element_count,
+        "error": r.error,
+    }
+
+
+def _browser_screenshot_path(raw_path: object | None = None) -> Path:
+    import os as _os
+    import time as _t
+
+    scratch_raw = _os.getenv("CLAW_BROWSER_SCRATCH_DIR")
+    scratch = (
+        Path(scratch_raw).expanduser()
+        if scratch_raw
+        else Path.home() / ".claw" / "scratch" / "browser"
+    ).resolve(strict=False)
+    raw_name = Path(str(raw_path)).name if raw_path else ""
+    if raw_name not in {"", ".", ".."} and Path(raw_name).suffix.lower() != ".png":
+        raw_name = Path(raw_name).with_suffix(".png").name
+    filename = (
+        raw_name
+        if raw_name not in {"", ".", ".."}
+        else f"browser_shot_{_t.time_ns()}_{secrets.token_hex(4)}.png"
+    )
+    target = (scratch / filename).resolve(strict=False)
+    if not target.is_relative_to(scratch):
+        raise PermissionError("screenshot path escaped browser scratch")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _browser_screenshot(args: dict) -> dict:
+    def _work():
+        observe = args.get("_observe")
+        svc = _browser_tool_service(observe=observe)
+        path = _browser_screenshot_path(args.get("path"))
+        return svc.screenshot(str(args.get("session_id") or "brain"), str(path), observe=observe)
+
+    try:
+        r = _run_off_loop(_work)
+    except Exception as exc:  # noqa: BLE001 - browser tools degrade service failures to {ok: False}
+        return {"ok": False, "error": str(exc)[:300]}
+    return {"ok": r.success, "screenshot_path": r.screenshot_path, "error": r.error}
+
+
+def _browser_click(args: dict) -> dict:
+    def _work():
+        observe = args.get("_observe")
+        svc = _browser_tool_service(observe=observe)
+        return svc.click(str(args.get("session_id") or "brain"), str(args["ref"]), observe=observe)
+
+    try:
+        r = _run_off_loop(_work)
+    except Exception as exc:  # noqa: BLE001 - browser tools degrade service failures to {ok: False}
+        return {"ok": False, "error": str(exc)[:300]}
+    return {"ok": r.success, "url": r.url, "snapshot": r.snapshot, "error": r.error}
+
+
+def _browser_type(args: dict) -> dict:
+    def _work():
+        observe = args.get("_observe")
+        svc = _browser_tool_service(observe=observe)
+        text = args.get("text")
+        if text is None:
+            raise ValueError("text is required")
+        return svc.type(
+            str(args.get("session_id") or "brain"),
+            str(args["ref"]),
+            str(text),
+            clear=args.get("clear") is not False,
+            observe=observe,
+        )
+
+    try:
+        r = _run_off_loop(_work)
+    except Exception as exc:  # noqa: BLE001 - browser tools degrade service failures to {ok: False}
+        return {"ok": False, "error": str(exc)[:300]}
+    return {"ok": r.success, "url": r.url, "snapshot": r.snapshot, "error": r.error}
 
 
 def is_valid_agent_class(value: str) -> bool:
@@ -545,7 +708,10 @@ class ToolRegistry:
                 logger.exception("observe_pre_state failed for tool %s", definition.name)
                 _pre_state = None
         try:
-            result = definition.handler(args)
+            handler_args = args
+            if definition.name.startswith("Browser") and self.observe is not None:
+                handler_args = {**args, "_observe": self.observe}
+            result = definition.handler(handler_args)
         except Exception as exc:
             self._observation_after_tool(
                 definition,
@@ -2077,6 +2243,136 @@ class ToolRegistry:
                         },
                     },
                     "required": ["url", "schema"],
+                },
+            )
+        )
+
+        registry.register(
+            ToolDefinition(
+                name="BrowserNavigate",
+                description="Navigate to a URL in the managed Chrome browser and return the page snapshot with @eN element refs.",
+                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["BrowserNavigate"],
+                handler=_browser_navigate,
+                requires_network=True,
+                ingests_external_content=True,
+                sanitize_fields=("snapshot",),
+                tier=TIER_READ_ONLY,
+                parameter_schema={
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL to navigate to"},
+                        "session_id": {
+                            "type": "string",
+                            "description": "Browser session id (default: brain)",
+                        },
+                    },
+                    "required": ["url"],
+                },
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="BrowserSnapshot",
+                description="Read the current page snapshot (DOM, text, @eN refs) without navigating.",
+                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["BrowserSnapshot"],
+                handler=_browser_snapshot,
+                requires_network=True,
+                ingests_external_content=True,
+                sanitize_fields=("snapshot",),
+                tier=TIER_READ_ONLY,
+                parameter_schema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "Browser session id (default: brain)",
+                        },
+                        "full": {
+                            "type": "boolean",
+                            "description": "Include full page text (default: false)",
+                        },
+                    },
+                    "required": [],
+                },
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="BrowserScreenshot",
+                description="Capture a PNG screenshot of the current browser viewport.",
+                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["BrowserScreenshot"],
+                handler=_browser_screenshot,
+                requires_network=True,
+                ingests_external_content=False,
+                mutates_state=True,
+                tier=TIER_LOCAL_MUTATION,
+                parameter_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Output file name/path (confined to browser scratch)",
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Browser session id (default: brain)",
+                        },
+                    },
+                    "required": [],
+                },
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="BrowserClick",
+                description="Click an element in the browser by @eN ref. Returns updated snapshot.",
+                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["BrowserClick"],
+                handler=_browser_click,
+                requires_network=True,
+                ingests_external_content=True,
+                sanitize_fields=("snapshot",),
+                mutates_state=True,
+                tier=TIER_REQUIRES_APPROVAL,
+                parameter_schema={
+                    "type": "object",
+                    "properties": {
+                        "ref": {"type": "string", "description": "Element ref (e.g. @e1)"},
+                        "session_id": {
+                            "type": "string",
+                            "description": "Browser session id (default: brain)",
+                        },
+                    },
+                    "required": ["ref"],
+                },
+            )
+        )
+        registry.register(
+            ToolDefinition(
+                name="BrowserType",
+                description="Type text into an input element in the browser by @eN ref.",
+                allowed_agent_classes=DEFAULT_TOOL_AGENT_CLASSES["BrowserType"],
+                handler=_browser_type,
+                requires_network=True,
+                ingests_external_content=True,
+                sanitize_fields=("snapshot",),
+                mutates_state=True,
+                tier=TIER_REQUIRES_APPROVAL,
+                parameter_schema={
+                    "type": "object",
+                    "properties": {
+                        "ref": {"type": "string", "description": "Element ref (e.g. @e1)"},
+                        "text": {"type": "string", "description": "Text to type"},
+                        "clear": {
+                            "type": "boolean",
+                            "description": "Clear the element before typing (default: true)",
+                            "default": True,
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Browser session id (default: brain)",
+                        },
+                    },
+                    "required": ["ref", "text"],
                 },
             )
         )

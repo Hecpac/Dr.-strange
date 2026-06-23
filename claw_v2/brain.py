@@ -293,7 +293,18 @@ Success and approval invariants:
 - The verifier may increase risk; it may not lower deterministic policy floors.
 - When the task ledger says pending/missing_evidence/interrupted, explain that state honestly and offer the next safe resume step instead of claiming success."""
 
-DELEGATION_CONTRACT = """# Delegation contract
+BROWSER_DELEGATION_RULE = (
+    "EXCEPTION (atomic non-interaction browser tools, run INLINE): BrowserNavigate "
+    "and BrowserSnapshot are reads; BrowserScreenshot writes only to controlled "
+    "scratch. Call them directly in this turn to open a URL, read a page, grab "
+    "@eN refs, or capture a screenshot. Do NOT delegate a single URL read or "
+    "screenshot. Delegate only when the objective needs many unknown steps, form "
+    "submission, or autonomous browsing. Running a Bash script that drives "
+    "Chrome/CDP is still delegation — use the atomic Browser* tools for inline "
+    "reads, not Bash."
+)
+
+DELEGATION_CONTRACT = f"""# Delegation contract
 Your chat turn has a hard 300-second wall. Work that drives the screen or the browser does not fit inside it and will time out — so it is delegated, never run inline.
 
 Bright line — delegate via the `mcp__claw__delegate_task` tool whenever the work needs ANY of these, even for a single step and even just to "check" or "verify":
@@ -310,7 +321,9 @@ How to call it:
 - `objective`: one imperative, self-contained instruction (the task runs with no memory of this conversation).
 - `mode`: `ops` (desktop/terminal automation), `publish` (social/content publishing), `browse` (web navigation/extraction), or `coding`/`research`.
 - `reason`: one line.
-- Weave the returned acknowledgement (it carries the task id) into your <response> so the user knows the task is running and the result will arrive when it finishes. After delegating, do NOT also run the work inline, and do not delegate the same objective twice."""
+- Weave the returned acknowledgement (it carries the task id) into your <response> so the user knows the task is running and the result will arrive when it finishes. After delegating, do NOT also run the work inline, and do not delegate the same objective twice.
+
+{BROWSER_DELEGATION_RULE}"""
 
 RUNTIME_OPERATIONS_CONTRACT = """# Runtime operations contract
 Claw runs as a single launchd service:
