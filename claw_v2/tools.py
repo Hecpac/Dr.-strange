@@ -270,7 +270,7 @@ def _browser_navigate(args: dict) -> dict:
 
     try:
         r = _run_off_loop(_work)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - browser tools degrade service failures to {ok: False}
         return {"ok": False, "error": str(exc)[:300]}
     return {
         "ok": r.success,
@@ -294,7 +294,7 @@ def _browser_snapshot(args: dict) -> dict:
 
     try:
         r = _run_off_loop(_work)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - browser tools degrade service failures to {ok: False}
         return {"ok": False, "error": str(exc)[:300]}
     return {
         "ok": r.success,
@@ -339,7 +339,7 @@ def _browser_screenshot(args: dict) -> dict:
 
     try:
         r = _run_off_loop(_work)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - browser tools degrade service failures to {ok: False}
         return {"ok": False, "error": str(exc)[:300]}
     return {"ok": r.success, "screenshot_path": r.screenshot_path, "error": r.error}
 
@@ -352,7 +352,7 @@ def _browser_click(args: dict) -> dict:
 
     try:
         r = _run_off_loop(_work)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - browser tools degrade service failures to {ok: False}
         return {"ok": False, "error": str(exc)[:300]}
     return {"ok": r.success, "url": r.url, "snapshot": r.snapshot, "error": r.error}
 
@@ -361,16 +361,20 @@ def _browser_type(args: dict) -> dict:
     def _work():
         observe = args.get("_observe")
         svc = _browser_tool_service(observe=observe)
+        text = args.get("text")
+        if text is None:
+            raise ValueError("text is required")
         return svc.type(
             str(args.get("session_id") or "brain"),
             str(args["ref"]),
-            str(args.get("text", "")),
+            str(text),
+            clear=bool(args.get("clear", True)),
             observe=observe,
         )
 
     try:
         r = _run_off_loop(_work)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - browser tools degrade service failures to {ok: False}
         return {"ok": False, "error": str(exc)[:300]}
     return {"ok": r.success, "url": r.url, "snapshot": r.snapshot, "error": r.error}
 
@@ -2058,12 +2062,17 @@ class ToolRegistry:
                     "properties": {
                         "ref": {"type": "string", "description": "Element ref (e.g. @e1)"},
                         "text": {"type": "string", "description": "Text to type"},
+                        "clear": {
+                            "type": "boolean",
+                            "description": "Clear the element before typing (default: true)",
+                            "default": True,
+                        },
                         "session_id": {
                             "type": "string",
                             "description": "Browser session id (default: brain)",
                         },
                     },
-                    "required": ["ref"],
+                    "required": ["ref", "text"],
                 },
             )
         )

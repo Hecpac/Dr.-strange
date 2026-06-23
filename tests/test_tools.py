@@ -556,7 +556,7 @@ class BrowserReadToolsTests(unittest.TestCase):
                 calls.append(("click", ref))
                 return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
 
-            def type(self, session_id, ref, text, *, observe=None):
+            def type(self, session_id, ref, text, *, clear=True, observe=None):
                 calls.append(("type", ref))
                 return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
 
@@ -596,7 +596,7 @@ class BrowserReadToolsTests(unittest.TestCase):
                 order.append("backend:click")
                 return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
 
-            def type(self, session_id, ref, text, *, observe=None):
+            def type(self, session_id, ref, text, *, clear=True, observe=None):
                 order.append("backend:type")
                 return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
 
@@ -633,6 +633,41 @@ class BrowserReadToolsTests(unittest.TestCase):
             order,
             ["gate:BrowserClick", "backend:click", "gate:BrowserType", "backend:type"],
         )
+
+    def test_browser_type_requires_text_and_does_not_call_backend_when_missing(self) -> None:
+        import claw_v2.tools as tools_mod
+
+        calls: list[str] = []
+
+        class _FakeSvc:
+            def type(self, session_id, ref, text, *, clear=True, observe=None):
+                calls.append("type")
+                raise AssertionError("BrowserType should validate text before backend")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace, autoexec_max_tier=2)
+            policy = SandboxPolicy(workspace_root=workspace)
+            definition = registry.get("BrowserType")
+
+            orig = tools_mod._browser_tool_service
+            tools_mod._browser_tool_service = lambda observe=None: _FakeSvc()
+            try:
+                result = registry.execute(
+                    "BrowserType",
+                    {"ref": "@e1"},
+                    agent_class="operator",
+                    policy=policy,
+                    approval_gate=lambda definition, args: None,
+                )
+            finally:
+                tools_mod._browser_tool_service = orig
+
+        self.assertIn("text", definition.parameter_schema["required"])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "text is required")
+        self.assertEqual(calls, [])
 
     def test_browser_snapshot_output_is_sanitized(self) -> None:
         import claw_v2.tools as tools_mod
@@ -753,7 +788,7 @@ class BrowserReadToolsTests(unittest.TestCase):
             def snapshot(self, full=False):
                 raise AssertionError("unused")
 
-            def act(self, selector, action, text=None):
+            def act(self, selector, action, text=None, *, clear=True):
                 raise AssertionError("unused")
 
             def screenshot(self, path):
@@ -814,7 +849,7 @@ class BrowserReadToolsTests(unittest.TestCase):
             def snapshot(self, full=False):
                 raise AssertionError("unused")
 
-            def act(self, selector, action, text=None):
+            def act(self, selector, action, text=None, *, clear=True):
                 raise AssertionError("unused")
 
             def screenshot(self, path):

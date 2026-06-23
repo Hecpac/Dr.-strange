@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import concurrent.futures
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import claw_v2.browser_tools as browser_tools_mod
@@ -67,7 +69,7 @@ class _FakeBackend:
         self._pages = pages
         self._i = -1
         self.navigated: list[str] = []
-        self.acted: list[tuple[str, str, str | None]] = []
+        self.acted: list[tuple[str, str, str | None, bool]] = []
         self.screenshots: list[str] = []
 
     def navigate(self, url: str) -> RawPage:
@@ -78,8 +80,10 @@ class _FakeBackend:
     def snapshot(self, full: bool = False) -> RawPage:
         return self._pages[min(self._i, len(self._pages) - 1)]
 
-    def act(self, selector: str, action: str, text: str | None = None) -> RawPage:
-        self.acted.append((selector, action, text))
+    def act(
+        self, selector: str, action: str, text: str | None = None, *, clear: bool = True
+    ) -> RawPage:
+        self.acted.append((selector, action, text, clear))
         self._i += 1
         return self._pages[min(self._i, len(self._pages) - 1)]
 
@@ -137,7 +141,9 @@ class _ConcurrentNavigateBackend:
     def snapshot(self, full: bool = False) -> RawPage:
         raise AssertionError("unused")
 
-    def act(self, selector: str, action: str, text: str | None = None) -> RawPage:
+    def act(
+        self, selector: str, action: str, text: str | None = None, *, clear: bool = True
+    ) -> RawPage:
         raise AssertionError("unused")
 
     def screenshot(self, path: str) -> bool:
@@ -384,21 +390,23 @@ class SessionActionSerializationTests(unittest.TestCase):
         backend = _ConcurrentNavigateBackend(block_first=True)
         svc = BrowserToolService(backend=backend)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            first = executor.submit(svc.navigate, "same", "https://a.test")
-            self.assertTrue(backend.first_entered.wait(timeout=1))
-            second = executor.submit(svc.screenshot, "same", "/tmp/shot.png")
-            time.sleep(0.05)
-            self.assertEqual(backend.calls, ["https://a.test"])
-            self.assertEqual(backend.max_active, 1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shot_path = str(Path(tmpdir) / "shot.png")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(svc.navigate, "same", "https://a.test")
+                self.assertTrue(backend.first_entered.wait(timeout=1))
+                second = executor.submit(svc.screenshot, "same", shot_path)
+                time.sleep(0.05)
+                self.assertEqual(backend.calls, ["https://a.test"])
+                self.assertEqual(backend.max_active, 1)
 
-            backend.release_first.set()
-            navigated = first.result(timeout=2)
-            screenshot = second.result(timeout=2)
+                backend.release_first.set()
+                navigated = first.result(timeout=2)
+                screenshot = second.result(timeout=2)
 
         self.assertTrue(navigated.success)
         self.assertTrue(screenshot.success)
-        self.assertEqual(screenshot.screenshot_path, "/tmp/shot.png")
+        self.assertEqual(screenshot.screenshot_path, shot_path)
         self.assertEqual(backend.max_active, 1)
 
 
@@ -457,7 +465,8 @@ class ObserveIsolationTests(unittest.TestCase):
         svc.snapshot("session-a", observe=observe)
         svc.click("session-a", "@e1", observe=observe)
         svc.type("session-a", "@e1", "hello", observe=observe)
-        svc.screenshot("session-a", "/tmp/shot.png", observe=observe)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            svc.screenshot("session-a", str(Path(tmpdir) / "shot.png"), observe=observe)
 
         started_actions = [
             payload.get("action")
@@ -479,7 +488,7 @@ class InteractionTests(unittest.TestCase):
         svc.navigate("s", "https://x.test")
         r = svc.click("s", "@e1")
         self.assertTrue(r.success)
-        self.assertEqual(backend.acted[-1], ("#post", "click", None))
+        self.assertEqual(backend.acted[-1], ("#post", "click", None, True))
 
     def test_type_passes_text(self) -> None:
         p1 = _page("https://x.test", RawElement("#q", "textbox", "Search", "", None, "text"))
@@ -488,7 +497,16 @@ class InteractionTests(unittest.TestCase):
         svc.navigate("s", "https://x.test")
         r = svc.type("s", "@e1", "hello")
         self.assertTrue(r.success)
-        self.assertEqual(backend.acted[-1], ("#q", "type", "hello"))
+        self.assertEqual(backend.acted[-1], ("#q", "type", "hello", True))
+
+    def test_type_clear_false_appends_without_clearing(self) -> None:
+        p1 = _page("https://x.test", RawElement("#q", "textbox", "Search", "", None, "text"))
+        backend = _FakeBackend([p1, p1])
+        svc = BrowserToolService(backend=backend)
+        svc.navigate("s", "https://x.test")
+        r = svc.type("s", "@e1", " appended", clear=False)
+        self.assertTrue(r.success)
+        self.assertEqual(backend.acted[-1], ("#q", "type", " appended", False))
 
     def test_stale_ref_after_version_change_fails_clearly(self) -> None:
         p1 = _page("https://a.test", RawElement("#a", "button", "A", "A", None, None))
@@ -504,11 +522,13 @@ class InteractionTests(unittest.TestCase):
         backend = _FakeBackend([_page("https://x.test")])
         svc = BrowserToolService(backend=backend)
 
-        result = svc.screenshot("s", "/tmp/shot.png")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shot_path = str(Path(tmpdir) / "shot.png")
+            result = svc.screenshot("s", shot_path)
 
         self.assertTrue(result.success)
-        self.assertEqual(result.screenshot_path, "/tmp/shot.png")
-        self.assertEqual(backend.screenshots, ["/tmp/shot.png"])
+        self.assertEqual(result.screenshot_path, shot_path)
+        self.assertEqual(backend.screenshots, [shot_path])
 
     def test_screenshot_uses_session_aware_backend_when_available(self) -> None:
         calls: list[tuple[str, str]] = []
@@ -523,10 +543,12 @@ class InteractionTests(unittest.TestCase):
 
         svc = BrowserToolService(backend=_SessionAwareBackend([_page("https://x.test")]))
 
-        result = svc.screenshot("session-a", "/tmp/shot.png")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shot_path = str(Path(tmpdir) / "shot.png")
+            result = svc.screenshot("session-a", shot_path)
 
         self.assertTrue(result.success)
-        self.assertEqual(calls, [("session-a", "/tmp/shot.png")])
+        self.assertEqual(calls, [("session-a", shot_path)])
 
 
 from claw_v2.browser_tools import ChromeCdpBrowserBackend, SNAPSHOT_MAX_ELEMENTS, SNAPSHOT_MAX_TEXT_CHARS
@@ -571,7 +593,10 @@ class ChromeCdpConnectionCleanupTests(unittest.TestCase):
                 return None
 
             def fill(self, selector, text, timeout=None):
-                return None
+                events.append(f"fill:{self.marker}:{selector}:{text}")
+
+            def type(self, selector, text, timeout=None):
+                events.append(f"type:{self.marker}:{selector}:{text}")
 
             def screenshot(self, path, full_page=True):
                 events.append(f"screenshot:{self.marker}:{path}")
@@ -669,6 +694,31 @@ class ChromeCdpConnectionCleanupTests(unittest.TestCase):
 
         self._run_with_fake_cdp(_case)
 
+    def test_run_on_worker_submits_while_lifecycle_lock_is_held(self) -> None:
+        backend = ChromeCdpBrowserBackend(cdp_endpoint="http://127.0.0.1:0")
+        real_executor = backend._executor
+        submit_lock_states: list[bool] = []
+
+        class _Future:
+            def __init__(self, value) -> None:
+                self._value = value
+
+            def result(self):
+                return self._value
+
+        class _Executor:
+            def submit(self, fn):
+                submit_lock_states.append(backend._lifecycle_lock.locked())
+                return _Future(fn())
+
+        backend._executor = _Executor()
+        try:
+            self.assertEqual(backend._run_on_worker(lambda: "ok"), "ok")
+        finally:
+            real_executor.shutdown(wait=False, cancel_futures=True)
+
+        self.assertEqual(submit_lock_states, [True])
+
     def test_different_sessions_are_serialized_on_cdp_worker_with_distinct_pages(self) -> None:
         def _case(backend, fake_browser, events):
             entered_first = threading.Event()
@@ -721,6 +771,19 @@ class ChromeCdpConnectionCleanupTests(unittest.TestCase):
 
         self._run_with_fake_cdp(_case)
 
+    def test_type_clear_controls_fill_vs_append_type(self) -> None:
+        def _case(backend, fake_browser, events):
+            svc = BrowserToolService(backend=backend)
+
+            svc.navigate("same", "https://a.test")
+            self.assertTrue(svc.type("same", "@e1", "replace").success)
+            self.assertTrue(svc.type("same", "@e1", " append", clear=False).success)
+
+            self.assertIn("fill:page-1-1:#a:replace", events)
+            self.assertIn("type:page-1-1:#a: append", events)
+
+        self._run_with_fake_cdp(_case)
+
     def test_connect_failure_stops_playwright_manager(self) -> None:
         def _case(backend, fake_browser, events):
             with self.assertRaisesRegex(RuntimeError, "connect failed"):
@@ -760,6 +823,20 @@ class SafetyCapsTests(unittest.TestCase):
         svc = BrowserToolService(backend=_FakeBackend([page]))
         r = svc.navigate("s", "https://x.test")
         self.assertLessEqual(len(r.snapshot), SNAPSHOT_MAX_TEXT_CHARS + 400)
+
+    def test_full_snapshot_bypasses_body_text_cap(self) -> None:
+        marker = "END-MARKER"
+        page = _page(
+            "https://x.test",
+            text=("x" * (SNAPSHOT_MAX_TEXT_CHARS + 250)) + marker,
+        )
+        svc = BrowserToolService(backend=_FakeBackend([page]))
+
+        capped = svc.snapshot("s", full=False)
+        full = svc.snapshot("s", full=True)
+
+        self.assertNotIn(marker, capped.snapshot)
+        self.assertIn(marker, full.snapshot)
 
     def test_login_page_is_not_success(self) -> None:
         page = _page(
@@ -814,7 +891,7 @@ class ObserveTests(unittest.TestCase):
             def snapshot(self, full=False):
                 raise AssertionError("unused")
 
-            def act(self, s, a, t=None):
+            def act(self, s, a, t=None, *, clear=True):
                 raise AssertionError("unused")
 
             def screenshot(self, p):
