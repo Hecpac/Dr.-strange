@@ -402,6 +402,74 @@ class SessionActionSerializationTests(unittest.TestCase):
         self.assertEqual(backend.max_active, 1)
 
 
+class ObserveIsolationTests(unittest.TestCase):
+    def test_concurrent_sessions_emit_only_to_their_explicit_observer(self) -> None:
+        backend = _ConcurrentNavigateBackend(block_all=True)
+        svc = BrowserToolService(backend=backend)
+        events_a: list[tuple[str, dict]] = []
+        events_b: list[tuple[str, dict]] = []
+
+        class _Obs:
+            def __init__(self, target: list[tuple[str, dict]]) -> None:
+                self._target = target
+
+            def emit(self, event_type, payload=None):
+                self._target.append((event_type, payload or {}))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(
+                svc.navigate,
+                "session-a",
+                "https://a.test",
+                observe=_Obs(events_a),
+            )
+            second = executor.submit(
+                svc.navigate,
+                "session-b",
+                "https://b.test",
+                observe=_Obs(events_b),
+            )
+            try:
+                self.assertTrue(backend.two_active.wait(timeout=1))
+            finally:
+                backend.release_all.set()
+            self.assertTrue(first.result(timeout=2).success)
+            self.assertTrue(second.result(timeout=2).success)
+
+        rendered_a = "\n".join(str(payload) for _, payload in events_a)
+        rendered_b = "\n".join(str(payload) for _, payload in events_b)
+        self.assertIn("a.test", rendered_a)
+        self.assertNotIn("b.test", rendered_a)
+        self.assertIn("b.test", rendered_b)
+        self.assertNotIn("a.test", rendered_b)
+
+    def test_explicit_observer_receives_events_for_all_browser_actions(self) -> None:
+        page = _page("https://x.test", RawElement("#q", "textbox", "Search", "", None, "text"))
+        svc = BrowserToolService(backend=_FakeBackend([page, page, page]))
+        events: list[tuple[str, dict]] = []
+
+        class _Obs:
+            def emit(self, event_type, payload=None):
+                events.append((event_type, payload or {}))
+
+        observe = _Obs()
+        svc.navigate("session-a", "https://x.test", observe=observe)
+        svc.snapshot("session-a", observe=observe)
+        svc.click("session-a", "@e1", observe=observe)
+        svc.type("session-a", "@e1", "hello", observe=observe)
+        svc.screenshot("session-a", "/tmp/shot.png", observe=observe)
+
+        started_actions = [
+            payload.get("action")
+            for kind, payload in events
+            if kind == "browser_tool_action_started"
+        ]
+        self.assertEqual(
+            started_actions,
+            ["navigate", "snapshot", "click", "type", "screenshot"],
+        )
+
+
 class InteractionTests(unittest.TestCase):
     def test_click_resolves_ref_to_selector(self) -> None:
         p1 = _page("https://x.test", RawElement("#post", "button", "Post", "Post", None, None))

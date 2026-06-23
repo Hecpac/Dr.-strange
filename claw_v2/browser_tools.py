@@ -98,6 +98,7 @@ class BrowserToolSession:
     refs: dict[str, BrowserElementRef]
     ref_version: int
     last_used_at: float
+    observe: Any | None = field(default=None, repr=False, compare=False)
     action_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
@@ -229,8 +230,18 @@ class BrowserToolService:
             metadata={"truncated": truncated, "ref_version": sess.ref_version},
         )
 
-    def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
-        obs = self.observe
+    def _observer_for_session(
+        self, sess: BrowserToolSession, observe: Any | None = None
+    ) -> Any | None:
+        if observe is not None:
+            sess.observe = observe
+            return observe
+        if sess.observe is not None:
+            return sess.observe
+        return self.observe
+
+    def _emit(self, observe: Any | None, event_type: str, payload: dict[str, Any]) -> None:
+        obs = observe
         if obs is None:
             return
         try:
@@ -273,16 +284,21 @@ class BrowserToolService:
         if callable(close):
             close()
 
-    def navigate(self, session_id: str, url: str) -> BrowserToolResult:
+    def navigate(
+        self, session_id: str, url: str, *, observe: Any | None = None
+    ) -> BrowserToolResult:
         _validate_navigation_url(url)
-        self._emit(
-            "browser_tool_action_started",
-            {"action": "navigate", "url": _redact_url(url), "backend": self._backend.name},
-        )
         fail: tuple[BrowserToolResult, str] | None = None
         result: BrowserToolResult | None = None
         sess = self._session(session_id)
+        event_observe: Any | None = None
         with sess.action_lock:
+            event_observe = self._observer_for_session(sess, observe)
+            self._emit(
+                event_observe,
+                "browser_tool_action_started",
+                {"action": "navigate", "url": _redact_url(url), "backend": self._backend.name},
+            )
             try:
                 page = self._navigate_backend(sess, url)
             except Exception as exc:
@@ -297,12 +313,14 @@ class BrowserToolService:
         if fail is not None:
             res, emsg = fail
             self._emit(
+                event_observe,
                 "browser_tool_action_failed",
                 {"action": "navigate", "url": _redact_url(url), "error": emsg},
             )
             return res
         assert result is not None
         self._emit(
+            event_observe,
             "browser_tool_action_completed",
             {
                 "action": "navigate",
@@ -313,14 +331,20 @@ class BrowserToolService:
         )
         return result
 
-    def snapshot(self, session_id: str, full: bool = False) -> BrowserToolResult:
-        self._emit(
-            "browser_tool_action_started", {"action": "snapshot", "backend": self._backend.name}
-        )
+    def snapshot(
+        self, session_id: str, full: bool = False, *, observe: Any | None = None
+    ) -> BrowserToolResult:
         fail: tuple[BrowserToolResult, str] | None = None
         result: BrowserToolResult | None = None
         sess = self._session(session_id)
+        event_observe: Any | None = None
         with sess.action_lock:
+            event_observe = self._observer_for_session(sess, observe)
+            self._emit(
+                event_observe,
+                "browser_tool_action_started",
+                {"action": "snapshot", "backend": self._backend.name},
+            )
             try:
                 page = self._snapshot_backend(sess, full=full)
             except Exception as exc:
@@ -334,10 +358,15 @@ class BrowserToolService:
                 result = self._ingest(sess, page)
         if fail is not None:
             res, emsg = fail
-            self._emit("browser_tool_action_failed", {"action": "snapshot", "error": emsg})
+            self._emit(
+                event_observe,
+                "browser_tool_action_failed",
+                {"action": "snapshot", "error": emsg},
+            )
             return res
         assert result is not None
         self._emit(
+            event_observe,
             "browser_tool_action_completed",
             {
                 "action": "snapshot",
@@ -349,16 +378,25 @@ class BrowserToolService:
         return result
 
     def _act(
-        self, session_id: str, ref: str, action: str, text: str | None = None
+        self,
+        session_id: str,
+        ref: str,
+        action: str,
+        text: str | None = None,
+        *,
+        observe: Any | None = None,
     ) -> BrowserToolResult:
-        self._emit(
-            "browser_tool_action_started",
-            {"action": action, "ref": ref, "backend": self._backend.name},
-        )
         fail: tuple[BrowserToolResult, str] | None = None
         result: BrowserToolResult | None = None
         sess = self._session(session_id)
+        event_observe: Any | None = None
         with sess.action_lock:
+            event_observe = self._observer_for_session(sess, observe)
+            self._emit(
+                event_observe,
+                "browser_tool_action_started",
+                {"action": action, "ref": ref, "backend": self._backend.name},
+            )
             target = sess.refs.get(ref)
             if target is None or not target.selector:
                 fail = (
@@ -388,10 +426,15 @@ class BrowserToolService:
                     result = self._ingest(sess, page)
         if fail is not None:
             res, emsg = fail
-            self._emit("browser_tool_action_failed", {"action": action, "ref": ref, "error": emsg})
+            self._emit(
+                event_observe,
+                "browser_tool_action_failed",
+                {"action": action, "ref": ref, "error": emsg},
+            )
             return res
         assert result is not None
         self._emit(
+            event_observe,
             "browser_tool_action_completed",
             {
                 "action": action,
@@ -402,29 +445,46 @@ class BrowserToolService:
         )
         return result
 
-    def click(self, session_id: str, ref: str) -> BrowserToolResult:
-        return self._act(session_id, ref, "click")
+    def click(self, session_id: str, ref: str, *, observe: Any | None = None) -> BrowserToolResult:
+        return self._act(session_id, ref, "click", observe=observe)
 
-    def type(self, session_id: str, ref: str, text: str, clear: bool = True) -> BrowserToolResult:
-        return self._act(session_id, ref, "type", text)
+    def type(
+        self,
+        session_id: str,
+        ref: str,
+        text: str,
+        clear: bool = True,
+        *,
+        observe: Any | None = None,
+    ) -> BrowserToolResult:
+        return self._act(session_id, ref, "type", text, observe=observe)
 
-    def screenshot(self, session_id: str, path: str | None = None) -> BrowserToolResult:
+    def screenshot(
+        self, session_id: str, path: str | None = None, *, observe: Any | None = None
+    ) -> BrowserToolResult:
         if not path:
             raise ValueError("screenshot_path_required")
-        self._emit(
-            "browser_tool_action_started",
-            {"action": "screenshot", "path": path, "backend": self._backend.name},
-        )
         sess = self._session(session_id)
         ok = False
         error: str | None = None
+        event_observe: Any | None = None
         with sess.action_lock:
+            event_observe = self._observer_for_session(sess, observe)
+            self._emit(
+                event_observe,
+                "browser_tool_action_started",
+                {"action": "screenshot", "path": path, "backend": self._backend.name},
+            )
             try:
                 ok = self._screenshot_backend(sess, path)
             except Exception as exc:
                 error = str(exc)[:300]
         if error is not None:
-            self._emit("browser_tool_action_failed", {"action": "screenshot", "error": error[:200]})
+            self._emit(
+                event_observe,
+                "browser_tool_action_failed",
+                {"action": "screenshot", "error": error[:200]},
+            )
             return BrowserToolResult(success=False, error=error, backend=self._backend.name)
         result = BrowserToolResult(
             success=ok,
@@ -432,6 +492,7 @@ class BrowserToolService:
             backend=self._backend.name,
         )
         self._emit(
+            event_observe,
             "browser_tool_action_completed",
             {"action": "screenshot", "success": result.success, "path": result.screenshot_path},
         )
