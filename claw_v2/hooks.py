@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 from typing import Any
@@ -10,9 +11,10 @@ from claw_v2.adapters.base import (
     PreLLMHook,
     PostLLMHook,
     evidence_pack_serialized_chars,
-    render_bounded_evidence_pack,
 )
 from claw_v2.observe import ObserveStream
+from claw_v2.leak_scrub import scrub_for_persistence
+from claw_v2.redaction import redact_sensitive
 from claw_v2.tracing import current_llm_trace, trace_metadata
 from claw_v2.types import LLMResponse
 
@@ -142,13 +144,24 @@ def make_decision_logger(observe: ObserveStream) -> PostLLMHook:
                 "response_length": len(response.content),
                 "effort": request.effort,
                 "has_evidence_pack": request.evidence_pack is not None,
-                "prompt_snapshot": _snapshot_prompt(request.prompt),
-                "system_prompt_snapshot": (
-                    _bounded_snapshot_text(request.system_prompt)
-                    if request.system_prompt is not None
-                    else None
-                ),
-                "evidence_pack_snapshot": _snapshot_evidence_pack(request.evidence_pack),
+                "prompt_hash": _metadata_hash(request.prompt),
+                "prompt_chars": _metadata_chars(request.prompt),
+                "prompt_preview_redacted": _metadata_preview(request.prompt, prompt_like=True),
+                "system_prompt_hash": _metadata_hash(request.system_prompt)
+                if request.system_prompt is not None
+                else None,
+                "system_prompt_chars": _metadata_chars(request.system_prompt)
+                if request.system_prompt is not None
+                else 0,
+                "system_prompt_preview_redacted": _metadata_preview(request.system_prompt)
+                if request.system_prompt is not None
+                else "",
+                "evidence_pack_hash": _metadata_hash(request.evidence_pack)
+                if request.evidence_pack is not None
+                else None,
+                "evidence_pack_chars": evidence_pack_serialized_chars(request.evidence_pack),
+                "evidence_pack_item_count": _metadata_item_count(request.evidence_pack),
+                "evidence_pack_preview_redacted": _metadata_preview(request.evidence_pack or {}),
             },
         )
         return response
@@ -178,56 +191,71 @@ def _select_decoys(session_id: str | None, count: int = 2) -> list[str]:
     return [_DECOY_POOL[i] for i in indices]
 
 
-# AM-DLOG (2026-06-12): decision_logger persisted the full prompt, system
-# prompt and evidence pack per LLM call — multimodal turns wrote base64 image
-# payloads straight into observe_stream. Snapshots are bounded; lengths stay
-# exact via prompt_length/response_length.
-_SNAPSHOT_MAX_CHARS = 4_000
-_SNAPSHOT_BLOCK_MAX_CHARS = 1_000
-_SNAPSHOT_MAX_BLOCKS = 20
+# F0.2d (2026-06-23): llm_decision events keep compact metadata only. The old
+# snapshots were bounded but still persisted prompt/system/evidence content per
+# LLM call. New events store hashes, raw char counts, and small redacted previews.
+_LLM_DECISION_PREVIEW_MAX_CHARS = 500
+_PROMPT_PREVIEW_MAX_BLOCKS = 8
 
 
-def _bounded_snapshot_text(value: Any, limit: int = _SNAPSHOT_MAX_CHARS) -> str:
-    text = str(value)
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"... [truncated {len(text) - limit} chars]"
+def _metadata_hash(value: Any) -> str:
+    rendered = _metadata_render(value)
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
 
-def _snapshot_prompt(prompt: Any) -> Any:
+def _metadata_chars(value: Any) -> int:
+    return len(_metadata_render(value))
+
+
+def _metadata_item_count(value: Any) -> int | None:
+    if value is None:
+        return 0
+    if isinstance(value, (dict, list, tuple)):
+        return len(value)
+    return None
+
+
+def _metadata_preview(value: Any, *, prompt_like: bool = False) -> str:
+    preview_source = _prompt_preview_shape(value) if prompt_like else value
+    safe = redact_sensitive(scrub_for_persistence(preview_source), limit=0)
+    rendered = _metadata_render(safe)
+    return _truncate_preview(rendered)
+
+
+def _metadata_render(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _prompt_preview_shape(prompt: Any) -> Any:
     if isinstance(prompt, str):
-        return _bounded_snapshot_text(prompt)
+        return prompt
     if isinstance(prompt, list):
         blocks: list[Any] = []
-        for block in prompt[:_SNAPSHOT_MAX_BLOCKS]:
+        for block in prompt[:_PROMPT_PREVIEW_MAX_BLOCKS]:
             if isinstance(block, dict):
                 block_type = str(block.get("type") or "block")
                 if block_type == "text":
-                    blocks.append(
-                        {
-                            "type": "text",
-                            "text": _bounded_snapshot_text(
-                                block.get("text", ""), _SNAPSHOT_BLOCK_MAX_CHARS
-                            ),
-                        }
-                    )
+                    blocks.append({"type": "text", "text": str(block.get("text", ""))})
                 else:
-                    # Media/base64 payloads never belong in the event log.
                     blocks.append({"type": block_type, "content_omitted": True})
             else:
-                blocks.append(_bounded_snapshot_text(block, _SNAPSHOT_BLOCK_MAX_CHARS))
-        if len(prompt) > _SNAPSHOT_MAX_BLOCKS:
-            blocks.append({"omitted_blocks": len(prompt) - _SNAPSHOT_MAX_BLOCKS})
+                blocks.append(block)
+        if len(prompt) > _PROMPT_PREVIEW_MAX_BLOCKS:
+            blocks.append({"omitted_blocks": len(prompt) - _PROMPT_PREVIEW_MAX_BLOCKS})
         return blocks
-    return _bounded_snapshot_text(prompt)
+    return prompt
 
 
-def _snapshot_evidence_pack(evidence_pack: dict[str, Any] | None) -> Any:
-    if not evidence_pack:
-        return {}
-    if evidence_pack_serialized_chars(evidence_pack) <= _SNAPSHOT_MAX_CHARS:
-        return evidence_pack
-    return render_bounded_evidence_pack(evidence_pack, max_chars=_SNAPSHOT_MAX_CHARS)
+def _truncate_preview(text: str) -> str:
+    if len(text) <= _LLM_DECISION_PREVIEW_MAX_CHARS:
+        return text
+    suffix = "... [truncated]"
+    keep = max(_LLM_DECISION_PREVIEW_MAX_CHARS - len(suffix), 0)
+    return text[:keep] + suffix
 
 
 def make_anti_distillation_hook(enabled: bool = True) -> PreLLMHook:
