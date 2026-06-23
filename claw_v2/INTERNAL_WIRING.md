@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: fe99808+spec-002-self-improve-promotion-hotfix+spec-002-subprocess-bounded-pr-c+spec-002-approval-manager-pr-d+spec-002-promotion-tooling-phase-4+brain-delegation-tool+recovery-jobs-drain-c1+audit-m3-m4-offloop-emits-nonblocking-checkpoint-backup+audit-high-2026-06-11+audit-waves-2-3-2026-06-12+adapters-d1-split-2026-06-12+pasos-6-7-coordinator-resumable-2026-06-12+wal-generation-guard-2026-06-12+telegram-t1-t12-2026-06-12+m2-pre-brain-browse-ops-gate-2026-06-14+f0-3c-dispatch-decision-consolidation-2026-06-15+f1-1b-readlock-tripwire-stress-2026-06-15+f1-2-f1-3-runtimedb-wal-heal-retired
-doc_version: 2.25
-last_verified: 2026-06-20
-verification_method: manual + pytest + AST sentinel cross-check
+describes_commit: "c42ae47 verified live baseline + #125 F1.4 + #126 autonomy recovery + #127 O3 verification reconciliation"
+doc_version: 2.27
+last_verified: 2026-06-23
+verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + repo/code inspection + existing pytest/AST sentinel cross-checks"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -19,6 +19,43 @@ audience: claw_v2  # consumed by the agent itself
 If `git rev-parse HEAD` diverges substantially from `describes_commit`,
 assume parts of this doc may be stale. The invariants below are the most
 stable section; the layer detail decays fastest.
+
+## c42ae47 audit status
+
+```yaml
+main_head: c42ae47
+live_daemon_field_verification:
+  source: operator-reported observe_stream agent_startup_context payload.code_version
+  code_version: c42ae47
+  pid: 86493
+  boot_time_utc: "2026-06-22 21:40:52"
+  scope: code_version/boot evidence only; does not verify every production state surface
+merged_lanes:
+  - "#125 / F1.4 watchdog stale-event filter"
+  - "#126 autonomy recovery wave A"
+  - "#127 O3 verification reconciliation lane"
+f1_source_status:
+  F1.1: complete; production runtime uses one RuntimeDb owner/lock for core stores
+  F1.2_F1.3: complete; production RuntimeDb path no longer registers WAL-heal handles
+  F1.4: complete/deployed through c42ae47; diagnostics classifies historical/stale observe errors as non-actionable
+f1_live_status:
+  RuntimeDb_single_writer: field-verified live at c42ae47
+  watchdog_stale_event_filter: field-verified live at c42ae47
+  included_live_lanes: ["#126 autonomy recovery wave A", "#127 O3 verification reconciliation lane"]
+  watchdog_reload_reenable: pending operator decision; operational gate, not a code bug
+operational_status:
+  source_integrated_on_main: true
+  live_daemon_code_version_field_verified: true
+  watchdog_reenabled_by_this_doc: false
+  watchdog_gate: reload/reenable decision remains operational; do not claim reenabled without field evidence
+pending_remediation_notes:
+  C4_promote_gate_bypass: confirmed in main until draft PR #128 merges; do not claim resolved on main yet
+  browser_tools_PR_112: blocked by validated security issues until draft PR #129 is reviewed and integrated into feat/browser-atomic-tools-2026-06-14
+  PR_92: stale/draft/conflicting/obsolete; do not rebase wholesale, extract C4 only via #128
+draft_prs:
+  "#128": C4 promote-gate artifact lift; draft, not merged
+  "#129": browser tools security patch against PR #112 branch; draft, not merged
+```
 
 ---
 
