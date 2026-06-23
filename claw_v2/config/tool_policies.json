@@ -187,19 +187,21 @@
       "allowed_contexts": ["telegram", "brain", "research", "researcher", "operator", "deployer"]
     },
     "BrowserScreenshot": {
-      "risk_level": "low",
-      "read_only": true,
+      "risk_level": "medium",
+      "read_only": false,
       "allowed_contexts": ["telegram", "brain", "research", "researcher", "operator", "deployer"]
     },
     "BrowserClick": {
       "risk_level": "medium",
       "read_only": false,
-      "allowed_contexts": ["telegram", "operator", "deployer"]
+      "allowed_contexts": ["telegram", "operator", "deployer"],
+      "requires_human": true
     },
     "BrowserType": {
       "risk_level": "medium",
       "read_only": false,
-      "allowed_contexts": ["telegram", "operator", "deployer"]
+      "allowed_contexts": ["telegram", "operator", "deployer"],
+      "requires_human": true
     },
     "SearchMemory": {
       "risk_level": "low",

@@ -6,7 +6,7 @@ import threading
 import time as _time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,11 @@ def _redact_url(url: str | None) -> str:
         return ""
     try:
         parts = urlsplit(url)
-        return f"{parts.scheme}://{parts.netloc}{parts.path}"
+        host = parts.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parts.port}" if parts.port else ""
+        return urlunsplit((parts.scheme, f"{host}{port}", parts.path, "", ""))
     except Exception:
         return "(unparseable url)"
 
@@ -119,6 +123,19 @@ _URL_RE = _re.compile(r"https?://\S+")
 
 def _redact_err(msg: str) -> str:
     return _URL_RE.sub(lambda m: _redact_url(m.group(0)), msg)[:200]
+
+
+_ALLOWED_NAVIGATION_SCHEMES = {"http", "https"}
+
+
+def _validate_navigation_url(url: str) -> None:
+    try:
+        parts = urlsplit(url)
+    except Exception as exc:
+        raise ValueError("blocked_scheme: malformed_url") from exc
+    scheme = parts.scheme.lower()
+    if scheme not in _ALLOWED_NAVIGATION_SCHEMES or not parts.netloc:
+        raise ValueError(f"blocked_scheme: {scheme or 'missing'}")
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +236,7 @@ class BrowserToolService:
             logger.debug("browser_tools observe emit failed: %s", event_type, exc_info=True)
 
     def navigate(self, session_id: str, url: str) -> BrowserToolResult:
+        _validate_navigation_url(url)
         self._emit(
             "browser_tool_action_started",
             {"action": "navigate", "url": _redact_url(url), "backend": self._backend.name},

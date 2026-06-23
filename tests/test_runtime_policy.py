@@ -115,6 +115,24 @@ class RuntimePolicyEngineTests(unittest.TestCase):
 
             self.assertIn("read-only", str(ctx.exception))
 
+    def test_explicit_non_http_url_is_denied_for_network_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace,
+                sandbox_policy=SandboxPolicy(workspace_root=workspace),
+            )
+
+            with self.assertRaises(PermissionError) as ctx:
+                engine.enforce(
+                    "BrowserNavigate",
+                    {"url": "file:///etc/passwd"},
+                    context="operator",
+                    requires_network=True,
+                )
+
+            self.assertIn("network target blocked", str(ctx.exception))
+
     def test_tool_registry_with_sandbox_denies_unlisted_registered_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
