@@ -552,11 +552,11 @@ class BrowserReadToolsTests(unittest.TestCase):
         calls: list[tuple[str, str]] = []
 
         class _FakeSvc:
-            def click(self, session_id, ref):
+            def click(self, session_id, ref, *, observe=None):
                 calls.append(("click", ref))
                 return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
 
-            def type(self, session_id, ref, text):
+            def type(self, session_id, ref, text, *, observe=None):
                 calls.append(("type", ref))
                 return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
 
@@ -567,7 +567,7 @@ class BrowserReadToolsTests(unittest.TestCase):
             policy = SandboxPolicy(workspace_root=workspace)
 
             orig = tools_mod._browser_tool_service
-            tools_mod._browser_tool_service = lambda: _FakeSvc()
+            tools_mod._browser_tool_service = lambda observe=None: _FakeSvc()
             try:
                 for name, args in (
                     ("BrowserClick", {"ref": "@e1"}),
@@ -592,11 +592,11 @@ class BrowserReadToolsTests(unittest.TestCase):
         order: list[str] = []
 
         class _FakeSvc:
-            def click(self, session_id, ref):
+            def click(self, session_id, ref, *, observe=None):
                 order.append("backend:click")
                 return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
 
-            def type(self, session_id, ref, text):
+            def type(self, session_id, ref, text, *, observe=None):
                 order.append("backend:type")
                 return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
 
@@ -610,7 +610,7 @@ class BrowserReadToolsTests(unittest.TestCase):
             policy = SandboxPolicy(workspace_root=workspace)
 
             orig = tools_mod._browser_tool_service
-            tools_mod._browser_tool_service = lambda: _FakeSvc()
+            tools_mod._browser_tool_service = lambda observe=None: _FakeSvc()
             try:
                 registry.execute(
                     "BrowserClick",
@@ -645,7 +645,7 @@ class BrowserReadToolsTests(unittest.TestCase):
                 "B", (), {"name": "chrome_cdp", "screenshot": staticmethod(lambda p: True)}
             )()
 
-            def navigate(self, s, u):
+            def navigate(self, s, u, *, observe=None):
                 return BrowserToolResult(
                     success=True, url=u, title="t", snapshot=malicious, element_count=0
                 )
@@ -655,7 +655,7 @@ class BrowserReadToolsTests(unittest.TestCase):
             workspace.mkdir()
             registry = ToolRegistry.default(workspace_root=workspace)
         orig = tools_mod._browser_tool_service
-        tools_mod._browser_tool_service = lambda: _FakeSvc()
+        tools_mod._browser_tool_service = lambda observe=None: _FakeSvc()
         try:
             result = registry.execute(
                 "BrowserNavigate", {"url": "https://x.test"}, agent_class="researcher"
@@ -677,7 +677,7 @@ class BrowserReadToolsTests(unittest.TestCase):
             workspace.mkdir()
             registry = ToolRegistry.default(workspace_root=workspace)
 
-        def _boom():
+        def _boom(observe=None):
             from claw_v2.browser_capability import BrowserCapabilityError
 
             raise BrowserCapabilityError("CDP down", endpoint="http://127.0.0.1:9250")
@@ -786,21 +786,79 @@ class BrowserReadToolsTests(unittest.TestCase):
             self.assertNotIn("pass", rendered)
             self.assertNotIn("token=x", rendered)
 
-    def test_browser_screenshot_rewrites_arbitrary_path_to_controlled_scratch(self) -> None:
-        import os
+    def test_browser_registry_replaces_stale_singleton_observe_sink(self) -> None:
         import claw_v2.tools as tools_mod
+        from claw_v2.browser_tools import BrowserToolService, RawElement, RawPage
 
-        captured: list[str] = []
+        stale_events: list[tuple[str, dict]] = []
+        fresh_events: list[tuple[str, dict]] = []
+
+        class _Obs:
+            def __init__(self, target):
+                self._target = target
+
+            def emit(self, event_type, payload=None):
+                self._target.append((event_type, payload or {}))
 
         class _Backend:
             name = "fake"
 
+            def navigate(self, url):
+                return RawPage(
+                    url="https://example.com",
+                    title="Example",
+                    text="ok",
+                    elements=[RawElement("#a", "button", "A", "A", None, None)],
+                )
+
+            def snapshot(self, full=False):
+                raise AssertionError("unused")
+
+            def act(self, selector, action, text=None):
+                raise AssertionError("unused")
+
             def screenshot(self, path):
-                captured.append(path)
-                return True
+                raise AssertionError("unused")
+
+            def console(self, clear=False):
+                return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            svc = BrowserToolService(backend=_Backend())
+            svc.observe = _Obs(stale_events)
+            tools_mod._browser_svc = svc
+            try:
+                registry = ToolRegistry.default(workspace_root=workspace, observe=_Obs(fresh_events))
+                registry.execute(
+                    "BrowserNavigate",
+                    {"url": "https://example.com"},
+                    agent_class="researcher",
+                )
+            finally:
+                tools_mod._browser_svc = None
+
+        self.assertEqual(stale_events, [])
+        self.assertTrue(fresh_events)
+
+    def test_browser_screenshot_rewrites_arbitrary_path_to_controlled_scratch(self) -> None:
+        import os
+        import claw_v2.tools as tools_mod
+        from claw_v2.browser_tools import BrowserToolResult
+
+        captured: list[tuple[str, str]] = []
+
+        class _ExplodingBackend:
+            def screenshot(self, path):
+                raise AssertionError("handler bypassed BrowserToolService")
 
         class _FakeSvc:
-            _backend = _Backend()
+            _backend = _ExplodingBackend()
+
+            def screenshot(self, session_id, path=None, *, observe=None):
+                captured.append((session_id, path))
+                return BrowserToolResult(success=True, screenshot_path=path)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -810,12 +868,12 @@ class BrowserReadToolsTests(unittest.TestCase):
             registry = ToolRegistry.default(workspace_root=workspace)
 
             orig = tools_mod._browser_tool_service
-            tools_mod._browser_tool_service = lambda: _FakeSvc()
+            tools_mod._browser_tool_service = lambda observe=None: _FakeSvc()
             try:
                 with patch.dict(os.environ, {"CLAW_BROWSER_SCRATCH_DIR": str(scratch)}):
                     result = registry.execute(
                         "BrowserScreenshot",
-                        {"path": "/tmp/evil/path.png"},
+                        {"path": "/tmp/evil/path.png", "session_id": "shot-session"},
                         agent_class="researcher",
                     )
             finally:
@@ -825,24 +883,20 @@ class BrowserReadToolsTests(unittest.TestCase):
         screenshot_path = Path(result["screenshot_path"])
         self.assertTrue(screenshot_path.is_relative_to(scratch.resolve()))
         self.assertEqual(screenshot_path.name, "path.png")
-        self.assertEqual(captured, [str(screenshot_path)])
+        self.assertEqual(captured, [("shot-session", str(screenshot_path))])
         self.assertNotEqual(str(screenshot_path), "/tmp/evil/path.png")
 
-    def test_browser_screenshot_default_path_stays_in_controlled_scratch(self) -> None:
+    def test_browser_screenshot_normalizes_non_image_custom_names_to_png(self) -> None:
         import os
         import claw_v2.tools as tools_mod
+        from claw_v2.browser_tools import BrowserToolResult
 
         captured: list[str] = []
 
-        class _Backend:
-            name = "fake"
-
-            def screenshot(self, path):
-                captured.append(path)
-                return True
-
         class _FakeSvc:
-            _backend = _Backend()
+            def screenshot(self, session_id, path=None, *, observe=None):
+                captured.append(path)
+                return BrowserToolResult(success=True, screenshot_path=path)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -852,7 +906,51 @@ class BrowserReadToolsTests(unittest.TestCase):
             registry = ToolRegistry.default(workspace_root=workspace)
 
             orig = tools_mod._browser_tool_service
-            tools_mod._browser_tool_service = lambda: _FakeSvc()
+            tools_mod._browser_tool_service = lambda observe=None: _FakeSvc()
+            try:
+                with patch.dict(os.environ, {"CLAW_BROWSER_SCRATCH_DIR": str(scratch)}):
+                    first = registry.execute(
+                        "BrowserScreenshot",
+                        {"path": "exploit.sh"},
+                        agent_class="researcher",
+                    )
+                    second = registry.execute(
+                        "BrowserScreenshot",
+                        {"path": "/tmp/malicious.py"},
+                        agent_class="researcher",
+                    )
+            finally:
+                tools_mod._browser_tool_service = orig
+
+        first_path = Path(first["screenshot_path"])
+        second_path = Path(second["screenshot_path"])
+        self.assertTrue(first_path.is_relative_to(scratch.resolve()))
+        self.assertTrue(second_path.is_relative_to(scratch.resolve()))
+        self.assertEqual(first_path.name, "exploit.png")
+        self.assertEqual(second_path.name, "malicious.png")
+        self.assertEqual([Path(path).suffix for path in captured], [".png", ".png"])
+
+    def test_browser_screenshot_default_path_stays_in_controlled_scratch(self) -> None:
+        import os
+        import claw_v2.tools as tools_mod
+        from claw_v2.browser_tools import BrowserToolResult
+
+        captured: list[str] = []
+
+        class _FakeSvc:
+            def screenshot(self, session_id, path=None, *, observe=None):
+                captured.append(path)
+                return BrowserToolResult(success=True, screenshot_path=path)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            scratch = root / "scratch"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            orig = tools_mod._browser_tool_service
+            tools_mod._browser_tool_service = lambda observe=None: _FakeSvc()
             try:
                 with patch.dict(os.environ, {"CLAW_BROWSER_SCRATCH_DIR": str(scratch)}):
                     result = registry.execute(
@@ -866,7 +964,91 @@ class BrowserReadToolsTests(unittest.TestCase):
         screenshot_path = Path(result["screenshot_path"])
         self.assertTrue(screenshot_path.is_relative_to(scratch.resolve()))
         self.assertTrue(screenshot_path.name.startswith("browser_shot_"))
+        self.assertEqual(screenshot_path.suffix, ".png")
         self.assertEqual(captured, [str(screenshot_path)])
+
+    def test_browser_screenshot_default_paths_are_unique_across_rapid_calls(self) -> None:
+        import os
+        import claw_v2.tools as tools_mod
+        from claw_v2.browser_tools import BrowserToolResult
+
+        captured: list[str] = []
+
+        class _FakeSvc:
+            def screenshot(self, session_id, path=None, *, observe=None):
+                captured.append(path)
+                return BrowserToolResult(success=True, screenshot_path=path)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            scratch = root / "scratch"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            orig = tools_mod._browser_tool_service
+            tools_mod._browser_tool_service = lambda observe=None: _FakeSvc()
+            try:
+                with (
+                    patch.dict(os.environ, {"CLAW_BROWSER_SCRATCH_DIR": str(scratch)}),
+                    patch("time.time_ns", return_value=123456789),
+                    patch.object(tools_mod.secrets, "token_hex", side_effect=["aaaa", "bbbb"]),
+                ):
+                    first = registry.execute("BrowserScreenshot", {}, agent_class="researcher")
+                    second = registry.execute("BrowserScreenshot", {}, agent_class="researcher")
+            finally:
+                tools_mod._browser_tool_service = orig
+
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertNotEqual(first["screenshot_path"], second["screenshot_path"])
+        self.assertEqual(len(set(captured)), 2)
+        self.assertEqual(Path(first["screenshot_path"]).suffix, ".png")
+        self.assertEqual(Path(second["screenshot_path"]).suffix, ".png")
+
+    def test_run_off_loop_rejects_direct_sync_use_inside_active_event_loop(self) -> None:
+        import concurrent.futures
+        import claw_v2.tools as tools_mod
+
+        async def _call() -> None:
+            with patch.object(
+                concurrent.futures,
+                "ThreadPoolExecutor",
+                side_effect=AssertionError("temporary executor should not be created"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "execute_async"):
+                    tools_mod._run_off_loop(lambda: "unused")
+
+        asyncio.run(_call())
+
+    def test_browser_tool_execute_async_still_runs_sync_handler_off_loop(self) -> None:
+        import claw_v2.tools as tools_mod
+        from claw_v2.browser_tools import BrowserToolResult
+
+        class _FakeSvc:
+            def navigate(self, session_id, url, *, observe=None):
+                return BrowserToolResult(success=True, url=url, title="ok", snapshot="ok")
+
+        async def _call(registry) -> dict:
+            return await registry.execute_async(
+                "BrowserNavigate",
+                {"url": "https://example.com"},
+                agent_class="researcher",
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+            orig = tools_mod._browser_tool_service
+            tools_mod._browser_tool_service = lambda observe=None: _FakeSvc()
+            try:
+                result = asyncio.run(_call(registry))
+            finally:
+                tools_mod._browser_tool_service = orig
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["url"], "https://example.com")
 
     def test_browser_screenshot_policy_denies_arbitrary_output_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

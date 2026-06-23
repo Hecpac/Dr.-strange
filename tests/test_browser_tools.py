@@ -68,6 +68,7 @@ class _FakeBackend:
         self._i = -1
         self.navigated: list[str] = []
         self.acted: list[tuple[str, str, str | None]] = []
+        self.screenshots: list[str] = []
 
     def navigate(self, url: str) -> RawPage:
         self.navigated.append(url)
@@ -83,6 +84,7 @@ class _FakeBackend:
         return self._pages[min(self._i, len(self._pages) - 1)]
 
     def screenshot(self, path: str) -> bool:
+        self.screenshots.append(path)
         return True
 
     def console(self, clear: bool = False) -> list[str]:
@@ -139,7 +141,17 @@ class _ConcurrentNavigateBackend:
         raise AssertionError("unused")
 
     def screenshot(self, path: str) -> bool:
-        return True
+        with self._lock:
+            self.calls.append(f"screenshot:{path}")
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+            if self._active >= 2:
+                self.two_active.set()
+        try:
+            return True
+        finally:
+            with self._lock:
+                self._active -= 1
 
     def console(self, clear: bool = False) -> list[str]:
         return []
@@ -368,6 +380,95 @@ class SessionActionSerializationTests(unittest.TestCase):
         for _, payload in events:
             self.assertNotIn("token=secret", str(payload))
 
+    def test_same_session_screenshot_serializes_with_navigation(self) -> None:
+        backend = _ConcurrentNavigateBackend(block_first=True)
+        svc = BrowserToolService(backend=backend)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(svc.navigate, "same", "https://a.test")
+            self.assertTrue(backend.first_entered.wait(timeout=1))
+            second = executor.submit(svc.screenshot, "same", "/tmp/shot.png")
+            time.sleep(0.05)
+            self.assertEqual(backend.calls, ["https://a.test"])
+            self.assertEqual(backend.max_active, 1)
+
+            backend.release_first.set()
+            navigated = first.result(timeout=2)
+            screenshot = second.result(timeout=2)
+
+        self.assertTrue(navigated.success)
+        self.assertTrue(screenshot.success)
+        self.assertEqual(screenshot.screenshot_path, "/tmp/shot.png")
+        self.assertEqual(backend.max_active, 1)
+
+
+class ObserveIsolationTests(unittest.TestCase):
+    def test_concurrent_sessions_emit_only_to_their_explicit_observer(self) -> None:
+        backend = _ConcurrentNavigateBackend(block_all=True)
+        svc = BrowserToolService(backend=backend)
+        events_a: list[tuple[str, dict]] = []
+        events_b: list[tuple[str, dict]] = []
+
+        class _Obs:
+            def __init__(self, target: list[tuple[str, dict]]) -> None:
+                self._target = target
+
+            def emit(self, event_type, payload=None):
+                self._target.append((event_type, payload or {}))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(
+                svc.navigate,
+                "session-a",
+                "https://a.test",
+                observe=_Obs(events_a),
+            )
+            second = executor.submit(
+                svc.navigate,
+                "session-b",
+                "https://b.test",
+                observe=_Obs(events_b),
+            )
+            try:
+                self.assertTrue(backend.two_active.wait(timeout=1))
+            finally:
+                backend.release_all.set()
+            self.assertTrue(first.result(timeout=2).success)
+            self.assertTrue(second.result(timeout=2).success)
+
+        rendered_a = "\n".join(str(payload) for _, payload in events_a)
+        rendered_b = "\n".join(str(payload) for _, payload in events_b)
+        self.assertIn("a.test", rendered_a)
+        self.assertNotIn("b.test", rendered_a)
+        self.assertIn("b.test", rendered_b)
+        self.assertNotIn("a.test", rendered_b)
+
+    def test_explicit_observer_receives_events_for_all_browser_actions(self) -> None:
+        page = _page("https://x.test", RawElement("#q", "textbox", "Search", "", None, "text"))
+        svc = BrowserToolService(backend=_FakeBackend([page, page, page]))
+        events: list[tuple[str, dict]] = []
+
+        class _Obs:
+            def emit(self, event_type, payload=None):
+                events.append((event_type, payload or {}))
+
+        observe = _Obs()
+        svc.navigate("session-a", "https://x.test", observe=observe)
+        svc.snapshot("session-a", observe=observe)
+        svc.click("session-a", "@e1", observe=observe)
+        svc.type("session-a", "@e1", "hello", observe=observe)
+        svc.screenshot("session-a", "/tmp/shot.png", observe=observe)
+
+        started_actions = [
+            payload.get("action")
+            for kind, payload in events
+            if kind == "browser_tool_action_started"
+        ]
+        self.assertEqual(
+            started_actions,
+            ["navigate", "snapshot", "click", "type", "screenshot"],
+        )
+
 
 class InteractionTests(unittest.TestCase):
     def test_click_resolves_ref_to_selector(self) -> None:
@@ -398,6 +499,34 @@ class InteractionTests(unittest.TestCase):
         r = svc.click("s", "@e99")
         self.assertFalse(r.success)
         self.assertEqual(r.error, "stale_ref: @e99 not in current snapshot")
+
+    def test_screenshot_routes_through_service_backend_adapter(self) -> None:
+        backend = _FakeBackend([_page("https://x.test")])
+        svc = BrowserToolService(backend=backend)
+
+        result = svc.screenshot("s", "/tmp/shot.png")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.screenshot_path, "/tmp/shot.png")
+        self.assertEqual(backend.screenshots, ["/tmp/shot.png"])
+
+    def test_screenshot_uses_session_aware_backend_when_available(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        class _SessionAwareBackend(_FakeBackend):
+            def screenshot_for_session(self, session_id: str, path: str) -> bool:
+                calls.append((session_id, path))
+                return True
+
+            def screenshot(self, path: str) -> bool:
+                raise AssertionError("service bypassed session-aware screenshot")
+
+        svc = BrowserToolService(backend=_SessionAwareBackend([_page("https://x.test")]))
+
+        result = svc.screenshot("session-a", "/tmp/shot.png")
+
+        self.assertTrue(result.success)
+        self.assertEqual(calls, [("session-a", "/tmp/shot.png")])
 
 
 from claw_v2.browser_tools import ChromeCdpBrowserBackend, SNAPSHOT_MAX_ELEMENTS, SNAPSHOT_MAX_TEXT_CHARS

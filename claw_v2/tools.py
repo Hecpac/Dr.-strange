@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import secrets
 import subprocess
 import threading
 from dataclasses import asdict, dataclass
@@ -233,54 +234,39 @@ def _browser_tool_service(observe: object | None = None):
     # Lazy + lock-guarded; never caches on failure so the handler try/except still degrades.
     global _browser_svc
     if _browser_svc is not None:
-        if observe is not None and getattr(_browser_svc, "observe", None) is None:
-            _browser_svc.observe = observe
         return _browser_svc
     with _browser_svc_lock:
         if _browser_svc is None:
             from claw_v2.browser_capability import BrowserCapability
             from claw_v2.browser_tools import build_chrome_cdp_service
 
-            endpoint = BrowserCapability().ensure_ready(visible=True)
+            endpoint = BrowserCapability(observe=observe).ensure_ready(visible=True)
             _browser_svc = build_chrome_cdp_service(cdp_endpoint=endpoint, observe=observe)
-        elif observe is not None and getattr(_browser_svc, "observe", None) is None:
-            _browser_svc.observe = observe
     return _browser_svc
 
 
-def _attach_browser_tool_observe(observe: object | None) -> None:
-    if observe is None:
-        return
-    try:
-        try:
-            svc = _browser_tool_service(observe=observe)
-        except TypeError:
-            svc = _browser_tool_service()
-        if getattr(svc, "observe", None) is None:
-            svc.observe = observe
-    except Exception:
-        logger.debug("browser observe attachment failed", exc_info=True)
-
-
 def _run_off_loop(fn, *a, **kw):
-    # Offloads a sync Playwright call (which cannot run inside a live asyncio loop)
-    # to a worker thread when one is running; otherwise runs inline.
+    # Sync callers run inline. Async callers must use ToolRegistry.execute_async,
+    # which already delegates sync handlers through asyncio.to_thread.
     import asyncio
 
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return fn(*a, **kw)
-    import concurrent.futures
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        return ex.submit(fn, *a, **kw).result()
+    raise RuntimeError(
+        "browser tool sync handler called from an active event loop; use ToolRegistry.execute_async"
+    )
 
 
 def _browser_navigate(args: dict) -> dict:
     def _work():
-        svc = _browser_tool_service()
-        return svc.navigate(str(args.get("session_id") or "brain"), str(args["url"]))
+        observe = args.get("_observe")
+        svc = _browser_tool_service(observe=observe)
+        return svc.navigate(
+            str(args.get("session_id") or "brain"), str(args["url"]), observe=observe
+        )
 
     try:
         r = _run_off_loop(_work)
@@ -298,8 +284,13 @@ def _browser_navigate(args: dict) -> dict:
 
 def _browser_snapshot(args: dict) -> dict:
     def _work():
-        svc = _browser_tool_service()
-        return svc.snapshot(str(args.get("session_id") or "brain"), bool(args.get("full", False)))
+        observe = args.get("_observe")
+        svc = _browser_tool_service(observe=observe)
+        return svc.snapshot(
+            str(args.get("session_id") or "brain"),
+            bool(args.get("full", False)),
+            observe=observe,
+        )
 
     try:
         r = _run_off_loop(_work)
@@ -325,7 +316,13 @@ def _browser_screenshot_path(raw_path: object | None = None) -> Path:
         else Path.home() / ".claw" / "scratch" / "browser"
     ).resolve(strict=False)
     raw_name = Path(str(raw_path)).name if raw_path else ""
-    filename = raw_name if raw_name not in {"", ".", ".."} else f"browser_shot_{int(_t.time())}.png"
+    if raw_name not in {"", ".", ".."} and Path(raw_name).suffix.lower() != ".png":
+        raw_name = Path(raw_name).with_suffix(".png").name
+    filename = (
+        raw_name
+        if raw_name not in {"", ".", ".."}
+        else f"browser_shot_{_t.time_ns()}_{secrets.token_hex(4)}.png"
+    )
     target = (scratch / filename).resolve(strict=False)
     if not target.is_relative_to(scratch):
         raise PermissionError("screenshot path escaped browser scratch")
@@ -335,23 +332,23 @@ def _browser_screenshot_path(raw_path: object | None = None) -> Path:
 
 def _browser_screenshot(args: dict) -> dict:
     def _work():
-        svc = _browser_tool_service()
+        observe = args.get("_observe")
+        svc = _browser_tool_service(observe=observe)
         path = _browser_screenshot_path(args.get("path"))
-        # TODO(PR3): expose BrowserToolService.screenshot() so the handler stops reaching into svc._backend
-        ok = svc._backend.screenshot(str(path))
-        return str(path) if ok else None
+        return svc.screenshot(str(args.get("session_id") or "brain"), str(path), observe=observe)
 
     try:
-        path = _run_off_loop(_work)
+        r = _run_off_loop(_work)
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:300]}
-    return {"ok": bool(path), "screenshot_path": path}
+    return {"ok": r.success, "screenshot_path": r.screenshot_path, "error": r.error}
 
 
 def _browser_click(args: dict) -> dict:
     def _work():
-        svc = _browser_tool_service()
-        return svc.click(str(args.get("session_id") or "brain"), str(args["ref"]))
+        observe = args.get("_observe")
+        svc = _browser_tool_service(observe=observe)
+        return svc.click(str(args.get("session_id") or "brain"), str(args["ref"]), observe=observe)
 
     try:
         r = _run_off_loop(_work)
@@ -362,9 +359,13 @@ def _browser_click(args: dict) -> dict:
 
 def _browser_type(args: dict) -> dict:
     def _work():
-        svc = _browser_tool_service()
+        observe = args.get("_observe")
+        svc = _browser_tool_service(observe=observe)
         return svc.type(
-            str(args.get("session_id") or "brain"), str(args["ref"]), str(args.get("text", ""))
+            str(args.get("session_id") or "brain"),
+            str(args["ref"]),
+            str(args.get("text", "")),
+            observe=observe,
         )
 
     try:
@@ -647,8 +648,6 @@ class ToolRegistry:
             self._emit_autonomy_event("AUTONOMY_APPROVED", definition, agent_class)
         else:
             self._emit_autonomy_event("AUTONOMY_BYPASS", definition, agent_class)
-        if definition.name.startswith("Browser"):
-            _attach_browser_tool_observe(self.observe)
         p0_goal_id = goal_id or self._p0_runtime_goal_id()
         p0_session_id = session_id or "runtime"
         proposed_event_id = self._emit_p0_tool_event(
@@ -677,7 +676,10 @@ class ToolRegistry:
                 logger.exception("observe_pre_state failed for tool %s", definition.name)
                 _pre_state = None
         try:
-            result = definition.handler(args)
+            handler_args = args
+            if definition.name.startswith("Browser") and self.observe is not None:
+                handler_args = {**args, "_observe": self.observe}
+            result = definition.handler(handler_args)
         except Exception as exc:
             self._observation_after_tool(
                 definition,
@@ -2005,7 +2007,11 @@ class ToolRegistry:
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Output file path (default: auto-generated /tmp path)",
+                            "description": "Output file name/path (confined to browser scratch)",
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Browser session id (default: brain)",
                         },
                     },
                     "required": [],
