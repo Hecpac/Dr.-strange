@@ -1073,6 +1073,53 @@ class CurrentDaemonWindowErrorFilteringTests(unittest.TestCase):
             self.assertEqual(unknown["checks"]["unknown_relevance_error_events"], 1)
             self.assertEqual(unknown["checks"]["recent_error_events"], 0)
 
+    def test_diagnostics_reads_legacy_and_compact_llm_decision_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "compact.db"
+            ObserveStream(db_path)
+            _insert_event_at(
+                db_path,
+                "llm_decision",
+                "-5 minutes",
+                {
+                    "prompt_snapshot": "legacy narrative database is locked mention",
+                    "system_prompt_snapshot": "legacy system",
+                    "evidence_pack_snapshot": {"legacy": True},
+                },
+            )
+            _insert_event_at(
+                db_path,
+                "llm_decision",
+                "-4 minutes",
+                {
+                    "prompt_hash": "a" * 64,
+                    "prompt_chars": 123,
+                    "prompt_preview_redacted": "compact narrative database is locked mention",
+                    "system_prompt_hash": "b" * 64,
+                    "system_prompt_chars": 42,
+                    "system_prompt_preview_redacted": "compact system",
+                    "evidence_pack_hash": "c" * 64,
+                    "evidence_pack_chars": 17,
+                    "evidence_pack_item_count": 1,
+                    "evidence_pack_preview_redacted": '{"safe": true}',
+                },
+            )
+
+            report = collect_diagnostics(
+                db_path=db_path, port=8765, runner=_healthy_runner, limit=10
+            )
+
+            recent_payloads = [
+                event["payload"]
+                for event in report["database"]["observe"]["recent_events"]
+                if event["event_type"] == "llm_decision"
+            ]
+            self.assertTrue(any("prompt_snapshot" in payload for payload in recent_payloads))
+            self.assertTrue(
+                any("prompt_preview_redacted" in payload for payload in recent_payloads)
+            )
+            self.assertEqual(report["checks"]["narrative_non_error_matches"], 2)
+
 
 class AcknowledgementConcurrencyTests(unittest.TestCase):
     def test_parallel_acknowledge_events_does_not_lose_writes(self) -> None:

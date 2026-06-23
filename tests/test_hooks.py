@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -649,21 +650,7 @@ class DecisionLoggerTests(unittest.TestCase):
             events = observe.recent_events(limit=5)
             return [e for e in events if e["event_type"] == "llm_decision"][0]["payload"]
 
-    def test_snapshots_are_bounded(self) -> None:
-        # AM-DLOG: huge prompts/system prompts/evidence packs must not be
-        # persisted whole into observe_stream on every LLM call.
-        big = "x" * 50_000
-        payload = self._emit_and_read_payload(
-            self._bounded_request(prompt=big, system_prompt=big, evidence_pack={"diff": big})
-        )
-        self.assertLess(len(payload["prompt_snapshot"]), 5_000)
-        self.assertIn("[truncated", payload["prompt_snapshot"])
-        self.assertLess(len(payload["system_prompt_snapshot"]), 5_000)
-        self.assertLess(len(str(payload["evidence_pack_snapshot"])), 6_000)
-        # Exact lengths stay available even though snapshots are bounded.
-        self.assertEqual(payload["prompt_length"], 50_000)
-
-    def test_small_snapshots_are_kept_whole(self) -> None:
+    def test_llm_decision_uses_compact_metadata_not_snapshots(self) -> None:
         payload = self._emit_and_read_payload(
             self._bounded_request(
                 prompt="small prompt",
@@ -671,11 +658,65 @@ class DecisionLoggerTests(unittest.TestCase):
                 evidence_pack={"k": "v"},
             )
         )
-        self.assertEqual(payload["prompt_snapshot"], "small prompt")
-        self.assertEqual(payload["system_prompt_snapshot"], "small system")
-        self.assertEqual(payload["evidence_pack_snapshot"], {"k": "v"})
+        self.assertNotIn("prompt_snapshot", payload)
+        self.assertNotIn("system_prompt_snapshot", payload)
+        self.assertNotIn("evidence_pack_snapshot", payload)
 
-    def test_multimodal_snapshot_omits_media_payloads(self) -> None:
+        for key in ("prompt_hash", "system_prompt_hash", "evidence_pack_hash"):
+            self.assertRegex(payload[key], r"^[0-9a-f]{64}$")
+        self.assertEqual(payload["prompt_chars"], len("small prompt"))
+        self.assertEqual(payload["system_prompt_chars"], len("small system"))
+        self.assertGreater(payload["evidence_pack_chars"], 0)
+        self.assertEqual(payload["evidence_pack_item_count"], 1)
+        self.assertIn("small prompt", payload["prompt_preview_redacted"])
+        self.assertIn("small system", payload["system_prompt_preview_redacted"])
+        self.assertIn('"k": "v"', payload["evidence_pack_preview_redacted"])
+
+    def test_compact_previews_are_bounded(self) -> None:
+        # F0.2d: huge prompts/system prompts/evidence packs must not be
+        # persisted whole into observe_stream on every LLM call.
+        big = "x" * 50_000
+        payload = self._emit_and_read_payload(
+            self._bounded_request(prompt=big, system_prompt=big, evidence_pack={"diff": big})
+        )
+        self.assertLessEqual(len(payload["prompt_preview_redacted"]), 500)
+        self.assertIn("[truncated", payload["prompt_preview_redacted"])
+        self.assertLessEqual(len(payload["system_prompt_preview_redacted"]), 500)
+        self.assertIn("[truncated", payload["system_prompt_preview_redacted"])
+        self.assertLessEqual(len(payload["evidence_pack_preview_redacted"]), 500)
+        self.assertIn("[truncated", payload["evidence_pack_preview_redacted"])
+        # Exact lengths stay available even though previews are bounded.
+        self.assertEqual(payload["prompt_length"], 50_000)
+        self.assertEqual(payload["prompt_chars"], 50_000)
+        self.assertEqual(payload["system_prompt_chars"], 50_000)
+
+    def test_compact_previews_redact_secrets_tokens_and_cookies(self) -> None:
+        api_key = "sk-abc123def456ghi789jkl012mno345"
+        jwt = (
+            "eyJhbGciOiJIUzI1NiJ9."
+            "eyJpc3MiOiJ0ZXN0Iiwic3ViIjoiZmFrZSIsImV4cCI6MTIzNDU2Nzg5MH0."
+            "AbcDefGhIjKlMnOpQrStUvWxYz1234567890"
+        )
+        cookie_value = "sessionid=secret-cookie-value"
+        payload = self._emit_and_read_payload(
+            self._bounded_request(
+                prompt=f"use {api_key} and Cookie: {cookie_value}",
+                system_prompt=f"Bearer {jwt}",
+                evidence_pack={
+                    "cookie": cookie_value,
+                    "api_key": api_key,
+                    "notes": f"token={jwt}",
+                },
+            )
+        )
+
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertNotIn(api_key, serialized)
+        self.assertNotIn(jwt, serialized)
+        self.assertNotIn(cookie_value, serialized)
+        self.assertIn("[REDACTED]", serialized)
+
+    def test_multimodal_preview_omits_media_payloads(self) -> None:
         payload = self._emit_and_read_payload(
             self._bounded_request(
                 prompt=[
@@ -691,10 +732,10 @@ class DecisionLoggerTests(unittest.TestCase):
                 ],
             )
         )
-        snapshot = payload["prompt_snapshot"]
-        self.assertEqual(snapshot[0], {"type": "text", "text": "que ves?"})
-        self.assertEqual(snapshot[1], {"type": "image", "content_omitted": True})
-        self.assertNotIn("A" * 100, str(snapshot))
+        preview = payload["prompt_preview_redacted"]
+        self.assertIn('"type": "text"', preview)
+        self.assertIn('"content_omitted": true', preview)
+        self.assertNotIn("A" * 100, preview)
 
     def test_router_uses_shared_trace_for_decision_and_response_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
