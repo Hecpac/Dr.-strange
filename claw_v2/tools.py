@@ -598,6 +598,7 @@ class ToolRegistry:
             from claw_v2.verification.local_tool_runner import (
                 CONTRACT_REQUIRED_KEY,
                 attach_artifact_to_result,
+                remember_tool_contract_result,
             )
 
             result[CONTRACT_REQUIRED_KEY] = True
@@ -620,6 +621,7 @@ class ToolRegistry:
                 # error field instead of silently swallowing.
                 logger.exception("attach_artifact_to_result failed for tool %s", definition.name)
                 result["_artifact_build_error"] = f"{type(exc).__name__}: {exc}"[:200]
+            remember_tool_contract_result(result)
         if definition.ingests_external_content and isinstance(result, dict):
             return sanitize_tool_output(definition, result, agent_class=agent_class)
         return result

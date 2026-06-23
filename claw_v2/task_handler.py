@@ -876,6 +876,9 @@ class TaskHandler:
         goal_id = self._p0_goal_id_for_task(
             task_id, session_id=session_id, objective=objective, mode=mode
         )
+        from claw_v2.verification.local_tool_runner import reset_current_tool_contract_result
+
+        reset_current_tool_contract_result()
         try:
             if self._is_cancelled(task_id):
                 self._mark_cancelled_task_state(
@@ -1006,8 +1009,18 @@ class TaskHandler:
             # FAIL-CLOSED on exception when a success_condition_artifact is present
             # AND raw terminal_status was "succeeded". Legacy passthrough only when
             # no artifact is declared.
+            from claw_v2.verification.local_tool_runner import (
+                consume_current_tool_contract_result,
+                lift_artifact_to_checkpoint,
+            )
             from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
 
+            contract_tool_result = consume_current_tool_contract_result()
+            if contract_tool_result is not None:
+                completed_checkpoint = lift_artifact_to_checkpoint(
+                    completed_checkpoint,
+                    contract_tool_result,
+                )
             terminal_status, verification_status, completed_checkpoint, _gate_events = (
                 apply_promote_gate_to_checkpoint(
                     raw_terminal_status=terminal_status,
@@ -1341,6 +1354,7 @@ class TaskHandler:
                 },
             )
         finally:
+            reset_current_tool_contract_result()
             with self._task_lock:
                 self._task_threads.pop(task_id, None)
                 self._cancelled_tasks.discard(task_id)

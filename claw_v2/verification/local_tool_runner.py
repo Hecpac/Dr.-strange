@@ -21,6 +21,7 @@ Privacy / size constraints (per Hector §11):
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 import hashlib
 from pathlib import Path
 from typing import Any, Mapping
@@ -35,6 +36,10 @@ from claw_v2.verification.local_tool_contracts import (
 # consumers (brain / task_handler) lift these into the checkpoint.
 ARTIFACT_RESULT_KEY = "_success_condition_artifact"
 CONTRACT_REQUIRED_KEY = "_contract_required"
+_CURRENT_CONTRACT_TOOL_RESULT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "claw_current_contract_tool_result",
+    default=None,
+)
 
 
 def _safe_path(args: Mapping[str, Any]) -> Path | None:
@@ -192,6 +197,36 @@ def attach_artifact_to_result(
         # marker already set; record the error so the gate event is descriptive
         result["_artifact_build_error"] = f"{type(exc).__name__}: {exc}"[:200]
     return result
+
+
+def remember_tool_contract_result(tool_result: Mapping[str, Any]) -> None:
+    """Remember the latest contract-bearing result for the task completion path."""
+    if not isinstance(tool_result, Mapping):
+        return
+    required = bool(tool_result.get(CONTRACT_REQUIRED_KEY))
+    artifact_present = ARTIFACT_RESULT_KEY in tool_result
+    if not required and not artifact_present:
+        return
+    liftable: dict[str, Any] = {}
+    if required:
+        liftable[CONTRACT_REQUIRED_KEY] = True
+    if artifact_present:
+        liftable[ARTIFACT_RESULT_KEY] = tool_result.get(ARTIFACT_RESULT_KEY)
+    _CURRENT_CONTRACT_TOOL_RESULT.set(liftable)
+
+
+def consume_current_tool_contract_result() -> dict[str, Any] | None:
+    """Return and clear the latest contract-bearing result for this context."""
+    result = _CURRENT_CONTRACT_TOOL_RESULT.get()
+    _CURRENT_CONTRACT_TOOL_RESULT.set(None)
+    if not isinstance(result, Mapping):
+        return None
+    return dict(result)
+
+
+def reset_current_tool_contract_result() -> None:
+    """Clear any contract-bearing result from the current execution context."""
+    _CURRENT_CONTRACT_TOOL_RESULT.set(None)
 
 
 def lift_artifact_to_checkpoint(

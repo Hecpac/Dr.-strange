@@ -32,6 +32,7 @@ from claw_v2.scheduled_background_jobs import (
 )
 from claw_v2.skill_expand_jobs import SKILL_EXPAND_JOB_KIND
 from claw_v2.skills import CodeSkillGovernancePolicy, Skill
+from claw_v2.task_handler import TaskHandler
 from claw_v2.workspace import StartupContextReport
 
 
@@ -292,6 +293,18 @@ class ArchitectureInvariantTests(unittest.TestCase):
         main_source = (REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
         self.assertIn("RecoveryJobDrainRunner", main_source)
         self.assertIn('name="recovery_drain"', main_source)
+
+    def test_task_handler_lifts_contract_artifact_before_promote_gate(self) -> None:
+        source = inspect.getsource(TaskHandler._run_autonomous_task)
+        consume_idx = source.find("consume_current_tool_contract_result")
+        lift_idx = source.find("lift_artifact_to_checkpoint")
+        gate_idx = source.find("apply_promote_gate_to_checkpoint")
+
+        self.assertGreaterEqual(consume_idx, 0)
+        self.assertGreaterEqual(lift_idx, 0)
+        self.assertGreaterEqual(gate_idx, 0)
+        self.assertLess(consume_idx, gate_idx)
+        self.assertLess(lift_idx, gate_idx)
 
     def test_computer_module_does_not_import_pyautogui_at_module_scope(self) -> None:
         tree = ast.parse((REPO_ROOT / "claw_v2" / "computer.py").read_text(encoding="utf-8"))

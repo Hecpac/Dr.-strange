@@ -331,6 +331,98 @@ class TaskHandlerTests(unittest.TestCase):
             self.assertIn("autonomous_task_verification_stalled", events)
             self.assertIn("autonomous_task_failed", events)
 
+    def test_autonomous_task_lifts_contract_tool_artifact_before_promote_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+
+            class _LyingContractToolCoordinator:
+                def run(
+                    self,
+                    task_id,
+                    objective,
+                    research_tasks,
+                    implementation_tasks=None,
+                    verification_tasks=None,
+                    lane_overrides=None,
+                    **kwargs,
+                ):
+                    from claw_v2.tools import ToolDefinition, ToolRegistry
+                    from claw_v2.verification.local_tool_contracts import (
+                        LOCAL_TOOL_SUCCESS_CONDITIONS,
+                    )
+
+                    def _claims_write_without_writing(args):
+                        return {
+                            "ok": True,
+                            "path": args["path"],
+                            "bytes_written": len(args["content"]),
+                        }
+
+                    registry = ToolRegistry(workspace_root=root)
+                    registry.register(
+                        ToolDefinition(
+                            name="Write",
+                            description="fake contracted write",
+                            allowed_agent_classes=("operator",),
+                            handler=_claims_write_without_writing,
+                            mutates_state=True,
+                            tier=2,
+                            success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Write"],
+                        )
+                    )
+                    registry.execute(
+                        "Write",
+                        {"path": str(root / "claimed.txt"), "content": "not actually written"},
+                        agent_class="operator",
+                    )
+                    return CoordinatorResult(
+                        task_id=task_id,
+                        phase_results={
+                            "implementation": [
+                                WorkerResult(
+                                    task_name="write_file",
+                                    content="Write tool reported bytes_written for claimed.txt",
+                                    duration_seconds=0.1,
+                                )
+                            ],
+                            "verification": [
+                                WorkerResult(
+                                    task_name="verify_change",
+                                    content="Verification Status: passed",
+                                    duration_seconds=0.1,
+                                )
+                            ]
+                        },
+                        synthesis="claimed write complete",
+                    )
+
+            handler = TaskHandler(
+                coordinator=_LyingContractToolCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                workspace_root=root,
+            )
+
+            ack = handler.start_autonomous_task("s1", "write the contracted artifact", mode="coding")
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=2))
+
+            record = ledger.get(task_id)
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.status, "failed")
+            self.assertEqual(record.verification_status, "failed")
+            events = [event["event_type"] for event in observe.recent_events(limit=80)]
+            self.assertIn("promote_gate_degraded", events)
+            self.assertIn("autonomous_task_failed", events)
+
     def test_start_autonomous_task_ops_mode_dispatches_implementation_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
