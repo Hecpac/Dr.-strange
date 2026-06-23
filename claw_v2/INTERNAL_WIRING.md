@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: "db73736 verified live baseline + #128 C4 promote-gate artifact lift + prior c42ae47 F1 lanes"
-doc_version: 2.28
+describes_commit: "4a1e624 main baseline + db73736 verified live baseline + #128 C4 + #132 F0.2d"
+doc_version: 2.29
 last_verified: 2026-06-23
 verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + repo/code inspection + existing pytest/AST sentinel cross-checks"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -20,10 +20,10 @@ If `git rev-parse HEAD` diverges substantially from `describes_commit`,
 assume parts of this doc may be stale. The invariants below are the most
 stable section; the layer detail decays fastest.
 
-## db73736 audit status
+## 4a1e624 audit status
 
 ```yaml
-main_head: db73736
+main_head: 4a1e624
 live_daemon_field_verification:
   source: operator-reported observe_stream agent_startup_context payload.code_version
   event_id: 265792
@@ -31,16 +31,19 @@ live_daemon_field_verification:
   pid: 25684
   boot_time_utc: "2026-06-23 15:53:58"
   scope: code_version/boot evidence only; does not verify every production state surface
+  post_132_live_verification: not performed; live daemon remains db73736 unless a later agent_startup_context proves code_version 4a1e624
 merged_lanes:
   - "#125 / F1.4 watchdog stale-event filter"
   - "#126 autonomy recovery wave A"
   - "#127 O3 verification reconciliation lane"
   - "#128 C4 promote-gate artifact lift"
+  - "#132 F0.2d llm_decision snapshot minimization"
 f1_source_status:
   F1.1: complete; production runtime uses one RuntimeDb owner/lock for core stores
   F1.2_F1.3: complete; production RuntimeDb path no longer registers WAL-heal handles
   F1.4: complete/deployed through c42ae47; diagnostics classifies historical/stale observe errors as non-actionable
   C4: complete/deployed through #128 / db73736; field-verified live
+  F0_2d: fixed in main by #132 / 4a1e624; not live unless daemon code_version later matches 4a1e624
 f1_live_status:
   RuntimeDb_single_writer: field-verified live at c42ae47
   watchdog_stale_event_filter: field-verified live at c42ae47
@@ -54,12 +57,13 @@ operational_status:
 pending_remediation_notes:
   C4_promote_gate_bypass: fixed in main by #128 / db73736 and field-verified live via agent_startup_context event 265792
   browser_tools_PR_112: pending browser security/concurrency review; draft PR #129 remains unmerged
+  watchdog_smoke_runbook_PR_131: pending
   PR_92: stale/draft/conflicting/obsolete; superseded by focused #128 C4 fix
-  F0_2d: implemented in draft #132; pending merge; not live unless merged
+  F0_2d: fixed in main by #132 / 4a1e624; not live unless daemon code_version later matches 4a1e624
   F2: design exists in draft #133; design-only; not implemented
 draft_prs:
   "#129": browser tools security patch against PR #112 branch; draft, not merged
-  "#132": F0.2d implementation; draft, pending merge; not live unless merged
+  "#131": watchdog smoke/runbook; pending
   "#133": F2 design; draft, design-only, not implemented
 ```
 
