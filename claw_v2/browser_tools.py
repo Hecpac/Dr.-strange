@@ -260,6 +260,12 @@ class BrowserToolService:
             return act_for_session(sess.session_id, selector, action, text)
         return self._backend.act(selector, action, text)
 
+    def _screenshot_backend(self, sess: BrowserToolSession, path: str) -> bool:
+        screenshot_for_session = getattr(self._backend, "screenshot_for_session", None)
+        if callable(screenshot_for_session):
+            return bool(screenshot_for_session(sess.session_id, path))
+        return bool(self._backend.screenshot(path))
+
     def close(self) -> None:
         with self._sessions_lock:
             self._sessions.clear()
@@ -401,6 +407,35 @@ class BrowserToolService:
 
     def type(self, session_id: str, ref: str, text: str, clear: bool = True) -> BrowserToolResult:
         return self._act(session_id, ref, "type", text)
+
+    def screenshot(self, session_id: str, path: str | None = None) -> BrowserToolResult:
+        if not path:
+            raise ValueError("screenshot_path_required")
+        self._emit(
+            "browser_tool_action_started",
+            {"action": "screenshot", "path": path, "backend": self._backend.name},
+        )
+        sess = self._session(session_id)
+        ok = False
+        error: str | None = None
+        with sess.action_lock:
+            try:
+                ok = self._screenshot_backend(sess, path)
+            except Exception as exc:
+                error = str(exc)[:300]
+        if error is not None:
+            self._emit("browser_tool_action_failed", {"action": "screenshot", "error": error[:200]})
+            return BrowserToolResult(success=False, error=error, backend=self._backend.name)
+        result = BrowserToolResult(
+            success=ok,
+            screenshot_path=path if ok else None,
+            backend=self._backend.name,
+        )
+        self._emit(
+            "browser_tool_action_completed",
+            {"action": "screenshot", "success": result.success, "path": result.screenshot_path},
+        )
+        return result
 
 
 # ---------------------------------------------------------------------------
