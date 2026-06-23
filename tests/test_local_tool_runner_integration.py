@@ -15,20 +15,28 @@ sockets/urllib. NO X/LinkedIn/HeyGen/deploy/GitHub remote, no browser/CDP.
 
 from __future__ import annotations
 
+import copy
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from claw_v2.coordinator import CoordinatorService, WorkerTask
 from claw_v2.tools import ToolDefinition, ToolRegistry
+from claw_v2.types import LLMResponse
 from claw_v2.verification.local_tool_contracts import LOCAL_TOOL_SUCCESS_CONDITIONS
 from claw_v2.verification.local_tool_runner import (
     ARTIFACT_RESULT_KEY,
     CONTRACT_REQUIRED_KEY,
+    contract_artifact_scope,
     consume_current_tool_contract_result,
+    consume_current_tool_contract_results,
     current_tool_contract_result,
+    current_tool_contract_results,
     lift_artifact_to_checkpoint,
+    lift_artifacts_to_checkpoint,
     remember_tool_contract_result,
     reset_current_tool_contract_result,
+    reset_current_tool_contract_results,
 )
 from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
 
@@ -129,6 +137,11 @@ def _registry_with(tool_name: str, handler, *, workspace_root=None):
     return reg
 
 
+class _NoopObserve:
+    def emit(self, *args, **kwargs):
+        return None
+
+
 def test_contract_result_cross_thread_session_store_is_one_shot():
     session_id = "session-A"
     reset_current_tool_contract_result(session_id=session_id)
@@ -152,6 +165,78 @@ def test_contract_result_cross_thread_session_store_is_one_shot():
     assert consume_current_tool_contract_result(session_id=session_id) is None
 
 
+def test_contract_result_worker_thread_uses_rebound_task_scope_without_session_id(tmp_path):
+    scope_id = "task-scope-worker"
+    target = tmp_path / "worker.txt"
+    reset_current_tool_contract_results(scope_id=scope_id)
+    reg = _registry_with(
+        "Write",
+        _fake_write_handler_factory(str(target), "from worker"),
+        workspace_root=tmp_path,
+    )
+
+    def _worker_tool_call():
+        with contract_artifact_scope(scope_id):
+            reg.execute(
+                "Write",
+                {"path": str(target), "content": "from worker"},
+                agent_class="operator",
+            )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(_worker_tool_call).result()
+
+    stored = consume_current_tool_contract_results(scope_id=scope_id)
+
+    assert len(stored) == 1
+    assert stored[0][CONTRACT_REQUIRED_KEY] is True
+    assert stored[0][ARTIFACT_RESULT_KEY]["tool_name"] == "Write"
+
+
+def test_coordinator_worker_dispatch_rebinds_contract_scope_for_tool_calls(tmp_path):
+    scope_id = "task-scope-coordinator-worker"
+    target = tmp_path / "coordinator-worker.txt"
+    reset_current_tool_contract_results(scope_id=scope_id)
+    reg = _registry_with(
+        "Write",
+        _fake_write_handler_factory(str(target), "from coordinator worker"),
+        workspace_root=tmp_path,
+    )
+
+    class _ToolCallingRouter:
+        def ask(self, prompt, **kwargs):
+            reg.execute(
+                "Write",
+                {"path": str(target), "content": "from coordinator worker"},
+                agent_class="operator",
+            )
+            return LLMResponse(
+                content="worker complete",
+                lane=kwargs.get("lane", "worker"),
+                provider="fake",
+                model="fake",
+            )
+
+    coordinator = CoordinatorService(
+        router=_ToolCallingRouter(),
+        observe=_NoopObserve(),
+        scratch_root=tmp_path / "scratch",
+        max_workers=1,
+    )
+
+    with contract_artifact_scope(scope_id):
+        results = coordinator._dispatch_parallel(
+            [WorkerTask(name="implementation-worker", instruction="write file", lane="worker")],
+            trace_context={"trace_id": "t", "root_trace_id": "t", "span_id": "s"},
+        )
+
+    stored = consume_current_tool_contract_results(scope_id=scope_id)
+
+    assert results[0].error == ""
+    assert len(stored) == 1
+    assert stored[0][ARTIFACT_RESULT_KEY]["tool_name"] == "Write"
+
+
 def test_contract_result_session_isolation_and_reset_are_session_scoped():
     session_a = "session-A"
     session_b = "session-B"
@@ -172,6 +257,41 @@ def test_contract_result_session_isolation_and_reset_are_session_scoped():
     assert current_tool_contract_result(session_id=session_b) == payload_b
     assert consume_current_tool_contract_result(session_id=session_b) == payload_b
     assert consume_current_tool_contract_result(session_id=session_b) is None
+
+
+def test_contract_result_context_fallback_is_not_used_for_other_sessions():
+    session_a = "session-A"
+    session_b = "session-B"
+    reset_current_tool_contract_result(session_id=session_a)
+    reset_current_tool_contract_result(session_id=session_b)
+    payload_b = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "Bash"}}
+
+    remember_tool_contract_result(payload_b, session_id=session_b)
+
+    assert current_tool_contract_result(session_id=session_a) is None
+    reset_current_tool_contract_result(session_id=session_a)
+    assert current_tool_contract_result(session_id=session_b) == payload_b
+    assert consume_current_tool_contract_result(session_id=session_b) == payload_b
+
+
+def test_contract_result_scope_isolation_and_multi_artifact_order():
+    scope_a = "task-A"
+    scope_b = "task-B"
+    reset_current_tool_contract_results(scope_id=scope_a)
+    reset_current_tool_contract_results(scope_id=scope_b)
+    first_a = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "Write"}}
+    second_a = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "Bash"}}
+    only_b = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "WikiLint"}}
+
+    remember_tool_contract_result(first_a, scope_id=scope_a)
+    remember_tool_contract_result(only_b, scope_id=scope_b)
+    remember_tool_contract_result(second_a, scope_id=scope_a)
+
+    assert current_tool_contract_results(scope_id=scope_a) == [first_a, second_a]
+    assert consume_current_tool_contract_results(scope_id=scope_a) == [first_a, second_a]
+    assert current_tool_contract_results(scope_id=scope_b) == [only_b]
+    reset_current_tool_contract_results(scope_id=scope_a)
+    assert consume_current_tool_contract_results(scope_id=scope_b) == [only_b]
 
 
 def test_contract_result_context_fallback_still_works_without_session_id():
@@ -218,6 +338,149 @@ def test_tool_registry_execute_stores_minimal_contract_result_by_session(tmp_pat
     assert stored[CONTRACT_REQUIRED_KEY] is True
     assert stored[ARTIFACT_RESULT_KEY]["tool_name"] == "Write"
     assert payload not in str(stored)
+
+
+def test_lift_artifacts_to_checkpoint_preserves_multiple_artifacts():
+    first = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "Write"}}
+    second = {CONTRACT_REQUIRED_KEY: True, ARTIFACT_RESULT_KEY: {"tool_name": "Bash"}}
+
+    checkpoint = lift_artifacts_to_checkpoint({"verification_status": "passed"}, [first, second])
+
+    assert checkpoint["contract_required"] is True
+    assert checkpoint["success_condition_artifact"] == {"tool_name": "Write"}
+    assert checkpoint["success_condition_artifacts"] == [
+        {"tool_name": "Write"},
+        {"tool_name": "Bash"},
+    ]
+
+
+def _write_and_bash_artifacts(tmp_path, *, write_handler):
+    target = tmp_path / "out.txt"
+    write_reg = _registry_with("Write", write_handler, workspace_root=tmp_path)
+    bash_reg = _registry_with("Bash", _fake_bash_handler, workspace_root=tmp_path)
+    write_result = write_reg.execute(
+        "Write",
+        {"path": str(target), "content": "hello"},
+        agent_class="operator",
+    )
+    bash_result = bash_reg.execute(
+        "Bash",
+        {"command": "pytest -q", "_fake_exit_code": 0},
+        agent_class="operator",
+    )
+    return write_result[ARTIFACT_RESULT_KEY], bash_result[ARTIFACT_RESULT_KEY]
+
+
+def test_multi_artifact_gate_all_pass_succeeds(tmp_path):
+    write_artifact, bash_artifact = _write_and_bash_artifacts(
+        tmp_path,
+        write_handler=_fake_write_handler_factory(str(tmp_path / "out.txt"), "hello"),
+    )
+    checkpoint = {
+        "verification_status": "passed",
+        "contract_required": True,
+        "success_condition_artifact": write_artifact,
+        "success_condition_artifacts": [write_artifact, bash_artifact],
+    }
+
+    terminal, verification, new_checkpoint, events = apply_promote_gate_to_checkpoint(
+        raw_terminal_status="succeeded",
+        raw_verification_status="passed",
+        completed_checkpoint=checkpoint,
+    )
+
+    assert terminal == "succeeded"
+    assert verification == "passed"
+    assert len(new_checkpoint["promote_gate_envelopes"]) == 2
+    assert events == []
+
+
+def test_multi_artifact_gate_first_fails_even_when_later_passes(tmp_path):
+    write_artifact, bash_artifact = _write_and_bash_artifacts(
+        tmp_path,
+        write_handler=_fake_write_handler_says_ok_but_writes_nothing,
+    )
+    checkpoint = {
+        "verification_status": "passed",
+        "contract_required": True,
+        "success_condition_artifact": write_artifact,
+        "success_condition_artifacts": [write_artifact, bash_artifact],
+    }
+
+    terminal, verification, new_checkpoint, events = apply_promote_gate_to_checkpoint(
+        raw_terminal_status="succeeded",
+        raw_verification_status="passed",
+        completed_checkpoint=checkpoint,
+    )
+
+    assert terminal == "failed"
+    assert verification == "failed"
+    assert new_checkpoint["promote_gate_reason"] == "multi_artifact_failed"
+    assert len(new_checkpoint["promote_gate_envelopes"]) == 2
+    assert any(name == "promote_gate_degraded" for name, _payload in events)
+
+
+def test_multi_artifact_gate_pending_artifact_keeps_task_pending(tmp_path):
+    write_artifact, bash_artifact = _write_and_bash_artifacts(
+        tmp_path,
+        write_handler=_fake_write_handler_factory(str(tmp_path / "out.txt"), "hello"),
+    )
+    pending_artifact = copy.deepcopy(write_artifact)
+    pending_artifact["success_condition"]["schema_version"] = "future-version"
+    checkpoint = {
+        "verification_status": "passed",
+        "contract_required": True,
+        "success_condition_artifact": pending_artifact,
+        "success_condition_artifacts": [pending_artifact, bash_artifact],
+    }
+
+    terminal, verification, new_checkpoint, _events = apply_promote_gate_to_checkpoint(
+        raw_terminal_status="succeeded",
+        raw_verification_status="passed",
+        completed_checkpoint=checkpoint,
+    )
+
+    assert terminal == ""
+    assert verification == "pending_verification"
+    assert new_checkpoint["promote_gate_reason"] == "multi_artifact_pending_verification"
+
+
+def test_multi_artifact_gate_blocked_artifact_blocks(tmp_path):
+    write_artifact, bash_artifact = _write_and_bash_artifacts(
+        tmp_path,
+        write_handler=_fake_write_handler_factory(str(tmp_path / "out.txt"), "hello"),
+    )
+    blocked_artifact = copy.deepcopy(bash_artifact)
+    blocked_artifact["tier"] = 3
+    checkpoint = {
+        "verification_status": "passed",
+        "contract_required": True,
+        "success_condition_artifact": write_artifact,
+        "success_condition_artifacts": [write_artifact, blocked_artifact],
+    }
+
+    terminal, verification, new_checkpoint, _events = apply_promote_gate_to_checkpoint(
+        raw_terminal_status="succeeded",
+        raw_verification_status="passed",
+        completed_checkpoint=checkpoint,
+    )
+
+    assert terminal == ""
+    assert verification == "blocked"
+    assert new_checkpoint["promote_gate_reason"] == "multi_artifact_blocked"
+
+
+def test_contract_required_with_empty_artifact_list_blocks():
+    terminal, verification, new_checkpoint, events = apply_promote_gate_to_checkpoint(
+        raw_terminal_status="succeeded",
+        raw_verification_status="passed",
+        completed_checkpoint={"contract_required": True, "success_condition_artifacts": []},
+    )
+
+    assert terminal == ""
+    assert verification == "blocked"
+    assert new_checkpoint["promote_gate_reason"] == "contract_required_artifact_missing"
+    assert any(name == "promote_gate_contract_bypass_detected" for name, _payload in events)
 
 
 # ---------------------------------------------------------------------------

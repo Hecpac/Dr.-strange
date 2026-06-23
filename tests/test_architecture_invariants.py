@@ -296,28 +296,38 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
     def test_task_handler_lifts_contract_artifact_before_promote_gate(self) -> None:
         source = inspect.getsource(TaskHandler._run_autonomous_task)
+        coordinator_source = (REPO_ROOT / "claw_v2" / "coordinator.py").read_text(encoding="utf-8")
+        runner_source = (REPO_ROOT / "claw_v2" / "verification" / "local_tool_runner.py").read_text(
+            encoding="utf-8"
+        )
         tools_source = (REPO_ROOT / "claw_v2" / "tools.py").read_text(encoding="utf-8")
-        consume_idx = source.find("consume_current_tool_contract_result")
-        lift_idx = source.find("lift_artifact_to_checkpoint")
+        consume_idx = source.find("consume_current_tool_contract_results")
+        lift_idx = source.find("lift_artifacts_to_checkpoint")
         gate_idx = source.find("apply_promote_gate_to_checkpoint")
 
         self.assertGreaterEqual(consume_idx, 0)
         self.assertGreaterEqual(lift_idx, 0)
         self.assertGreaterEqual(gate_idx, 0)
+        self.assertLess(consume_idx, lift_idx)
         self.assertLess(consume_idx, gate_idx)
         self.assertLess(lift_idx, gate_idx)
         self.assertIn(
-            "reset_current_tool_contract_result(session_id=session_id)",
+            "reset_current_tool_contract_results(session_id=session_id, scope_id=task_id)",
             source,
         )
         self.assertIn(
-            "consume_current_tool_contract_result(session_id=session_id)",
+            "consume_current_tool_contract_results(",
             source,
         )
+        self.assertIn("scope_id=task_id", source)
+        self.assertIn("contract_artifact_scope(task_id)", source)
+        self.assertIn("contract_artifact_scope(worker_contract_scope)", coordinator_source)
         self.assertIn(
             "remember_tool_contract_result(result, session_id=session_id)",
             tools_source,
         )
+        self.assertIn("_SCOPE_CONTRACT_TOOL_RESULTS: dict[str, list", runner_source)
+        self.assertIn("setdefault(effective_scope_id, []).append", runner_source)
         self.assertIn("verification_status=verification_status", source)
         self.assertIn("last_checkpoint=completed_checkpoint", source)
 

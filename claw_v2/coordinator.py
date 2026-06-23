@@ -576,12 +576,24 @@ class CoordinatorService:
         pool = ThreadPoolExecutor(max_workers=min(self.max_workers, len(tasks)))
         shutdown_early = False
         try:
-            futures = {
-                pool.submit(
-                    self._execute_worker, task, trace_context, lane_overrides=lane_overrides
-                ): task
-                for task in tasks
-            }
+            from claw_v2.verification.local_tool_runner import (
+                contract_artifact_scope,
+                current_contract_artifact_scope,
+            )
+
+            worker_contract_scope = current_contract_artifact_scope()
+        except Exception:  # pragma: no cover - defensive optional verification import
+            contract_artifact_scope = None  # type: ignore[assignment]
+            worker_contract_scope = None
+
+        def _execute_scoped_worker(task: WorkerTask) -> WorkerResult:
+            if worker_contract_scope and contract_artifact_scope is not None:
+                with contract_artifact_scope(worker_contract_scope):
+                    return self._execute_worker(task, trace_context, lane_overrides=lane_overrides)
+            return self._execute_worker(task, trace_context, lane_overrides=lane_overrides)
+
+        try:
+            futures = {pool.submit(_execute_scoped_worker, task): task for task in tasks}
             for future in as_completed(futures):
                 task = futures[future]
                 try:

@@ -39,9 +39,11 @@ class GateOutcome:
     envelope: VerificationResult | None
     degraded: bool  # True if the gate downgraded from succeeded
     reason: str  # short code describing the degrade, "" if not degraded
+    envelopes: list[dict[str, Any] | None] | None = None
 
 
 _ARTIFACT_KEY = "success_condition_artifact"
+_ARTIFACTS_KEY = "success_condition_artifacts"
 
 
 def _deserialize_success_condition(payload: Mapping[str, Any]) -> SuccessCondition | None:
@@ -147,9 +149,89 @@ def gate_terminal_status(
           - "blocked"              → "" (verification_status="blocked")
     """
     checkpoint = dict(completed_checkpoint or {})
+    artifacts = checkpoint.get(_ARTIFACTS_KEY)
     artifact = checkpoint.get(_ARTIFACT_KEY)
 
-    if raw_terminal_status != "succeeded" or artifact is None:
+    if raw_terminal_status != "succeeded":
+        return GateOutcome(
+            terminal_status=raw_terminal_status,
+            verification_status=raw_verification_status,
+            envelope=None,
+            degraded=False,
+            reason="",
+        )
+
+    if isinstance(artifacts, list) and len(artifacts) > 1:
+        outcomes: list[GateOutcome] = []
+        for item in artifacts:
+            if not isinstance(item, Mapping):
+                outcomes.append(
+                    GateOutcome(
+                        terminal_status="failed",
+                        verification_status="failed",
+                        envelope=None,
+                        degraded=True,
+                        reason="malformed_success_condition_artifact",
+                    )
+                )
+                continue
+            outcomes.append(
+                gate_terminal_status(
+                    raw_terminal_status=raw_terminal_status,
+                    raw_verification_status=raw_verification_status,
+                    completed_checkpoint={_ARTIFACT_KEY: item},
+                )
+            )
+
+        envelopes = [out.envelope.to_dict() if out.envelope else None for out in outcomes]
+        degraded_envelope = next(
+            (out.envelope for out in outcomes if out.degraded and out.envelope is not None),
+            None,
+        )
+        first_envelope = degraded_envelope or next(
+            (out.envelope for out in outcomes if out.envelope is not None),
+            None,
+        )
+        if any(out.verification_status == "blocked" for out in outcomes):
+            return GateOutcome(
+                terminal_status="",
+                verification_status="blocked",
+                envelope=first_envelope,
+                degraded=True,
+                reason="multi_artifact_blocked",
+                envelopes=envelopes,
+            )
+        if any(
+            out.terminal_status == "failed" or out.verification_status == "failed"
+            for out in outcomes
+        ):
+            return GateOutcome(
+                terminal_status="failed",
+                verification_status="failed",
+                envelope=first_envelope,
+                degraded=True,
+                reason="multi_artifact_failed",
+                envelopes=envelopes,
+            )
+        if any(out.verification_status == "pending_verification" for out in outcomes):
+            return GateOutcome(
+                terminal_status="",
+                verification_status="pending_verification",
+                envelope=first_envelope,
+                degraded=True,
+                reason="multi_artifact_pending_verification",
+                envelopes=envelopes,
+            )
+        return GateOutcome(
+            terminal_status="succeeded",
+            verification_status="passed",
+            envelope=first_envelope,
+            degraded=False,
+            reason="",
+            envelopes=envelopes,
+        )
+
+    if artifact is None:
         return GateOutcome(
             terminal_status=raw_terminal_status,
             verification_status=raw_verification_status,
@@ -320,7 +402,12 @@ def apply_promote_gate_to_checkpoint(
     list of events lets the caller (task_handler) wire its own emit().
     """
     checkpoint = dict(completed_checkpoint or {})
-    artifact_present = checkpoint.get("success_condition_artifact") is not None
+    raw_artifacts = checkpoint.get(_ARTIFACTS_KEY)
+    artifacts_present = (
+        isinstance(raw_artifacts, list)
+        and any(isinstance(item, Mapping) for item in raw_artifacts)
+    )
+    artifact_present = checkpoint.get(_ARTIFACT_KEY) is not None or artifacts_present
     is_promoting = raw_terminal_status == "succeeded"
     events: list[tuple[str, dict]] = []
 
@@ -393,6 +480,8 @@ def apply_promote_gate_to_checkpoint(
             "promote_gate_envelope": gate.envelope.to_dict() if gate.envelope else None,
             "promote_gate_reason": gate.reason,
         }
+        if gate.envelopes is not None:
+            new_checkpoint["promote_gate_envelopes"] = gate.envelopes
         events.append(
             (
                 "promote_gate_degraded",
@@ -409,6 +498,15 @@ def apply_promote_gate_to_checkpoint(
         new_checkpoint = {
             **checkpoint,
             "promote_gate_envelope": gate.envelope.to_dict(),
+        }
+        if gate.envelopes is not None:
+            new_checkpoint["promote_gate_envelopes"] = gate.envelopes
+        return (gate.terminal_status, gate.verification_status, new_checkpoint, events)
+
+    if gate.envelopes is not None:
+        new_checkpoint = {
+            **checkpoint,
+            "promote_gate_envelopes": gate.envelopes,
         }
         return (gate.terminal_status, gate.verification_status, new_checkpoint, events)
 

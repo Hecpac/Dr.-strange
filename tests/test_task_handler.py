@@ -374,11 +374,30 @@ class TaskHandlerTests(unittest.TestCase):
                             success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Write"],
                         )
                     )
+                    registry.register(
+                        ToolDefinition(
+                            name="Bash",
+                            description="fake contracted bash",
+                            allowed_agent_classes=("operator",),
+                            handler=lambda args: {
+                                "ok": True,
+                                "exit_code": int(args.get("_fake_exit_code", 0)),
+                                "stdout": "tests passed",
+                            },
+                            mutates_state=True,
+                            tier=2,
+                            success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Bash"],
+                        )
+                    )
                     registry.execute(
                         "Write",
                         {"path": str(root / "claimed.txt"), "content": "not actually written"},
                         agent_class="operator",
-                        session_id="s1",
+                    )
+                    registry.execute(
+                        "Bash",
+                        {"command": "pytest -q", "_fake_exit_code": 0},
+                        agent_class="operator",
                     )
                     return CoordinatorResult(
                         task_id=task_id,
@@ -424,8 +443,10 @@ class TaskHandlerTests(unittest.TestCase):
             self.assertEqual(state["verification_status"], "failed")
             checkpoint = state["last_checkpoint"]
             self.assertEqual(checkpoint["verification_status"], "failed")
-            self.assertEqual(checkpoint["promote_gate_reason"], "success_condition_violated")
+            self.assertEqual(checkpoint["promote_gate_reason"], "multi_artifact_failed")
             self.assertIn("success_condition_artifact", checkpoint)
+            self.assertEqual(len(checkpoint["success_condition_artifacts"]), 2)
+            self.assertEqual(len(checkpoint["promote_gate_envelopes"]), 2)
             self.assertEqual(state["active_object"]["active_task"]["status"], "failed")
             events = [event["event_type"] for event in observe.recent_events(limit=80)]
             self.assertIn("promote_gate_degraded", events)

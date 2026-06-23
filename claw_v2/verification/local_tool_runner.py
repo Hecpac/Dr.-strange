@@ -21,11 +21,12 @@ Privacy / size constraints (per Hector §11):
 
 from __future__ import annotations
 
+import contextlib
 from contextvars import ContextVar
 import hashlib
 import threading
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from claw_v2.verification.local_tool_contracts import (
     build_local_tool_artifact,
@@ -45,12 +46,32 @@ _LIFTABLE_RESULT_KEYS = (
     _ARTIFACT_BUILD_ERROR_KEY,
     _PRE_STATE_ERROR_KEY,
 )
-_CURRENT_CONTRACT_TOOL_RESULT: ContextVar[dict[str, Any] | None] = ContextVar(
-    "claw_current_contract_tool_result",
+_CURRENT_CONTRACT_TOOL_RESULTS: ContextVar[dict[str, Any] | None] = ContextVar(
+    "claw_current_contract_tool_results",
     default=None,
 )
-_SESSION_CONTRACT_TOOL_RESULTS: dict[str, dict[str, Any]] = {}
+_CURRENT_CONTRACT_ARTIFACT_SCOPE: ContextVar[str | None] = ContextVar(
+    "claw_contract_artifact_scope",
+    default=None,
+)
+_SESSION_CONTRACT_TOOL_RESULTS: dict[str, list[dict[str, Any]]] = {}
+_SCOPE_CONTRACT_TOOL_RESULTS: dict[str, list[dict[str, Any]]] = {}
 _SESSION_CONTRACT_TOOL_RESULTS_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def contract_artifact_scope(scope_id: str) -> Iterator[None]:
+    """Bind contract-artifact propagation to a task/session completion scope."""
+    token = _CURRENT_CONTRACT_ARTIFACT_SCOPE.set(scope_id)
+    try:
+        yield
+    finally:
+        _CURRENT_CONTRACT_ARTIFACT_SCOPE.reset(token)
+
+
+def current_contract_artifact_scope() -> str | None:
+    """Return the active task-scoped artifact bridge id, if one is bound."""
+    return _CURRENT_CONTRACT_ARTIFACT_SCOPE.get()
 
 
 def _safe_path(args: Mapping[str, Any]) -> Path | None:
@@ -228,54 +249,156 @@ def remember_tool_contract_result(
     tool_result: Mapping[str, Any],
     *,
     session_id: str | None = None,
+    scope_id: str | None = None,
 ) -> None:
     """Remember the latest contract-bearing result for the task completion path."""
     liftable = _liftable_contract_result(tool_result)
     if liftable is None:
         return
-    _CURRENT_CONTRACT_TOOL_RESULT.set(dict(liftable))
+    effective_scope_id = scope_id or current_contract_artifact_scope()
+    entry = dict(liftable)
+    _CURRENT_CONTRACT_TOOL_RESULTS.set(
+        {"scope_id": effective_scope_id, "session_id": session_id, "results": [dict(entry)]}
+    )
+    if effective_scope_id:
+        with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
+            _SCOPE_CONTRACT_TOOL_RESULTS.setdefault(effective_scope_id, []).append(dict(entry))
+    elif session_id:
+        with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
+            _SESSION_CONTRACT_TOOL_RESULTS.setdefault(session_id, []).append(dict(entry))
+
+
+def _context_results_for(
+    *,
+    session_id: str | None = None,
+    scope_id: str | None = None,
+) -> list[dict[str, Any]]:
+    context_payload = _CURRENT_CONTRACT_TOOL_RESULTS.get()
+    if not isinstance(context_payload, Mapping):
+        return []
+    if scope_id is not None and context_payload.get("scope_id") != scope_id:
+        return []
+    if (
+        scope_id is None
+        and session_id is not None
+        and context_payload.get("session_id") != session_id
+    ):
+        return []
+    results = context_payload.get("results")
+    if not isinstance(results, list):
+        return []
+    return [dict(item) for item in results if isinstance(item, Mapping)]
+
+
+def current_tool_contract_results(
+    *,
+    session_id: str | None = None,
+    scope_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return remembered contract-bearing results without clearing them."""
+    effective_scope_id = scope_id or current_contract_artifact_scope()
+    if effective_scope_id:
+        with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
+            results = _SCOPE_CONTRACT_TOOL_RESULTS.get(effective_scope_id, [])
+        if results:
+            return [dict(item) for item in results]
     if session_id:
         with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
-            _SESSION_CONTRACT_TOOL_RESULTS[session_id] = dict(liftable)
+            results = _SESSION_CONTRACT_TOOL_RESULTS.get(session_id, [])
+        if results:
+            return [dict(item) for item in results]
+    return _context_results_for(session_id=session_id, scope_id=effective_scope_id)
 
 
-def current_tool_contract_result(*, session_id: str | None = None) -> dict[str, Any] | None:
+def current_tool_contract_result(
+    *,
+    session_id: str | None = None,
+    scope_id: str | None = None,
+) -> dict[str, Any] | None:
     """Return the latest contract-bearing result without clearing it."""
+    results = current_tool_contract_results(session_id=session_id, scope_id=scope_id)
+    return dict(results[-1]) if results else None
+
+
+def _clear_context_results_for(
+    *,
+    session_id: str | None = None,
+    scope_id: str | None = None,
+) -> None:
+    context_payload = _CURRENT_CONTRACT_TOOL_RESULTS.get()
+    if not isinstance(context_payload, Mapping):
+        return
+    if scope_id is None and session_id is None:
+        _CURRENT_CONTRACT_TOOL_RESULTS.set(None)
+        return
+    if scope_id is not None and context_payload.get("scope_id") == scope_id:
+        _CURRENT_CONTRACT_TOOL_RESULTS.set(None)
+        return
+    if (
+        scope_id is None
+        and session_id is not None
+        and context_payload.get("session_id") == session_id
+    ):
+        _CURRENT_CONTRACT_TOOL_RESULTS.set(None)
+
+
+def consume_current_tool_contract_results(
+    *,
+    session_id: str | None = None,
+    scope_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return and clear contract-bearing results for this task/session scope."""
+    effective_scope_id = scope_id or current_contract_artifact_scope()
+    if effective_scope_id:
+        with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
+            scope_results = _SCOPE_CONTRACT_TOOL_RESULTS.pop(effective_scope_id, [])
+        _clear_context_results_for(scope_id=effective_scope_id)
+        if scope_results:
+            return [dict(item) for item in scope_results]
     if session_id:
         with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
-            result = _SESSION_CONTRACT_TOOL_RESULTS.get(session_id)
-        if isinstance(result, Mapping):
-            return dict(result)
-    result = _CURRENT_CONTRACT_TOOL_RESULT.get()
-    if not isinstance(result, Mapping):
-        return None
-    return dict(result)
+            session_results = _SESSION_CONTRACT_TOOL_RESULTS.pop(session_id, [])
+        _clear_context_results_for(session_id=session_id)
+        if session_results:
+            return [dict(item) for item in session_results]
+    context_results = _context_results_for(session_id=session_id, scope_id=effective_scope_id)
+    _clear_context_results_for(session_id=session_id, scope_id=effective_scope_id)
+    return context_results
 
 
 def consume_current_tool_contract_result(
     *,
     session_id: str | None = None,
+    scope_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Return and clear the latest contract-bearing result for this context."""
-    session_result: dict[str, Any] | None = None
-    if session_id:
+    results = consume_current_tool_contract_results(session_id=session_id, scope_id=scope_id)
+    return dict(results[-1]) if results else None
+
+
+def reset_current_tool_contract_results(
+    *,
+    session_id: str | None = None,
+    scope_id: str | None = None,
+) -> None:
+    """Clear contract-bearing results for a task/session scope."""
+    effective_scope_id = scope_id or current_contract_artifact_scope()
+    if effective_scope_id:
         with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
-            session_result = _SESSION_CONTRACT_TOOL_RESULTS.pop(session_id, None)
-    context_result = _CURRENT_CONTRACT_TOOL_RESULT.get()
-    _CURRENT_CONTRACT_TOOL_RESULT.set(None)
-    if isinstance(session_result, Mapping):
-        return dict(session_result)
-    if not isinstance(context_result, Mapping):
-        return None
-    return dict(context_result)
-
-
-def reset_current_tool_contract_result(*, session_id: str | None = None) -> None:
-    """Clear any contract-bearing result from the current execution context."""
-    _CURRENT_CONTRACT_TOOL_RESULT.set(None)
+            _SCOPE_CONTRACT_TOOL_RESULTS.pop(effective_scope_id, None)
     if session_id:
         with _SESSION_CONTRACT_TOOL_RESULTS_LOCK:
             _SESSION_CONTRACT_TOOL_RESULTS.pop(session_id, None)
+    _clear_context_results_for(session_id=session_id, scope_id=effective_scope_id)
+
+
+def reset_current_tool_contract_result(
+    *,
+    session_id: str | None = None,
+    scope_id: str | None = None,
+) -> None:
+    """Clear any contract-bearing result from the current execution context."""
+    reset_current_tool_contract_results(session_id=session_id, scope_id=scope_id)
 
 
 def lift_artifact_to_checkpoint(
@@ -289,13 +412,30 @@ def lift_artifact_to_checkpoint(
     (e.g. an artifact-build exception), only the marker is propagated —
     the gate will detect the missing artifact and fail closed.
     """
+    return lift_artifacts_to_checkpoint(checkpoint, [tool_result])
+
+
+def lift_artifacts_to_checkpoint(
+    checkpoint: dict[str, Any] | None,
+    tool_results: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+) -> dict[str, Any]:
+    """Move runtime-attached artifact markers from multiple results into a checkpoint."""
     base = dict(checkpoint or {})
-    if not isinstance(tool_result, Mapping):
-        return base
-    artifact = tool_result.get(ARTIFACT_RESULT_KEY)
-    required = bool(tool_result.get(CONTRACT_REQUIRED_KEY))
+    artifacts: list[Any] = []
+    required = bool(base.get("contract_required"))
+    for tool_result in tool_results:
+        if not isinstance(tool_result, Mapping):
+            continue
+        if bool(tool_result.get(CONTRACT_REQUIRED_KEY)):
+            required = True
+        artifact = tool_result.get(ARTIFACT_RESULT_KEY)
+        if artifact is not None:
+            artifacts.append(artifact)
     if required:
         base["contract_required"] = True
-    if artifact is not None:
-        base["success_condition_artifact"] = artifact
+    if artifacts:
+        base["success_condition_artifacts"] = list(artifacts)
+        base["success_condition_artifact"] = artifacts[0]
+    elif required:
+        base["success_condition_artifacts"] = []
     return base
