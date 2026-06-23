@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re as _re
 import threading
@@ -239,6 +240,33 @@ class BrowserToolService:
         except Exception:
             logger.debug("browser_tools observe emit failed: %s", event_type, exc_info=True)
 
+    def _navigate_backend(self, sess: BrowserToolSession, url: str) -> RawPage:
+        navigate_for_session = getattr(self._backend, "navigate_for_session", None)
+        if callable(navigate_for_session):
+            return navigate_for_session(sess.session_id, url)
+        return self._backend.navigate(url)
+
+    def _snapshot_backend(self, sess: BrowserToolSession, *, full: bool) -> RawPage:
+        snapshot_for_session = getattr(self._backend, "snapshot_for_session", None)
+        if callable(snapshot_for_session):
+            return snapshot_for_session(sess.session_id, full=full)
+        return self._backend.snapshot(full=full)
+
+    def _act_backend(
+        self, sess: BrowserToolSession, selector: str, action: str, text: str | None
+    ) -> RawPage:
+        act_for_session = getattr(self._backend, "act_for_session", None)
+        if callable(act_for_session):
+            return act_for_session(sess.session_id, selector, action, text)
+        return self._backend.act(selector, action, text)
+
+    def close(self) -> None:
+        with self._sessions_lock:
+            self._sessions.clear()
+        close = getattr(self._backend, "close", None)
+        if callable(close):
+            close()
+
     def navigate(self, session_id: str, url: str) -> BrowserToolResult:
         _validate_navigation_url(url)
         self._emit(
@@ -250,7 +278,7 @@ class BrowserToolService:
         sess = self._session(session_id)
         with sess.action_lock:
             try:
-                page = self._backend.navigate(url)
+                page = self._navigate_backend(sess, url)
             except Exception as exc:
                 fail = (
                     BrowserToolResult(
@@ -288,7 +316,7 @@ class BrowserToolService:
         sess = self._session(session_id)
         with sess.action_lock:
             try:
-                page = self._backend.snapshot(full=full)
+                page = self._snapshot_backend(sess, full=full)
             except Exception as exc:
                 fail = (
                     BrowserToolResult(
@@ -339,7 +367,7 @@ class BrowserToolService:
                 )
             else:
                 try:
-                    page = self._backend.act(target.selector, action, text)
+                    page = self._act_backend(sess, target.selector, action, text)
                 except Exception as exc:
                     fail = (
                         BrowserToolResult(
@@ -438,12 +466,24 @@ _SNAPSHOT_JS = r"""
 """
 
 
+@dataclass(slots=True)
+class _ChromeCdpOwnedPage:
+    context: Any
+    page: Any
+
+
 class ChromeCdpBrowserBackend:
     """Selector-level CDP backend over Playwright sync API.
 
     SYNCHRONOUS on purpose: callers (the ToolRegistry handler) invoke it off the
     event loop via asyncio.to_thread (C3). sync_playwright cannot run inside a
     live asyncio loop, so never call this from the brain coroutine directly.
+
+    The sync Playwright/CDP connection is owned by one backend worker thread.
+    BrowserToolService still serializes same-session actions; the backend also
+    maps each service session id to its own BrowserContext/Page and serializes
+    CDP calls on the worker so different sessions never touch Chrome's first
+    shared page by accident.
     """
 
     name = "chrome_cdp"
@@ -451,24 +491,126 @@ class ChromeCdpBrowserBackend:
     def __init__(self, *, cdp_endpoint: str, nav_timeout_ms: int = 45000) -> None:
         self._endpoint = cdp_endpoint
         self._nav_timeout = nav_timeout_ms
-        # PR #138 should assign page/context ownership per browser session. Until
-        # then the real CDP backend is conservative because it reuses Chrome's
-        # first context/page below; fake/isolated backends can run sessions in
-        # parallel through BrowserToolService.
-        self._page_lock = threading.Lock()
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="claw-browser-cdp"
+        )
+        self._lifecycle_lock = threading.Lock()
+        self._closed = False
+        self._pw: Any | None = None
+        self._browser: Any | None = None
+        self._owned_pages: dict[str, _ChromeCdpOwnedPage] = {}
 
-    def _with_page(self, fn):
+    def _run_on_worker(self, fn):
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("chrome_cdp_backend_closed")
+            executor = self._executor
+        return executor.submit(fn).result()
+
+    def _browser_connected(self) -> bool:
+        if self._browser is None:
+            return False
+        is_connected = getattr(self._browser, "is_connected", None)
+        if callable(is_connected):
+            try:
+                return bool(is_connected())
+            except Exception:
+                return False
+        return True
+
+    def _cleanup_worker(self) -> None:
+        for owned in list(self._owned_pages.values()):
+            try:
+                owned.context.close()
+            except Exception:
+                pass
+        self._owned_pages.clear()
+        if self._browser is not None:
+            try:
+                self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        if self._pw is not None:
+            try:
+                self._pw.stop()
+            except Exception:
+                pass
+            self._pw = None
+
+    def _ensure_connected_worker(self) -> None:
         from claw_v2.browser import _cdp_connect, _require_sync_playwright
 
-        with self._page_lock:
-            with _require_sync_playwright() as pw:
-                browser = _cdp_connect(pw, self._endpoint, enable_downloads=False)
+        if self._browser_connected():
+            return
+        self._cleanup_worker()
+        pw_manager = _require_sync_playwright()
+        self._pw = pw_manager.start()
+        try:
+            self._browser = _cdp_connect(self._pw, self._endpoint, enable_downloads=False)
+        except Exception:
+            self._cleanup_worker()
+            raise
+
+    def _page_is_usable(self, owned: _ChromeCdpOwnedPage) -> bool:
+        is_closed = getattr(owned.page, "is_closed", None)
+        if callable(is_closed):
+            try:
+                return not bool(is_closed())
+            except Exception:
+                return False
+        return True
+
+    def _discard_session_worker(self, session_id: str) -> None:
+        owned = self._owned_pages.pop(session_id, None)
+        if owned is None:
+            return
+        try:
+            owned.context.close()
+        except Exception:
+            pass
+
+    def _owned_page_worker(self, session_id: str) -> _ChromeCdpOwnedPage:
+        self._ensure_connected_worker()
+        owned = self._owned_pages.get(session_id)
+        if owned is not None and self._page_is_usable(owned):
+            return owned
+        self._discard_session_worker(session_id)
+        assert self._browser is not None
+        context = None
+        try:
+            context = self._browser.new_context(viewport={"width": 1280, "height": 900})
+            page = context.new_page()
+        except Exception as exc:
+            if context is not None:
                 try:
-                    ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                    return fn(page)
-                finally:
-                    browser.close()
+                    context.close()
+                except Exception:
+                    pass
+            raise RuntimeError(
+                "cdp_session_isolation_unavailable: could not create isolated browser context"
+            ) from exc
+        owned = _ChromeCdpOwnedPage(context=context, page=page)
+        self._owned_pages[session_id] = owned
+        return owned
+
+    def _with_page(self, session_id_or_fn, fn=None):
+        if fn is None:
+            session_id = "brain"
+            callback = session_id_or_fn
+        else:
+            session_id = str(session_id_or_fn or "brain")
+            callback = fn
+
+        def _work():
+            owned = self._owned_page_worker(session_id)
+            try:
+                return callback(owned.page)
+            except Exception:
+                self._discard_session_worker(session_id)
+                raise
+
+        return self._run_on_worker(_work)
 
     def _read_page(self, page) -> RawPage:
         data = page.evaluate(_SNAPSHOT_JS)
@@ -494,7 +636,7 @@ class ChromeCdpBrowserBackend:
             login_or_challenge=login,
         )
 
-    def navigate(self, url: str) -> RawPage:
+    def navigate_for_session(self, session_id: str, url: str) -> RawPage:
         def _go(page):
             # C4: domcontentloaded, then best-effort load/networkidle (bounded).
             page.goto(url, wait_until="domcontentloaded", timeout=self._nav_timeout)
@@ -505,12 +647,20 @@ class ChromeCdpBrowserBackend:
                     pass
             return self._read_page(page)
 
-        return self._with_page(_go)
+        return self._with_page(session_id, _go)
+
+    def navigate(self, url: str) -> RawPage:
+        return self.navigate_for_session("brain", url)
+
+    def snapshot_for_session(self, session_id: str, full: bool = False) -> RawPage:
+        return self._with_page(session_id, self._read_page)
 
     def snapshot(self, full: bool = False) -> RawPage:
-        return self._with_page(self._read_page)
+        return self.snapshot_for_session("brain", full=full)
 
-    def act(self, selector: str, action: str, text: str | None = None) -> RawPage:
+    def act_for_session(
+        self, session_id: str, selector: str, action: str, text: str | None = None
+    ) -> RawPage:
         def _do(page):
             if action == "click":
                 page.click(selector, timeout=10000)
@@ -524,19 +674,36 @@ class ChromeCdpBrowserBackend:
                 pass
             return self._read_page(page)
 
-        return self._with_page(_do)
+        return self._with_page(session_id, _do)
 
-    def screenshot(self, path: str) -> bool:
+    def act(self, selector: str, action: str, text: str | None = None) -> RawPage:
+        return self.act_for_session("brain", selector, action, text)
+
+    def screenshot_for_session(self, session_id: str, path: str) -> bool:
         def _shot(page):
             page.screenshot(path=path, full_page=True)
             return True
 
-        return self._with_page(_shot)
+        return self._with_page(session_id, _shot)
+
+    def screenshot(self, path: str) -> bool:
+        return self.screenshot_for_session("brain", path)
 
     def console(self, clear: bool = False) -> list[str]:
         # Console history needs a persistent listener; PR1 returns empty and the
         # tool degrades. Real console capture lands in PR5 with the dialog work.
         return []
+
+    def close(self) -> None:
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            executor = self._executor
+        try:
+            executor.submit(self._cleanup_worker).result()
+        finally:
+            executor.shutdown(wait=True)
 
 
 # ---------------------------------------------------------------------------
