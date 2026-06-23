@@ -540,6 +540,99 @@ class BrowserReadToolsTests(unittest.TestCase):
         self.assertNotIn("BrowserType", researcher)
         self.assertIn("BrowserClick", operator)
         self.assertIn("BrowserType", operator)
+        self.assertEqual(registry.get("BrowserClick").tier, TIER_REQUIRES_APPROVAL)
+        self.assertEqual(registry.get("BrowserType").tier, TIER_REQUIRES_APPROVAL)
+        self.assertEqual(registry.get("BrowserScreenshot").tier, TIER_LOCAL_MUTATION)
+        self.assertTrue(registry.get("BrowserScreenshot").mutates_state)
+
+    def test_browser_click_and_type_require_approval_on_operator_policy_path(self) -> None:
+        import claw_v2.tools as tools_mod
+        from claw_v2.browser_tools import BrowserToolResult
+
+        calls: list[tuple[str, str]] = []
+
+        class _FakeSvc:
+            def click(self, session_id, ref):
+                calls.append(("click", ref))
+                return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
+
+            def type(self, session_id, ref, text):
+                calls.append(("type", ref))
+                return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace, autoexec_max_tier=2)
+            policy = SandboxPolicy(workspace_root=workspace)
+
+            orig = tools_mod._browser_tool_service
+            tools_mod._browser_tool_service = lambda: _FakeSvc()
+            try:
+                for name, args in (
+                    ("BrowserClick", {"ref": "@e1"}),
+                    ("BrowserType", {"ref": "@e1", "text": "hello"}),
+                ):
+                    with self.subTest(name=name):
+                        with self.assertRaises(PermissionError):
+                            registry.execute(
+                                name,
+                                args,
+                                agent_class="operator",
+                                policy=policy,
+                            )
+                self.assertEqual(calls, [])
+            finally:
+                tools_mod._browser_tool_service = orig
+
+    def test_browser_click_and_type_call_approval_gate_before_backend(self) -> None:
+        import claw_v2.tools as tools_mod
+        from claw_v2.browser_tools import BrowserToolResult
+
+        order: list[str] = []
+
+        class _FakeSvc:
+            def click(self, session_id, ref):
+                order.append("backend:click")
+                return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
+
+            def type(self, session_id, ref, text):
+                order.append("backend:type")
+                return BrowserToolResult(success=True, url="https://x.test", snapshot="ok")
+
+        def gate(definition, args):
+            order.append(f"gate:{definition.name}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace, autoexec_max_tier=2)
+            policy = SandboxPolicy(workspace_root=workspace)
+
+            orig = tools_mod._browser_tool_service
+            tools_mod._browser_tool_service = lambda: _FakeSvc()
+            try:
+                registry.execute(
+                    "BrowserClick",
+                    {"ref": "@e1"},
+                    agent_class="operator",
+                    policy=policy,
+                    approval_gate=gate,
+                )
+                registry.execute(
+                    "BrowserType",
+                    {"ref": "@e1", "text": "hello"},
+                    agent_class="operator",
+                    policy=policy,
+                    approval_gate=gate,
+                )
+            finally:
+                tools_mod._browser_tool_service = orig
+
+        self.assertEqual(
+            order,
+            ["gate:BrowserClick", "backend:click", "gate:BrowserType", "backend:type"],
+        )
 
     def test_browser_snapshot_output_is_sanitized(self) -> None:
         import claw_v2.tools as tools_mod
@@ -636,6 +729,159 @@ class BrowserReadToolsTests(unittest.TestCase):
             bc.BrowserCapability.ensure_ready = orig_ensure
             tools_mod._browser_svc = None  # clean up so other tests aren't poisoned
 
+    def test_browser_registry_observe_sink_is_attached_to_singleton_events(self) -> None:
+        import claw_v2.tools as tools_mod
+        from claw_v2.browser_tools import BrowserToolService, RawElement, RawPage
+
+        events: list[tuple[str, dict]] = []
+
+        class _Obs:
+            def emit(self, event_type, payload=None):
+                events.append((event_type, payload or {}))
+
+        class _Backend:
+            name = "fake"
+
+            def navigate(self, url):
+                return RawPage(
+                    url="https://user:pass@example.com/a?token=x",
+                    title="Example",
+                    text="ok",
+                    elements=[RawElement("#a", "button", "A", "A", None, None)],
+                )
+
+            def snapshot(self, full=False):
+                raise AssertionError("unused")
+
+            def act(self, selector, action, text=None):
+                raise AssertionError("unused")
+
+            def screenshot(self, path):
+                raise AssertionError("unused")
+
+            def console(self, clear=False):
+                return []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            svc = BrowserToolService(backend=_Backend())
+            tools_mod._browser_svc = svc
+            try:
+                registry = ToolRegistry.default(workspace_root=workspace, observe=_Obs())
+                registry.execute(
+                    "BrowserNavigate",
+                    {"url": "https://user:pass@example.com/a?token=x"},
+                    agent_class="researcher",
+                )
+            finally:
+                tools_mod._browser_svc = None
+
+        kinds = [kind for kind, _ in events]
+        self.assertIn("browser_tool_action_started", kinds)
+        self.assertIn("browser_tool_action_completed", kinds)
+        for _, payload in events:
+            rendered = str(payload)
+            self.assertNotIn("user", rendered)
+            self.assertNotIn("pass", rendered)
+            self.assertNotIn("token=x", rendered)
+
+    def test_browser_screenshot_rewrites_arbitrary_path_to_controlled_scratch(self) -> None:
+        import os
+        import claw_v2.tools as tools_mod
+
+        captured: list[str] = []
+
+        class _Backend:
+            name = "fake"
+
+            def screenshot(self, path):
+                captured.append(path)
+                return True
+
+        class _FakeSvc:
+            _backend = _Backend()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            scratch = root / "scratch"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            orig = tools_mod._browser_tool_service
+            tools_mod._browser_tool_service = lambda: _FakeSvc()
+            try:
+                with patch.dict(os.environ, {"CLAW_BROWSER_SCRATCH_DIR": str(scratch)}):
+                    result = registry.execute(
+                        "BrowserScreenshot",
+                        {"path": "/tmp/evil/path.png"},
+                        agent_class="researcher",
+                    )
+            finally:
+                tools_mod._browser_tool_service = orig
+
+        self.assertTrue(result["ok"])
+        screenshot_path = Path(result["screenshot_path"])
+        self.assertTrue(screenshot_path.is_relative_to(scratch.resolve()))
+        self.assertEqual(screenshot_path.name, "path.png")
+        self.assertEqual(captured, [str(screenshot_path)])
+        self.assertNotEqual(str(screenshot_path), "/tmp/evil/path.png")
+
+    def test_browser_screenshot_default_path_stays_in_controlled_scratch(self) -> None:
+        import os
+        import claw_v2.tools as tools_mod
+
+        captured: list[str] = []
+
+        class _Backend:
+            name = "fake"
+
+            def screenshot(self, path):
+                captured.append(path)
+                return True
+
+        class _FakeSvc:
+            _backend = _Backend()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace = root / "workspace"
+            scratch = root / "scratch"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            orig = tools_mod._browser_tool_service
+            tools_mod._browser_tool_service = lambda: _FakeSvc()
+            try:
+                with patch.dict(os.environ, {"CLAW_BROWSER_SCRATCH_DIR": str(scratch)}):
+                    result = registry.execute(
+                        "BrowserScreenshot",
+                        {},
+                        agent_class="researcher",
+                    )
+            finally:
+                tools_mod._browser_tool_service = orig
+
+        screenshot_path = Path(result["screenshot_path"])
+        self.assertTrue(screenshot_path.is_relative_to(scratch.resolve()))
+        self.assertTrue(screenshot_path.name.startswith("browser_shot_"))
+        self.assertEqual(captured, [str(screenshot_path)])
+
+    def test_browser_screenshot_policy_denies_arbitrary_output_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            with self.assertRaises(PermissionError):
+                registry.execute(
+                    "BrowserScreenshot",
+                    {"path": "/tmp/evil/path.png"},
+                    agent_class="researcher",
+                    policy=SandboxPolicy(workspace_root=workspace),
+                )
+
     def test_browser_tools_have_runtime_policies(self) -> None:
         from claw_v2.tool_policy import TOOL_POLICIES
 
@@ -657,7 +903,10 @@ class BrowserReadToolsTests(unittest.TestCase):
         # interaction tools are mutations
         self.assertFalse(TOOL_POLICIES["BrowserClick"].read_only)
         self.assertFalse(TOOL_POLICIES["BrowserType"].read_only)
+        self.assertTrue(TOOL_POLICIES["BrowserClick"].requires_human)
+        self.assertTrue(TOOL_POLICIES["BrowserType"].requires_human)
         self.assertTrue(TOOL_POLICIES["BrowserNavigate"].read_only)
+        self.assertFalse(TOOL_POLICIES["BrowserScreenshot"].read_only)
 
 
 if __name__ == "__main__":

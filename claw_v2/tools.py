@@ -226,13 +226,15 @@ _browser_svc = None
 _browser_svc_lock = threading.Lock()
 
 
-def _browser_tool_service():
+def _browser_tool_service(observe: object | None = None):
     # Process-wide singleton: the @eN ref map lives in BrowserToolService._sessions,
     # so navigate/click/type must share one instance or refs go stale. Also avoids
     # re-running ensure_ready() (which focuses/launches Chrome) on every tool call.
     # Lazy + lock-guarded; never caches on failure so the handler try/except still degrades.
     global _browser_svc
     if _browser_svc is not None:
+        if observe is not None and getattr(_browser_svc, "observe", None) is None:
+            _browser_svc.observe = observe
         return _browser_svc
     with _browser_svc_lock:
         if _browser_svc is None:
@@ -240,8 +242,24 @@ def _browser_tool_service():
             from claw_v2.browser_tools import build_chrome_cdp_service
 
             endpoint = BrowserCapability().ensure_ready(visible=True)
-            _browser_svc = build_chrome_cdp_service(cdp_endpoint=endpoint)
+            _browser_svc = build_chrome_cdp_service(cdp_endpoint=endpoint, observe=observe)
+        elif observe is not None and getattr(_browser_svc, "observe", None) is None:
+            _browser_svc.observe = observe
     return _browser_svc
+
+
+def _attach_browser_tool_observe(observe: object | None) -> None:
+    if observe is None:
+        return
+    try:
+        try:
+            svc = _browser_tool_service(observe=observe)
+        except TypeError:
+            svc = _browser_tool_service()
+        if getattr(svc, "observe", None) is None:
+            svc.observe = observe
+    except Exception:
+        logger.debug("browser observe attachment failed", exc_info=True)
 
 
 def _run_off_loop(fn, *a, **kw):
@@ -296,17 +314,32 @@ def _browser_snapshot(args: dict) -> dict:
     }
 
 
-def _browser_screenshot(args: dict) -> dict:
+def _browser_screenshot_path(raw_path: object | None = None) -> Path:
     import os as _os
     import time as _t
 
+    scratch_raw = _os.getenv("CLAW_BROWSER_SCRATCH_DIR")
+    scratch = (
+        Path(scratch_raw).expanduser()
+        if scratch_raw
+        else Path.home() / ".claw" / "scratch" / "browser"
+    ).resolve(strict=False)
+    raw_name = Path(str(raw_path)).name if raw_path else ""
+    filename = raw_name if raw_name not in {"", ".", ".."} else f"browser_shot_{int(_t.time())}.png"
+    target = (scratch / filename).resolve(strict=False)
+    if not target.is_relative_to(scratch):
+        raise PermissionError("screenshot path escaped browser scratch")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _browser_screenshot(args: dict) -> dict:
     def _work():
         svc = _browser_tool_service()
-        path = str(args.get("path") or f"/tmp/browser_shot_{int(_t.time())}.png")
-        _os.makedirs(_os.path.dirname(path) or ".", exist_ok=True)
+        path = _browser_screenshot_path(args.get("path"))
         # TODO(PR3): expose BrowserToolService.screenshot() so the handler stops reaching into svc._backend
-        ok = svc._backend.screenshot(path)
-        return path if ok else None
+        ok = svc._backend.screenshot(str(path))
+        return str(path) if ok else None
 
     try:
         path = _run_off_loop(_work)
@@ -614,6 +647,8 @@ class ToolRegistry:
             self._emit_autonomy_event("AUTONOMY_APPROVED", definition, agent_class)
         else:
             self._emit_autonomy_event("AUTONOMY_BYPASS", definition, agent_class)
+        if definition.name.startswith("Browser"):
+            _attach_browser_tool_observe(self.observe)
         p0_goal_id = goal_id or self._p0_runtime_goal_id()
         p0_session_id = session_id or "runtime"
         proposed_event_id = self._emit_p0_tool_event(
@@ -1963,7 +1998,8 @@ class ToolRegistry:
                 handler=_browser_screenshot,
                 requires_network=True,
                 ingests_external_content=False,
-                tier=TIER_READ_ONLY,
+                mutates_state=True,
+                tier=TIER_LOCAL_MUTATION,
                 parameter_schema={
                     "type": "object",
                     "properties": {
@@ -1986,7 +2022,7 @@ class ToolRegistry:
                 ingests_external_content=True,
                 sanitize_fields=("snapshot",),
                 mutates_state=True,
-                tier=TIER_LOCAL_MUTATION,
+                tier=TIER_REQUIRES_APPROVAL,
                 parameter_schema={
                     "type": "object",
                     "properties": {
@@ -2010,7 +2046,7 @@ class ToolRegistry:
                 ingests_external_content=True,
                 sanitize_fields=("snapshot",),
                 mutates_state=True,
-                tier=TIER_LOCAL_MUTATION,
+                tier=TIER_REQUIRES_APPROVAL,
                 parameter_schema={
                     "type": "object",
                     "properties": {

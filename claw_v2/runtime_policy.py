@@ -422,7 +422,10 @@ def _iter_urls(value: Any, *, key: str = "") -> list[str]:
         for child_key, child_value in value.items():
             normalized = str(child_key).lower()
             if normalized in _URL_KEYS and isinstance(child_value, str):
-                if _looks_like_url(child_value):
+                if _looks_like_url(child_value) or _has_explicit_url_scheme(
+                    child_value,
+                    key=normalized,
+                ):
                     urls.append(child_value)
                 continue
             if normalized in _URL_LIST_KEYS and isinstance(child_value, list):
@@ -446,6 +449,24 @@ def _iter_urls(value: Any, *, key: str = "") -> list[str]:
 def _looks_like_url(value: str) -> bool:
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _has_explicit_url_scheme(value: str, *, key: str) -> bool:
+    parsed = urlparse(value)
+    scheme = (parsed.scheme or "").lower()
+    if not scheme:
+        return False
+    if key == "target":
+        return "://" in value or scheme in {
+            "file",
+            "chrome",
+            "chrome-extension",
+            "data",
+            "javascript",
+            "about",
+            "ftp",
+        }
+    return True
 
 
 def _blocked_by_policy(raw_path: str, resolved: Path, policy: ToolPolicy) -> bool:

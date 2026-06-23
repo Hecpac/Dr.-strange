@@ -7,6 +7,7 @@ from claw_v2.browser_tools import (
     BrowserToolResult,
     RawElement,
     RawPage,
+    _redact_url,
 )
 
 
@@ -60,9 +61,11 @@ class _FakeBackend:
     def __init__(self, pages: list[RawPage]) -> None:
         self._pages = pages
         self._i = -1
+        self.navigated: list[str] = []
         self.acted: list[tuple[str, str, str | None]] = []
 
     def navigate(self, url: str) -> RawPage:
+        self.navigated.append(url)
         self._i += 1
         return self._pages[min(self._i, len(self._pages) - 1)]
 
@@ -111,6 +114,54 @@ class NavigateRefTests(unittest.TestCase):
         self.assertGreater(sess.ref_version, v1)
         self.assertIn("@e1", sess.refs)
         self.assertEqual(sess.refs["@e1"].selector, "#b")
+
+    def test_navigate_blocks_file_scheme_before_backend(self) -> None:
+        backend = _FakeBackend([_page("https://unused.test")])
+        svc = BrowserToolService(backend=backend)
+
+        with self.assertRaises(ValueError):
+            svc.navigate("sess1", "file:///etc/passwd")
+
+        self.assertEqual(backend.navigated, [])
+
+    def test_navigate_blocks_chrome_scheme_before_backend(self) -> None:
+        backend = _FakeBackend([_page("https://unused.test")])
+        svc = BrowserToolService(backend=backend)
+
+        with self.assertRaises(ValueError):
+            svc.navigate("sess1", "chrome://version")
+
+        self.assertEqual(backend.navigated, [])
+
+    def test_navigate_blocks_non_http_schemes_and_malformed_urls_before_backend(self) -> None:
+        blocked_urls = (
+            "chrome-extension://abc/options.html",
+            "data:text/html,<h1>x</h1>",
+            "javascript:alert(1)",
+            "about:blank",
+            "ftp://example.com/file",
+            "gopher://example.com/file",
+            "https:///missing-host",
+            "example.com/no-scheme",
+        )
+        for url in blocked_urls:
+            with self.subTest(url=url):
+                backend = _FakeBackend([_page("https://unused.test")])
+                svc = BrowserToolService(backend=backend)
+
+                with self.assertRaises(ValueError):
+                    svc.navigate("sess1", url)
+
+                self.assertEqual(backend.navigated, [])
+
+    def test_navigate_allows_https_scheme(self) -> None:
+        backend = _FakeBackend([_page("https://example.com")])
+        svc = BrowserToolService(backend=backend)
+
+        result = svc.navigate("sess1", "https://example.com")
+
+        self.assertTrue(result.success)
+        self.assertEqual(backend.navigated, ["https://example.com"])
 
 
 class InteractionTests(unittest.TestCase):
@@ -179,6 +230,15 @@ class SafetyCapsTests(unittest.TestCase):
 
 
 class ObserveTests(unittest.TestCase):
+    def test_redact_url_strips_userinfo_query_and_fragment(self) -> None:
+        redacted = _redact_url("https://user:pass@example.com:8443/a?token=x#frag")
+
+        self.assertEqual(redacted, "https://example.com:8443/a")
+        self.assertNotIn("user", redacted)
+        self.assertNotIn("pass", redacted)
+        self.assertNotIn("token", redacted)
+        self.assertNotIn("frag", redacted)
+
     def test_navigate_emits_started_and_completed(self) -> None:
         events: list[tuple[str, dict]] = []
 

@@ -245,13 +245,14 @@ Success and approval invariants:
 - When the task ledger says pending/missing_evidence/interrupted, explain that state honestly and offer the next safe resume step instead of claiming success."""
 
 BROWSER_DELEGATION_RULE = (
-    "EXCEPTION (atomic reads, run INLINE): BrowserNavigate, BrowserSnapshot, "
-    "BrowserScreenshot are fast, deterministic, LLM-free CDP reads — call them "
-    "directly in this turn to open a URL, read a page, grab @eN refs, or capture "
-    "a screenshot. Do NOT delegate a single URL read or screenshot. Delegate only "
-    "when the objective needs many unknown steps, form submission, or autonomous "
-    "browsing. Running a Bash script that drives Chrome/CDP is still delegation — "
-    "use the atomic Browser* tools for inline reads, not Bash."
+    "EXCEPTION (atomic non-interaction browser tools, run INLINE): BrowserNavigate "
+    "and BrowserSnapshot are reads; BrowserScreenshot writes only to controlled "
+    "scratch. Call them directly in this turn to open a URL, read a page, grab "
+    "@eN refs, or capture a screenshot. Do NOT delegate a single URL read or "
+    "screenshot. Delegate only when the objective needs many unknown steps, form "
+    "submission, or autonomous browsing. Running a Bash script that drives "
+    "Chrome/CDP is still delegation — use the atomic Browser* tools for inline "
+    "reads, not Bash."
 )
 
 DELEGATION_CONTRACT = f"""# Delegation contract
