@@ -4,6 +4,7 @@ import concurrent.futures
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 import claw_v2.browser_tools as browser_tools_mod
 from claw_v2.browser_tools import (
@@ -399,7 +400,63 @@ class InteractionTests(unittest.TestCase):
         self.assertEqual(r.error, "stale_ref: @e99 not in current snapshot")
 
 
-from claw_v2.browser_tools import SNAPSHOT_MAX_ELEMENTS, SNAPSHOT_MAX_TEXT_CHARS
+from claw_v2.browser_tools import ChromeCdpBrowserBackend, SNAPSHOT_MAX_ELEMENTS, SNAPSHOT_MAX_TEXT_CHARS
+
+
+class ChromeCdpConnectionCleanupTests(unittest.TestCase):
+    def _run_with_fake_cdp(self, callback):
+        closed: list[str] = []
+
+        class _FakePage:
+            marker = "page"
+
+        class _FakeContext:
+            pages = [_FakePage()]
+
+            def new_page(self):
+                raise AssertionError("existing page should be used")
+
+        class _FakeBrowser:
+            contexts = [_FakeContext()]
+
+            def close(self):
+                closed.append("closed")
+
+        class _FakePlaywright:
+            pass
+
+        class _FakePlaywrightManager:
+            def __enter__(self):
+                return _FakePlaywright()
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        fake_browser = _FakeBrowser()
+        with (
+            patch("claw_v2.browser._require_sync_playwright", return_value=_FakePlaywrightManager()),
+            patch("claw_v2.browser._cdp_connect", return_value=fake_browser),
+        ):
+            return callback(ChromeCdpBrowserBackend(cdp_endpoint="http://127.0.0.1:0"), closed)
+
+    def test_with_page_closes_cdp_connection_after_success(self) -> None:
+        def _case(backend, closed):
+            result = backend._with_page(lambda page: page.marker)
+            self.assertEqual(result, "page")
+            return closed
+
+        self.assertEqual(self._run_with_fake_cdp(_case), ["closed"])
+
+    def test_with_page_closes_cdp_connection_after_callback_error(self) -> None:
+        def _case(backend, closed):
+            def boom(page):
+                raise RuntimeError("callback failed")
+
+            with self.assertRaises(RuntimeError):
+                backend._with_page(boom)
+            return closed
+
+        self.assertEqual(self._run_with_fake_cdp(_case), ["closed"])
 
 
 class SafetyCapsTests(unittest.TestCase):
@@ -498,8 +555,6 @@ class ObserveTests(unittest.TestCase):
 
 import os
 import urllib.request
-
-from claw_v2.browser_tools import ChromeCdpBrowserBackend
 
 
 def _cdp_up(endpoint: str = "http://127.0.0.1:9250") -> bool:

@@ -463,9 +463,12 @@ class ChromeCdpBrowserBackend:
         with self._page_lock:
             with _require_sync_playwright() as pw:
                 browser = _cdp_connect(pw, self._endpoint, enable_downloads=False)
-                ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-                page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                return fn(page)
+                try:
+                    ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                    return fn(page)
+                finally:
+                    browser.close()
 
     def _read_page(self, page) -> RawPage:
         data = page.evaluate(_SNAPSHOT_JS)
