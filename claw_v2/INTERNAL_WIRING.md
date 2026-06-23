@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "901fd72 live baseline + #128 C4 + #132 F0.2d + #131 watchdog smoke/runbook"
-doc_version: 2.30
+describes_commit: "e4a3ee2 live baseline + #112 browser atomic read-only smoke + watchdog smoke"
+doc_version: 2.31
 last_verified: 2026-06-23
-verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + repo/code inspection + existing pytest/AST sentinel cross-checks"
+verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -19,6 +19,61 @@ audience: claw_v2  # consumed by the agent itself
 If `git rev-parse HEAD` diverges substantially from `describes_commit`,
 assume parts of this doc may be stale. The invariants below are the most
 stable section; the layer detail decays fastest.
+
+## e4a3ee2 browser atomic tools live smoke status
+
+```yaml
+main_head: e4a3ee2
+main_commit: e4a3ee2fd9399b8ff7633cde5be4aafe6ccfd2ca
+live_daemon_field_verification:
+  source: observe_stream agent_startup_context payload.code_version
+  event_id: 270260
+  code_version: e4a3ee2
+  pid: 33828
+browser_atomic_tools:
+  source_pr: "#112"
+  merged_to_main: true
+  deployed_live: true
+  live_code_version: e4a3ee2
+  smoke_status: pass
+  smoke_path: ToolRegistry.default(...).execute(...)
+  smoke_session_id: smoke-browser-readonly
+  smoke_scope:
+    - BrowserNavigate to https://example.com
+    - BrowserSnapshot on the same session
+  smoke_not_executed:
+    - BrowserClick
+    - BrowserType
+    - submit
+    - screenshot
+    - private_or_authenticated_site
+    - mutating_browser_action
+  smoke_evidence:
+    navigate_ok: true
+    navigate_final_url: https://example.com/
+    navigate_title: Example Domain
+    snapshot_ok: true
+    snapshot_contains: Example Domain
+    snapshot_bounded: true
+    observe_events:
+      - browser_tool_action_started
+      - browser_tool_action_completed
+    sensitive_payload_hits: 0
+    persisted_url_userinfo_query_fragment_hits: 0
+    RuntimeDb_WAL_SQLite_database_locked_errors: 0
+    browser_tools_errors: 0
+    tool_policy_errors: 0
+    watchdog_smoke_after_browser_smoke: PASS/read_only
+  approval_model:
+    read_only_tools: BrowserNavigate and BrowserSnapshot are Tier 1
+    mutating_tools: BrowserClick and BrowserType remain Tier 3 approval-gated
+    approval_bypass_observed: false
+operational_status:
+  browser_atomic_read_only_tools_live: true
+  browser_atomic_read_only_smoke_passed: true
+  private_authenticated_browser_state_inspected: false
+  F2: design-only; not implemented
+```
 
 ## 901fd72 audit status
 
@@ -72,12 +127,12 @@ operational_status:
   watchdog_gate: complete; continue read-only 1h/24h soak monitoring
 pending_remediation_notes:
   C4_promote_gate_bypass: fixed in main by #128 and field-verified live via agent_startup_context event 266236
-  browser_tools_PR_112: pending browser security/concurrency review; draft PR #129 remains unmerged
+  browser_tools_PR_112: merged, deployed, and read-only smoke-passed live at e4a3ee2
   PR_92: stale/draft/conflicting/obsolete; superseded by focused #128 C4 fix
   F0_2d: fixed in main by #132 and field-verified live at 901fd72
   F2: design exists in draft #133; design-only; not implemented
 draft_prs:
-  "#129": browser tools security patch against PR #112 branch; draft, not merged
+  "#129": browser tools security patch against PR #112 branch; superseded by merged #112 stack
   "#133": F2 design; draft, design-only, not implemented
 ```
 
