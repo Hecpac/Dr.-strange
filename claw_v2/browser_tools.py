@@ -148,23 +148,27 @@ class BrowserToolService:
         self._backend = backend
         self._cdp_endpoint = cdp_endpoint
         self._sessions: dict[str, BrowserToolSession] = {}
+        # Protects only the session registry; the broader action lock still
+        # serializes backend/CDP calls until the follow-up concurrency PR.
+        self._sessions_lock = threading.Lock()
         self._lock = threading.Lock()
         self.observe: Any | None = None
 
     def _session(self, session_id: str) -> BrowserToolSession:
-        sess = self._sessions.get(session_id)
-        if sess is None:
-            sess = BrowserToolSession(
-                session_id=session_id,
-                cdp_endpoint=self._cdp_endpoint,
-                backend=self._backend.name,
-                current_url=None,
-                refs={},
-                ref_version=0,
-                last_used_at=_time.time(),
-            )
-            self._sessions[session_id] = sess
-        return sess
+        with self._sessions_lock:
+            sess = self._sessions.get(session_id)
+            if sess is None:
+                sess = BrowserToolSession(
+                    session_id=session_id,
+                    cdp_endpoint=self._cdp_endpoint,
+                    backend=self._backend.name,
+                    current_url=None,
+                    refs={},
+                    ref_version=0,
+                    last_used_at=_time.time(),
+                )
+                self._sessions[session_id] = sess
+            return sess
 
     def _ingest(self, sess: BrowserToolSession, page: RawPage) -> BrowserToolResult:
         # Refs expire when a new snapshot is captured: replace the whole map and
