@@ -18,10 +18,11 @@ from claw_v2.f2_recovery import (
     F2RecoveryPlan,
     F2RecoveryStatus,
 )
+from claw_v2.f2_durability_store import F2DurabilityStore
 from claw_v2.jobs import JobService
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
-from claw_v2.sqlite_runtime import RuntimeDatabaseError
+from claw_v2.sqlite_runtime import RuntimeDatabaseError, RuntimeDb
 from claw_v2.task_handler import TaskHandler
 from claw_v2.task_ledger import TaskLedger
 
@@ -638,6 +639,105 @@ class ResumeWiringTests(unittest.TestCase):
             external_effect_blockers=blockers,
             will_replay_external_effects=False,
         )
+
+    def test_startup_recovery_is_seeded_from_running_agent_tasks_not_phase_checkpoints(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runtime_db = RuntimeDb(root / "claw.db")
+            self.addCleanup(runtime_db.close)
+            f2_store = F2DurabilityStore(runtime_db)
+            ledger = TaskLedger(root / "claw.db", runtime_db=runtime_db)
+            ghost_task_id = "stage2c1-ghost-checkpoint-only"
+            checkpoint = f2_store.create_phase_checkpoint(
+                checkpoint_id="checkpoint-stage2c1-ghost-checkpoint-only",
+                task_id=ghost_task_id,
+                run_id=ghost_task_id,
+                phase="implementation",
+                phase_version=1,
+                status="started",
+                last_write_order=0,
+                payload={
+                    "synthetic": True,
+                    "source": "stage2c1",
+                    "task_id": ghost_task_id,
+                },
+            )
+            recorded: dict[str, object] = {}
+
+            class _ForbiddenStartupF2Store:
+                def _fail(self, operation: str):
+                    recorded["forbidden_f2_operation"] = operation
+                    raise AssertionError(
+                        f"startup recovery must not enumerate F2 evidence: {operation}"
+                    )
+
+                def get_recovery_cursor(self, *args, **kwargs):
+                    return self._fail("get_recovery_cursor")
+
+                def list_phase_checkpoints(self, *args, **kwargs):
+                    return self._fail("list_phase_checkpoints")
+
+                def list_checkpoint_writes(self, *args, **kwargs):
+                    return self._fail("list_checkpoint_writes")
+
+                def list_external_effects(self, *args, **kwargs):
+                    return self._fail("list_external_effects")
+
+                def upsert_recovery_cursor(self, *args, **kwargs):
+                    return self._fail("upsert_recovery_cursor")
+
+                def record_external_effect(self, *args, **kwargs):
+                    return self._fail("record_external_effect")
+
+                def update_external_effect_status(self, *args, **kwargs):
+                    return self._fail("update_external_effect_status")
+
+            class _NoRunCoordinator:
+                f2_durability_store = _ForbiddenStartupF2Store()
+
+                def detect_resume_phase(self, task_id):
+                    recorded["detect_resume_phase"] = task_id
+                    raise AssertionError("orphan checkpoint must not seed resume")
+
+                def run(self, *args, **kwargs):
+                    recorded["run_called"] = True
+                    raise AssertionError("orphan checkpoint must not rerun coordinator")
+
+            handler = TaskHandler(
+                coordinator=_NoRunCoordinator(),
+                observe=None,
+                task_ledger=ledger,
+                get_session_state=lambda _session_id: {},
+                update_session_state=lambda **_kwargs: None,
+            )
+
+            with patch(
+                "claw_v2.task_handler.plan_f2_recovery",
+                side_effect=AssertionError(
+                    "orphan checkpoint must not invoke F2 recovery planning"
+                ),
+            ) as planner, patch.object(ledger, "list", wraps=ledger.list) as list_tasks:
+                resumed = handler.resume_interrupted_autonomous_tasks()
+
+            self.assertEqual(resumed, 0)
+            list_tasks.assert_called_once_with(statuses=("running",), limit=20)
+            planner.assert_not_called()
+            self.assertEqual(recorded, {})
+            self.assertIsNone(ledger.get(ghost_task_id))
+            with runtime_db.cursor() as cur:
+                task_count = cur.execute("SELECT COUNT(*) AS count FROM agent_tasks").fetchone()
+            self.assertEqual(task_count["count"], 0)
+            self.assertEqual(f2_store.get_phase_checkpoint(checkpoint.checkpoint_id), checkpoint)
+            self.assertEqual(
+                [
+                    item.checkpoint_id
+                    for item in f2_store.list_phase_checkpoints(task_id=ghost_task_id)
+                ],
+                [checkpoint.checkpoint_id],
+            )
+            self.assertEqual(f2_store.list_external_effects(task_id=ghost_task_id), [])
 
     def test_resumed_run_passes_detected_start_phase_and_abort_callback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

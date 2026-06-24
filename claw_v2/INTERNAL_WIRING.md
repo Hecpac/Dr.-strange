@@ -262,6 +262,25 @@ invariants:
          executes in a ClawDaemon background runner off-tick. The backstop fails
          if any future job re-introduces inline heavy work.
 
+  startup_recovery_is_seeded_from_running_agent_tasks_not_phase_checkpoints:
+    rule: Startup recovery roots come from `agent_tasks` records that are
+          running/resumable. Startup recovery must not globally enumerate
+          `phase_checkpoints`.
+    checkpoint_only_orphans: Checkpoint-only orphan rows, including old
+          synthetic `stage2c1-*` rows with no `agent_tasks` record, are not
+          recovery roots at startup.
+    effective_startup_state: These rows are not classified at startup as
+          `complete`, `retryable`, `manual_review_required`, or
+          `verified_absent`; their effective startup state is
+          `not_classified_not_reached`.
+    f2_boundary: This is independent of `CLAW_F2_DURABILITY_ENABLED`; F2 ON
+          only affects per-resumed-task planning after an `agent_tasks` record
+          has seeded resume.
+    no_side_effects: No replay or coordinator rerun is allowed solely because an
+          orphan F2 checkpoint exists.
+    enforced_by:
+      - tests/test_task_handler.py::ResumeWiringTests::test_startup_recovery_is_seeded_from_running_agent_tasks_not_phase_checkpoints
+
   self_improve_promotion_gate:
     rule: self-improve promotion actions must pass through BrainService
           critical-action verification and may not commit generated changes to
