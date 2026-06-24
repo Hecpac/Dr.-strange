@@ -13,15 +13,17 @@ must sit between the already-live F1 RuntimeDb single-connection discipline and
 later roadmap work:
 
 - In short: port LangGraph-style patterns, not adopt LangGraph runtime.
-- F1: field-verified live at `c42ae47`; rollout still has to re-check the live
-  daemon before enabling F2 behavior.
-- F0.2d: implemented in draft PR #132 and pending merge. This document does not
-  treat F0.2d as merged or live.
-- F2: pending. Add durable phase checkpoints, incremental writes, external
-  effect records, and recovery cursors inside `claw.db`. No F2
+- Current `main` baseline after docs PR #140 (`efd5185`): C4, F0.2d,
+  F1/RuntimeDb and watchdog work, and browser atomic read-only tools are live
+  and documented. Rollout still has to re-check the live daemon before enabling
+  F2 behavior.
+- F2: design-only, pending, and not live. It proposes durable phase checkpoints,
+  incremental writes, external effect records, and recovery cursors inside
+  `claw.db`. No F2
   `CheckpointSaver`, `checkpoint_writes`, or `external_effect_record` facility
   exists today.
-- Watchdog: remains an operational gate for rollout.
+- Watchdog and browser atomic tooling: current baseline and operational rollout
+  constraints, not F2 implementation surfaces.
 - F3: later lease/watchdog semantics. F2 must not depend on F3.
 - F4: later forced-action gate. F2 must preserve current promote-gate and
   verification discipline.
@@ -237,11 +239,10 @@ same intended external mutation, same key; materially different mutation,
 different key. Store both the key and the individual fields so operators can
 debug without recomputing.
 
-The table should also enforce a unique domain key:
-
-```text
-(task_id, run_id, phase, effect_kind, target, content_hash)
-```
+The table should store the individual fields that feed the idempotency key for
+operator debugging, but the proposed database enforcement point is
+`UNIQUE(idempotency_key)`. The design does not add a second composite unique
+constraint over `(task_id, run_id, phase, effect_kind, target, content_hash)`.
 
 When the target cannot be safely canonicalized, the effect must be treated as
 not idempotent and require explicit recovery verification before retry.
@@ -329,7 +330,9 @@ Indexes and constraints:
 - `UNIQUE(task_id, run_id, phase, phase_version)`
 - `INDEX(task_id, run_id, phase, phase_version DESC)`
 - `INDEX(task_id, status, created_at DESC)`
-- `CHECK(phase IN ('research', 'synthesis', 'implementation', 'verification'))`
+- Phase names should be validated at the Coordinator/RuntimeDb store layer, not
+  hard-coded in a SQLite `CHECK` constraint. That keeps F2 compatible with later
+  phase additions without requiring a table recreation migration.
 
 ### `phase_checkpoint_writes`
 
@@ -349,15 +352,23 @@ Columns:
 - `schema_version INTEGER NOT NULL`
 - `payload_json TEXT NOT NULL`
 - `payload_sha256 TEXT NOT NULL`
-- `external_effect_id TEXT`
+- `external_effect_id TEXT REFERENCES external_effect_records(external_effect_id)`
 - `created_at TEXT NOT NULL`
 
 Indexes and constraints:
 
 - `UNIQUE(task_id, run_id, phase, write_order)`
-- `UNIQUE(task_id, run_id, phase, write_kind, write_key)` where `write_key IS NOT NULL`
 - `INDEX(task_id, run_id, phase, write_order)`
 - `INDEX(external_effect_id)` for effect-linked writes
+
+The non-null write-key uniqueness rule should be a partial unique index, not a
+table-level constraint:
+
+```sql
+CREATE UNIQUE INDEX idx_phase_checkpoint_writes_key
+ON phase_checkpoint_writes(task_id, run_id, phase, write_kind, write_key)
+WHERE write_key IS NOT NULL;
+```
 
 `write_key` is the local idempotency key for replayable writes such as
 `artifact_recorded` or `approval_wait`; it is distinct from external effect
@@ -405,7 +416,6 @@ Statuses:
 Indexes and constraints:
 
 - `UNIQUE(idempotency_key)`
-- `UNIQUE(task_id, run_id, phase, effect_kind, target, content_hash)`
 - `INDEX(task_id, run_id, phase, status)`
 - `INDEX(status, updated_at)`
 
@@ -422,9 +432,9 @@ Columns:
 - `session_id TEXT`
 - `phase TEXT NOT NULL`
 - `cursor_status TEXT NOT NULL`
-- `last_checkpoint_id TEXT`
+- `last_checkpoint_id TEXT REFERENCES phase_checkpoints(checkpoint_id)`
 - `last_write_order INTEGER NOT NULL DEFAULT 0`
-- `external_effect_id TEXT`
+- `external_effect_id TEXT REFERENCES external_effect_records(external_effect_id)`
 - `resume_payload_json TEXT NOT NULL`
 - `schema_version INTEGER NOT NULL`
 - `created_at TEXT NOT NULL`
