@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from claw_v2.jobs import JOB_TERMINAL_STATUSES, JobService
 from claw_v2.observe import ObserveStream
@@ -115,6 +117,97 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(claimed.worker_id, "worker-1")
             self.assertIsNone(claimed_again)
             self.assertEqual(service.get(created.job_id).worker_id, "worker-1")
+
+    def test_claims_allowed_when_maintenance_flags_absent(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CLAW_MAINTENANCE_MODE": "0", "CLAW_NO_JOB_CLAIM": "0"},
+            clear=False,
+        ):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                service = JobService(Path(tmpdir) / "claw.db")
+                specific = service.enqueue(kind="notebooklm.research")
+                next_job = service.enqueue(kind="pipeline.issue")
+
+                claimed_specific = service.claim(specific.job_id, worker_id="worker-1")
+                claimed_next = service.claim_next(
+                    worker_id="worker-2",
+                    kinds=("pipeline.issue",),
+                )
+
+                self.assertIsNotNone(claimed_specific)
+                self.assertIsNotNone(claimed_next)
+                assert claimed_specific is not None
+                assert claimed_next is not None
+                self.assertEqual(claimed_specific.status, "running")
+                self.assertEqual(claimed_next.job_id, next_job.job_id)
+                self.assertEqual(claimed_next.status, "running")
+
+    def test_claims_blocked_by_maintenance_mode_before_running_transition(self) -> None:
+        self._assert_claim_gate_blocks_transitions(
+            flag_name="CLAW_MAINTENANCE_MODE",
+            expected_reason="maintenance_mode_active",
+        )
+
+    def test_claims_blocked_by_no_job_claim_before_running_transition(self) -> None:
+        self._assert_claim_gate_blocks_transitions(
+            flag_name="CLAW_NO_JOB_CLAIM",
+            expected_reason="no_job_claim_active",
+        )
+
+    def _assert_claim_gate_blocks_transitions(
+        self,
+        *,
+        flag_name: str,
+        expected_reason: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            observe = ObserveStream(root / "observe.db")
+            service = JobService(root / "claw.db", observe=observe)
+            queued = service.enqueue(kind="notebooklm.research")
+            retrying = service.enqueue(kind="pipeline.issue")
+            service.claim(retrying.job_id, worker_id="setup-worker")
+            service.fail(
+                retrying.job_id,
+                error="setup_retry",
+                retry=True,
+                retry_delay_seconds=0,
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "CLAW_MAINTENANCE_MODE": "0",
+                    "CLAW_NO_JOB_CLAIM": "0",
+                    flag_name: "1",
+                },
+                clear=False,
+            ):
+                specific_claim = service.claim(queued.job_id, worker_id="worker-1")
+                next_claim = service.claim_next(
+                    worker_id="worker-2",
+                    kinds=("pipeline.issue",),
+                    now=time.time() + 1,
+                )
+
+            self.assertIsNone(specific_claim)
+            self.assertIsNone(next_claim)
+            self.assertEqual(service.get(queued.job_id).status, "queued")
+            self.assertEqual(service.get(retrying.job_id).status, "retrying")
+            events = [
+                event
+                for event in observe.recent_events(limit=20)
+                if event["event_type"] == "job_claim_blocked"
+            ]
+            self.assertEqual(len(events), 2)
+            payloads = [event["payload"] for event in events]
+            self.assertEqual(
+                {payload["operation"] for payload in payloads},
+                {"claim", "claim_next"},
+            )
+            self.assertEqual({payload["reason"] for payload in payloads}, {expected_reason})
+            self.assertNotIn("setup_retry", str(payloads))
 
     def test_claim_checkpoint_complete_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

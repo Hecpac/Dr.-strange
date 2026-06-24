@@ -9,8 +9,8 @@
 
 ```yaml
 describes_commit: "e4a3ee2 live baseline + #112 browser atomic read-only smoke + watchdog smoke"
-doc_version: 2.31
-last_verified: 2026-06-23
+doc_version: 2.32
+last_verified: 2026-06-24
 verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -280,6 +280,54 @@ invariants:
           orphan F2 checkpoint exists.
     enforced_by:
       - tests/test_task_handler.py::ResumeWiringTests::test_startup_recovery_is_seeded_from_running_agent_tasks_not_phase_checkpoints
+
+  maintenance_mode_blocks_claims_scheduler_work_and_drain_applies:
+    rule: With `CLAW_MAINTENANCE_MODE` truthy, the daemon may stay up but must
+          not pick up work through the A2 chokepoints: JobService claims are
+          blocked, scheduler work enqueue is blocked for `approval_sweep` and
+          `pipeline_poll_merges`, and pending-verification drain apply is
+          blocked.
+    flags:
+      CLAW_MAINTENANCE_MODE: Truthy values (`1`, `true`, `yes`, `on`) block
+          JobService.claim(), JobService.claim_next(), scheduler enqueue work
+          for `approval_sweep` / `pipeline_poll_merges`, and the mutating
+          pending-verification drain apply path. Absence/default preserves
+          current production behavior.
+      CLAW_NO_JOB_CLAIM: Truthy values block only JobService.claim() and
+          JobService.claim_next(). Absence/default preserves current production
+          behavior.
+    existing_maintenance_relationship: `CLAW_AUTONOMOUS_MAINTENANCE` /
+          `CLAW_AUTONOMOUS_MAINTENANCE_ENABLED` still control autonomous
+          maintenance jobs and keep their existing skip reason
+          `autonomous_maintenance_disabled`. `CLAW_MAINTENANCE_MODE` is a
+          broader no-work gate and is checked before the autonomous-maintenance
+          and capability skip reasons on jobs that use the combined skip
+          helper.
+    drain_relationship: `CLAW_PENDING_VERIFICATION_DRAIN_APPLY` still defaults
+          off and is still required before any drain apply is requested. When
+          `CLAW_MAINTENANCE_MODE` is truthy, the runner reports
+          `maintenance_mode_active` and does not call
+          drain_reconcilable_unverified(apply=True) or
+          reconcile_failed_unverified(apply=True), even if a queued payload asks
+          for `drain_apply=true`.
+    f2_boundary: This invariant is independent of F2 durability flags.
+          `daemon up + maintenance ON + F2 OFF` is a valid positive control and
+          emits `maintenance_mode_gate_assertion` with `claim=off`,
+          `scheduler=off`, and `drain=off`.
+    scheduler_chokepoint: Scheduler work must be gated before
+          enqueue_scheduled_background_job(), not only by blocking JobService
+          claims. Claim-only blocking would still allow scheduler ticks to
+          create queued work and emit enqueue side effects.
+    drain_chokepoint: Drain apply has its own gate even when claims are
+          blocked because `_execute()` is the mutating boundary and can be
+          called directly in tests or by future runner paths.
+    enforced_by:
+      - tests/test_jobs.py::JobServiceTests::test_claims_allowed_when_maintenance_flags_absent
+      - tests/test_jobs.py::JobServiceTests::test_claims_blocked_by_maintenance_mode_before_running_transition
+      - tests/test_jobs.py::JobServiceTests::test_claims_blocked_by_no_job_claim_before_running_transition
+      - tests/test_approval_runtime_wiring.py::ApprovalRuntimeWiringTests::test_maintenance_mode_blocks_approval_and_pipeline_merge_enqueues_with_f2_off
+      - tests/test_approval_runtime_wiring.py::ApprovalRuntimeWiringTests::test_pipeline_poll_merges_preserves_autonomous_maintenance_skip
+      - tests/test_daemon.py::DaemonTickTests::test_maintenance_mode_blocks_drain_apply_even_when_payload_requests_apply
 
   self_improve_promotion_gate:
     rule: self-improve promotion actions must pass through BrainService

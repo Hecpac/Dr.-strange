@@ -40,6 +40,27 @@ class AppConfigDefaultsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 invalid.validate()
 
+    def test_maintenance_gate_flags_default_off_and_read_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = str(Path(tmpdir) / "home")
+            with patch.dict(os.environ, {"HOME": home}, clear=True):
+                default_config = AppConfig.from_env()
+            self.assertFalse(default_config.maintenance_mode_enabled)
+            self.assertFalse(default_config.no_job_claim_enabled)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "HOME": home,
+                    "CLAW_MAINTENANCE_MODE": "yes",
+                    "CLAW_NO_JOB_CLAIM": "on",
+                },
+                clear=True,
+            ):
+                configured = AppConfig.from_env()
+            self.assertTrue(configured.maintenance_mode_enabled)
+            self.assertTrue(configured.no_job_claim_enabled)
+
     def test_default_allowed_read_paths_scoped_to_claw_not_home(self) -> None:
         # 2026-05-31 audit (H2): the default read-root is ~/.claw (+ /private/tmp),
         # NOT all of $HOME. Agent state under ~/.claw and the workspace stay

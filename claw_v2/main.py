@@ -69,6 +69,7 @@ from claw_v2.learning import LearningLoop
 from claw_v2.linear import LinearService, build_linear_api_caller
 from claw_v2.llm import LLMRouter
 from claw_v2.memory import MemoryStore
+from claw_v2.maintenance import maintenance_assertion_payload, scheduler_work_block_reason
 from claw_v2.metrics import MetricsTracker
 from claw_v2.model_registry import ModelRegistry
 from claw_v2.network_proxy import DomainAllowlistEnforcer
@@ -1311,11 +1312,14 @@ def _setup_scheduler(
             return "autonomous_maintenance_disabled"
         return None
 
+    def _maintenance_mode_skip() -> str | None:
+        return scheduler_work_block_reason()
+
     def _skip_maintenance_or(*capabilities: str) -> Callable[[], str | None]:
         capability_check = _skip_for(*capabilities)
 
         def inner() -> str | None:
-            return _maintenance_skip() or capability_check()
+            return _maintenance_mode_skip() or _maintenance_skip() or capability_check()
 
         return inner
 
@@ -1679,6 +1683,7 @@ def _setup_scheduler(
                     observe=observe,
                     max_attempts=1,
                 ),
+                skip_if=_maintenance_mode_skip,
             ),
         )
     )
@@ -2203,6 +2208,12 @@ def build_runtime(
         channel="daemon",
     )
     observe.emit("agent_startup_context", payload=startup_context_report.to_dict())
+    if config.maintenance_mode_enabled:
+        payload = maintenance_assertion_payload(
+            f2_durability_enabled=config.f2_durability_enabled
+        )
+        logger.warning(payload["message"])
+        observe.emit("maintenance_mode_gate_assertion", payload=payload)
     if (
         startup_context_report.prompt_manifest is not None
         and startup_context_report.prompt_manifest.mode == "shadow"

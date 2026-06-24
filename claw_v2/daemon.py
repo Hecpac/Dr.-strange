@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from claw_v2.cron import CronScheduler
 from claw_v2.heartbeat import HeartbeatService, HeartbeatSnapshot
+from claw_v2.maintenance import drain_apply_block_reason
 from claw_v2.observe import ObserveStream
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.tracing import new_trace_context
@@ -557,6 +558,18 @@ class PendingVerificationReconciliationJobRunner:
             "drain_apply": drain_apply,
         }
         if not drain_apply:
+            return result
+
+        apply_block_reason = drain_apply_block_reason()
+        if apply_block_reason:
+            result["drain_apply_requested"] = True
+            result["drain_apply"] = False
+            result["drain_skip_reason"] = apply_block_reason
+            if self.observe is not None:
+                self.observe.emit(
+                    "pending_verification_drain_apply_skipped",
+                    payload={"job_id": job.job_id, "reason": apply_block_reason},
+                )
             return result
 
         drain_max_scan = int(payload.get("drain_max_scan", 500))

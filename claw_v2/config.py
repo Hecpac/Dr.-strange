@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from claw_v2.approval import APPROVAL_TTL_SECONDS
+from claw_v2.maintenance import maintenance_mode_enabled, no_job_claim_enabled
 
 from .types import Lane, ProviderRole
 
@@ -507,6 +508,8 @@ class AppConfig:
     provider_timeout_coordinator_implementation_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS[
         "coordinator_implementation"
     ]
+    maintenance_mode_enabled: bool = False
+    no_job_claim_enabled: bool = False
     f2_durability_enabled: bool = False
 
     @classmethod
@@ -770,6 +773,8 @@ class AppConfig:
                 "CLAW_PROVIDER_TIMEOUT_COORDINATOR_IMPLEMENTATION_SECONDS",
                 _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_implementation"],
             ),
+            maintenance_mode_enabled=maintenance_mode_enabled(),
+            no_job_claim_enabled=no_job_claim_enabled(),
             f2_durability_enabled=_env_bool(
                 "CLAW_F2_DURABILITY_ENABLED",
                 _env_bool("F2_DURABILITY_ENABLED", False),
