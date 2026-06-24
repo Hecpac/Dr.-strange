@@ -1686,6 +1686,64 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
                     offenders.append("router.ask")
         self.assertEqual(offenders, [])
 
+    def test_f2_4b_taskhandler_consumes_planner_without_effect_execution(self) -> None:
+        from claw_v2.task_handler import TaskHandler
+
+        task_handler_source = (REPO_ROOT / "claw_v2" / "task_handler.py").read_text(
+            encoding="utf-8"
+        )
+        coordinator_source = (REPO_ROOT / "claw_v2" / "coordinator.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("plan_f2_recovery", task_handler_source)
+        self.assertIn("persist_cursor=False", task_handler_source)
+        self.assertIn('("research", "synthesis", "implementation", "verification")', task_handler_source)
+        self.assertIn("PHASE_ORDER = (\"research\", \"synthesis\", \"implementation\", \"verification\")", coordinator_source)
+        self.assertNotIn("plan_f2_recovery", coordinator_source)
+
+        f2_helper_source = "\n".join(
+            inspect.getsource(getattr(TaskHandler, name))
+            for name in (
+                "_f2_recovery_result_or_start_phase",
+                "_f2_retryable_block_reason",
+                "_f2_recovery_no_run_result",
+            )
+        )
+        forbidden_symbols = (
+            "record_external_effect",
+            "get_external_effect_by_idempotency_key",
+            "update_external_effect_status",
+            "create_phase_checkpoint",
+            "append_checkpoint_write",
+            "upsert_recovery_cursor",
+            "BrowserUseService",
+            "ComputerService",
+            "delegate_task",
+            "dynamic_fanout",
+        )
+        offenders = {
+            "TaskHandler F2.4B helpers": [
+                symbol for symbol in forbidden_symbols if symbol in f2_helper_source
+            ],
+            "claw_v2/coordinator.py": [
+                symbol
+                for symbol in (
+                    "record_external_effect",
+                    "get_external_effect_by_idempotency_key",
+                    "update_external_effect_status",
+                    "dynamic_fanout",
+                )
+                if symbol in coordinator_source
+            ],
+        }
+        self.assertEqual(
+            {path: symbols for path, symbols in offenders.items() if symbols},
+            {},
+            "F2.4B may consume the recovery classifier only; side-effect wiring, "
+            f"cursor persistence, and dynamic fanout are out of scope: {offenders}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
