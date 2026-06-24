@@ -1454,6 +1454,85 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
                 offenders.append("connect_runtime_sqlite")
         self.assertEqual(offenders, [])
 
+    def test_f2_store_is_runtimedb_backed_and_not_runtime_wired(self) -> None:
+        path = REPO_ROOT / "claw_v2" / "f2_durability_store.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        classes = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "F2DurabilityStore"
+        ]
+        self.assertEqual(len(classes), 1)
+        init = next(
+            member
+            for member in classes[0].body
+            if isinstance(member, ast.FunctionDef) and member.name == "__init__"
+        )
+        schema_ready = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_ensure_schema_ready"
+        )
+        self.assertEqual([arg.arg for arg in init.args.args], ["self", "runtime_db"])
+        self.assertEqual(self._name_from_annotation(init.args.args[1].annotation), "RuntimeDb")
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_ensure_schema_ready"
+                for node in ast.walk(init)
+            )
+        )
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "ensure_f2_durability_schema"
+                for node in ast.walk(schema_ready)
+            )
+        )
+
+        lock_helper_calls: set[str] = set()
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in {"sqlite3", "claw_v2.task_handler", "claw_v2.coordinator"}:
+                        offenders.append(alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module in {"sqlite3", "claw_v2.task_handler", "claw_v2.coordinator"}:
+                    offenders.append(f"from {node.module} import ...")
+                if node.module == "claw_v2.sqlite_runtime":
+                    offenders.extend(
+                        alias.name for alias in node.names if alias.name == "connect_runtime_sqlite"
+                    )
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "connect"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "sqlite3"
+            ):
+                offenders.append("sqlite3.connect")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "connect_runtime_sqlite"
+            ):
+                offenders.append("connect_runtime_sqlite")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"cursor", "transaction"}
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "_db"
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id == "self"
+            ):
+                lock_helper_calls.add(node.func.attr)
+        self.assertEqual(offenders, [])
+        self.assertTrue({"cursor", "transaction"}.issubset(lock_helper_calls))
+
     def test_f2_0_does_not_wire_taskhandler_or_coordinator_checkpoint_writes(self) -> None:
         f2_symbols = {
             "ensure_f2_durability_schema",
