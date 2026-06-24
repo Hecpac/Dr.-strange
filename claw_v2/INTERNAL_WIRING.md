@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: "e4a3ee2 live baseline + #112 browser atomic read-only smoke + watchdog smoke"
-doc_version: 2.33
+describes_commit: "A4 maintenance preflight no-work check"
+doc_version: 2.34
 last_verified: 2026-06-24
 verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -328,6 +328,60 @@ invariants:
       - tests/test_approval_runtime_wiring.py::ApprovalRuntimeWiringTests::test_maintenance_mode_blocks_approval_and_pipeline_merge_enqueues_with_f2_off
       - tests/test_approval_runtime_wiring.py::ApprovalRuntimeWiringTests::test_pipeline_poll_merges_preserves_autonomous_maintenance_skip
       - tests/test_daemon.py::DaemonTickTests::test_maintenance_mode_blocks_drain_apply_even_when_payload_requests_apply
+
+  maintenance_preflight_proves_no_work_pickup_before_canary:
+    rule: Before Fase B / Stage 2C2 canary, operators must run the
+          maintenance preflight in the intended runtime posture. The preflight
+          reports explicit PASS/FAIL for claim, scheduler, and drain paths and
+          fails closed when `CLAW_MAINTENANCE_MODE` is absent or a path cannot
+          be verified.
+    entrypoint: `python -m claw_v2.maintenance_preflight`
+    proves:
+      claim_path: With the supplied flags, JobService.claim() and
+          JobService.claim_next() do not transition queued/retrying jobs to
+          `running`. The proof uses isolated temp job state and the real claim
+          methods.
+      scheduler_path: With the supplied flags, `approval_sweep` and
+          `pipeline_poll_merges` are blocked before
+          enqueue_scheduled_background_job(). The proof uses isolated temp job
+          state and the registered scheduler job kinds/resume keys.
+      drain_path: With the supplied flags, observe/report-only reconciliation
+          may run, but the mutating calls
+          drain_reconcilable_unverified(apply=True) and
+          reconcile_failed_unverified(apply=True) are blocked even when a
+          payload asks for `drain_apply=true`.
+    does_not_prove: The preflight does not start/restart the daemon, run a live
+          scheduler loop, claim live jobs, apply live drains, or prove a
+          launched process is using a specific environment. Live daemon
+          confirmation remains a separate smoke after operator authorization.
+    flags:
+      CLAW_MAINTENANCE_MODE: Must be truthy for PASS. This is the required
+          canary no-work posture.
+      CLAW_NO_JOB_CLAIM: Reported separately. It can block claim path only, but
+          cannot make scheduler or drain paths PASS without
+          `CLAW_MAINTENANCE_MODE`.
+      CLAW_F2_DURABILITY_ENABLED: Reported as `f2_enabled`; PASS/FAIL for the
+          no-work paths is independent of F2 ON/OFF.
+    read_only_safety: Tests and local smoke use temp DBs/fakes only. If a live
+          DB path is supplied, the preflight opens it read-only/immutable for a
+          liveness check and still proves work paths with temp/fake state.
+          Operator procedure still requires the approved backup +
+          `integrity_check` pattern before primary DB inspection.
+    output_contract: Structured output includes `overall_status`, `claim_path`,
+          `scheduler_path`, `drain_path`, `maintenance_mode_active`,
+          `no_job_claim_active`, `f2_enabled`, `db_path_checked`, and
+          path-level reasons/details. Any path FAIL makes
+          `overall_status=FAIL`.
+    enforced_by:
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_preflight_passes_with_maintenance_on_and_f2_off
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_preflight_passes_with_maintenance_on_and_f2_on
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_preflight_fails_when_maintenance_is_off
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_claim_path_fails_if_runtime_claim_gates_are_inactive
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_scheduler_path_fails_if_scheduled_work_would_enqueue
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_drain_path_fails_if_apply_would_run
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_output_is_structured_with_path_level_reasons
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_cli_smoke_outputs_json_pass_with_temp_state
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_supplied_db_path_is_opened_read_only_immutable
 
   external_effect_recovery_is_idempotent_and_never_auto_replays:
     rule: F2 recovery classifies external-effect evidence only; it never
