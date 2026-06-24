@@ -1393,5 +1393,46 @@ class RuntimeDbReadLockDisciplineTests(unittest.TestCase):
         )
 
 
+class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
+    def test_f2_schema_uses_runtimedb_not_raw_sqlite_connections(self) -> None:
+        source = (REPO_ROOT / "claw_v2" / "f2_durability_schema.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("def ensure_f2_durability_schema(runtime_db: RuntimeDb)", source)
+        self.assertIn("runtime_db.transaction()", source)
+        self.assertNotIn("sqlite3.connect", source)
+        self.assertNotIn("connect_runtime_sqlite", source)
+
+    def test_f2_0_does_not_wire_taskhandler_or_coordinator_checkpoint_writes(self) -> None:
+        f2_tokens = (
+            "ensure_f2_durability_schema",
+            "phase_checkpoints",
+            "phase_checkpoint_writes",
+            "external_effect_records",
+            "phase_recovery_cursors",
+        )
+        runtime_sources = {
+            "claw_v2/task_handler.py": (REPO_ROOT / "claw_v2" / "task_handler.py").read_text(
+                encoding="utf-8"
+            ),
+            "claw_v2/coordinator.py": (REPO_ROOT / "claw_v2" / "coordinator.py").read_text(
+                encoding="utf-8"
+            ),
+        }
+
+        offenders = {
+            rel_path: [token for token in f2_tokens if token in source]
+            for rel_path, source in runtime_sources.items()
+        }
+        offenders = {rel_path: tokens for rel_path, tokens in offenders.items() if tokens}
+        self.assertEqual(
+            offenders,
+            {},
+            "F2.0 must add schema/tests only; TaskHandler/Coordinator checkpoint "
+            f"write wiring belongs to a later PR: {offenders}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
