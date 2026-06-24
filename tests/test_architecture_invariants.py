@@ -1623,6 +1623,69 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
             f"external-effect execution wiring belongs to later PRs: {offenders}",
         )
 
+    def test_f2_4a_recovery_planner_is_classification_only(self) -> None:
+        path = REPO_ROOT / "claw_v2" / "f2_recovery.py"
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+
+        self.assertIn(
+            'F2_COORDINATOR_PHASES = ("research", "synthesis", "implementation", "verification")',
+            source,
+        )
+        self.assertIn("will_replay_external_effects=False", source)
+        self.assertNotIn("CLAW_F2_DURABILITY_ENABLED", source)
+        self.assertNotIn("F2_DURABILITY_ENABLED", source)
+
+        forbidden_imports = {
+            "sqlite3",
+            "claw_v2.config",
+            "claw_v2.main",
+            "claw_v2.browser",
+            "claw_v2.browser_tools",
+            "claw_v2.chrome",
+            "claw_v2.chrome_handler",
+            "claw_v2.computer",
+            "claw_v2.computer_handler",
+            "claw_v2.tools",
+            "subprocess",
+        }
+        forbidden_names = {
+            "record_external_effect",
+            "update_external_effect_status",
+            "append_checkpoint_write",
+            "create_phase_checkpoint",
+            "connect_runtime_sqlite",
+            "delegate_task",
+            "ThreadPoolExecutor",
+            "Popen",
+            "run",
+        }
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                offenders.extend(
+                    alias.name for alias in node.names if alias.name in forbidden_imports
+                )
+            elif isinstance(node, ast.ImportFrom):
+                if node.module in forbidden_imports:
+                    offenders.append(f"from {node.module} import ...")
+            elif isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id in forbidden_names:
+                    offenders.append(node.func.id)
+                elif (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr in forbidden_names
+                ):
+                    offenders.append(node.func.attr)
+                elif (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "ask"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "router"
+                ):
+                    offenders.append("router.ask")
+        self.assertEqual(offenders, [])
+
 
 if __name__ == "__main__":
     unittest.main()
