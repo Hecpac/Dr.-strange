@@ -1468,14 +1468,27 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
             for member in classes[0].body
             if isinstance(member, ast.FunctionDef) and member.name == "__init__"
         )
+        schema_ready = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_ensure_schema_ready"
+        )
         self.assertEqual([arg.arg for arg in init.args.args], ["self", "runtime_db"])
         self.assertEqual(self._name_from_annotation(init.args.args[1].annotation), "RuntimeDb")
         self.assertTrue(
             any(
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
-                and node.func.id == "ensure_f2_durability_schema"
+                and node.func.id == "_ensure_schema_ready"
                 for node in ast.walk(init)
+            )
+        )
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "ensure_f2_durability_schema"
+                for node in ast.walk(schema_ready)
             )
         )
 

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import uuid
+import weakref
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -42,6 +44,8 @@ RECOVERY_CURSOR_STATUSES = frozenset(
 )
 
 _DEFAULT_MAX_JSON_BYTES = 1_000_000
+_SCHEMA_READY_LOCK = threading.Lock()
+_SCHEMA_READY_RUNTIME_DBS: weakref.WeakSet[RuntimeDb] = weakref.WeakSet()
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,7 +159,7 @@ class F2DurabilityStore:
             raise ValueError("max_json_bytes must be positive")
         self._db = runtime_db
         self._max_json_bytes = max_json_bytes
-        ensure_f2_durability_schema(runtime_db)
+        _ensure_schema_ready(runtime_db)
 
     def create_phase_checkpoint(
         self,
@@ -689,7 +693,7 @@ class F2DurabilityStore:
         return [self._recovery_cursor_from_row(row) for row in rows]
 
     def _json_dumps(self, value: Any) -> str:
-        rendered = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         if len(rendered.encode("utf-8")) > self._max_json_bytes:
             raise ValueError("JSON payload exceeds max_json_bytes")
         return rendered
@@ -821,6 +825,14 @@ def compute_external_effect_idempotency_key(
     ):
         _require_nonblank(name, value)
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+
+
+def _ensure_schema_ready(runtime_db: RuntimeDb) -> None:
+    with _SCHEMA_READY_LOCK:
+        if runtime_db in _SCHEMA_READY_RUNTIME_DBS:
+            return
+        ensure_f2_durability_schema(runtime_db)
+        _SCHEMA_READY_RUNTIME_DBS.add(runtime_db)
 
 
 def _new_id(prefix: str) -> str:

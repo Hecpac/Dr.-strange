@@ -61,6 +61,31 @@ class F2DurabilityStoreTests(unittest.TestCase):
                 ).fetchone()["n"]
             self.assertEqual(count, len(F2_DURABILITY_TABLES))
 
+    def test_repeated_store_construction_uses_schema_ready_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+
+            with patch.object(
+                f2_store_module,
+                "ensure_f2_durability_schema",
+                wraps=f2_store_module.ensure_f2_durability_schema,
+            ) as ensure_schema:
+                first = F2DurabilityStore(db)
+                second = F2DurabilityStore(db)
+
+                first.create_phase_checkpoint(
+                    checkpoint_id="checkpoint-1",
+                    task_id="task-1",
+                    run_id="run-1",
+                    phase="research",
+                    phase_version=1,
+                    status="started",
+                    payload={},
+                )
+                second.list_phase_checkpoints(task_id="task-1")
+
+            ensure_schema.assert_called_once_with(db)
+
     def test_create_and_read_phase_checkpoint_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store, _db = self._store(tmpdir)
@@ -86,6 +111,43 @@ class F2DurabilityStoreTests(unittest.TestCase):
             self.assertEqual(loaded.payload, {"phase": "research", "items": [1, 2]})
             self.assertTrue(loaded.payload_sha256.startswith("sha256:"))
             self.assertIsNone(loaded.payload_error)
+
+    def test_unicode_json_roundtrips_without_ascii_escaping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store, db = self._store(tmpdir)
+            payload = {
+                "accent": "caf\u00e9",
+                "city": "\u6771\u4eac",
+                "emoji": "\U0001f680",
+            }
+
+            created = store.create_phase_checkpoint(
+                checkpoint_id="checkpoint-unicode",
+                task_id="task-1",
+                run_id="run-1",
+                phase="research",
+                phase_version=1,
+                status="started",
+                payload=payload,
+            )
+
+            with db.cursor() as cur:
+                payload_json = cur.execute(
+                    """
+                    SELECT payload_json
+                    FROM phase_checkpoints
+                    WHERE checkpoint_id = ?
+                    """,
+                    (created.checkpoint_id,),
+                ).fetchone()["payload_json"]
+
+            self.assertEqual(created.payload, payload)
+            self.assertIn(payload["accent"], payload_json)
+            self.assertIn(payload["city"], payload_json)
+            self.assertIn(payload["emoji"], payload_json)
+            self.assertNotIn("\\u00e9", payload_json)
+            self.assertNotIn("\\u6771", payload_json)
+            self.assertNotIn("\\ud83d", payload_json)
 
     def test_list_phase_checkpoints_is_filtered_and_deterministically_ordered(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
