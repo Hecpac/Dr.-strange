@@ -18,10 +18,8 @@ F2_DURABILITY_TABLES: tuple[str, ...] = (
 
 F2_DURABILITY_INDEXES: tuple[str, ...] = (
     "ux_phase_checkpoints_task_run_phase_version",
-    "idx_phase_checkpoints_task_run_phase_version_desc",
     "idx_phase_checkpoints_task_status_created_at",
     "ux_phase_checkpoint_writes_order",
-    "idx_phase_checkpoint_writes_task_run_phase_order",
     "idx_phase_checkpoint_writes_external_effect_id",
     "ux_phase_checkpoint_writes_key",
     "ux_external_effect_records_idempotency_key",
@@ -56,10 +54,6 @@ F2_DURABILITY_SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE UNIQUE INDEX IF NOT EXISTS ux_phase_checkpoints_task_run_phase_version
     ON phase_checkpoints(task_id, run_id, phase, phase_version)
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_phase_checkpoints_task_run_phase_version_desc
-    ON phase_checkpoints(task_id, run_id, phase, phase_version DESC)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_phase_checkpoints_task_status_created_at
@@ -121,10 +115,6 @@ F2_DURABILITY_SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     """
     CREATE UNIQUE INDEX IF NOT EXISTS ux_phase_checkpoint_writes_order
-    ON phase_checkpoint_writes(task_id, run_id, phase, write_order)
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_phase_checkpoint_writes_task_run_phase_order
     ON phase_checkpoint_writes(task_id, run_id, phase, write_order)
     """,
     """
