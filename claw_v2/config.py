@@ -507,6 +507,7 @@ class AppConfig:
     provider_timeout_coordinator_implementation_seconds: float = _PROVIDER_ROLE_TIMEOUT_DEFAULTS[
         "coordinator_implementation"
     ]
+    f2_durability_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -768,6 +769,10 @@ class AppConfig:
             provider_timeout_coordinator_implementation_seconds=_env_float(
                 "CLAW_PROVIDER_TIMEOUT_COORDINATOR_IMPLEMENTATION_SECONDS",
                 _PROVIDER_ROLE_TIMEOUT_DEFAULTS["coordinator_implementation"],
+            ),
+            f2_durability_enabled=_env_bool(
+                "CLAW_F2_DURABILITY_ENABLED",
+                _env_bool("F2_DURABILITY_ENABLED", False),
             ),
         )
 

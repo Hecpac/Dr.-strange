@@ -59,6 +59,7 @@ from claw_v2.coordinator import CoordinatorService
 from claw_v2.cron import CronScheduler, ScheduledJob
 from claw_v2.daemon import ClawDaemon, RecoveryJobDrainRunner
 from claw_v2.dream import AutoDreamService
+from claw_v2.f2_durability_store import F2DurabilityStore
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
 from claw_v2.hooks import make_anti_distillation_hook, make_daily_cost_gate, make_decision_logger
@@ -212,6 +213,7 @@ class ClawRuntime:
     tool_registry: object | None = None
     openai_tool_executor: object | None = None
     observation_window: ObservationWindowState | None = None
+    f2_durability_store: F2DurabilityStore | None = None
 
 
 def build_runtime_approval_gate(approvals: ApprovalManager) -> Callable[[object, dict], None]:
@@ -789,6 +791,7 @@ def _setup_agent_services(
     metrics: MetricsTracker,
     brain: BrainService,
     runtime_db: RuntimeDb | None = None,
+    f2_durability_store: F2DurabilityStore | None = None,
 ) -> tuple[
     AutoResearchAgentService,
     SubAgentService,
@@ -835,6 +838,7 @@ def _setup_agent_services(
         default_implementation_timeout_seconds=config.timeout_for_role(
             "coordinator_implementation"
         ),
+        f2_durability_store=f2_durability_store,
     )
     task_board = TaskBoard(board_root=config.agent_state_root / "_board")
     registry_path = config.agent_state_root / "AGENTS.md"
@@ -2172,6 +2176,7 @@ def build_runtime(
     task_ledger = TaskLedger(config.db_path, observe=observe, runtime_db=runtime_db)
     task_ledger.reconcile_false_successes()
     job_service = JobService(config.db_path, observe=observe, runtime_db=runtime_db)
+    f2_durability_store = F2DurabilityStore(runtime_db) if config.f2_durability_enabled else None
     model_registry = ModelRegistry.default()
     startup_health = _run_startup_healthchecks(config, observe)
     observation_window = ObservationWindowState(
@@ -2260,6 +2265,7 @@ def build_runtime(
             metrics=metrics,
             brain=brain,
             runtime_db=runtime_db,
+            f2_durability_store=f2_durability_store,
         )
     )
     daemon, bot, pipeline, _, _, _ = _setup_operational_services(
@@ -2356,6 +2362,7 @@ def build_runtime(
         tool_registry=tool_registry,
         openai_tool_executor=openai_tool_executor,
         observation_window=observation_window,
+        f2_durability_store=f2_durability_store,
     )
 
 
