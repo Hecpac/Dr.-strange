@@ -1164,6 +1164,10 @@ class DiagnosticsRunbookTests(unittest.TestCase):
         subprocess.run(["bash", "-n", "ops/claw-watchdog.sh"], check=True)
         subprocess.run(["bash", "-n", "ops/chrome-cdp-launcher.sh"], check=True)
 
+    def test_diagnose_wrapper_passes_arguments_through_unchanged(self) -> None:
+        text = Path("scripts/diagnose.sh").read_text(encoding="utf-8")
+        self.assertIn('exec "$PYTHON_BIN" -m claw_v2.diagnostics "$@"', text)
+
     def test_runbook_documents_core_operational_commands(self) -> None:
         text = Path("docs/OPERATIONS_RUNBOOK.md").read_text()
         restart = Path("scripts/restart.sh").read_text()

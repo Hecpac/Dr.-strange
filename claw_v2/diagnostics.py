@@ -210,6 +210,18 @@ def collect_diagnostics(
     }
 
 
+def _collect_f2_recovery_cli_report(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "f2_recovery": collect_f2_recovery_report(
+            db_path=Path(args.f2_db),
+            task_id=args.task_id,
+            run_id=args.run_id,
+            limit=args.limit,
+            include_payload=args.include_payload,
+        )
+    }
+
+
 def _run_command(args: list[str], *, runner: Runner, timeout: float = 5.0) -> dict[str, Any]:
     try:
         result = runner(args, capture_output=True, text=True, timeout=timeout, check=False)
@@ -681,11 +693,13 @@ def _f2_json_summary(raw: Any, *, sha256: str | None = None) -> dict[str, Any]:
 
 
 def _safe_f2_text_summary(value: Any) -> dict[str, Any]:
-    text = str(redact_sensitive(str(value), limit=200))
+    text = str(value or "")
     return {
         "present": bool(text),
-        "text": text,
-        "truncated": len(str(value)) > 200,
+        "bytes": len(text.encode("utf-8", errors="replace")),
+        "raw_included": False,
+        "redacted": True,
+        "truncated": len(text) > 200,
     }
 
 
@@ -1859,6 +1873,35 @@ def format_text(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_f2_recovery_text(report: dict[str, Any]) -> str:
+    f2_report = report.get("f2_recovery") if isinstance(report, dict) else {}
+    if not isinstance(f2_report, dict):
+        return "F2 recovery diagnostics: unavailable"
+    readiness = f2_report.get("readiness") or {}
+    counts = f2_report.get("counts") or {}
+    external_effects = f2_report.get("external_effects") or {}
+    lines = [
+        "F2 recovery diagnostics",
+        f"status={f2_report.get('status')}",
+        f"enabled={f2_report.get('enabled')}",
+        f"db={f2_report.get('db_path')}",
+        f"readiness={readiness.get('status') if isinstance(readiness, dict) else None}",
+    ]
+    for table in F2_DURABILITY_TABLES:
+        table_counts = counts.get(table) if isinstance(counts, dict) else None
+        if isinstance(table_counts, dict):
+            lines.append(f"{table}={table_counts.get('total', 0)}")
+    if isinstance(external_effects, dict):
+        lines.append(
+            "external_effects="
+            f"orphaned:{len(external_effects.get('orphaned') or [])},"
+            f"manual_review:{len(external_effects.get('manual_review_required') or [])},"
+            "verified_absent_future_execution:"
+            f"{len(external_effects.get('verified_absent_requires_future_execution') or [])}"
+        )
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Collect local Dr. Strange runtime diagnostics.")
     parser.add_argument("--db", default=os.getenv("DB_PATH", str(DEFAULT_DB_PATH)))
@@ -1875,7 +1918,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ack-hours", type=float, default=24.0)
     parser.add_argument("--ack-reason", default="")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of readable text.")
+    parser.add_argument(
+        "--f2-recovery-report",
+        action="store_true",
+        help="Collect a local read-only F2 recovery diagnostics report.",
+    )
+    parser.add_argument(
+        "--f2-db",
+        default=None,
+        help="Explicit local SQLite DB path for --f2-recovery-report.",
+    )
+    parser.add_argument("--task-id", default=None, help="Optional F2 task_id filter.")
+    parser.add_argument("--run-id", default=None, help="Optional F2 run_id filter.")
+    parser.add_argument(
+        "--include-payload",
+        action="store_true",
+        help="Include safe F2 payload summaries only; raw payloads are never emitted.",
+    )
     args = parser.parse_args(argv)
+    if args.f2_recovery_report:
+        if not args.f2_db:
+            parser.error("--f2-db is required when --f2-recovery-report is used")
+        report = _collect_f2_recovery_cli_report(args)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        else:
+            print(format_f2_recovery_text(report))
+        return 0
+
     ack_event_ids = list(args.ack_event)
     if args.ack_current:
         current_report = collect_diagnostics(

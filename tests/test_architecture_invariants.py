@@ -1762,10 +1762,13 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
 
         f2_function_names = {
             "collect_f2_recovery_report",
+            "_collect_f2_recovery_cli_report",
             "_open_readonly_sqlite",
             "_empty_f2_report",
             "_empty_f2_counts",
             "_empty_f2_recent_records",
+            "_safe_f2_text_summary",
+            "format_f2_recovery_text",
         }
         f2_function_nodes = [
             node
@@ -1812,6 +1815,14 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
         payload_policy_source = inspect.getsource(diagnostics_module._empty_f2_report)
         self.assertIn("raw_payloads_included", payload_policy_source)
         self.assertIn("False", payload_policy_source)
+        cli_source = inspect.getsource(diagnostics_module._collect_f2_recovery_cli_report)
+        self.assertIn("collect_f2_recovery_report", cli_source)
+        self.assertNotIn("DEFAULT_DB_PATH", cli_source)
+        self.assertNotIn("os.getenv", cli_source)
+        main_source = inspect.getsource(diagnostics_module.main)
+        self.assertIn("--f2-recovery-report", main_source)
+        self.assertIn("--f2-db", main_source)
+        self.assertIn("parser.error", main_source)
 
 
 if __name__ == "__main__":
