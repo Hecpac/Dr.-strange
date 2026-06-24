@@ -9,7 +9,7 @@
 
 ```yaml
 describes_commit: "e4a3ee2 live baseline + #112 browser atomic read-only smoke + watchdog smoke"
-doc_version: 2.32
+doc_version: 2.33
 last_verified: 2026-06-24
 verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -328,6 +328,44 @@ invariants:
       - tests/test_approval_runtime_wiring.py::ApprovalRuntimeWiringTests::test_maintenance_mode_blocks_approval_and_pipeline_merge_enqueues_with_f2_off
       - tests/test_approval_runtime_wiring.py::ApprovalRuntimeWiringTests::test_pipeline_poll_merges_preserves_autonomous_maintenance_skip
       - tests/test_daemon.py::DaemonTickTests::test_maintenance_mode_blocks_drain_apply_even_when_payload_requests_apply
+
+  external_effect_recovery_is_idempotent_and_never_auto_replays:
+    rule: F2 recovery classifies external-effect evidence only; it never
+          executes external effects directly and never sets
+          `will_replay_external_effects=true`.
+    idempotency_key: `external_effect_records.idempotency_key` is unique.
+          A duplicate idempotency key must reuse the existing
+          `external_effect_records` row; executor behavior must treat that as a
+          no-op and must not call the external provider again.
+    executor_ordering: Executors for real external effects must write durable
+          intent (`intent_recorded` plus a linked checkpoint write) before any
+          real-world effect is attempted. Ledger dedup only protects effects
+          after that durable intent exists.
+    verified_applied: `verified_applied` means the effect is already applied.
+          Recovery may classify the phase as complete or retryable depending on
+          checkpoint state, but the effect itself must be reused/no-op by
+          idempotency key and never replayed.
+    verified_absent: `verified_absent` means the effect was checked and is
+          absent. Recovery records the effect as requiring future execution,
+          keeps `will_replay_external_effects=false`, and TaskHandler blocks
+          coordinator auto-rerun with
+          `f2_recovery_retry_requires_future_external_effect`.
+    manual_review: Unsafe statuses (`intent_recorded`, `apply_in_progress`,
+          `applied`, `failed`, `verification_required`,
+          `blocked_manual_review`) and orphan/unlinked external-effect rows
+          require manual review. They may not be auto-replayed by recovery.
+    crash_before_ledger: If a crash occurs after a real-world effect starts but
+          before `external_effect_records` is written, F2 has no durable row to
+          dedup or classify. Current recovery treats the phase from checkpoint
+          evidence alone, usually as retryable when the latest checkpoint is
+          `started`; this remains outside ledger dedup and must be controlled
+          by executor ordering and the future Stage 3 design.
+    enforced_by:
+      - tests/test_f2_external_effect_synthetics.py::F2ExternalEffectSyntheticTests::test_same_idempotency_key_executes_fake_effect_once_and_reuses_record
+      - tests/test_f2_external_effect_synthetics.py::F2ExternalEffectSyntheticTests::test_crash_before_ledger_write_is_undetectable_retryable_risk
+      - tests/test_f2_external_effect_synthetics.py::F2ExternalEffectSyntheticTests::test_effect_then_crash_before_checkpoint_does_not_reexecute_verified_applied
+      - tests/test_f2_external_effect_synthetics.py::F2ExternalEffectSyntheticTests::test_orphaned_verified_applied_effect_requires_manual_review
+      - tests/test_f2_external_effect_synthetics.py::F2ExternalEffectSyntheticTests::test_verified_absent_future_effect_blocks_taskhandler_auto_rerun
 
   self_improve_promotion_gate:
     rule: self-improve promotion actions must pass through BrainService
