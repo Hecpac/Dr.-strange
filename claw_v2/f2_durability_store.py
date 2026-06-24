@@ -14,6 +14,7 @@ from claw_v2.f2_durability_schema import (
     ensure_f2_durability_schema,
     validate_f2_schema_version,
 )
+from claw_v2.redaction import redact_sensitive
 from claw_v2.sqlite_runtime import RuntimeDb
 
 
@@ -402,7 +403,7 @@ class F2DurabilityStore:
         _validate_status("external effect", status, EXTERNAL_EFFECT_STATUSES)
         if attempt_count < 0:
             raise ValueError("attempt_count must be >= 0")
-        request_json = self._json_dumps(request)
+        request_json = self._json_dumps(_redact_external_effect_metadata(request))
         request_sha256 = _sha256_text(request_json)
         resolved_content_hash = content_hash or request_sha256
         resolved_idempotency_key = idempotency_key or compute_external_effect_idempotency_key(
@@ -414,9 +415,18 @@ class F2DurabilityStore:
             content_hash=resolved_content_hash,
             schema_version=schema_version,
         )
-        verification_json = self._json_dumps(verification) if verification is not None else None
-        result_json = self._json_dumps(result) if result is not None else None
+        verification_json = (
+            self._json_dumps(_redact_external_effect_metadata(verification))
+            if verification is not None
+            else None
+        )
+        result_json = (
+            self._json_dumps(_redact_external_effect_metadata(result))
+            if result is not None
+            else None
+        )
         result_sha256 = _sha256_text(result_json) if result_json is not None else None
+        safe_error = _redact_external_effect_error(error)
         row_id = external_effect_id or _new_id("external-effect")
         now = created_at or _utc_now()
         with self._db.transaction() as cur:
@@ -449,7 +459,7 @@ class F2DurabilityStore:
                     verification_json,
                     result_json,
                     result_sha256,
-                    error,
+                    safe_error,
                     schema_version,
                     now,
                     now,
@@ -533,9 +543,18 @@ class F2DurabilityStore:
     ) -> ExternalEffectRecord | None:
         _require_nonblank("external_effect_id", external_effect_id)
         _validate_status("external effect", status, EXTERNAL_EFFECT_STATUSES)
-        result_json = self._json_dumps(result) if result is not None else None
+        result_json = (
+            self._json_dumps(_redact_external_effect_metadata(result))
+            if result is not None
+            else None
+        )
         result_sha256 = _sha256_text(result_json) if result_json is not None else None
-        verification_json = self._json_dumps(verification) if verification is not None else None
+        verification_json = (
+            self._json_dumps(_redact_external_effect_metadata(verification))
+            if verification is not None
+            else None
+        )
+        safe_error = _redact_external_effect_error(error)
         attempt_sql = "attempt_count + 1" if increment_attempt_count else "attempt_count"
         now = updated_at or _utc_now()
         with self._db.transaction() as cur:
@@ -558,7 +577,7 @@ class F2DurabilityStore:
                     verification_json,
                     result_json,
                     result_sha256,
-                    error,
+                    safe_error,
                     now,
                     external_effect_id,
                 ),
@@ -845,6 +864,16 @@ def _utc_now() -> str:
 
 def _sha256_text(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _redact_external_effect_metadata(value: Any) -> Any:
+    return redact_sensitive(value, limit=0)
+
+
+def _redact_external_effect_error(error: str | None) -> str | None:
+    if error is None:
+        return None
+    return str(redact_sensitive(error, limit=0))
 
 
 def _require_nonblank(name: str, value: str) -> None:

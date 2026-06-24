@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 import tempfile
 import threading
 import traceback
@@ -220,7 +222,7 @@ class F2DurabilityStoreTests(unittest.TestCase):
 
     def test_record_external_effect_roundtrip_and_idempotency(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            store, _db = self._store(tmpdir)
+            store, db = self._store(tmpdir)
             key = compute_external_effect_idempotency_key(
                 task_id="task-1",
                 run_id="run-1",
@@ -265,6 +267,100 @@ class F2DurabilityStoreTests(unittest.TestCase):
             self.assertEqual(by_key.external_effect_id, "effect-1")
             self.assertEqual(by_key.request, {"title": "Draft PR"})
             self.assertEqual([row.external_effect_id for row in listed], ["effect-1"])
+            self.assertEqual(second.request, first.request)
+            with db.cursor() as cur:
+                row = cur.execute(
+                    """
+                    SELECT COUNT(*) AS n, request_json
+                    FROM external_effect_records
+                    WHERE idempotency_key = ?
+                    """,
+                    (key,),
+                ).fetchone()
+            self.assertEqual(row["n"], 1)
+            self.assertNotIn("Different duplicate request", row["request_json"])
+
+    def test_external_effect_redacts_persisted_metadata_and_hashes_redacted_json(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store, db = self._store(tmpdir)
+
+            created = store.record_external_effect(
+                external_effect_id="effect-secret",
+                task_id="task-1",
+                run_id="run-1",
+                phase="implementation",
+                effect_kind="telegram_send",
+                target="chat:owner",
+                request={
+                    "api_key": "sk-requestsecret12345678901234567890",
+                    "headers": {
+                        "authorization": "Bearer requestsecret12345678901234567890",
+                        "cookie": "sid=request-cookie-secret",
+                    },
+                    "items": [
+                        {
+                            "access_token": "list-secret-token",
+                            "safe": "list-metadata",
+                        }
+                    ],
+                    "telegram_bot_token": "123456789:abcdefghijklmnopqrstuvwxyzABCDE",
+                    "safe": "metadata",
+                },
+                verification={
+                    "access_token": "verify-secret-token",
+                    "status": "pending",
+                },
+                result={
+                    "cookie": "sid=result-cookie-secret",
+                    "message_id": "42",
+                },
+                error="failed with Bearer errorsecret12345678901234567890",
+            )
+
+            with db.cursor() as cur:
+                row = cur.execute(
+                    """
+                    SELECT request_json, request_sha256, verification_json,
+                           result_json, result_sha256, error
+                    FROM external_effect_records
+                    WHERE external_effect_id = ?
+                    """,
+                    (created.external_effect_id,),
+                ).fetchone()
+
+            persisted = "\n".join(
+                str(row[column] or "")
+                for column in (
+                    "request_json",
+                    "verification_json",
+                    "result_json",
+                    "error",
+                )
+            )
+            self.assertNotIn("sk-requestsecret", persisted)
+            self.assertNotIn("requestsecret12345678901234567890", persisted)
+            self.assertNotIn("request-cookie-secret", persisted)
+            self.assertNotIn("list-secret-token", persisted)
+            self.assertNotIn("verify-secret-token", persisted)
+            self.assertNotIn("result-cookie-secret", persisted)
+            self.assertNotIn("errorsecret12345678901234567890", persisted)
+            self.assertIn("[REDACTED]", persisted)
+            persisted_request = json.loads(row["request_json"])
+            self.assertEqual(persisted_request["safe"], "metadata")
+            self.assertEqual(persisted_request["items"][0]["safe"], "list-metadata")
+            self.assertEqual(persisted_request["items"][0]["access_token"], "[REDACTED]")
+            self.assertEqual(
+                row["request_sha256"],
+                "sha256:"
+                + hashlib.sha256(row["request_json"].encode("utf-8")).hexdigest(),
+            )
+            self.assertEqual(
+                row["result_sha256"],
+                "sha256:"
+                + hashlib.sha256(row["result_json"].encode("utf-8")).hexdigest(),
+            )
 
     def test_update_external_effect_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -293,6 +389,85 @@ class F2DurabilityStoreTests(unittest.TestCase):
             self.assertEqual(updated.result_sha256[:7], "sha256:")
             self.assertEqual(updated.attempt_count, 1)
             self.assertEqual(updated.updated_at, "2026-06-24T01:00:00Z")
+
+    def test_update_external_effect_status_preserves_identity_attempts_and_redacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store, _db = self._store(tmpdir)
+            effect = store.record_external_effect(
+                external_effect_id="effect-update",
+                task_id="task-1",
+                run_id="run-1",
+                phase="implementation",
+                effect_kind="github_push",
+                target="origin/feat",
+                request={"branch": "feat"},
+                created_at="2026-06-24T00:00:00Z",
+            )
+
+            first = store.update_external_effect_status(
+                effect.external_effect_id,
+                status="apply_in_progress",
+                updated_at="2026-06-24T00:05:00Z",
+            )
+            second = store.update_external_effect_status(
+                effect.external_effect_id,
+                status="failed",
+                result={
+                    "ok": False,
+                    "authorization": "Bearer resultsecret12345678901234567890",
+                },
+                error="push failed with api_key=resultsecret12345678901234567890",
+                increment_attempt_count=True,
+                updated_at="2026-06-24T00:06:00Z",
+            )
+
+            self.assertEqual(first.external_effect_id, effect.external_effect_id)
+            self.assertEqual(second.external_effect_id, effect.external_effect_id)
+            self.assertEqual(first.idempotency_key, effect.idempotency_key)
+            self.assertEqual(second.idempotency_key, effect.idempotency_key)
+            self.assertEqual(first.attempt_count, 0)
+            self.assertEqual(second.attempt_count, 1)
+            self.assertEqual(first.updated_at, "2026-06-24T00:05:00Z")
+            self.assertEqual(second.updated_at, "2026-06-24T00:06:00Z")
+            self.assertEqual(second.result["authorization"], "[REDACTED]")
+            self.assertNotIn("resultsecret12345678901234567890", second.result_json)
+            self.assertNotIn("resultsecret12345678901234567890", second.error)
+            self.assertIn("[REDACTED]", second.error)
+
+    def test_checkpoint_write_can_reference_external_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store, _db = self._store(tmpdir)
+            effect = store.record_external_effect(
+                external_effect_id="effect-linked",
+                task_id="task-1",
+                run_id="run-1",
+                phase="implementation",
+                effect_kind="github_pr",
+                target="Hecpac/repo#draft",
+                request={"title": "Draft PR"},
+            )
+
+            write = store.append_checkpoint_write(
+                write_id="write-linked",
+                task_id="task-1",
+                run_id="run-1",
+                phase="implementation",
+                write_kind="external_effect_intent",
+                write_key="external-effect:effect-linked",
+                payload={"external_effect_id": effect.external_effect_id},
+                external_effect_id=effect.external_effect_id,
+            )
+            linked = store.list_checkpoint_writes(
+                task_id="task-1",
+                run_id="run-1",
+                phase="implementation",
+                external_effect_id=effect.external_effect_id,
+            )
+
+            self.assertEqual(write.external_effect_id, effect.external_effect_id)
+            self.assertEqual([row.write_id for row in linked], ["write-linked"])
 
     def test_recovery_cursor_upsert_and_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
