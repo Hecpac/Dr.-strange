@@ -100,7 +100,7 @@ Smoke coverage:
 
 Safety boundaries:
 
-- `BrowserClick`, `BrowserType`, submit, screenshot, private/authenticated
+- `BrowserClick`, `BrowserType`, submit, `BrowserScreenshot`, private/authenticated
   sites, and mutating browser actions were not executed in the smoke.
 - `BrowserClick` and `BrowserType` remain Tier 3 approval-gated.
 - No private or authenticated browser state was inspected.

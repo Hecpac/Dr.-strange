@@ -45,7 +45,7 @@ browser_atomic_tools:
     - BrowserClick
     - BrowserType
     - submit
-    - screenshot
+    - BrowserScreenshot
     - private_or_authenticated_site
     - mutating_browser_action
   smoke_evidence:
