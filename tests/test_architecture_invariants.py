@@ -1393,5 +1393,117 @@ class RuntimeDbReadLockDisciplineTests(unittest.TestCase):
         )
 
 
+class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
+    @staticmethod
+    def _name_from_annotation(node: ast.AST | None) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        return ""
+
+    def test_f2_schema_uses_runtimedb_not_raw_sqlite_connections(self) -> None:
+        path = REPO_ROOT / "claw_v2" / "f2_durability_schema.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        funcs = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "ensure_f2_durability_schema"
+        ]
+
+        self.assertEqual(len(funcs), 1)
+        func = funcs[0]
+        self.assertEqual([arg.arg for arg in func.args.args], ["runtime_db"])
+        self.assertEqual(self._name_from_annotation(func.args.args[0].annotation), "RuntimeDb")
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "transaction"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "runtime_db"
+                for node in ast.walk(func)
+            )
+        )
+
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                offenders.extend(alias.name for alias in node.names if alias.name == "sqlite3")
+            elif isinstance(node, ast.ImportFrom):
+                if node.module == "sqlite3":
+                    offenders.append("from sqlite3 import ...")
+                if node.module == "claw_v2.sqlite_runtime":
+                    offenders.extend(
+                        alias.name for alias in node.names if alias.name == "connect_runtime_sqlite"
+                    )
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "connect"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "sqlite3"
+            ):
+                offenders.append("sqlite3.connect")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "connect_runtime_sqlite"
+            ):
+                offenders.append("connect_runtime_sqlite")
+        self.assertEqual(offenders, [])
+
+    def test_f2_0_does_not_wire_taskhandler_or_coordinator_checkpoint_writes(self) -> None:
+        f2_symbols = {
+            "ensure_f2_durability_schema",
+            "phase_checkpoints",
+            "phase_checkpoint_writes",
+            "external_effect_records",
+            "phase_recovery_cursors",
+        }
+        runtime_paths = ("claw_v2/task_handler.py", "claw_v2/coordinator.py")
+
+        offenders: dict[str, list[str]] = {}
+        for rel_path in runtime_paths:
+            path = REPO_ROOT / rel_path
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            bad: list[str] = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    bad.extend(
+                        alias.name
+                        for alias in node.names
+                        if alias.name == "claw_v2.f2_durability_schema"
+                    )
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module == "claw_v2.f2_durability_schema":
+                        bad.append("from claw_v2.f2_durability_schema import ...")
+                elif (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "ensure_f2_durability_schema"
+                ):
+                    bad.append("ensure_f2_durability_schema()")
+                elif (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {"execute", "executemany", "executescript"}
+                ):
+                    for arg in node.args:
+                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                            bad.extend(
+                                symbol for symbol in f2_symbols if symbol in arg.value
+                            )
+            if bad:
+                offenders[rel_path] = bad
+        self.assertEqual(
+            offenders,
+            {},
+            "F2.0 must add schema/tests only; TaskHandler/Coordinator checkpoint "
+            f"write wiring belongs to a later PR: {offenders}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
