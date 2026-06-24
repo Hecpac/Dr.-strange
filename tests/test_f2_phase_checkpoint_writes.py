@@ -8,7 +8,11 @@ from unittest.mock import MagicMock, patch
 
 from claw_v2.adapters.base import LLMRequest
 from claw_v2.config import AppConfig
-from claw_v2.coordinator import CoordinatorService, WorkerTask
+from claw_v2.coordinator import (
+    IMPLEMENTATION_STARTED_MARKER,
+    CoordinatorService,
+    WorkerTask,
+)
 from claw_v2.f2_durability_store import F2DurabilityStore
 from claw_v2.main import build_runtime
 from claw_v2.sqlite_runtime import RuntimeDb
@@ -204,6 +208,30 @@ class F2PhaseCheckpointWriteTests(unittest.TestCase):
                 [(row.phase_version, row.status) for row in implementation_checkpoints],
                 [(1, "started"), (2, "succeeded"), (3, "failed")],
             )
+            synthesis_writes = store.list_checkpoint_writes(
+                task_id="task-critical",
+                run_id="task-critical",
+                phase="synthesis",
+            )
+            self.assertEqual(
+                [(row.write_order, row.write_kind) for row in synthesis_writes],
+                [
+                    (1, "phase_started"),
+                    (2, "phase_return"),
+                    (3, "phase_started"),
+                    (4, "phase_return"),
+                ],
+            )
+            synthesis_checkpoints = store.list_phase_checkpoints(
+                task_id="task-critical",
+                run_id="task-critical",
+                phase="synthesis",
+                order="phase_version_asc",
+            )
+            self.assertEqual(
+                [(row.phase_version, row.status) for row in synthesis_checkpoints],
+                [(1, "started"), (2, "succeeded"), (3, "started"), (4, "succeeded")],
+            )
             task_writes = store.list_checkpoint_writes(
                 task_id="task-critical",
                 run_id="task-critical",
@@ -214,6 +242,98 @@ class F2PhaseCheckpointWriteTests(unittest.TestCase):
                 [(1, "coordinator_start"), (2, "task_failed")],
             )
             self.assertEqual(store.list_external_effects(task_id="task-critical"), [])
+
+    def test_generic_exception_closes_active_f2_phase_and_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+            store = F2DurabilityStore(db)
+            svc, _router, observe = _make_coordinator(
+                f2_store=store,
+                scratch_root=Path(tmpdir) / "scratch",
+            )
+            svc._dispatch_parallel = MagicMock(side_effect=RuntimeError("dispatch exploded"))
+
+            result = svc.run(
+                "task-generic-fail",
+                "objective",
+                [WorkerTask(name="r1", instruction="find")],
+            )
+
+            self.assertEqual(result.error, "dispatch exploded")
+            research_writes = store.list_checkpoint_writes(
+                task_id="task-generic-fail",
+                run_id="task-generic-fail",
+                phase="research",
+            )
+            self.assertEqual(
+                [(row.write_order, row.write_kind) for row in research_writes],
+                [(1, "phase_started"), (2, "phase_error")],
+            )
+            research_checkpoints = store.list_phase_checkpoints(
+                task_id="task-generic-fail",
+                run_id="task-generic-fail",
+                phase="research",
+                order="phase_version_asc",
+            )
+            self.assertEqual(
+                [(row.phase_version, row.status) for row in research_checkpoints],
+                [(1, "started"), (2, "failed")],
+            )
+            task_writes = store.list_checkpoint_writes(
+                task_id="task-generic-fail",
+                run_id="task-generic-fail",
+                phase="task",
+            )
+            self.assertEqual(
+                [(row.write_order, row.write_kind) for row in task_writes],
+                [(1, "coordinator_start"), (2, "task_failed")],
+            )
+            event_names = [call.args[0] for call in observe.emit.call_args_list if call.args]
+            self.assertNotIn("coordinator_complete", event_names)
+
+    def test_implementation_marker_is_not_left_when_f2_phase_start_fails(self) -> None:
+        class ImplementationStartFailingStore(F2DurabilityStore):
+            def append_checkpoint_write(self, **kwargs):
+                if (
+                    kwargs.get("phase") == "implementation"
+                    and kwargs.get("write_kind") == "phase_started"
+                ):
+                    raise RuntimeError("implementation f2 start failed")
+                return super().append_checkpoint_write(**kwargs)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+            store = ImplementationStartFailingStore(db)
+            scratch_root = Path(tmpdir) / "scratch"
+            svc, router, observe = _make_coordinator(
+                f2_store=store,
+                scratch_root=scratch_root,
+            )
+            router.ask.return_value = MagicMock(content="ok")
+
+            result = svc.run(
+                "task-marker",
+                "objective",
+                [WorkerTask(name="r1", instruction="find")],
+                [WorkerTask(name="i1", instruction="build", lane="worker")],
+            )
+
+            self.assertIn("implementation f2 start failed", result.error)
+            self.assertFalse(
+                (scratch_root / "task-marker" / IMPLEMENTATION_STARTED_MARKER).exists()
+            )
+            task_writes = store.list_checkpoint_writes(
+                task_id="task-marker",
+                run_id="task-marker",
+                phase="task",
+            )
+            self.assertEqual(
+                [(row.write_order, row.write_kind) for row in task_writes],
+                [(1, "coordinator_start"), (2, "task_failed")],
+            )
+            event_names = [call.args[0] for call in observe.emit.call_args_list if call.args]
+            self.assertIn("f2_durability_write_failed", event_names)
+            self.assertNotIn("coordinator_complete", event_names)
 
     def test_checkpoint_write_failure_is_visible_and_does_not_fake_success(self) -> None:
         class FailingStore:

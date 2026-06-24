@@ -154,6 +154,82 @@ class CoordinatorService:
         def _phase_resumable(phase: str) -> bool:
             return PHASE_ORDER.index(phase) < start_rank
 
+        f2_task_started = False
+        f2_active_phase: str | None = None
+        f2_task_terminal_recorded = False
+
+        def _mark_f2_task_started() -> None:
+            nonlocal f2_task_started
+            self._f2_record_task_started(
+                task_id=task_id,
+                run_id=orchestration_run_id,
+                start_phase=start_phase,
+            )
+            if self.f2_durability_store is not None:
+                f2_task_started = True
+
+        def _mark_f2_phase_started(phase: str) -> None:
+            nonlocal f2_active_phase
+            self._f2_record_phase_started(
+                task_id=task_id,
+                run_id=orchestration_run_id,
+                phase=phase,
+            )
+            if self.f2_durability_store is not None:
+                f2_active_phase = phase
+
+        def _mark_f2_phase_completed(
+            phase: str,
+            *,
+            results: list[WorkerResult] | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> None:
+            nonlocal f2_active_phase
+            self._f2_record_phase_completed(
+                task_id=task_id,
+                run_id=orchestration_run_id,
+                phase=phase,
+                results=results,
+                payload=payload,
+            )
+            if f2_active_phase == phase:
+                f2_active_phase = None
+
+        def _mark_f2_task_terminal(status: str) -> None:
+            nonlocal f2_task_terminal_recorded
+            self._f2_record_task_terminal(
+                task_id=task_id,
+                run_id=orchestration_run_id,
+                status=status,
+                result=result,
+            )
+            if self.f2_durability_store is not None:
+                f2_task_terminal_recorded = True
+
+        def _close_f2_after_exception(exc: Exception) -> None:
+            if not f2_task_started or self.f2_durability_store is None:
+                return
+            if f2_active_phase is not None:
+                try:
+                    self._f2_record_phase_failed(
+                        task_id=task_id,
+                        run_id=orchestration_run_id,
+                        phase=f2_active_phase,
+                        error=str(exc),
+                    )
+                except Exception:
+                    logger.debug("F2 phase failure close failed", exc_info=True)
+            if not f2_task_terminal_recorded:
+                try:
+                    self._f2_record_task_terminal(
+                        task_id=task_id,
+                        run_id=orchestration_run_id,
+                        status="failed",
+                        result=result,
+                    )
+                except Exception:
+                    logger.debug("F2 task terminal failure close failed", exc_info=True)
+
         try:
             self._orchestration_begin_run(
                 run_id=orchestration_run_id,
@@ -172,11 +248,7 @@ class CoordinatorService:
                 artifact_id=trace["artifact_id"],
                 payload={"task_id": task_id, "objective": objective, "start_phase": start_phase},
             )
-            self._f2_record_task_started(
-                task_id=task_id,
-                run_id=orchestration_run_id,
-                start_phase=start_phase,
-            )
+            _mark_f2_task_started()
             # Phase 1: Research
             research_results: list[WorkerResult] = []
             if _phase_resumable("research"):
@@ -205,11 +277,7 @@ class CoordinatorService:
                         )
             if not result.phase_results.get("research"):
                 self._orchestration_begin_phase(orchestration_run_id, "research", trace)
-                self._f2_record_phase_started(
-                    task_id=task_id,
-                    run_id=orchestration_run_id,
-                    phase="research",
-                )
+                _mark_f2_phase_started("research")
                 research_results = self._dispatch_parallel(
                     self._with_phase_timeout(research_tasks, self.default_research_timeout_seconds),
                     trace,
@@ -241,12 +309,7 @@ class CoordinatorService:
                     trace,
                     results=research_results,
                 )
-                self._f2_record_phase_completed(
-                    task_id=task_id,
-                    run_id=orchestration_run_id,
-                    phase="research",
-                    results=research_results,
-                )
+                _mark_f2_phase_completed("research", results=research_results)
                 critical = _critical_worker_result(research_results)
                 if critical is not None:
                     return self._complete_critical_worker_run(
@@ -281,11 +344,7 @@ class CoordinatorService:
                     self._emit_phase_resumed_from_scratch(trace, task_id, "synthesis", 1)
             if not synthesis:
                 self._orchestration_begin_phase(orchestration_run_id, "synthesis", trace)
-                self._f2_record_phase_started(
-                    task_id=task_id,
-                    run_id=orchestration_run_id,
-                    phase="synthesis",
-                )
+                _mark_f2_phase_started("synthesis")
                 synthesis = self._synthesize(
                     objective, research_results, trace, lane_overrides=lane_overrides
                 )
@@ -325,10 +384,8 @@ class CoordinatorService:
                         "synthesis_empty": not (synthesis or "").strip(),
                     },
                 )
-                self._f2_record_phase_completed(
-                    task_id=task_id,
-                    run_id=orchestration_run_id,
-                    phase="synthesis",
+                _mark_f2_phase_completed(
+                    "synthesis",
                     payload={
                         "content_length": len(synthesis or ""),
                         "synthesis_empty": not (synthesis or "").strip(),
@@ -416,12 +473,7 @@ class CoordinatorService:
                         phase="implementation",
                         reason=result.error,
                     )
-                    self._f2_record_task_terminal(
-                        task_id=task_id,
-                        run_id=orchestration_run_id,
-                        status="failed",
-                        result=result,
-                    )
+                    _mark_f2_task_terminal("failed")
                     self._orchestration_complete_run(
                         orchestration_run_id,
                         status="failed",
@@ -429,15 +481,11 @@ class CoordinatorService:
                         trace_context=trace,
                     )
                     return result
+                self._orchestration_begin_phase(orchestration_run_id, "implementation", trace)
+                _mark_f2_phase_started("implementation")
                 started_marker.write_text(
                     json.dumps({"task_id": task_id, "started_at": time.time()}),
                     encoding="utf-8",
-                )
-                self._orchestration_begin_phase(orchestration_run_id, "implementation", trace)
-                self._f2_record_phase_started(
-                    task_id=task_id,
-                    run_id=orchestration_run_id,
-                    phase="implementation",
                 )
                 impl_tasks = self._inject_context(
                     self._with_phase_timeout(
@@ -479,12 +527,7 @@ class CoordinatorService:
                     trace,
                     results=impl_results,
                 )
-                self._f2_record_phase_completed(
-                    task_id=task_id,
-                    run_id=orchestration_run_id,
-                    phase="implementation",
-                    results=impl_results,
-                )
+                _mark_f2_phase_completed("implementation", results=impl_results)
                 critical = _critical_worker_result(impl_results)
                 if critical is not None:
                     return self._complete_critical_worker_run(
@@ -511,11 +554,7 @@ class CoordinatorService:
                         start_time=start,
                     )
                 self._orchestration_begin_phase(orchestration_run_id, "verification", trace)
-                self._f2_record_phase_started(
-                    task_id=task_id,
-                    run_id=orchestration_run_id,
-                    phase="verification",
-                )
+                _mark_f2_phase_started("verification")
                 verification_input_ref = synthesis_artifact_ref
                 verification_input_summary = synthesis_summary
                 if impl_results:
@@ -571,12 +610,7 @@ class CoordinatorService:
                     trace,
                     results=verify_results,
                 )
-                self._f2_record_phase_completed(
-                    task_id=task_id,
-                    run_id=orchestration_run_id,
-                    phase="verification",
-                    results=verify_results,
-                )
+                _mark_f2_phase_completed("verification", results=verify_results)
                 critical = _critical_worker_result(verify_results)
                 if critical is not None:
                     return self._complete_critical_worker_run(
@@ -593,12 +627,7 @@ class CoordinatorService:
                     )
 
             result.duration_seconds = time.time() - start
-            self._f2_record_task_terminal(
-                task_id=task_id,
-                run_id=orchestration_run_id,
-                status="succeeded",
-                result=result,
-            )
+            _mark_f2_task_terminal("succeeded")
             self._orchestration_complete_run(
                 orchestration_run_id,
                 status="succeeded",
@@ -626,6 +655,7 @@ class CoordinatorService:
             logger.exception("Coordinator run failed for task %s", task_id)
             result.error = str(exc)
             result.duration_seconds = time.time() - start
+            _close_f2_after_exception(exc)
             self._orchestration_complete_run(
                 orchestration_run_id,
                 status="failed",
@@ -1083,6 +1113,11 @@ class CoordinatorService:
         )
 
         self._orchestration_begin_phase(orchestration_run_id, "synthesis", trace_context)
+        self._f2_record_phase_started(
+            task_id=result.task_id,
+            run_id=orchestration_run_id,
+            phase="synthesis",
+        )
         synthesis = self._synthesize(
             objective,
             collected_results,
@@ -1109,15 +1144,22 @@ class CoordinatorService:
             reason="critical_worker_self_healing_synthesis",
             artifact_ids=[synthesis_artifact_id] if synthesis_artifact_id else [],
         )
+        synthesis_payload = {
+            "content_length": len(synthesis or ""),
+            "critical_worker_error": True,
+            "critical_phase": phase,
+        }
         self._orchestration_finish_phase(
             orchestration_run_id,
             "synthesis",
             trace_context,
-            payload={
-                "content_length": len(synthesis or ""),
-                "critical_worker_error": True,
-                "critical_phase": phase,
-            },
+            payload=synthesis_payload,
+        )
+        self._f2_record_phase_completed(
+            task_id=result.task_id,
+            run_id=orchestration_run_id,
+            phase="synthesis",
+            payload=synthesis_payload,
         )
         result.duration_seconds = time.time() - start_time
         self._f2_record_phase_failed(
