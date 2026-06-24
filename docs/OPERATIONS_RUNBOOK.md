@@ -74,6 +74,38 @@ Chrome CDP is managed by `ops/chrome-cdp-launcher.sh` when installed via
 `ops/com.claw.chrome-cdp.plist`. The launcher reuses a healthy CDP process and
 refuses to remove `SingletonLock` while the configured profile is active.
 
+## Browser Atomic Tools Current Status
+
+As of the 2026-06-23 operator smoke, browser atomic tools from #112 are merged,
+deployed, and live at code_version `e4a3ee2`
+(`e4a3ee2fd9399b8ff7633cde5be4aafe6ccfd2ca`). The live daemon evidence was
+`agent_startup_context` event `270260`, pid `33828`.
+
+The read-only smoke used the runtime tool path:
+`ToolRegistry.default(...).execute(...)`. It did not use an ad-hoc Playwright
+script.
+
+Smoke coverage:
+
+- `BrowserNavigate` to `https://example.com` passed.
+- `BrowserSnapshot` on the same session passed.
+- `observe_stream` included `browser_tool_action_started` and
+  `browser_tool_action_completed` for navigate/snapshot.
+- The snapshot contained `Example Domain` and stayed bounded.
+- Sensitive payload hits were `0`, and no URL userinfo/query/fragment was
+  persisted.
+- RuntimeDb/WAL/SQLite/database-lock/browser_tools/tool-policy errors were `0`.
+- The post-smoke watchdog stale-filter smoke was `PASS` with
+  `database_open_mode=read_only`.
+
+Safety boundaries:
+
+- `BrowserClick`, `BrowserType`, submit, `BrowserScreenshot`, private/authenticated
+  sites, and mutating browser actions were not executed in the smoke.
+- `BrowserClick` and `BrowserType` remain Tier 3 approval-gated.
+- No private or authenticated browser state was inspected.
+- F2 remains design-only and is not implemented.
+
 ## Watchdog Stale-Filter Smoke (Dry Run)
 
 Before reactivating or reloading the watchdog after F1.4 stale-event filtering,
@@ -103,12 +135,14 @@ roll back manually after reviewing the report.
 
 ## Watchdog Current Status
 
-As of the 2026-06-23 operator check, the watchdog is re-enabled safely after a
-read-only stale-filter smoke PASS against live code_version `901fd72`.
+As of the 2026-06-23 operator checks, the watchdog is re-enabled safely and the
+latest read-only stale-filter smoke after the browser atomic tools smoke passed
+against live code_version `e4a3ee2`.
 
-- Live daemon: startup event `266236`, pid `55176`, code_version `901fd72`
-  (`901fd72146fbf48590bc36513ae25c87b5c2606b`).
-- C4 and F0.2d are live in that daemon version.
+- Live daemon: startup event `270260`, pid `33828`, code_version `e4a3ee2`
+  (`e4a3ee2fd9399b8ff7633cde5be4aafe6ccfd2ca`).
+- C4, F0.2d, and #112 browser atomic read-only tools are live in that daemon
+  version.
 - Portable enable command form:
 
 ```bash
@@ -129,14 +163,15 @@ launchctl print "gui/$(id -u)/com.pachano.claw-watchdog"
 
 - Post-enable status: loaded LaunchAgent, interval `300s`, last exit code `0`,
   idle between interval runs.
-- Post-enable smoke: `safe_candidate` / `PASS`, `database_open_mode=read_only`,
-  `expected_code_version=901fd72`, `latest_startup_code_version=901fd72`.
-- 10-minute observe window checked: events `266365`-`266434`; RuntimeDb/WAL/
-  SQLite/database-lock errors `0`; stale-event action attempts `0`; unexpected
-  historical stale resume/enqueue `0`.
+- Latest post-browser-smoke watchdog smoke: `safe_candidate` / `PASS`,
+  `database_open_mode=read_only`, `expected_code_version=e4a3ee2`,
+  `latest_startup_code_version=e4a3ee2`.
+- Post-browser-smoke observe scan checked events after `270334`; RuntimeDb/WAL/
+  SQLite/database-lock errors `0`; browser_tools/tool-policy errors `0`;
+  stale-event action attempts `0`.
 
 Next recommended check: run a 1h and 24h read-only observe soak. Re-run the
-watchdog smoke with `--expected-code-version 901fd72`; do not treat this docs
+watchdog smoke with `--expected-code-version e4a3ee2`; do not treat this docs
 update as a new deploy.
 
 ## Restart
