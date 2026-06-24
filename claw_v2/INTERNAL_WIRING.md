@@ -9,7 +9,7 @@
 
 ```yaml
 describes_commit: "A4 maintenance preflight no-work check"
-doc_version: 2.34
+doc_version: 2.35
 last_verified: 2026-06-24
 verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -19,6 +19,14 @@ audience: claw_v2  # consumed by the agent itself
 If `git rev-parse HEAD` diverges substantially from `describes_commit`,
 assume parts of this doc may be stale. The invariants below are the most
 stable section; the layer detail decays fastest.
+
+F2 production state (2026-06-24): F2.0/F2.1 are merged; the four F2 tables
+(`phase_checkpoints`, `phase_checkpoint_writes`, `external_effect_records`,
+`phase_recovery_cursors`) physically exist in production `claw.db` but are empty
+after purging a Stage 2C1 synthetic-record seed. `CLAW_F2_DURABILITY_ENABLED` is
+unset, so the live daemon constructs no `F2DurabilityStore` and performs no F2
+reads/writes. Older commit-keyed `operational_status` blocks below that read
+"F2: design-only" are point-in-time snapshots, not current state.
 
 ## e4a3ee2 browser atomic tools live smoke status
 

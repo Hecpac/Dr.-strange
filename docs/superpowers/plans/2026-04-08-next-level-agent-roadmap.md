@@ -12,6 +12,39 @@
 
 ---
 
+## Current Status Snapshot — 2026-06-24
+
+This snapshot reflects `main` at `5edd53d583e78dbda45186e9235833450bb97dfa`,
+deployed via `bash scripts/restart.sh` and field-verified by
+`agent_startup_context` event `271951` (`pid=89862`, `code_version=5edd53d`).
+
+| Phase | Status | Evidence / Next Step |
+| --- | --- | --- |
+| F0 | Live baseline | F0.2d and browser atomic read-only tooling are already integrated. Keep smoke checks read-only unless explicitly authorized. |
+| F1 | Complete/live | RuntimeDb single-writer path, WAL-heal retirement, and watchdog stale-event filter are integrated. Latest post-deploy scan after `5edd53d` found no RuntimeDb/WAL/SQLite/database-locked events. |
+| F2 | Partially shipped, disabled in production | F2.0 schema tests, F2.1 RuntimeDb store, and F2.2 Coordinator phase checkpoint hooks are merged and deployed. `CLAW_F2_DURABILITY_ENABLED` / `F2_DURABILITY_ENABLED` remain unset, so the live daemon performs no F2 reads/writes. The four F2 tables physically exist in production `claw.db` (materialized via the merged F2.0 schema) and are currently empty after the 2026-06-24 purge of a Stage 2C1 synthetic-record seed. |
+| F2 remaining | Pending | F2.3 external-effect records, F2.4 recovery/resume, and F2.5 diagnostics/observability remain future work. Do not enable F2 until migration/readiness gates and recovery semantics are implemented. |
+| F3 | Deferred for this F0-F6 roadmap | Later lease/watchdog semantics. Do not confuse this with separate `F3a/F3b` verification/HeyGen labels already present elsewhere in the repo. |
+| F4 | Deferred | Later forced-action/hard gate. Current promote-gate and verification discipline must remain intact. |
+| F5 | Deferred | Later browser/runtime side-effect work. Browser read-only tooling is live, but F5 side-effect behavior is not. |
+| F6 | Deferred | Later dynamic fanout/graph scheduling. Coordinator remains fixed-phase. |
+
+Operational note: the F2 design document still contains earlier design-only
+language and proposed flag names. Treat current code as authoritative:
+`AppConfig.f2_durability_enabled` defaults `False` and is enabled only through
+`CLAW_F2_DURABILITY_ENABLED` or `F2_DURABILITY_ENABLED`.
+
+Maintenance note (2026-06-24): a Stage 2C1 exercise had materialized the F2
+tables in production `claw.db` and seeded 66 synthetic `stage2c1-*` rows. These
+were purged in a ~5-second maintenance window (daemon stopped via launchd
+bootout, raw backup `data/claw.db.bak-pre-f2-stage2c1-purge-20260624T233607Z`,
+`PRAGMA integrity_check` ok pre/post, daemon restarted). Three stale
+`notebooklm.research` jobs stuck in `running` were reconciled to `cancelled` in
+the same window. The F2 tables remain present but empty and the durability flag
+stays OFF.
+
+---
+
 ## Success Criteria
 
 - [ ] Every agent action runs under a typed lifecycle: `plan -> execute -> verify -> outcome`.

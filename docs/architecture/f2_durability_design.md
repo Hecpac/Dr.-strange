@@ -2,6 +2,14 @@
 
 Status: Draft, 2026-06-23
 
+> Update 2026-06-24: F2.0 (schema, #141) and F2.1 (RuntimeDb store, #142) are
+> now implemented and merged. The four F2 tables physically exist in production
+> `claw.db` — present but empty after the 2026-06-24 purge of a Stage 2C1
+> synthetic-seed exercise. `CLAW_F2_DURABILITY_ENABLED` stays unset, so the live
+> daemon constructs no `F2DurabilityStore` and performs no F2 reads/writes. The
+> proposed flag name `CLAW_F2_DURABILITY` in this draft ships as
+> `CLAW_F2_DURABILITY_ENABLED` / `F2_DURABILITY_ENABLED`.
+
 Scope: design/spec only. This document does not implement runtime code, migrate
 production data, deploy, restart, or add a LangGraph dependency.
 
