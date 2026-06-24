@@ -1744,6 +1744,75 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
             f"cursor persistence, and dynamic fanout are out of scope: {offenders}",
         )
 
+    def test_f2_5a_diagnostics_collector_is_read_only_and_local(self) -> None:
+        import claw_v2.diagnostics as diagnostics_module
+
+        path = REPO_ROOT / "claw_v2" / "diagnostics.py"
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+
+        self.assertIn("def collect_f2_recovery_report", source)
+        self.assertIn("mode=ro", inspect.getsource(diagnostics_module._open_readonly_sqlite))
+        self.assertNotIn("mode=rw", inspect.getsource(diagnostics_module._open_readonly_sqlite))
+        self.assertNotIn("mode=rwc", inspect.getsource(diagnostics_module._open_readonly_sqlite))
+        self.assertNotIn("from claw_v2.sqlite_runtime", source)
+        self.assertNotIn("from claw_v2.f2_durability_store", source)
+        self.assertNotIn("from claw_v2.task_handler", source)
+        self.assertNotIn("from claw_v2.coordinator", source)
+
+        f2_function_names = {
+            "collect_f2_recovery_report",
+            "_open_readonly_sqlite",
+            "_empty_f2_report",
+            "_empty_f2_counts",
+            "_empty_f2_recent_records",
+        }
+        f2_function_nodes = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and (node.name in f2_function_names or node.name.startswith("_f2_"))
+        ]
+        self.assertTrue(f2_function_nodes)
+
+        forbidden_call_names = {
+            "RuntimeDb",
+            "F2DurabilityStore",
+            "ensure_f2_durability_schema",
+            "plan_f2_recovery",
+            "TaskHandler",
+            "Coordinator",
+            "CoordinatorService",
+            "connect_runtime_sqlite",
+            "record_external_effect",
+            "update_external_effect_status",
+            "append_checkpoint_write",
+            "create_phase_checkpoint",
+            "upsert_recovery_cursor",
+            "get_recovery_cursor",
+            "BrowserUseService",
+            "ComputerService",
+            "delegate_task",
+            "dynamic_fanout",
+            "Popen",
+        }
+        forbidden_write_methods = {"commit", "rollback", "executescript", "executemany"}
+        offenders: list[str] = []
+        for function_node in f2_function_nodes:
+            for node in ast.walk(function_node):
+                if not isinstance(node, ast.Call):
+                    continue
+                if isinstance(node.func, ast.Name) and node.func.id in forbidden_call_names:
+                    offenders.append(f"{function_node.name}:{node.func.id}")
+                elif isinstance(node.func, ast.Attribute):
+                    if node.func.attr in forbidden_call_names | forbidden_write_methods:
+                        offenders.append(f"{function_node.name}:{node.func.attr}")
+        self.assertEqual(offenders, [])
+
+        payload_policy_source = inspect.getsource(diagnostics_module._empty_f2_report)
+        self.assertIn("raw_payloads_included", payload_policy_source)
+        self.assertIn("False", payload_policy_source)
+
 
 if __name__ == "__main__":
     unittest.main()

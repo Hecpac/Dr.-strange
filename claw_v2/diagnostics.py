@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from claw_v2 import liveness
+from claw_v2.f2_durability_schema import F2_DURABILITY_TABLES
 from claw_v2.redaction import redact_sensitive
 
 
@@ -56,6 +57,124 @@ NARRATIVE_ERROR_PATTERNS = (
     "sqlite",
     "wal",
 )
+F2_DIAGNOSTIC_MAX_LIMIT = 100
+F2_MANUAL_REVIEW_EFFECT_STATUSES = frozenset(
+    {
+        "intent_recorded",
+        "apply_in_progress",
+        "applied",
+        "failed",
+        "verification_required",
+        "blocked_manual_review",
+    }
+)
+F2_VERIFIED_ABSENT_STATUS = "verified_absent"
+
+
+def collect_f2_recovery_report(
+    db_path: str | Path,
+    task_id: str | None = None,
+    run_id: str | None = None,
+    limit: int = 20,
+    include_payload: bool = False,
+) -> dict[str, Any]:
+    """Collect a safe, read-only F2 durability/recovery diagnostic report.
+
+    This function intentionally uses direct SQLite read-only mode instead of
+    RuntimeDb/F2DurabilityStore. Constructing those runtime objects can create
+    or migrate F2 tables, while this diagnostic surface must never mutate the
+    inspected database.
+    """
+    db = Path(db_path)
+    requested_limit = limit
+    safe_limit = _f2_diagnostic_limit(limit)
+    report = _empty_f2_report(
+        db,
+        requested_limit=requested_limit,
+        limit=safe_limit,
+        include_payload=include_payload,
+    )
+    if not db.exists():
+        report["reason"] = "db_missing"
+        report["readiness"] = _f2_readiness(
+            report["status"],
+            report["tables_present"],
+            orphaned_count=0,
+            manual_review_count=0,
+            verified_absent_count=0,
+        )
+        return report
+
+    try:
+        conn = _open_readonly_sqlite(db)
+    except sqlite3.Error as exc:
+        report.update(
+            {
+                "status": "error",
+                "reason": "db_unreadable",
+                "error_type": type(exc).__name__,
+            }
+        )
+        report["readiness"] = _f2_readiness(
+            report["status"],
+            report["tables_present"],
+            orphaned_count=0,
+            manual_review_count=0,
+            verified_absent_count=0,
+        )
+        return report
+
+    try:
+        tables_present = {table: _table_exists(conn, table) for table in F2_DURABILITY_TABLES}
+        report["tables_present"] = tables_present
+        present_count = sum(1 for present in tables_present.values() if present)
+        if present_count == 0:
+            report["reason"] = "f2_tables_absent"
+        elif present_count != len(F2_DURABILITY_TABLES):
+            report.update({"status": "schema_error", "reason": "f2_schema_partial"})
+        else:
+            report.update(
+                {
+                    "status": "ok",
+                    "enabled": True,
+                    "reason": "f2_tables_present",
+                    "counts": _f2_counts(conn, task_id=task_id, run_id=run_id),
+                    "recent_records": _f2_recent_records(
+                        conn,
+                        task_id=task_id,
+                        run_id=run_id,
+                        limit=safe_limit,
+                        include_payload=include_payload,
+                    ),
+                    "external_effects": _f2_external_effect_diagnostics(
+                        conn,
+                        task_id=task_id,
+                        run_id=run_id,
+                        limit=safe_limit,
+                    ),
+                }
+            )
+    except sqlite3.Error as exc:
+        report.update(
+            {
+                "status": "error",
+                "enabled": False,
+                "reason": "f2_query_error",
+                "error_type": type(exc).__name__,
+            }
+        )
+    finally:
+        conn.close()
+
+    effects = report.get("external_effects") if isinstance(report.get("external_effects"), dict) else {}
+    report["readiness"] = _f2_readiness(
+        report["status"],
+        report["tables_present"],
+        orphaned_count=len(effects.get("orphaned") or []),
+        manual_review_count=len(effects.get("manual_review_required") or []),
+        verified_absent_count=len(effects.get("verified_absent_requires_future_execution") or []),
+    )
+    return report
 
 
 def collect_diagnostics(
@@ -201,6 +320,553 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
         (name,),
     ).fetchone()
     return row is not None
+
+
+def _open_readonly_sqlite(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
+
+
+def _empty_f2_report(
+    db_path: Path,
+    *,
+    requested_limit: int,
+    limit: int,
+    include_payload: bool,
+) -> dict[str, Any]:
+    return {
+        "status": "disabled",
+        "enabled": False,
+        "db_path": str(db_path),
+        "requested_limit": requested_limit,
+        "limit": limit,
+        "tables_present": {table: False for table in F2_DURABILITY_TABLES},
+        "counts": _empty_f2_counts(),
+        "recent_records": _empty_f2_recent_records(),
+        "external_effects": {
+            "orphaned": [],
+            "manual_review_required": [],
+            "verified_absent_requires_future_execution": [],
+        },
+        "readiness": {"status": "warning", "checks": []},
+        "payload_policy": {
+            "include_payload_requested": bool(include_payload),
+            "raw_payloads_included": False,
+            "mode": "safe_summaries_only",
+        },
+        "generated_at": _utc_iso_now(),
+    }
+
+
+def _empty_f2_counts() -> dict[str, Any]:
+    return {
+        "phase_checkpoints": {"total": 0, "by_status": {}},
+        "phase_checkpoint_writes": {"total": 0, "by_write_kind": {}},
+        "external_effect_records": {"total": 0, "by_status": {}},
+        "phase_recovery_cursors": {"total": 0, "by_cursor_status": {}},
+    }
+
+
+def _empty_f2_recent_records() -> dict[str, list[dict[str, Any]]]:
+    return {
+        "phase_checkpoints": [],
+        "phase_checkpoint_writes": [],
+        "external_effect_records": [],
+        "phase_recovery_cursors": [],
+    }
+
+
+def _f2_diagnostic_limit(limit: int) -> int:
+    try:
+        parsed = int(limit)
+    except (TypeError, ValueError):
+        parsed = 20
+    return max(1, min(F2_DIAGNOSTIC_MAX_LIMIT, parsed))
+
+
+def _utc_iso_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def _f2_counts(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str | None,
+    run_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "phase_checkpoints": _f2_grouped_count(
+            conn,
+            "phase_checkpoints",
+            "status",
+            task_id=task_id,
+            run_id=run_id,
+            group_key="by_status",
+        ),
+        "phase_checkpoint_writes": _f2_grouped_count(
+            conn,
+            "phase_checkpoint_writes",
+            "write_kind",
+            task_id=task_id,
+            run_id=run_id,
+            group_key="by_write_kind",
+        ),
+        "external_effect_records": _f2_grouped_count(
+            conn,
+            "external_effect_records",
+            "status",
+            task_id=task_id,
+            run_id=run_id,
+            group_key="by_status",
+        ),
+        "phase_recovery_cursors": _f2_grouped_count(
+            conn,
+            "phase_recovery_cursors",
+            "cursor_status",
+            task_id=task_id,
+            run_id=run_id,
+            group_key="by_cursor_status",
+        ),
+    }
+
+
+def _f2_grouped_count(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    *,
+    task_id: str | None,
+    run_id: str | None,
+    group_key: str,
+) -> dict[str, Any]:
+    where, params = _f2_where(task_id=task_id, run_id=run_id)
+    total = conn.execute(f"SELECT COUNT(*) AS count FROM {table}{where}", params).fetchone()
+    grouped_rows = conn.execute(
+        f"""
+        SELECT {column} AS value, COUNT(*) AS count
+        FROM {table}
+        {where}
+        GROUP BY {column}
+        ORDER BY {column} ASC
+        """,
+        params,
+    ).fetchall()
+    return {
+        "total": int(total["count"]),
+        group_key: {str(row["value"]): int(row["count"]) for row in grouped_rows},
+    }
+
+
+def _f2_recent_records(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str | None,
+    run_id: str | None,
+    limit: int,
+    include_payload: bool,
+) -> dict[str, list[dict[str, Any]]]:
+    where, params = _f2_where(task_id=task_id, run_id=run_id)
+    checkpoints = conn.execute(
+        f"""
+        SELECT checkpoint_id, task_id, run_id, job_id, session_id, phase,
+               phase_version, status, schema_version, last_write_order,
+               payload_json, payload_sha256, orchestration_run_id,
+               orchestration_checkpoint_id, created_at
+        FROM phase_checkpoints
+        {where}
+        ORDER BY created_at DESC, phase_version DESC, checkpoint_id ASC
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+    writes = conn.execute(
+        f"""
+        SELECT write_id, task_id, run_id, job_id, phase, write_order, write_kind,
+               write_key, schema_version, payload_json, payload_sha256,
+               external_effect_id, created_at
+        FROM phase_checkpoint_writes
+        {where}
+        ORDER BY created_at DESC, write_order DESC, write_id ASC
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+    effects = conn.execute(
+        f"""
+        SELECT external_effect_id, idempotency_key, task_id, run_id, job_id,
+               phase, effect_kind, content_hash, request_json, request_sha256,
+               status, attempt_count, verifier_kind, verification_json,
+               result_json, result_sha256, error, schema_version, created_at,
+               updated_at
+        FROM external_effect_records
+        {where}
+        ORDER BY updated_at DESC, external_effect_id ASC
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+    cursors = conn.execute(
+        f"""
+        SELECT recovery_cursor_id, task_id, run_id, job_id, session_id, phase,
+               cursor_status, last_checkpoint_id, last_write_order,
+               external_effect_id, resume_payload_json, schema_version,
+               created_at, updated_at
+        FROM phase_recovery_cursors
+        {where}
+        ORDER BY updated_at DESC, recovery_cursor_id ASC
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+    return {
+        "phase_checkpoints": [
+            _f2_checkpoint_summary(row, include_payload=include_payload)
+            for row in checkpoints
+        ],
+        "phase_checkpoint_writes": [
+            _f2_write_summary(row, include_payload=include_payload) for row in writes
+        ],
+        "external_effect_records": [
+            _f2_effect_summary(row, include_payload=include_payload) for row in effects
+        ],
+        "phase_recovery_cursors": [
+            _f2_cursor_summary(row, include_payload=include_payload) for row in cursors
+        ],
+    }
+
+
+def _f2_checkpoint_summary(row: sqlite3.Row, *, include_payload: bool) -> dict[str, Any]:
+    summary = {
+        "checkpoint_id": row["checkpoint_id"],
+        "task_id": row["task_id"],
+        "run_id": row["run_id"],
+        "phase": row["phase"],
+        "phase_version": int(row["phase_version"]),
+        "status": row["status"],
+        "schema_version": int(row["schema_version"]),
+        "last_write_order": int(row["last_write_order"]),
+        "payload_sha256": row["payload_sha256"],
+        "created_at": row["created_at"],
+    }
+    if row["job_id"]:
+        summary["job_id"] = row["job_id"]
+    if row["session_id"]:
+        summary["session_id"] = row["session_id"]
+    if row["orchestration_run_id"]:
+        summary["orchestration_run_id"] = row["orchestration_run_id"]
+    if row["orchestration_checkpoint_id"]:
+        summary["orchestration_checkpoint_id"] = row["orchestration_checkpoint_id"]
+    if include_payload:
+        summary["payload_summary"] = _f2_json_summary(
+            row["payload_json"],
+            sha256=row["payload_sha256"],
+        )
+    return redact_sensitive(summary, limit=4000)
+
+
+def _f2_write_summary(row: sqlite3.Row, *, include_payload: bool) -> dict[str, Any]:
+    summary = {
+        "write_id": row["write_id"],
+        "task_id": row["task_id"],
+        "run_id": row["run_id"],
+        "phase": row["phase"],
+        "write_order": int(row["write_order"]),
+        "write_kind": row["write_kind"],
+        "schema_version": int(row["schema_version"]),
+        "payload_sha256": row["payload_sha256"],
+        "external_effect_id": row["external_effect_id"],
+        "created_at": row["created_at"],
+    }
+    if row["job_id"]:
+        summary["job_id"] = row["job_id"]
+    if row["write_key"]:
+        summary["write_key"] = str(redact_sensitive(row["write_key"], limit=200))
+    if include_payload:
+        summary["payload_summary"] = _f2_json_summary(
+            row["payload_json"],
+            sha256=row["payload_sha256"],
+        )
+    return redact_sensitive(summary, limit=4000)
+
+
+def _f2_effect_summary(row: sqlite3.Row, *, include_payload: bool) -> dict[str, Any]:
+    summary = {
+        "external_effect_id": row["external_effect_id"],
+        "idempotency_key": row["idempotency_key"],
+        "task_id": row["task_id"],
+        "run_id": row["run_id"],
+        "phase": row["phase"],
+        "effect_kind": row["effect_kind"],
+        "content_hash": row["content_hash"],
+        "request_sha256": row["request_sha256"],
+        "status": row["status"],
+        "attempt_count": int(row["attempt_count"]),
+        "verifier_kind": row["verifier_kind"],
+        "result_sha256": row["result_sha256"],
+        "error_present": bool(row["error"]),
+        "schema_version": int(row["schema_version"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+    if row["job_id"]:
+        summary["job_id"] = row["job_id"]
+    if include_payload:
+        summary["request_summary"] = _f2_json_summary(
+            row["request_json"],
+            sha256=row["request_sha256"],
+        )
+        summary["verification_summary"] = _f2_json_summary(row["verification_json"])
+        summary["result_summary"] = _f2_json_summary(
+            row["result_json"],
+            sha256=row["result_sha256"],
+        )
+        if row["error"]:
+            summary["error_summary"] = _safe_f2_text_summary(row["error"])
+    return redact_sensitive(summary, limit=4000)
+
+
+def _f2_cursor_summary(row: sqlite3.Row, *, include_payload: bool) -> dict[str, Any]:
+    summary = {
+        "recovery_cursor_id": row["recovery_cursor_id"],
+        "task_id": row["task_id"],
+        "run_id": row["run_id"],
+        "phase": row["phase"],
+        "cursor_status": row["cursor_status"],
+        "last_checkpoint_id": row["last_checkpoint_id"],
+        "last_write_order": int(row["last_write_order"]),
+        "external_effect_id": row["external_effect_id"],
+        "schema_version": int(row["schema_version"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+    if row["job_id"]:
+        summary["job_id"] = row["job_id"]
+    if row["session_id"]:
+        summary["session_id"] = row["session_id"]
+    if include_payload:
+        summary["resume_payload_summary"] = _f2_json_summary(row["resume_payload_json"])
+    return redact_sensitive(summary, limit=4000)
+
+
+def _f2_json_summary(raw: Any, *, sha256: str | None = None) -> dict[str, Any]:
+    if raw is None:
+        return {"present": False}
+    text = str(raw)
+    summary: dict[str, Any] = {
+        "present": True,
+        "bytes": len(text.encode("utf-8", errors="replace")),
+        "raw_included": False,
+        "redacted": True,
+    }
+    if sha256:
+        summary["sha256"] = sha256
+    try:
+        value = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        summary["json_type"] = "invalid"
+        return summary
+    if isinstance(value, dict):
+        summary["json_type"] = "object"
+        summary["top_level_key_count"] = len(value)
+    elif isinstance(value, list):
+        summary["json_type"] = "array"
+        summary["item_count"] = len(value)
+    else:
+        summary["json_type"] = type(value).__name__
+    return summary
+
+
+def _safe_f2_text_summary(value: Any) -> dict[str, Any]:
+    text = str(redact_sensitive(str(value), limit=200))
+    return {
+        "present": bool(text),
+        "text": text,
+        "truncated": len(str(value)) > 200,
+    }
+
+
+def _f2_external_effect_diagnostics(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str | None,
+    run_id: str | None,
+    limit: int,
+) -> dict[str, list[dict[str, Any]]]:
+    where, params = _f2_where(task_id=task_id, run_id=run_id, prefix="e.")
+    linked_where = f"{where} AND w.write_id IS NULL" if where else " WHERE w.write_id IS NULL"
+    orphaned = conn.execute(
+        f"""
+        SELECT e.external_effect_id, e.idempotency_key, e.task_id, e.run_id, e.phase,
+               e.effect_kind, e.status, e.attempt_count, e.request_sha256,
+               e.result_sha256, e.updated_at
+        FROM external_effect_records e
+        LEFT JOIN phase_checkpoint_writes w
+          ON w.external_effect_id = e.external_effect_id
+        {linked_where}
+        ORDER BY e.updated_at DESC, e.external_effect_id ASC
+        LIMIT ?
+        """,
+        [*params, limit],
+    ).fetchall()
+    manual_statuses = tuple(sorted(F2_MANUAL_REVIEW_EFFECT_STATUSES))
+    placeholders = ",".join("?" for _ in manual_statuses)
+    manual_where = (
+        f"{where} AND e.status IN ({placeholders})"
+        if where
+        else f" WHERE e.status IN ({placeholders})"
+    )
+    manual = conn.execute(
+        f"""
+        SELECT e.external_effect_id, e.idempotency_key, e.task_id, e.run_id, e.phase,
+               e.effect_kind, e.status, e.attempt_count, e.request_sha256,
+               e.result_sha256, e.updated_at
+        FROM external_effect_records e
+        {manual_where}
+        ORDER BY e.updated_at DESC, e.external_effect_id ASC
+        LIMIT ?
+        """,
+        [*params, *manual_statuses, limit],
+    ).fetchall()
+    absent_where = (
+        f"{where} AND e.status = ?"
+        if where
+        else " WHERE e.status = ?"
+    )
+    verified_absent = conn.execute(
+        f"""
+        SELECT e.external_effect_id, e.idempotency_key, e.task_id, e.run_id, e.phase,
+               e.effect_kind, e.status, e.attempt_count, e.request_sha256,
+               e.result_sha256, e.updated_at
+        FROM external_effect_records e
+        {absent_where}
+        ORDER BY e.updated_at DESC, e.external_effect_id ASC
+        LIMIT ?
+        """,
+        [*params, F2_VERIFIED_ABSENT_STATUS, limit],
+    ).fetchall()
+    return {
+        "orphaned": [
+            _f2_effect_issue(row, reason="orphaned_external_effect")
+            for row in orphaned
+        ],
+        "manual_review_required": [
+            _f2_effect_issue(row, reason="unsafe_external_effect_status")
+            for row in manual
+        ],
+        "verified_absent_requires_future_execution": [
+            _f2_effect_issue(
+                row,
+                reason="verified_absent_future_execution_required",
+            )
+            for row in verified_absent
+        ],
+    }
+
+
+def _f2_effect_issue(row: sqlite3.Row, *, reason: str) -> dict[str, Any]:
+    return redact_sensitive(
+        {
+            "external_effect_id": row["external_effect_id"],
+            "idempotency_key": row["idempotency_key"],
+            "task_id": row["task_id"],
+            "run_id": row["run_id"],
+            "phase": row["phase"],
+            "effect_kind": row["effect_kind"],
+            "status": row["status"],
+            "attempt_count": int(row["attempt_count"]),
+            "request_sha256": row["request_sha256"],
+            "result_sha256": row["result_sha256"],
+            "updated_at": row["updated_at"],
+            "reason": reason,
+        },
+        limit=4000,
+    )
+
+
+def _f2_readiness(
+    report_status: str,
+    tables_present: dict[str, bool],
+    *,
+    orphaned_count: int,
+    manual_review_count: int,
+    verified_absent_count: int,
+) -> dict[str, Any]:
+    present_count = sum(1 for present in tables_present.values() if present)
+    all_present = present_count == len(F2_DURABILITY_TABLES)
+    none_present = present_count == 0
+    checks = [
+        {
+            "code": "f2_flags_disabled_by_default",
+            "status": "pass",
+            "detail": "F2 diagnostics do not enable durability flags.",
+        },
+        {
+            "code": "f2_tables_state",
+            "status": "pass" if all_present or none_present else "fail",
+            "present_count": present_count,
+            "expected_count": len(F2_DURABILITY_TABLES),
+        },
+        {
+            "code": "diagnostics_read_only",
+            "status": "pass",
+            "detail": "SQLite is opened with mode=ro and no RuntimeDb/F2 store is constructed.",
+        },
+        {
+            "code": "no_diagnostics_migration_or_write_path",
+            "status": "pass",
+            "detail": "Report generation does not call F2 schema/store migration helpers.",
+        },
+        {
+            "code": "no_replay_or_execution_behavior",
+            "status": "pass",
+            "detail": "Report generation summarizes records only and does not execute recovery.",
+        },
+        {
+            "code": "orphaned_external_effect_count",
+            "status": "warning" if orphaned_count else "pass",
+            "count": orphaned_count,
+        },
+        {
+            "code": "manual_review_blockers_count",
+            "status": "warning" if manual_review_count else "pass",
+            "count": manual_review_count,
+        },
+        {
+            "code": "verified_absent_future_execution_count",
+            "status": "warning" if verified_absent_count else "pass",
+            "count": verified_absent_count,
+        },
+    ]
+    if report_status in {"schema_error", "error"}:
+        status = "fail"
+    elif any(check["status"] == "fail" for check in checks):
+        status = "fail"
+    elif any(check["status"] == "warning" for check in checks):
+        status = "warning"
+    else:
+        status = "pass"
+    return {"status": status, "checks": checks}
+
+
+def _f2_where(
+    *,
+    task_id: str | None,
+    run_id: str | None,
+    prefix: str = "",
+) -> tuple[str, list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if task_id is not None:
+        clauses.append(f"{prefix}task_id = ?")
+        params.append(task_id)
+    if run_id is not None:
+        clauses.append(f"{prefix}run_id = ?")
+        params.append(run_id)
+    return (" WHERE " + " AND ".join(clauses), params) if clauses else ("", params)
 
 
 def _recent_events(conn: sqlite3.Connection, *, limit: int) -> list[dict[str, Any]]:
