@@ -1583,6 +1583,46 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
             f"write wiring belongs to a later PR: {offenders}",
         )
 
+    def test_f2_2_checkpoint_writes_are_flag_gated_without_recovery_or_effects(self) -> None:
+        config_source = (REPO_ROOT / "claw_v2" / "config.py").read_text(encoding="utf-8")
+        main_source = (REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
+        coordinator_source = (REPO_ROOT / "claw_v2" / "coordinator.py").read_text(
+            encoding="utf-8"
+        )
+        task_handler_source = (REPO_ROOT / "claw_v2" / "task_handler.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("f2_durability_enabled: bool = False", config_source)
+        self.assertIn("CLAW_F2_DURABILITY_ENABLED", config_source)
+        self.assertIn("F2DurabilityStore(runtime_db) if config.f2_durability_enabled else None", main_source)
+        self.assertIn("f2_durability_store=f2_durability_store", main_source)
+        self.assertIn("if self.f2_durability_store is None:", coordinator_source)
+        self.assertIn("f2_durability_write_failed", coordinator_source)
+
+        forbidden_symbols = (
+            "record_external_effect",
+            "get_external_effect_by_idempotency_key",
+            "update_external_effect_status",
+            "upsert_recovery_cursor",
+            "get_recovery_cursor",
+        )
+        offenders = {
+            "claw_v2/coordinator.py": [
+                symbol for symbol in forbidden_symbols if symbol in coordinator_source
+            ],
+            "claw_v2/task_handler.py": [
+                symbol for symbol in ("F2DurabilityStore", *forbidden_symbols)
+                if symbol in task_handler_source
+            ],
+        }
+        self.assertEqual(
+            {path: symbols for path, symbols in offenders.items() if symbols},
+            {},
+            "F2.2 may write flag-gated phase checkpoints only; recovery and "
+            f"external-effect execution wiring belongs to later PRs: {offenders}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
