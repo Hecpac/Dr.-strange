@@ -866,42 +866,55 @@ invariants:
     deterministic_enqueue: Reuses `TaskHandler.start_autonomous_task` (additive
           optional `idempotency_key` → `JobService.enqueue(resume_key=...)`), not
           a hand-rolled job. No MCP tool call is emitted.
-    exactly_once: resume_key = `f4b-delegation:{session_id}:{telegram message_id}`.
-          The gate pre-checks `JobService.get_by_resume_key` (ANY status — a
-          completed job keeps the key because the unique index is `WHERE
-          resume_key IS NOT NULL`, and `enqueue` re-raises on a completed-key
-          collision) and dedups before any side effect; the DB unique index is
-          the concurrency backstop. The Telegram delivery id is plumbed via
-          `context_metadata["inbound"]` (`telegram._inbound_context_metadata`).
-          In prod TelegramTransport runs with an AgentRuntime, so the chain is
-          `TelegramTransport → AgentRuntime.handle_text(metadata=…) →
-          BotService.handle_text(context_metadata=…) → gate`: the AgentRuntime
-          path **forwards** `context_metadata["inbound"]`, and the gate consumes
-          `inbound.message_id` as its durable delivery identity (stripping it
-          there would make the gate inert — that was the P1 regression). No
-          delivery id → fall through (never enqueue without dedup capability).
-          Same message twice → one job; new message, identical text → new job.
-    truthful: Success is claimed only after `get_by_resume_key` confirms the
-          durable job exists; failure emits `f4_deterministic_delegation_failed`
-          (reason code only, never raw error/secrets) and a concise "no task
-          created" message — no fabricated tool/policy/loader detail, no "send
-          the same command again".
+    exactly_once: **Atomic creator election** on resume_key =
+          `f4b-delegation:{session_id}:{telegram message_id}` BEFORE any
+          externally visible side effect. `JobService.reserve(resume_key, kind=
+          "f4b.delegation_reservation")` returns `(record, created)`: the DB
+          unique index on `resume_key` elects exactly one creator under
+          concurrent duplicate delivery (cross-process), identified by the
+          generated `job_id` round-tripping unchanged. ONLY the winner runs
+          `start_autonomous_task` (one task_id / goal / ledger / thread); every
+          duplicate (concurrent, or a redelivery) gets `created=False` and
+          returns the dedup ack with ZERO side effects. The reservation kind is
+          claimed by no runner, so it is a pure durable dedup token that stays
+          `queued` (active) for the delivery's life — making dedup independent of
+          the task's lifecycle (redelivery-after-completion still dedups). This
+          replaced a check-then-`start_autonomous_task` TOCTOU race where two
+          concurrent deliveries each ran the side effects (two task_ids/threads,
+          one job). Delivery id plumbed via `context_metadata["inbound"]`; in
+          prod the chain is `TelegramTransport → AgentRuntime.handle_text →
+          BotService.handle_text(context_metadata) → gate` (AgentRuntime forwards
+          inbound; stripping it was the P1 regression). No delivery id → fall
+          through. Same message twice → one task; new message id → new task.
+    crash_window: If the winner fails before durable setup
+          (`start_autonomous_task` raises / returns a non-start marker / no
+          coordinator), the gate `JobService.delete`s the reservation, so the
+          released token leaves no claimable orphan (the reservation kind runs
+          nowhere) and a redelivery can re-elect a creator (no false dedup).
+    truthful: Success is claimed only when `start_autonomous_task` returns a
+          positive durable-start marker; failure releases the reservation, emits
+          `f4_deterministic_delegation_failed` (reason code only, never raw
+          error/secrets) and a concise "no task created" message — no fabricated
+          tool/policy/loader detail, no retry/notification/future-execution
+          promise, no "send the same command again".
     observe: f4_deterministic_delegation_matched (deduped) / _enqueued / _failed /
-          _skipped_no_delivery_id — safe ids/reason codes only.
+          _skipped_no_delivery_id — best-effort, safe ids/reason codes only.
     why_not_reprompt: A re-prompt re-enters the same model that just confabulated
           and can be talked around; deterministic routing removes the enqueue
           from model discretion for this narrow case. Broader forced-action /
           post-model anti-confabulation stays F4-B2.
     enforced_by:
       - tests/test_f4b_deterministic_delegation.py::ClassifierTests
-      - tests/test_f4b_deterministic_delegation.py::GateTests::test_incident_enqueues_one_durable_job_with_truthful_ack
-      - tests/test_f4b_deterministic_delegation.py::GateTests::test_flag_off_falls_through_no_enqueue
+      - tests/test_f4b_deterministic_delegation.py::JobServiceReserveTests
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_incident_elects_one_creator_with_truthful_ack
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_flag_off_falls_through
       - tests/test_f4b_deterministic_delegation.py::GateTests::test_gate_independent_of_broad_router_flag
-      - tests/test_f4b_deterministic_delegation.py::GateTests::test_duplicate_delivery_creates_one_job
-      - tests/test_f4b_deterministic_delegation.py::GateTests::test_legitimate_repeat_creates_new_job
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_duplicate_delivery_one_creator
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_legitimate_repeat_new_creator
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_concurrent_duplicate_elects_one_creator
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_start_returning_no_task_releases_reservation
       - tests/test_f4b_deterministic_delegation.py::GateTests::test_no_delivery_id_falls_through
-      - tests/test_f4b_deterministic_delegation.py::GateTests::test_enqueue_exception_is_truthful_with_no_job
-      - tests/test_f4b_deterministic_delegation.py::ClassifierTests::test_other_platform_not_matched
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_observe_none_does_not_crash
       - tests/test_f4b_deterministic_delegation.py::RealChainIntegrationTests::test_agent_runtime_path_forwards_inbound_id_to_gate
 ```
 
