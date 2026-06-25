@@ -198,6 +198,120 @@ class RunnerBlockedTests(unittest.TestCase):
             notifier.assert_called_once()
 
 
+class RunnerDedupGuaranteeTests(unittest.TestCase):
+    """The 'never duplicate' guarantee (spec §3, §5): on recovery the verifier
+    must compare the ORIGINAL baseline (captured at first intent, persisted in
+    the record) against the current count — NOT a baseline recomputed from the
+    live count on the retry (which would always look unchanged → false
+    verified_absent → re-run → duplicate sources).
+    """
+
+    def _preseed_interrupted(self, store, job_id: str, original_pre: int) -> None:
+        """Pre-seed an interrupted apply_in_progress record whose persisted
+        request.pre_intent_source_count is the ORIGINAL baseline."""
+        from claw_v2.notebooklm_research_effect import build_research_effect_spec
+
+        spec = build_research_effect_spec(
+            job_id=job_id,
+            notebook_id="nb-1",
+            query="q",
+            mode="deep",
+            pre_intent_source_count=original_pre,
+        )
+        store.record_external_effect(
+            task_id=spec.task_id,
+            run_id=spec.run_id,
+            phase=spec.phase,
+            effect_kind=spec.effect_kind,
+            target=spec.target,
+            request=spec.request,
+            content_hash=spec.content_hash,
+            job_id=spec.job_id,
+            status="apply_in_progress",
+            attempt_count=1,
+        )
+
+    def test_count_moved_from_original_baseline_blocks_no_reapply(self) -> None:
+        """Original baseline 0, current count 5 (sources WERE imported before the
+        crash) → blocked_manual_review, adapter NOT re-run, job fail(retry=False).
+        The anti-duplicate proof."""
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs, store = _setup(tmp)
+            job = jobs.enqueue(
+                kind="notebooklm.research",
+                payload={"notebook_id": "nb-1", "query": "q", "mode": "deep"},
+            )
+            self._preseed_interrupted(store, job.job_id, original_pre=0)
+
+            adapter_calls = {"n": 0}
+
+            def _never_run(nb: str, q: str) -> int:
+                adapter_calls["n"] += 1
+                return 9
+
+            runner = NotebookLMResearchRunner(
+                job_service=jobs,
+                store=store,
+                observe=None,
+                notifier=None,
+                deep_research_fn=_never_run,
+                status_fn=lambda nb: {"source_count": 5},  # MOVED from original 0
+            )
+            ran = runner.run_once()
+            self.assertTrue(ran)
+
+            self.assertEqual(adapter_calls["n"], 0)  # NO re-apply → no duplicate
+            record = jobs.get(job.job_id)
+            self.assertEqual(record.status, "failed")
+            self.assertEqual(record.error, "effect_blocked_manual_review")
+
+            effects = store.list_external_effects()
+            self.assertEqual(len(effects), 1)
+            self.assertEqual(effects[0].status, "blocked_manual_review")
+
+    def test_count_unchanged_from_original_baseline_safely_reapplies(self) -> None:
+        """Original baseline 5, current count 5 (unchanged → clean no-op, nothing
+        was imported) → verified_absent → the executor's controlled retry
+        (verified_absent → _apply on the SAME key, spec §7) re-runs the adapter
+        once and applies. Safe: count unchanged proves no prior import, so the
+        single re-apply cannot duplicate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs, store = _setup(tmp)
+            job = jobs.enqueue(
+                kind="notebooklm.research",
+                payload={"notebook_id": "nb-1", "query": "q", "mode": "deep"},
+                max_attempts=3,
+            )
+            self._preseed_interrupted(store, job.job_id, original_pre=5)
+
+            adapter_calls = {"n": 0}
+
+            def _research(nb: str, q: str) -> int:
+                adapter_calls["n"] += 1
+                return 2
+
+            runner = NotebookLMResearchRunner(
+                job_service=jobs,
+                store=store,
+                observe=None,
+                notifier=None,
+                deep_research_fn=_research,
+                status_fn=lambda nb: {"source_count": 5},  # UNCHANGED from original 5
+            )
+            ran = runner.run_once()
+            self.assertTrue(ran)
+
+            # verified_absent → controlled retry → adapter runs exactly once on
+            # the SAME effect row (no duplicate row).
+            self.assertEqual(adapter_calls["n"], 1)
+            record = jobs.get(job.job_id)
+            self.assertEqual(record.status, "completed")
+
+            effects = store.list_external_effects()
+            self.assertEqual(len(effects), 1)
+            self.assertEqual(effects[0].status, "applied")
+
+
 class RunnerAdapterExceptionTests(unittest.TestCase):
     def test_adapter_exception_fails_job_with_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

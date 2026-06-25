@@ -84,9 +84,18 @@ def notebooklm_research_verifier(
     - result_json present on the record → verified_applied (adapter finished).
     - count unchanged vs pre_intent_source_count, no result → verified_absent.
     - count moved, or pre unknown, or status_fn raises/missing → blocked_manual_review.
+
+    CRITICAL (dedup guarantee, §3/§5): the baseline (pre_intent_source_count) is
+    read from the PERSISTED RECORD — the first-intent request — NOT from the
+    ``spec`` argument. On a crash-recovery the runner rebuilds the spec with the
+    CURRENT live count as its "pre", so comparing the spec's pre against the live
+    count would always look unchanged → false verified_absent → re-run → duplicate
+    imported sources. The record's request_json (preserved by
+    ``record_external_effect``'s ON CONFLICT DO NOTHING) holds the TRUE original
+    baseline, so everything the verifier decides on is derived from the record.
     """
 
-    def verify(spec: EffectSpec, record: ExternalEffectRecord) -> VerifierVerdict:
+    def verify(_spec: EffectSpec, record: ExternalEffectRecord) -> VerifierVerdict:
         # 1. Adapter committed its result before the crash → already applied.
         if record.result_json:
             return VerifierVerdict(
@@ -95,9 +104,23 @@ def notebooklm_research_verifier(
                 "result_present",
             )
 
-        # 2. Need live count to decide. Coerce pre fail-closed: a non-int
-        # persisted on an old/foreign record must not escape verify().
-        pre_raw = spec.request.get("pre_intent_source_count", -1)
+        # 2. Baseline comes from the PERSISTED RECORD (first intent), not the
+        # rebuilt spec. record.request is the parsed dict (None on a JSON parse
+        # error). Fail closed if the original request / baseline is unavailable.
+        record_request = record.request
+        if record_request is None or not isinstance(record_request, dict):
+            return VerifierVerdict(
+                "blocked_manual_review",
+                {"pre": None, "current": None},
+                "pre_count_unavailable",
+            )
+        if "pre_intent_source_count" not in record_request:
+            return VerifierVerdict(
+                "blocked_manual_review",
+                {"pre": None, "current": None},
+                "pre_count_unavailable",
+            )
+        pre_raw = record_request.get("pre_intent_source_count")
         try:
             pre = int(pre_raw)
         except (ValueError, TypeError):
@@ -115,7 +138,7 @@ def notebooklm_research_verifier(
             )
 
         try:
-            raw = status_fn(spec.target) or {}
+            raw = status_fn(record.target) or {}
             current_raw = raw.get("source_count")
         except Exception as exc:
             return VerifierVerdict(

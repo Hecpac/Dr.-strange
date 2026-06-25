@@ -50,10 +50,14 @@ def _record_with_result(tmp: str, imported_count: int = 2):
     return rec
 
 
-def _record_no_result(tmp: str):
-    """Return an ExternalEffectRecord with no result_json (interrupted apply)."""
+def _record_no_result(tmp: str, pre_count: int = 0):
+    """Return an ExternalEffectRecord with no result_json (interrupted apply).
+
+    The persisted request carries ``pre_intent_source_count == pre_count`` — the
+    ORIGINAL baseline the verifier must read from the record (not the spec).
+    """
     store = _store(tmp)
-    spec = _nb_spec()
+    spec = _nb_spec(pre_count=pre_count)
     rec = store.record_external_effect(
         task_id=spec.task_id,
         run_id=spec.run_id,
@@ -341,9 +345,10 @@ class VerifierTests(unittest.TestCase):
         from claw_v2.notebooklm_research_effect import notebooklm_research_verifier
 
         with tempfile.TemporaryDirectory() as tmp:
-            rec = _record_no_result(tmp)
+            # Baseline lives in the RECORD (original intent), not the spec.
+            rec = _record_no_result(tmp, pre_count=7)
             v = notebooklm_research_verifier(status_fn=lambda nb: {"source_count": 7})
-            # pre_count == current_count (both 7) → verified_absent
+            # record pre (7) == current_count (7) → verified_absent
             spec = _nb_spec(pre_count=7)
             verdict = v(spec, rec)
             self.assertEqual(verdict.classification, "verified_absent")
@@ -358,6 +363,63 @@ class VerifierTests(unittest.TestCase):
             v = notebooklm_research_verifier(status_fn=lambda nb: {"source_count": "oops"})
             verdict = v(_nb_spec(pre_count=0), rec)
             self.assertEqual(verdict.classification, "blocked_manual_review")
+
+    def test_baseline_read_from_record_not_spec(self):
+        """Dedup guarantee (§3/§5): the verifier compares the RECORD's original
+        baseline against the live count — NOT the spec's. Here the RECORD's
+        original baseline is 0 (sources were imported before the crash → live
+        count is 5), while the rebuilt SPEC carries pre=5 (the recomputed live
+        baseline). Reading the spec would yield 5 == 5 → false verified_absent;
+        reading the record yields 0 != 5 → blocked_manual_review (correct)."""
+        from claw_v2.notebooklm_research_effect import notebooklm_research_verifier
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = _record_no_result(tmp, pre_count=0)  # ORIGINAL baseline = 0
+            v = notebooklm_research_verifier(status_fn=lambda nb: {"source_count": 5})
+            spec = _nb_spec(pre_count=5)  # rebuilt-from-live spec (the trap)
+            verdict = v(spec, rec)
+            self.assertEqual(verdict.classification, "blocked_manual_review")
+            self.assertEqual(verdict.verification["pre"], 0)
+            self.assertEqual(verdict.verification["current"], 5)
+
+    def test_record_request_missing_pre_count_is_blocked(self):
+        """Record whose persisted request has no pre_intent_source_count →
+        blocked_manual_review (pre_count_unavailable), regardless of the spec."""
+        from claw_v2.notebooklm_research_effect import notebooklm_research_verifier
+        from claw_v2.external_effect_executor import EffectSpec
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _store(tmp)
+            rec = store.record_external_effect(
+                task_id="t1",
+                run_id="r1",
+                phase="research",
+                effect_kind="notebooklm_research",
+                target="nb-1",
+                request={"notebook_id": "nb-1", "query": "q", "mode": "deep"},
+                content_hash="ch-missing-pre",
+                status="apply_in_progress",
+                attempt_count=1,
+            )
+            # Spec DOES carry a pre — must be ignored; record is the source of truth.
+            spec = EffectSpec(
+                task_id="t1",
+                run_id="r1",
+                phase="research",
+                effect_kind="notebooklm_research",
+                target="nb-1",
+                request={
+                    "notebook_id": "nb-1",
+                    "query": "q",
+                    "mode": "deep",
+                    "pre_intent_source_count": 0,
+                },
+                content_hash="ch-missing-pre",
+            )
+            v = notebooklm_research_verifier(status_fn=lambda nb: {"source_count": 0})
+            verdict = v(spec, rec)
+            self.assertEqual(verdict.classification, "blocked_manual_review")
+            self.assertEqual(verdict.reason, "pre_count_unavailable")
 
     def test_non_int_pre_count_is_blocked(self):
         """A foreign/old record whose persisted pre_intent_source_count is non-int
