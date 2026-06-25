@@ -245,6 +245,7 @@ class GateTests(unittest.TestCase):
         self.assertIn("no quedó nada encolado", resp)
         self.assertNotIn("ToolSearch", resp)
         self.assertNotIn("tool_polic", resp)
+        self._assert_no_unsupported_promise(resp)
         self.assertIsNone(self.jobs.get_by_resume_key("f4b-delegation:tg-1:111"))
         self.assertIn("f4_deterministic_delegation_failed", self.observe.types())
 
@@ -255,8 +256,18 @@ class GateTests(unittest.TestCase):
         self.assertIsNotNone(resp)
         assert resp is not None
         self.assertIn("no quedó nada encolado", resp)
+        self.assertNotIn("ToolSearch", resp)
+        self.assertNotIn("tool_polic", resp)
+        self._assert_no_unsupported_promise(resp)
         self.assertIsNone(self.jobs.get_by_resume_key("f4b-delegation:tg-1:111"))
         self.assertIn("f4_deterministic_delegation_failed", self.observe.types())
+
+    def _assert_no_unsupported_promise(self, resp: str) -> None:
+        # No durable retry/scheduler exists on the failure path, so the message
+        # must not promise a retry, a later notification, or future execution.
+        low = resp.lower()
+        for forbidden in ("reintento", "reintentar", "te aviso cuando", "cuando se resuelva"):
+            self.assertNotIn(forbidden, low)
 
 
 class RealChainIntegrationTests(unittest.TestCase):

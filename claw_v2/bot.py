@@ -3545,11 +3545,13 @@ class BotService:
 
     @staticmethod
     def _f4_delegation_failure_message() -> str:
+        # Strictly truthful: no durable retry job/scheduler exists on this path,
+        # so we must not promise a retry, a later notification, or future
+        # execution — and must not expose internal error/tool/policy detail.
         return (
             "No pude crear la tarea de fondo para el repaso de X; no quedó nada "
-            "encolado. No es un problema de permisos ni de tu mensaje — fue un "
-            "fallo interno de encolado. No necesitas reenviar el comando; lo "
-            "reintento yo cuando se resuelva."
+            "encolado. El fallo interno quedó registrado y no voy a afirmar que "
+            "el repaso esté en curso."
         )
 
     def _maybe_handle_f4_deterministic_delegation(

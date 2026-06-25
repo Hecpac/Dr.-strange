@@ -872,11 +872,15 @@ invariants:
           resume_key IS NOT NULL`, and `enqueue` re-raises on a completed-key
           collision) and dedups before any side effect; the DB unique index is
           the concurrency backstop. The Telegram delivery id is plumbed via
-          `context_metadata["inbound"]` (`telegram._inbound_context_metadata`);
-          the agent-runtime path is NOT given the inbound id (unchanged
-          contract). No delivery id → fall through (never enqueue without dedup
-          capability). Same message twice → one job; new message, identical text
-          → new job.
+          `context_metadata["inbound"]` (`telegram._inbound_context_metadata`).
+          In prod TelegramTransport runs with an AgentRuntime, so the chain is
+          `TelegramTransport → AgentRuntime.handle_text(metadata=…) →
+          BotService.handle_text(context_metadata=…) → gate`: the AgentRuntime
+          path **forwards** `context_metadata["inbound"]`, and the gate consumes
+          `inbound.message_id` as its durable delivery identity (stripping it
+          there would make the gate inert — that was the P1 regression). No
+          delivery id → fall through (never enqueue without dedup capability).
+          Same message twice → one job; new message, identical text → new job.
     truthful: Success is claimed only after `get_by_resume_key` confirms the
           durable job exists; failure emits `f4_deterministic_delegation_failed`
           (reason code only, never raw error/secrets) and a concise "no task
@@ -897,6 +901,8 @@ invariants:
       - tests/test_f4b_deterministic_delegation.py::GateTests::test_legitimate_repeat_creates_new_job
       - tests/test_f4b_deterministic_delegation.py::GateTests::test_no_delivery_id_falls_through
       - tests/test_f4b_deterministic_delegation.py::GateTests::test_enqueue_exception_is_truthful_with_no_job
+      - tests/test_f4b_deterministic_delegation.py::ClassifierTests::test_other_platform_not_matched
+      - tests/test_f4b_deterministic_delegation.py::RealChainIntegrationTests::test_agent_runtime_path_forwards_inbound_id_to_gate
 ```
 
 ---
