@@ -160,11 +160,18 @@ class F2ExternalEffectExecutor:
         verdict = verifier(spec, record)
         if verdict.classification not in _VERIFIER_CLASSIFICATIONS:
             raise ValueError(f"invalid verifier classification: {verdict.classification}")
+        # Persist the verifier's reason into record.error ONLY when blocking, so
+        # record.error uniformly carries the blocking reason on both the
+        # adapter-blocked path (e.g. "zero_imports") and the verifier-blocked
+        # path (e.g. "count_moved_or_unknown"). verified_applied/verified_absent
+        # are not failures, so they must not write an error.
+        blocking = verdict.classification == "blocked_manual_review"
         updated = self._transition(
             record.external_effect_id,
             status=verdict.classification,
             verification=verdict.verification,
             verifier_kind=spec.verifier_kind,
+            error=verdict.reason if blocking else None,
         )
         if verdict.classification == "verified_applied":
             return EffectOutcome("verified_applied", updated, should_retry=False)

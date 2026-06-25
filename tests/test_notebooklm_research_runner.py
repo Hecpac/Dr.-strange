@@ -120,6 +120,83 @@ class RunnerBlockedTests(unittest.TestCase):
             runner.run_once()
             notifier.assert_called_once()
 
+    def test_recovery_blocked_emits_verifier_reason_metadata(self) -> None:
+        """Crash-recovery → verifier blocked_manual_review must surface the
+        verifier's reason string (not None / a stale adapter error) in the
+        observe + notify metadata.
+        """
+        from claw_v2.notebooklm_research_effect import build_research_effect_spec
+
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs, store = _setup(tmp)
+            job = jobs.enqueue(
+                kind="notebooklm.research",
+                payload={"notebook_id": "nb-1", "query": "q", "mode": "deep"},
+            )
+            # Pre-seed an interrupted attempt with the SAME idempotency key the
+            # runner will compute: apply_in_progress, attempt=1, no result. The
+            # runner's record_external_effect (ON CONFLICT DO NOTHING) loads this
+            # row → _drive routes to _recover (NOT _apply), so the verifier runs.
+            spec = build_research_effect_spec(
+                job_id=job.job_id,
+                notebook_id="nb-1",
+                query="q",
+                mode="deep",
+                pre_intent_source_count=0,
+            )
+            store.record_external_effect(
+                task_id=spec.task_id,
+                run_id=spec.run_id,
+                phase=spec.phase,
+                effect_kind=spec.effect_kind,
+                target=spec.target,
+                request=spec.request,
+                content_hash=spec.content_hash,
+                job_id=spec.job_id,
+                status="apply_in_progress",
+                attempt_count=1,
+            )
+
+            observe_payloads: list[dict] = []
+
+            class FakeObserve:
+                def emit(self, event_type: str, payload: object = None) -> None:
+                    if event_type == "notebooklm_research_effect_blocked_manual_review":
+                        assert isinstance(payload, dict)
+                        observe_payloads.append(payload)
+
+            # status_fn returns no source_count → verifier classifies
+            # blocked_manual_review with reason "source_count_missing".
+            # The adapter (deep_research_fn) must NOT run on the recovery path.
+            adapter_calls = {"n": 0}
+
+            def _never_run(nb: str, q: str) -> int:
+                adapter_calls["n"] += 1
+                return 0
+
+            notifier = MagicMock()
+            runner = NotebookLMResearchRunner(
+                job_service=jobs,
+                store=store,
+                observe=FakeObserve(),
+                notifier=notifier,
+                deep_research_fn=_never_run,
+                status_fn=lambda nb: {},  # no source_count → blocked
+            )
+            ran = runner.run_once()
+            self.assertTrue(ran)
+
+            record = jobs.get(job.job_id)
+            self.assertEqual(record.status, "failed")
+            self.assertEqual(record.error, "effect_blocked_manual_review")
+            self.assertEqual(adapter_calls["n"], 0)  # recovery path, no re-apply
+
+            # The verifier's reason string (NOT None / a stale adapter error)
+            # must surface in the observe + notify metadata.
+            self.assertEqual(len(observe_payloads), 1)
+            self.assertEqual(observe_payloads[0]["verifier_reason"], "source_count_missing")
+            notifier.assert_called_once()
+
 
 class RunnerAdapterExceptionTests(unittest.TestCase):
     def test_adapter_exception_fails_job_with_retry(self) -> None:

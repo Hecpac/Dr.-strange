@@ -2369,6 +2369,9 @@ def build_runtime(
 
         def _nlm_deep_research_fn(notebook_id: str, query: str) -> int:
             # Lazy: bot.notebooklm is set by lifecycle after build_runtime returns.
+            # NOTE: mode is hardcoded to "deep" regardless of the job payload's
+            # `mode` field — a documented limitation for the deep-only
+            # notebooklm.research kind (no non-deep caller exists today).
             nlm = bot.notebooklm
             if nlm is None:
                 return 0
