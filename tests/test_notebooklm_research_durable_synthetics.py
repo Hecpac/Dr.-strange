@@ -121,16 +121,72 @@ class Window41CrashBeforeIntentTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 4.2 — crash after intent, before adapter
+# 4.2 — crash after intent, before adapter (two reachable sub-paths)
+#
+# The executor short-circuits determinate states and only calls the verifier
+# for genuinely ambiguous ones, so §8's single "after intent, before adapter"
+# window splits into two distinct resume paths:
+#   (a) crash AFTER the intent commit but BEFORE _apply transitions:
+#       intent_recorded, attempt_count=0, no result → routed DIRECTLY to
+#       _apply (NO verifier) → clean single apply.   [test 4.2a]
+#   (b) crash INSIDE _apply (after the apply_in_progress transition, at/before
+#       the adapter call): apply_in_progress, attempt_count=1, no result →
+#       _recover → verifier(count unchanged) → verified_absent → re-apply. [4.2b]
 # ---------------------------------------------------------------------------
 
 
-class Window42CrashAfterIntentBeforeAdapterTests(unittest.TestCase):
-    """§8: state is apply_in_progress (attempt 1, no result); status_fn shows
-    count unchanged → verifier verified_absent → executor re-applies → applied.
-    Adapter called exactly once in this execute call (the recovery re-apply)."""
+class Window42aCrashAfterIntentBeforeApplyTests(unittest.TestCase):
+    """§8-4.2 sub-path (a): crash AFTER the intent commit but BEFORE _apply
+    transitioned the row.  State is intent_recorded, attempt_count=0, no result.
+    On re-execute the executor routes intent_recorded/attempt-0 DIRECTLY to
+    _apply (NO verifier) and applies once."""
 
-    def test_intent_in_progress_count_unchanged_verified_absent_then_applied(
+    def test_fresh_intent_attempt0_applies_once_without_verifier(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db, store = _store(tmp)
+            self.addCleanup(db.close)
+
+            # Pre-seed: intent_recorded, attempt_count=0, NO result — the row was
+            # committed by the intent step but the crash hit before _apply ran.
+            spec = _spec(pre_count=0)
+            _seed_effect(store, spec, status="intent_recorded", attempt_count=0)
+
+            calls: list[str] = []
+
+            def deep_research(nb: str, q: str) -> int:
+                calls.append(nb)
+                return 5  # sources imported
+
+            adapter = notebooklm_research_adapter(deep_research)
+
+            def verifier(_spec, _record):
+                raise AssertionError(
+                    "verifier must NOT run for intent_recorded/attempt-0 "
+                    "(determinate → routed directly to _apply)"
+                )
+
+            executor = F2ExternalEffectExecutor(store)
+
+            # execute() loads the seeded row (ON CONFLICT DO NOTHING), sees
+            # intent_recorded with attempt_count==0 → _apply directly (no verifier).
+            outcome = executor.execute(spec, adapter, verifier)
+
+            effects = store.list_external_effects()
+            self.assertEqual(outcome.status, "applied")
+            self.assertEqual(len(effects), 1, "no duplicate effect row created")
+            self.assertEqual(effects[0].status, "applied")
+            self.assertEqual(effects[0].attempt_count, 1)
+            self.assertEqual(len(calls), 1, "adapter called exactly once")
+
+
+class Window42bCrashInsideApplyTests(unittest.TestCase):
+    """§8-4.2 sub-path (b): crash INSIDE _apply — after the apply_in_progress
+    transition, at/before the adapter call.  State is apply_in_progress
+    (attempt 1, no result); status_fn shows count unchanged → _recover →
+    verifier verified_absent → executor re-applies → applied.  Adapter called
+    exactly once in this execute call (the recovery re-apply)."""
+
+    def test_in_progress_count_unchanged_verified_absent_then_applied(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -218,9 +274,14 @@ class Window43CrashAfterAdapterBeforeResultCommitTests(unittest.TestCase):
 class Window44CrashAfterResultBeforeJobCompleteTests(unittest.TestCase):
     """§8: state is 'applied' with a result (adapter finished and result was
     committed, but the job-complete step never ran).  execute() must return
-    'applied' immediately without calling the adapter.  No duplicate row."""
+    'applied' immediately without calling the adapter.  No duplicate row.
 
-    def test_applied_row_returns_applied_without_adapter_call(self) -> None:
+    NOTE: the executor short-circuits a committed 'applied' result — it returns
+    immediately WITHOUT calling the verifier.  This is correct and intentionally
+    tighter than §8's looser "→ verifier → verified_applied" wording: a
+    committed result is determinate, so no verification is needed."""
+
+    def test_applied_row_returns_applied_without_adapter_or_verifier(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db, store = _store(tmp)
             self.addCleanup(db.close)
@@ -241,8 +302,16 @@ class Window44CrashAfterResultBeforeJobCompleteTests(unittest.TestCase):
                 calls.append(nb)
                 return 3  # should never be reached
 
+            verifier_calls: list[str] = []
+
+            def verifier(_spec, record):
+                verifier_calls.append(record.external_effect_id)
+                raise AssertionError(
+                    "verifier must NOT run on an idempotent committed-'applied' "
+                    "re-entry (short-circuited as determinate)"
+                )
+
             adapter = notebooklm_research_adapter(deep_research)
-            verifier = notebooklm_research_verifier(status_fn=lambda nb: {"source_count": 3})
             executor = F2ExternalEffectExecutor(store)
 
             outcome = executor.execute(spec, adapter, verifier)
@@ -252,6 +321,11 @@ class Window44CrashAfterResultBeforeJobCompleteTests(unittest.TestCase):
             self.assertEqual(len(effects), 1, "no duplicate effect row")
             self.assertEqual(effects[0].status, "applied")
             self.assertEqual(len(calls), 0, "adapter must NOT be called (idempotent re-entry)")
+            self.assertEqual(
+                len(verifier_calls),
+                0,
+                "verifier must NOT be called (committed result short-circuits)",
+            )
 
 
 if __name__ == "__main__":
