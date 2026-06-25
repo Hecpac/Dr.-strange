@@ -70,7 +70,6 @@ class _PathResult:
 @dataclass(frozen=True, slots=True)
 class _IndexSpec:
     name: str
-    unique: bool
     columns: tuple[str, ...]
 
 
@@ -81,34 +80,38 @@ class ExpectedSchema:
     unique_indexes: dict[str, _IndexSpec]
 
 
-def _introspect(executor: Any) -> tuple[dict[str, tuple[str, ...]], dict[str, _IndexSpec]]:
-    """Introspect F2 tables (columns) and their unique indexes via PRAGMAs.
-
-    ``executor`` is anything with ``.execute(sql).fetchall()`` whose rows allow
-    key access (a RuntimeDb cursor or a ``sqlite3.Connection`` with
-    ``row_factory = sqlite3.Row``)."""
+# ``executor`` (below) is anything with ``.execute(sql).fetchall()`` whose rows
+# allow key access — a RuntimeDb cursor or a ``sqlite3.Connection`` with
+# ``row_factory = sqlite3.Row``.
+def _introspect_tables(executor: Any) -> dict[str, tuple[str, ...]]:
+    """Introspect the columns of each present F2 table via ``PRAGMA table_info``."""
     tables: dict[str, tuple[str, ...]] = {}
-    unique_indexes: dict[str, _IndexSpec] = {}
     for table in F2_DURABILITY_TABLES:
         cols = executor.execute(f"PRAGMA table_info({table})").fetchall()
         if cols:
             tables[table] = tuple(row["name"] for row in cols)
+    return tables
+
+
+def _introspect_unique_indexes(executor: Any) -> dict[str, _IndexSpec]:
+    """Introspect the unique indexes on the F2 tables via ``PRAGMA index_list`` /
+    ``index_info``. Only the index's columns are captured; a partial-index
+    predicate (e.g. `WHERE write_key IS NOT NULL` on
+    ux_phase_checkpoint_writes_key) is intentionally NOT verified — acceptable
+    because the expected schema is derived from the same DDL that builds the
+    primary."""
+    unique_indexes: dict[str, _IndexSpec] = {}
+    for table in F2_DURABILITY_TABLES:
         for idx in executor.execute(f"PRAGMA index_list({table})").fetchall():
             if not int(idx["unique"]):
                 continue
             name = idx["name"]
-            # Only the unique index's columns are captured; a partial-index
-            # predicate (e.g. `WHERE write_key IS NOT NULL` on
-            # ux_phase_checkpoint_writes_key) is intentionally NOT verified —
-            # acceptable because the expected schema is derived from the same DDL
-            # that builds the primary.
             info = executor.execute(f"PRAGMA index_info({name})").fetchall()
             unique_indexes[name] = _IndexSpec(
                 name=name,
-                unique=True,
                 columns=tuple(row["name"] for row in info if row["name"] is not None),
             )
-    return tables, unique_indexes
+    return unique_indexes
 
 
 def expected_f2_schema() -> ExpectedSchema:
@@ -119,7 +122,8 @@ def expected_f2_schema() -> ExpectedSchema:
         try:
             F2DurabilityStore(db)  # ensures the F2 schema on construction
             with db.cursor() as cur:
-                tables, unique_indexes = _introspect(cur)
+                tables = _introspect_tables(cur)
+                unique_indexes = _introspect_unique_indexes(cur)
         finally:
             db.close()
     return ExpectedSchema(
@@ -151,10 +155,10 @@ def _check_schema(conn: sqlite3.Connection, expected: ExpectedSchema) -> _PathRe
     # as the partial-index predicate: it only bites if the primary were built by
     # something other than the same F2 DDL.
     reasons: list[str] = []
+    actual_tables = _introspect_tables(conn)
     found: dict[str, list[str]] = {}
     for table, exp_cols in expected.tables.items():
-        cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        actual = [row["name"] for row in cols]
+        actual = list(actual_tables.get(table, ()))
         found[table] = actual
         if not actual:
             reasons.append(f"missing_table:{table}")
@@ -170,7 +174,7 @@ def _check_schema(conn: sqlite3.Connection, expected: ExpectedSchema) -> _PathRe
 
 def _check_indexes(conn: sqlite3.Connection, expected: ExpectedSchema) -> _PathResult:
     reasons: list[str] = []
-    _, actual_unique = _introspect(conn)
+    actual_unique = _introspect_unique_indexes(conn)
     for name, spec in expected.unique_indexes.items():
         found = actual_unique.get(name)
         if found is None:
@@ -233,10 +237,10 @@ def _read_found_schema_version(conn: sqlite3.Connection) -> int | None:
     return best
 
 
-def _blocked_report(
-    *, db_path_checked: str, opened_read_only: bool, reasons: list[str]
-) -> dict[str, Any]:
-    """Fail-closed report for paths where no checks ran (open failure / exception)."""
+def _base_report(*, db_path_checked: str, opened_read_only: bool) -> dict[str, Any]:
+    """The full report skeleton with fail-closed defaults — the single source of
+    truth for the report field contract. Callers override the fields they prove;
+    a blocked report keeps the defaults."""
     return {
         "overall_status": FAIL,
         "db_path_checked": db_path_checked,
@@ -252,11 +256,20 @@ def _blocked_report(
         "integrity_required": True,
         "f2_table_counts": {table: None for table in F2_DURABILITY_TABLES},
         "non_empty_f2_tables": [],
-        "reasons": reasons,
+        "reasons": [],
         "checks": {},
         "recommendation": BLOCKED,
         "does_not_prove": _DOES_NOT_PROVE,
     }
+
+
+def _blocked_report(
+    *, db_path_checked: str, opened_read_only: bool, reasons: list[str]
+) -> dict[str, Any]:
+    """Fail-closed report for paths where no checks ran (open failure / exception)."""
+    report = _base_report(db_path_checked=db_path_checked, opened_read_only=opened_read_only)
+    report["reasons"] = reasons
+    return report
 
 
 def _run_checks(
@@ -288,31 +301,28 @@ def _run_checks(
     else:
         recommendation = BLOCKED
 
-    return {
-        "overall_status": overall,
-        "db_path_checked": db_path_checked,
-        "opened_read_only": True,
-        "immutable_mode_used": False,
-        "primary_db_touched": False,
-        "schema_version_expected": expected.schema_version,
-        "schema_version_found": found_version,
-        "schema_path": schema.status,
-        "index_path": index.status,
-        "counts_path": counts.status,
-        "integrity_path": integrity.status,
-        "integrity_required": True,
-        "f2_table_counts": counts.details.get("f2_table_counts", {}),
-        "non_empty_f2_tables": counts.details.get("non_empty_f2_tables", []),
-        "reasons": reasons,
-        "checks": {
-            "schema": schema.details,
-            "index": index.details,
-            "counts": counts.details,
-            "integrity": integrity.details,
-        },
-        "recommendation": recommendation,
-        "does_not_prove": _DOES_NOT_PROVE,
-    }
+    report = _base_report(db_path_checked=db_path_checked, opened_read_only=True)
+    report.update(
+        {
+            "overall_status": overall,
+            "schema_version_found": found_version,
+            "schema_path": schema.status,
+            "index_path": index.status,
+            "counts_path": counts.status,
+            "integrity_path": integrity.status,
+            "f2_table_counts": counts.details.get("f2_table_counts", {}),
+            "non_empty_f2_tables": counts.details.get("non_empty_f2_tables", []),
+            "reasons": reasons,
+            "checks": {
+                "schema": schema.details,
+                "index": index.details,
+                "counts": counts.details,
+                "integrity": integrity.details,
+            },
+            "recommendation": recommendation,
+        }
+    )
+    return report
 
 
 def run_primary_compat_preflight(*, db_path: str | None = None) -> dict[str, Any]:

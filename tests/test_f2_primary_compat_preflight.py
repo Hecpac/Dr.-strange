@@ -39,7 +39,6 @@ class ExpectedSchemaTests(unittest.TestCase):
             f"missing F2 unique indexes: {_EXPECTED_UNIQUE_INDEXES - set(expected.unique_indexes)}",
         )
         idem = expected.unique_indexes["ux_external_effect_records_idempotency_key"]
-        self.assertTrue(idem.unique)
         self.assertEqual(set(idem.columns), {"idempotency_key"})
 
 
