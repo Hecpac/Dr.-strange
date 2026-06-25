@@ -392,3 +392,124 @@ class StartResearchRoutingTests(unittest.TestCase):
             all_jobs = jobs.list()
             self.assertEqual(len(all_jobs), 1)
             self.assertEqual(all_jobs[0].status, "completed")
+
+    def test_durable_on_nondeep_mode_uses_thread_path(self) -> None:
+        """The durable lane is deep-only by construction: a non-deep mode falls
+        through to the existing thread path even with research_durable=True."""
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            from claw_v2.notebooklm import NotebookLMService
+
+            db_path = Path(tmp) / "claw.db"
+            jobs = JobService(db_path)
+            svc = NotebookLMService(job_service=jobs, research_durable=True)
+            svc._cdp_research_fn = lambda nb, q: 2
+
+            result = svc.start_research("nb-full-id", "query", mode="quick")
+            # Thread path message, not the durable "encolado" one.
+            self.assertIn("iniciado", result.lower())
+            self.assertNotIn("encolado", result.lower())
+
+            deadline = time.time() + 2.0
+            while time.time() < deadline and svc._running:
+                time.sleep(0.01)
+
+            all_jobs = jobs.list()
+            self.assertEqual(len(all_jobs), 1)
+            # The thread path claims and completes the job (durable enqueue-only
+            # would have left it queued).
+            self.assertEqual(all_jobs[0].status, "completed")
+
+
+# ---------------------------------------------------------------------------
+# main.py wiring closures (status-shape adaptation + baseline handling)
+# ---------------------------------------------------------------------------
+class StatusFnAdaptationTests(unittest.TestCase):
+    """The status_fn closure must adapt NotebookLMService.status()'s NESTED shape
+    {"notebook": {"sources_count": N}, ...} to the flat {"source_count": N} the
+    verifier and pre-intent baseline read expect. Item #1 defect regression guard.
+    """
+
+    def test_status_fn_adapts_nested_sources_count(self) -> None:
+        from claw_v2.notebooklm_research_runner import make_nlm_status_fn
+
+        class FakeNlm:
+            def status(self, notebook_id: str) -> dict:
+                return {
+                    "notebook": {"id": "x", "title": "t", "sources_count": 7},
+                    "sources": [],
+                }
+
+        status_fn = make_nlm_status_fn(lambda: FakeNlm())
+        self.assertEqual(status_fn("nb"), {"source_count": 7})
+
+    def test_status_fn_missing_notebook_key_yields_zero(self) -> None:
+        from claw_v2.notebooklm_research_runner import make_nlm_status_fn
+
+        class FakeNlm:
+            def status(self, notebook_id: str) -> dict:
+                return {"sources": []}  # no "notebook" key
+
+        status_fn = make_nlm_status_fn(lambda: FakeNlm())
+        self.assertEqual(status_fn("nb"), {"source_count": 0})
+
+    def test_status_fn_nlm_none_yields_zero(self) -> None:
+        from claw_v2.notebooklm_research_runner import make_nlm_status_fn
+
+        status_fn = make_nlm_status_fn(lambda: None)
+        self.assertEqual(status_fn("nb"), {"source_count": 0})
+
+    def test_status_fn_propagates_status_exception(self) -> None:
+        """The closure must NOT swallow status() errors — let them raise so the
+        verifier classifies status_unavailable (and run_once treats a baseline
+        read failure as transient). Item #7."""
+        from claw_v2.notebooklm_research_runner import make_nlm_status_fn
+
+        class FakeNlm:
+            def status(self, notebook_id: str) -> dict:
+                raise RuntimeError("network down")
+
+        status_fn = make_nlm_status_fn(lambda: FakeNlm())
+        with self.assertRaises(RuntimeError):
+            status_fn("nb")
+
+
+class RunnerBaselineExceptionTests(unittest.TestCase):
+    def test_pre_intent_status_exception_fails_job_retry(self) -> None:
+        """A transient status_fn failure during the pre-intent baseline read must
+        fail the job with retry=True (transient), not crash or record a bogus
+        baseline. Item #7."""
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs, store = _setup(tmp)
+            job = jobs.enqueue(
+                kind="notebooklm.research",
+                payload={"notebook_id": "nb-1", "query": "q", "mode": "deep"},
+                max_attempts=3,
+            )
+
+            def failing_status(nb: str) -> dict:
+                raise RuntimeError("network down")
+
+            adapter_calls = {"n": 0}
+
+            def _never_run(nb: str, q: str) -> int:
+                adapter_calls["n"] += 1
+                return 3
+
+            runner = NotebookLMResearchRunner(
+                job_service=jobs,
+                store=store,
+                observe=None,
+                notifier=None,
+                deep_research_fn=_never_run,
+                status_fn=failing_status,
+            )
+            ran = runner.run_once()
+            self.assertTrue(ran)
+
+            # No intent recorded, no adapter run, job retrying (transient).
+            self.assertEqual(adapter_calls["n"], 0)
+            self.assertEqual(len(store.list_external_effects()), 0)
+            record = jobs.get(job.job_id)
+            self.assertEqual(record.status, "retrying")

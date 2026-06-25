@@ -7,9 +7,11 @@ state. Maintenance-gate (A2) is enforced automatically by ``JobService.claim_nex
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Callable
 
+from claw_v2 import notebooklm_cdp
 from claw_v2.external_effect_executor import F2ExternalEffectExecutor
 from claw_v2.f2_durability_store import F2DurabilityStore
 from claw_v2.jobs import JobService
@@ -23,6 +25,61 @@ logger = logging.getLogger(__name__)
 
 _JOB_KIND = "notebooklm.research"
 _WORKER_ID = "notebooklm-research"
+
+
+def make_nlm_status_fn(
+    nlm_getter: Callable[[], Any],
+) -> Callable[[str], dict[str, Any]]:
+    """Build the status_fn closure the runner/verifier consume.
+
+    NotebookLMService.status() returns a NESTED dict
+    ``{"notebook": {"sources_count": N, ...}, "sources": [...]}`` (same shape for
+    the SDK/CDP and external/Jacob backends). The verifier and the runner's
+    pre-intent baseline both read a FLAT ``{"source_count": int}``, so this
+    adapter flattens it. ``nlm_getter`` is called lazily (the NotebookLMService is
+    wired by lifecycle after build_runtime returns).
+
+    NOTE: status() exceptions are intentionally NOT swallowed — they propagate so
+    the verifier classifies ``status_unavailable`` and the runner treats a
+    pre-intent baseline read failure as transient (retry), rather than letting a
+    transient error masquerade as "0 sources".
+    """
+
+    def status_fn(notebook_id: str) -> dict[str, Any]:
+        nlm = nlm_getter()
+        if nlm is None:
+            return {"source_count": 0}
+        raw = nlm.status(notebook_id) or {}
+        notebook = raw.get("notebook") or {}
+        return {"source_count": int(notebook.get("sources_count") or 0)}
+
+    return status_fn
+
+
+def make_nlm_deep_research_fn(
+    nlm_getter: Callable[[], Any],
+) -> Callable[[str, str], int]:
+    """Build the deep_research_fn closure the runner/adapter consume.
+
+    Selects the research backend (external vs CDP) by mirroring
+    ``start_research`` / ``_worker``. The durable runner handles deep-only by
+    construction (``start_research`` only routes to the durable lane when
+    ``mode == "deep"``), so mode is not threaded through here — the CDP backend
+    is inherently deep-only.
+    """
+
+    def deep_research_fn(notebook_id: str, query: str) -> int:
+        nlm = nlm_getter()
+        if nlm is None:
+            return 0
+        if getattr(nlm, "_use_external_backend", False):
+            ext = getattr(nlm, "_external_backend", None)
+            if ext is not None:
+                return int(ext.deep_research(notebook_id, query, mode="deep") or 0)
+        cdp_fn = getattr(nlm, "_cdp_research_fn", None) or notebooklm_cdp.deep_research
+        return int(cdp_fn(notebook_id, query) or 0)
+
+    return deep_research_fn
 
 
 class NotebookLMResearchRunner:
@@ -80,12 +137,21 @@ class NotebookLMResearchRunner:
         query: str = payload.get("query", "")
         mode: str = payload.get("mode", "deep")
 
-        # Read pre-intent source count for the verifier baseline.
+        # Read pre-intent source count for the verifier baseline. A status read
+        # failure here is transient (network/CDP) — fail the job with retry=True
+        # rather than recording a bogus 0 baseline (which would corrupt the
+        # verifier's later recovery decision). No intent has been recorded yet.
         try:
             pre_count_raw = (self._status_fn(notebook_id) or {}).get("source_count", 0)
             pre_count = int(pre_count_raw)
-        except Exception:
-            pre_count = 0
+        except Exception as exc:
+            logger.warning(
+                "notebooklm_research_runner: pre-intent status read failed for job %s: %s",
+                job_id,
+                exc,
+            )
+            self._jobs.fail(job_id, error=f"pre_intent_status_unavailable: {exc}", retry=True)
+            return True
 
         spec = build_research_effect_spec(
             job_id=job_id,
@@ -102,9 +168,7 @@ class NotebookLMResearchRunner:
         try:
             outcome = self._executor.execute(spec, adapter, verifier)
         except Exception as exc:
-            logger.exception(
-                "notebooklm_research_runner: adapter raised for job %s", job_id
-            )
+            logger.exception("notebooklm_research_runner: adapter raised for job %s", job_id)
             self._jobs.fail(job_id, error=str(exc), retry=True)
             return True
 
@@ -113,14 +177,22 @@ class NotebookLMResearchRunner:
                 job_id,
                 result={
                     "notebook_id": notebook_id,
-                    "imported_count": (outcome.record.result_json and _parse_imported_count(outcome.record.result_json)) or 0,
+                    "imported_count": (
+                        outcome.record.result_json
+                        and _parse_imported_count(outcome.record.result_json)
+                    )
+                    or 0,
                     "external_effect_id": outcome.record.external_effect_id,
                 },
             )
-        elif outcome.should_retry:
-            # verified_absent within attempt budget
-            self._jobs.fail(job_id, error="effect_verified_absent_retry", retry=True)
         else:
+            # The executor only returns applied/verified_applied (handled above)
+            # or blocked_manual_review here — verified_absent is retried IN-CALL
+            # by the executor, never surfaced as an outcome. Assert loudly if a
+            # new terminal status is ever introduced.
+            assert outcome.status == "blocked_manual_review", (
+                f"unexpected outcome status {outcome.status!r} for job {job_id}"
+            )
             # blocked_manual_review: terminal, never retry
             meta = {
                 "external_effect_id": outcome.record.external_effect_id,
@@ -156,8 +228,6 @@ class NotebookLMResearchRunner:
 
 def _parse_imported_count(result_json: str) -> int | None:
     """Extract imported_count from the stored result JSON string, if present."""
-    import json
-
     try:
         data = json.loads(result_json)
         if isinstance(data, dict):

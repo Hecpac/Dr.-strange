@@ -540,6 +540,11 @@ async def run() -> int:
             runtime_policy=build_runtime_policy_engine(runtime.config, runtime.approvals),
             policy_context="telegram",
             external_backend=external_nlm_backend,
+            # Same two-flag conjunction that guards the durable runner
+            # registration in main.py build_runtime — both sites MUST stay in
+            # sync: start_research only enqueues (no thread) when this is True,
+            # and the runner only exists to claim those jobs when the guard there
+            # is also True.
             research_durable=(
                 runtime.config.f2_durability_enabled and runtime.config.notebooklm_research_durable
             ),

@@ -54,7 +54,6 @@ class ExecutorHappyPathTests(unittest.TestCase):
             self.assertEqual(calls, ["r1"])
             self.assertEqual(outcome.record.status, "applied")
             self.assertEqual(outcome.record.attempt_count, 1)
-            self.assertFalse(outcome.should_retry)
 
 
 class ExecutorDedupTests(unittest.TestCase):

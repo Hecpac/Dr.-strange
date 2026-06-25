@@ -432,9 +432,12 @@ class NotebookLMService:
             "nlm_research_started", notebook_id=full_id, query=query, mode=mode, job_id=job_id
         )
 
-        # Durable lane: the runner (NotebookLMResearchRunner) claims the job off-tick
-        # and drives it through F2ExternalEffectExecutor. No thread is spawned here.
-        if self._research_durable:
+        # Durable lane: the runner (NotebookLMResearchRunner) claims the job
+        # off-tick and drives it through F2ExternalEffectExecutor. No thread is
+        # spawned here. The durable lane is deep-only by construction (the CDP
+        # backend is inherently deep-only and the runner does not thread mode
+        # through), so any non-deep mode falls through to the thread path.
+        if self._research_durable and mode == "deep":
             return f"Deep Research encolado para '{query}' en notebook {title}..."
 
         def _worker():

@@ -36,9 +36,8 @@ class VerifierVerdict:
 
 @dataclass(frozen=True, slots=True)
 class EffectOutcome:
-    status: str  # applied | verified_applied | verified_absent | blocked_manual_review
+    status: str  # applied | verified_applied | blocked_manual_review
     record: ExternalEffectRecord
-    should_retry: bool
 
 
 # adapter: (EffectSpec) -> AdapterResult, may raise
@@ -92,9 +91,9 @@ class F2ExternalEffectExecutor:
     ) -> EffectOutcome:
         status = record.status
         if status in ("applied", "verified_applied"):
-            return EffectOutcome("applied", record, should_retry=False)
+            return EffectOutcome("applied", record)
         if status == "blocked_manual_review":
-            return EffectOutcome("blocked_manual_review", record, should_retry=False)
+            return EffectOutcome("blocked_manual_review", record)
         if status == "verified_absent" or (
             status == "intent_recorded" and record.attempt_count == 0
         ):
@@ -119,7 +118,7 @@ class F2ExternalEffectExecutor:
                 status="blocked_manual_review",
                 error="max_attempts_exhausted",
             )
-            return EffectOutcome("blocked_manual_review", blocked, should_retry=False)
+            return EffectOutcome("blocked_manual_review", blocked)
         record = self._transition(
             record.external_effect_id,
             status="apply_in_progress",
@@ -141,14 +140,14 @@ class F2ExternalEffectExecutor:
                 status="applied",
                 result=ar.result,
             )
-            return EffectOutcome("applied", applied, should_retry=False)
+            return EffectOutcome("applied", applied)
         blocked = self._transition(
             record.external_effect_id,
             status="blocked_manual_review",
             result=ar.result,
             error=ar.reason or "adapter_not_applied",
         )
-        return EffectOutcome("blocked_manual_review", blocked, should_retry=False)
+        return EffectOutcome("blocked_manual_review", blocked)
 
     def _recover(
         self,
@@ -174,7 +173,7 @@ class F2ExternalEffectExecutor:
             error=verdict.reason if blocking else None,
         )
         if verdict.classification == "verified_applied":
-            return EffectOutcome("verified_applied", updated, should_retry=False)
+            return EffectOutcome("verified_applied", updated)
         if verdict.classification == "verified_absent":
             return self._apply(spec, updated, adapter, verifier)
-        return EffectOutcome("blocked_manual_review", updated, should_retry=False)
+        return EffectOutcome("blocked_manual_review", updated)

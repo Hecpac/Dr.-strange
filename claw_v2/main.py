@@ -2364,32 +2364,21 @@ def build_runtime(
         handler=lambda: skill_expand_runner.run_available(limit=1),
     )
     if config.f2_durability_enabled and config.notebooklm_research_durable:
-        from claw_v2 import notebooklm_cdp as _nlm_cdp
-        from claw_v2.notebooklm_research_runner import NotebookLMResearchRunner
+        from claw_v2.notebooklm_research_runner import (
+            NotebookLMResearchRunner,
+            make_nlm_deep_research_fn,
+            make_nlm_status_fn,
+        )
 
-        def _nlm_deep_research_fn(notebook_id: str, query: str) -> int:
-            # Lazy: bot.notebooklm is set by lifecycle after build_runtime returns.
-            # NOTE: mode is hardcoded to "deep" regardless of the job payload's
-            # `mode` field — a documented limitation for the deep-only
-            # notebooklm.research kind (no non-deep caller exists today).
-            nlm = bot.notebooklm
-            if nlm is None:
-                return 0
-            if getattr(nlm, "_use_external_backend", False):
-                ext = getattr(nlm, "_external_backend", None)
-                if ext is not None:
-                    return int(ext.deep_research(notebook_id, query, mode="deep") or 0)
-            cdp_fn = getattr(nlm, "_cdp_research_fn", None) or _nlm_cdp.deep_research
-            return int(cdp_fn(notebook_id, query) or 0)
+        # Lazy getter: bot.notebooklm is wired by lifecycle after build_runtime
+        # returns. The two factories adapt the NotebookLMService nested status
+        # shape and select the research backend (see make_nlm_status_fn /
+        # make_nlm_deep_research_fn).
+        def _nlm_getter() -> Any:
+            return bot.notebooklm
 
-        def _nlm_status_fn(notebook_id: str) -> dict:
-            nlm = bot.notebooklm
-            if nlm is None:
-                return {"source_count": 0}
-            try:
-                return nlm.status(notebook_id)
-            except Exception:
-                return {"source_count": 0}
+        _nlm_status_fn = make_nlm_status_fn(_nlm_getter)
+        _nlm_deep_research_fn = make_nlm_deep_research_fn(_nlm_getter)
 
         _nlm_notifier: Callable[[str], None] | None = None
         if config.telegram_bot_token and config.telegram_allowed_user_id:
