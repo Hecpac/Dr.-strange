@@ -2363,6 +2363,48 @@ def build_runtime(
         name="skill_expand",
         handler=lambda: skill_expand_runner.run_available(limit=1),
     )
+    if config.notebooklm_research_durable_active:
+        from claw_v2.notebooklm_research_runner import (
+            NotebookLMResearchRunner,
+            make_nlm_deep_research_fn,
+            make_nlm_status_fn,
+        )
+
+        # Lazy getter: bot.notebooklm is wired by lifecycle after build_runtime
+        # returns. The two factories adapt the NotebookLMService nested status
+        # shape and select the research backend (see make_nlm_status_fn /
+        # make_nlm_deep_research_fn).
+        def _nlm_getter() -> Any:
+            return bot.notebooklm
+
+        _nlm_status_fn = make_nlm_status_fn(_nlm_getter)
+        _nlm_deep_research_fn = make_nlm_deep_research_fn(_nlm_getter)
+
+        _nlm_notifier: Callable[[str], None] | None = None
+        if config.telegram_bot_token and config.telegram_allowed_user_id:
+            from claw_v2.stop_notifier import send_telegram_message as _send_tg
+
+            def _nlm_notifier(message: str) -> None:
+                _send_tg(
+                    config.telegram_bot_token or "",
+                    config.telegram_allowed_user_id or "",
+                    message,
+                )
+
+        _nlm_research_runner = NotebookLMResearchRunner(
+            job_service=job_service,
+            store=f2_durability_store,  # type: ignore[arg-type]  # guarded above
+            deep_research_fn=_nlm_deep_research_fn,
+            status_fn=_nlm_status_fn,
+            observe=observe,
+            notifier=_nlm_notifier,
+        )
+        daemon.register_background_job_runner(
+            name="notebooklm_research",
+            handler=_nlm_research_runner.run_once,
+            interval=300.0,
+        )
+
     brain.wiki = wiki
     agent_runtime = AgentRuntime(bot_service=bot, memory=memory, observe=observe)
     recovered_orphans = recover_orphan_actions(config.telemetry_root, observe=observe)

@@ -540,6 +540,9 @@ async def run() -> int:
             runtime_policy=build_runtime_policy_engine(runtime.config, runtime.approvals),
             policy_context="telegram",
             external_backend=external_nlm_backend,
+            # Single source of truth (AppConfig property) shared with the durable
+            # runner registration guard in main.py build_runtime.
+            research_durable=runtime.config.notebooklm_research_durable_active,
         )
         runtime.bot.notebooklm = nlm_service
 

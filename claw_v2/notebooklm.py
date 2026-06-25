@@ -115,6 +115,7 @@ class NotebookLMService:
         runtime_policy: Any | None = None,
         policy_context: str = "telegram",
         external_backend: Any | None = None,
+        research_durable: bool = False,
     ) -> None:
         self._notify = notify or (lambda msg: None)
         self._observe = observe
@@ -123,6 +124,7 @@ class NotebookLMService:
         self._runtime_policy = runtime_policy
         self._policy_context = policy_context
         self._external_backend = external_backend
+        self._research_durable = research_durable
         self._running: dict[str, threading.Thread] = {}
         self._client_factory: Callable[[], Any] | None = None
         # Optional override for CDP-backed methods (used by tests). Defaults to
@@ -412,6 +414,23 @@ class NotebookLMService:
             title = self._get_notebook_title(full_id)
         if full_id in self._running and self._running[full_id].is_alive():
             return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...)."
+        # The durable lane is deep-only by construction (the CDP backend is
+        # inherently deep-only and the runner does not thread mode through), so
+        # any non-deep mode falls through to the thread path.
+        durable = self._research_durable and mode == "deep"
+        # In-flight collapse for the durable path: the thread path guards
+        # concurrent identical requests via `_running`, but the durable path
+        # spawns no thread, so two rapid identical start_research calls would
+        # enqueue two jobs with distinct run_ids → distinct effect keys → both
+        # import. A stable resume_key (per notebook+query+mode, matching the
+        # effect content_hash) collapses a concurrent identical request onto the
+        # active job; once the job is terminal the key frees, so a legitimate
+        # later re-request still creates a new job (spec §6 preserved).
+        resume_key: str | None = None
+        if durable:
+            from claw_v2.notebooklm_research_effect import research_content_hash
+
+            resume_key = f"nlm-research:{full_id}:{research_content_hash(query, mode)}"
         job_id: str | None = None
         if self._job_service is not None:
             job = self._job_service.enqueue(
@@ -424,11 +443,18 @@ class NotebookLMService:
                     "external_backend": external_mode,
                 },
                 metadata={"notebook_title": title},
+                resume_key=resume_key,
             )
             job_id = job.job_id
         self._emit(
             "nlm_research_started", notebook_id=full_id, query=query, mode=mode, job_id=job_id
         )
+
+        # Durable lane: the runner (NotebookLMResearchRunner) claims the job
+        # off-tick and drives it through F2ExternalEffectExecutor. No thread is
+        # spawned here.
+        if durable:
+            return f"Deep Research encolado para '{query}' en notebook {title}..."
 
         def _worker():
             try:

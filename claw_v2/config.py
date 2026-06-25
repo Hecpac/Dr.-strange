@@ -511,6 +511,15 @@ class AppConfig:
     maintenance_mode_enabled: bool = False
     no_job_claim_enabled: bool = False
     f2_durability_enabled: bool = False
+    notebooklm_research_durable: bool = False
+
+    @property
+    def notebooklm_research_durable_active(self) -> bool:
+        """The durable NotebookLM research lane requires BOTH F2 durability and
+        its dedicated flag. Single source of truth for the conjunction used by
+        build_runtime (runner registration) and lifecycle (start_research routing).
+        """
+        return self.f2_durability_enabled and self.notebooklm_research_durable
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -779,6 +788,7 @@ class AppConfig:
                 "CLAW_F2_DURABILITY_ENABLED",
                 _env_bool("F2_DURABILITY_ENABLED", False),
             ),
+            notebooklm_research_durable=_env_bool("CLAW_NOTEBOOKLM_RESEARCH_DURABLE", False),
         )
 
     def ensure_directories(self) -> None:

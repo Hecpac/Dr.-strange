@@ -600,6 +600,21 @@ class AppConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(config.scheduled_sub_agents[0].agent, "alma")
         self.assertEqual(config.scheduled_sub_agents[0].skill, "daily-brief")
 
+    def test_notebooklm_research_durable_defaults_false_and_reads_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = str(Path(tmpdir) / "home")
+            with patch.dict(os.environ, {"HOME": home}, clear=True):
+                default_config = AppConfig.from_env()
+            self.assertFalse(default_config.notebooklm_research_durable)
+
+            with patch.dict(
+                os.environ,
+                {"HOME": home, "CLAW_NOTEBOOKLM_RESEARCH_DURABLE": "1"},
+                clear=True,
+            ):
+                configured = AppConfig.from_env()
+            self.assertTrue(configured.notebooklm_research_durable)
+
 
 class CodexConfigTests(unittest.TestCase):
     def test_codex_worker_provider_passes_validate(self) -> None:
