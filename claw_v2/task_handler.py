@@ -5,6 +5,7 @@ import re
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -152,6 +153,29 @@ def _failure_response_text(
     if error and not _INTERNAL_ERROR_CODE_RE.match(error.strip()):
         lines.append(f"Error: {error}")
     return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class AutonomousTaskBootstrapResult:
+    """Structured outcome of ``TaskHandler.ensure_autonomous_task_enqueued``.
+
+    ``status`` is "started" once the idempotent ledger row + coordinator job are
+    in place, "coordinator_unavailable" when no coordinator is wired, or "failed"
+    when the job service is unavailable. ``task_created`` / ``job_created`` report
+    whether THIS call was the one that created each (False on an idempotent retry).
+    ``job_created`` is authoritative — ``JobService.reserve`` atomically elects a
+    single creator. ``task_created`` is best-effort (a check-then-act on
+    ``task_ledger.get`` before the guarded write), so under a true concurrent
+    first-call both callers may report True; the PRIMARY KEY still keeps it to one
+    row.
+    """
+
+    task_id: str
+    coordinator_job_id: str | None
+    task_created: bool
+    job_created: bool
+    status: str
+    reason: str
 
 
 class TaskHandler:
@@ -491,6 +515,101 @@ class TaskHandler:
             f"Tarea autónoma iniciada: `{task_id}`\n"
             f"Modo: {mode}\n"
             "Para mirar el estado en vivo: `/task_loop`."
+        )
+
+    def ensure_autonomous_task_enqueued(
+        self,
+        *,
+        task_id: str,
+        session_id: str,
+        objective: str,
+        mode: str,
+        task_kind: str,
+        source_text: str,
+        delegation_metadata: dict[str, Any] | None,
+    ) -> AutonomousTaskBootstrapResult:
+        """Idempotently materialise one autonomous task for a deterministic id.
+
+        Additive crash-recovery bootstrap for the F4-B durable delegation lane:
+        a future ``f4b.delegation`` job runner calls this so a redelivery /
+        reclaim of the SAME ``task_id`` converges on exactly one logical task.
+        It does NOT mint a fresh ``task_id`` and does NOT start an inline thread.
+
+        Both writes are idempotent on the deterministic ``task_id``:
+          - the ``agent_tasks`` row via ``_record_ledger_task_started`` ->
+            ``TaskLedger.create`` (``ON CONFLICT(task_id) DO UPDATE`` upsert), and
+          - the coordinator job via ``reserve(resume_key="coordinator:{task_id}")``
+            (the active-``resume_key`` unique index elects one creator).
+
+        Session-state / goal / lifecycle-artifact writes are intentionally OMITTED
+        from this path: the ledger row it writes (status="running",
+        runtime="coordinator", metadata.autonomous=True) is the resumable handle,
+        and ``_resume_autonomous_record`` (reached via
+        ``resume_interrupted_autonomous_tasks``) self-heals goal, artifacts, and
+        session state when the task is later picked up. Omitting them keeps this
+        path idempotent without duplicating non-idempotent session writes.
+        """
+        if self.coordinator is None:
+            return AutonomousTaskBootstrapResult(
+                task_id, None, False, False, "coordinator_unavailable", "coordinator unavailable"
+            )
+        if self.job_service is None:
+            return AutonomousTaskBootstrapResult(
+                task_id, None, False, False, "failed", "job_service unavailable"
+            )
+        existed_task = self.task_ledger is not None and self.task_ledger.get(task_id) is not None
+        # Write the ledger row ONLY on first materialisation. ``TaskLedger.create``
+        # is idempotent on row COUNT (ON CONFLICT(task_id) DO UPDATE) but NOT on row
+        # STATE: re-running it would overwrite status/completed_at/metadata/artifacts
+        # with these INITIAL values, clobbering coordinator progress and resurrecting
+        # an already-terminal task (succeeded -> running, completed_at cleared) so the
+        # lifecycle watchdog re-executes it. Guarding on ``existed_task`` preserves
+        # "exactly one logical task per delivery" in the crash-after-bootstrap retry
+        # window. Concurrency-safe: two concurrent first-calls both see
+        # ``existed_task=False`` and write identical INITIAL content (benign — no
+        # progress exists yet); the PRIMARY KEY keeps it to one row.
+        if not existed_task:
+            task_contract = {
+                "goal": objective,
+                "source_message": (source_text or objective)[:500],
+                "task_kind": task_kind,
+                "current_step": "task_started",
+                "verification_requirement": (
+                    "task ledger records terminal or pending state with evidence"
+                ),
+                "blockers": [],
+                "plan": list(planned_phases_for_mode(mode)),
+            }
+            self._record_ledger_task_started(
+                task_id=task_id,
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                route={},
+                goal_id=None,
+                task_contract=task_contract,
+                verify=None,
+            )
+        provider, model = self._provider_model_for_mode(session_id, mode)
+        job, job_created = self.job_service.reserve(
+            resume_key=self._resume_key_for_task(task_id),
+            kind="coordinator.autonomous_task",
+            payload={
+                "task_id": task_id,
+                "session_id": session_id,
+                "objective": objective,
+                "mode": mode,
+            },
+            metadata={
+                "runtime": "coordinator",
+                "provider": provider,
+                "model": model,
+                "reason": "f4b_delegation_bootstrap",
+                "delegation_metadata": dict(delegation_metadata or {}),
+            },
+        )
+        return AutonomousTaskBootstrapResult(
+            task_id, job.job_id, not existed_task, job_created, "started", "ok"
         )
 
     def record_blocked_task(
