@@ -115,5 +115,103 @@ class PathCheckTests(unittest.TestCase):
         self.assertEqual(result.status, preflight.PASS)
 
 
+_REQUIRED_JSON_FIELDS = (
+    "overall_status",
+    "db_path_checked",
+    "opened_read_only",
+    "immutable_mode_used",
+    "primary_db_touched",
+    "schema_version_expected",
+    "schema_version_found",
+    "schema_path",
+    "index_path",
+    "counts_path",
+    "integrity_path",
+    "integrity_required",
+    "f2_table_counts",
+    "non_empty_f2_tables",
+    "reasons",
+    "checks",
+    "recommendation",
+    "does_not_prove",
+)
+
+
+class RunReportTests(unittest.TestCase):
+    def _primary_with_writer(self, tmpdir: str):
+        path = Path(tmpdir) / "claw.db"
+        wdb = RuntimeDb(path)
+        F2DurabilityStore(wdb)
+        self.addCleanup(wdb.close)
+        return path, wdb
+
+    def test_smoke_temp_db_passes(self) -> None:
+        report = preflight.run_primary_compat_preflight()
+        self.assertEqual(report["overall_status"], preflight.PASS)
+        self.assertEqual(report["recommendation"], preflight.READY)
+        self.assertFalse(report["primary_db_touched"])
+        self.assertTrue(report["opened_read_only"])
+        self.assertFalse(report["immutable_mode_used"])
+        self.assertTrue(report["integrity_required"])
+
+    def test_json_output_contains_required_fields(self) -> None:
+        report = preflight.run_primary_compat_preflight()
+        for key in _REQUIRED_JSON_FIELDS:
+            self.assertIn(key, report)
+        self.assertEqual(report["does_not_prove"], preflight._DOES_NOT_PROVE)
+
+    def test_matching_primary_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path, _ = self._primary_with_writer(tmpdir)
+            report = preflight.run_primary_compat_preflight(db_path=str(path))
+        self.assertEqual(report["overall_status"], preflight.PASS)
+        self.assertEqual(report["recommendation"], preflight.READY)
+        self.assertFalse(report["primary_db_touched"])
+
+    def test_missing_table_needs_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path, wdb = self._primary_with_writer(tmpdir)
+            with wdb.transaction() as cur:
+                cur.execute("DROP TABLE phase_recovery_cursors")
+            report = preflight.run_primary_compat_preflight(db_path=str(path))
+        self.assertEqual(report["overall_status"], preflight.FAIL)
+        self.assertEqual(report["recommendation"], preflight.NEEDS_REPAIR)
+
+    def test_missing_unique_index_needs_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path, wdb = self._primary_with_writer(tmpdir)
+            with wdb.transaction() as cur:
+                cur.execute("DROP INDEX ux_phase_recovery_cursors_task_run")
+            report = preflight.run_primary_compat_preflight(db_path=str(path))
+        self.assertEqual(report["overall_status"], preflight.FAIL)
+        self.assertEqual(report["recommendation"], preflight.NEEDS_REPAIR)
+
+    def test_subset_extra_objects_still_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path, wdb = self._primary_with_writer(tmpdir)
+            with wdb.transaction() as cur:
+                cur.execute("ALTER TABLE phase_checkpoints ADD COLUMN extra_col TEXT")
+                cur.execute("CREATE TABLE unrelated_extra (id TEXT PRIMARY KEY)")
+            report = preflight.run_primary_compat_preflight(db_path=str(path))
+        self.assertEqual(report["overall_status"], preflight.PASS)
+
+    def test_open_failure_is_blocked(self) -> None:
+        report = preflight.run_primary_compat_preflight(db_path="/nonexistent/dir/claw.db")
+        self.assertEqual(report["overall_status"], preflight.FAIL)
+        self.assertEqual(report["recommendation"], preflight.BLOCKED)
+        self.assertFalse(report["opened_read_only"])
+        self.assertFalse(report["primary_db_touched"])
+
+    def test_read_only_enforcement_write_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path, _ = self._primary_with_writer(tmpdir)
+            conn = preflight._open_readonly(path)
+            self.addCleanup(conn.close)
+            with self.assertRaises(sqlite3.OperationalError):
+                conn.execute("CREATE TABLE should_fail (x TEXT)")
+            query_only = conn.execute("PRAGMA query_only").fetchone()[0]
+        self.assertEqual(int(query_only), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -208,3 +208,160 @@ def _check_integrity(conn: sqlite3.Connection) -> _PathResult:
         details={"quick_check": results[:5]},
     )
     return _finalize(result, "integrity_ok")
+
+
+def _read_found_schema_version(conn: sqlite3.Connection) -> int | None:
+    """Best-effort: the max schema_version across populated F2 tables, or None
+    when all are empty/absent."""
+    best: int | None = None
+    for table in F2_DURABILITY_TABLES:
+        try:
+            row = conn.execute(
+                f"SELECT MAX(schema_version) AS v FROM {table}"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            continue
+        value = row["v"]
+        if value is not None:
+            best = value if best is None else max(best, int(value))
+    return best
+
+
+def _blocked_report(
+    *, db_path_checked: str, opened_read_only: bool, reasons: list[str]
+) -> dict[str, Any]:
+    """Fail-closed report for paths where no checks ran (open failure / exception)."""
+    return {
+        "overall_status": FAIL,
+        "db_path_checked": db_path_checked,
+        "opened_read_only": opened_read_only,
+        "immutable_mode_used": False,
+        "primary_db_touched": False,
+        "schema_version_expected": F2_DURABILITY_SCHEMA_VERSION,
+        "schema_version_found": None,
+        "schema_path": FAIL,
+        "index_path": FAIL,
+        "counts_path": FAIL,
+        "integrity_path": FAIL,
+        "integrity_required": True,
+        "f2_table_counts": {table: None for table in F2_DURABILITY_TABLES},
+        "non_empty_f2_tables": [],
+        "reasons": reasons,
+        "checks": {},
+        "recommendation": BLOCKED,
+        "does_not_prove": _DOES_NOT_PROVE,
+    }
+
+
+def _run_checks(
+    conn: sqlite3.Connection, expected: ExpectedSchema, *, db_path_checked: str
+) -> dict[str, Any]:
+    schema = _check_schema(conn, expected)
+    index = _check_indexes(conn, expected)
+    counts = _check_counts(conn)
+    integrity = _check_integrity(conn)
+    found_version = _read_found_schema_version(conn)
+
+    reasons: list[str] = []
+    reasons.extend(f"schema:{r}" for r in schema.reasons)
+    reasons.extend(f"index:{r}" for r in index.reasons)
+    reasons.extend(f"counts:{r}" for r in counts.reasons)
+    reasons.extend(f"integrity:{r}" for r in integrity.reasons)
+
+    version_ok = found_version is None or found_version == expected.schema_version
+    if not version_ok:
+        reasons.append(f"schema_version_mismatch:found={found_version}")
+
+    paths_pass = all(
+        p.status == PASS for p in (schema, index, counts, integrity)
+    ) and version_ok
+    overall = PASS if paths_pass else FAIL
+    if overall == PASS:
+        recommendation = READY
+        reasons.append("primary_f2_compatible")
+    elif schema.status == FAIL or index.status == FAIL or not version_ok:
+        recommendation = NEEDS_REPAIR
+    else:
+        recommendation = BLOCKED
+
+    return {
+        "overall_status": overall,
+        "db_path_checked": db_path_checked,
+        "opened_read_only": True,
+        "immutable_mode_used": False,
+        "primary_db_touched": False,
+        "schema_version_expected": expected.schema_version,
+        "schema_version_found": found_version,
+        "schema_path": schema.status,
+        "index_path": index.status,
+        "counts_path": counts.status,
+        "integrity_path": integrity.status,
+        "integrity_required": True,
+        "f2_table_counts": counts.details.get("f2_table_counts", {}),
+        "non_empty_f2_tables": counts.details.get("non_empty_f2_tables", []),
+        "reasons": reasons,
+        "checks": {
+            "schema": schema.details,
+            "index": index.details,
+            "counts": counts.details,
+            "integrity": integrity.details,
+        },
+        "recommendation": recommendation,
+        "does_not_prove": _DOES_NOT_PROVE,
+    }
+
+
+def run_primary_compat_preflight(*, db_path: str | None = None) -> dict[str, Any]:
+    """Run the read-only F2 primary compatibility preflight and return a
+    structured, fail-closed report. Never writes to ``db_path``."""
+    try:
+        expected = expected_f2_schema()
+    except Exception as exc:  # building the expected schema itself failed
+        return _blocked_report(
+            db_path_checked=db_path or "temp",
+            opened_read_only=False,
+            reasons=[f"expected_schema_build_failed:{exc.__class__.__name__}", str(exc)],
+        )
+
+    if db_path is None:
+        # Smoke: build a temp 'primary', keep its writer open so the read-only
+        # open sees the WAL, and check it against the expected schema.
+        try:
+            with tempfile.TemporaryDirectory(prefix="f2-compat-smoke-") as tmpdir:
+                temp_path = Path(tmpdir) / "claw.db"
+                writer = RuntimeDb(temp_path)
+                try:
+                    F2DurabilityStore(writer)
+                    conn = _open_readonly(temp_path)
+                    try:
+                        return _run_checks(conn, expected, db_path_checked="temp")
+                    finally:
+                        conn.close()
+                finally:
+                    writer.close()
+        except Exception as exc:
+            return _blocked_report(
+                db_path_checked="temp",
+                opened_read_only=False,
+                reasons=[f"unexpected_exception:{exc.__class__.__name__}", str(exc)],
+            )
+
+    target = Path(db_path)
+    try:
+        conn = _open_readonly(target)
+    except Exception as exc:
+        return _blocked_report(
+            db_path_checked=str(target),
+            opened_read_only=False,
+            reasons=[f"read_only_open_failed:{exc.__class__.__name__}", str(exc)],
+        )
+    try:
+        return _run_checks(conn, expected, db_path_checked=str(target))
+    except Exception as exc:
+        return _blocked_report(
+            db_path_checked=str(target),
+            opened_read_only=True,
+            reasons=[f"unexpected_exception:{exc.__class__.__name__}", str(exc)],
+        )
+    finally:
+        conn.close()
