@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "Stage 2C2 isolated synthetic F2 canary harness"
-doc_version: 2.36
+describes_commit: "F2 primary DB compatibility preflight (read-only)"
+doc_version: 2.37
 last_verified: 2026-06-25
-verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks + stage2c2_synthetic_canary --temp-db --json smoke (overall PASS, temp_db_only/primary_db_touched verified) and targeted pytest"
+verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks + stage2c2_synthetic_canary --temp-db --json smoke (overall PASS, temp_db_only/primary_db_touched verified) and targeted pytest + f2_primary_compat_preflight --temp-db --json smoke (overall PASS, opened_read_only/immutable_mode_used/primary_db_touched verified) and targeted pytest"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -440,6 +440,47 @@ invariants:
       - tests/test_stage2c2_synthetic_canary.py::Stage2C2SyntheticCanaryTests::test_duplicate_idempotency_returns_existing_row
       - tests/test_stage2c2_synthetic_canary.py::Stage2C2SyntheticCanaryTests::test_json_output_contains_required_fields
       - tests/test_stage2c2_synthetic_canary.py::Stage2C2SyntheticCanaryTests::test_no_real_work_paths_invoked
+
+  primary_f2_compatibility_preflight_is_read_only:
+    rule: The F2 primary compatibility preflight only ever READS a supplied DB.
+          A supplied `--db-path` is opened `mode=ro` (URI `?mode=ro`) plus
+          `PRAGMA query_only=ON`; it MUST NOT be opened `immutable=1` (the live
+          daemon is the single RuntimeDb WAL writer, and `immutable` ignores the
+          `-wal`, yielding a stale snapshot). It never constructs a writing
+          `RuntimeDb`/`F2DurabilityStore` against the supplied path — those are
+          built only on its own temp DBs (for the expected-schema derivation and
+          the `--temp-db` smoke). `primary_db_touched` is always false.
+    entrypoint: `python -m claw_v2.f2_primary_compat_preflight --db-path data/claw.db --json`
+    replaces: The proposed primary seed/verify/purge synthetic canary
+          (`primary_f2_write_path_incompatibility_canary`), rejected by the
+          operator 2026-06-25 (mutating the primary buys little vs its cost).
+    retires_failure_mode: `primary_f2_write_path_incompatibility` — the first
+          real F2 write to the primary failing/corrupting/behaving differently
+          due to schema drift, missing real indexes/constraints, or physical
+          state. Answered read-only: do the F2 tables/columns/unique-indexes the
+          code expects exist (subset semantics) and does `quick_check` pass?
+    does_not_prove: NOT the live F2 write path, crash recovery, WAL concurrency,
+          a real executor, the durable NotebookLM lane, external-effect dedup,
+          or Stage 3. A `PRIMARY_COMPAT_PREFLIGHT_READY` result means only that
+          the primary schema is compatible — it is NOT a signal that enabling F2
+          live (Gate B / Stage 2C2) is safe. Each gate stays separate.
+    output_contract: Structured `--json` includes `overall_status`,
+          `recommendation` (PRIMARY_COMPAT_PREFLIGHT_READY / NEEDS_REPAIR /
+          BLOCKED), `db_path_checked`, `opened_read_only`, `immutable_mode_used`
+          (false), `primary_db_touched` (false), `schema_version_expected`,
+          `schema_version_found`, `schema_path`, `index_path`, `counts_path`,
+          `integrity_path`, `integrity_required` (true), `f2_table_counts`,
+          `non_empty_f2_tables`, `reasons`, `checks`, and `does_not_prove`. Fails
+          closed (`BLOCKED`) on read-only open failure or any exception.
+    enforced_by:
+      - tests/test_f2_primary_compat_preflight.py::RunReportTests::test_read_only_enforcement_write_raises
+      - tests/test_f2_primary_compat_preflight.py::RunReportTests::test_open_failure_is_blocked
+      - tests/test_f2_primary_compat_preflight.py::RunReportTests::test_matching_primary_passes
+      - tests/test_f2_primary_compat_preflight.py::RunReportTests::test_missing_table_needs_repair
+      - tests/test_f2_primary_compat_preflight.py::RunReportTests::test_missing_unique_index_needs_repair
+      - tests/test_f2_primary_compat_preflight.py::RunReportTests::test_subset_extra_objects_still_passes
+      - tests/test_f2_primary_compat_preflight.py::RunReportTests::test_json_output_contains_required_fields
+      - tests/test_f2_primary_compat_preflight.py::CliTests::test_cli_db_path_is_read_only
 
   external_effect_recovery_is_idempotent_and_never_auto_replays:
     rule: F2 recovery classifies external-effect evidence only; it never
