@@ -600,7 +600,6 @@ class AppConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(config.scheduled_sub_agents[0].agent, "alma")
         self.assertEqual(config.scheduled_sub_agents[0].skill, "daily-brief")
 
-
     def test_notebooklm_research_durable_defaults_false_and_reads_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home = str(Path(tmpdir) / "home")
