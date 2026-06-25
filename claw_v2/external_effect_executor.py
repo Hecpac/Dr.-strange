@@ -99,8 +99,10 @@ class F2ExternalEffectExecutor:
         ):
             return self._apply(spec, record, adapter, verifier)
         # Interrupted attempt: a recoverable in-flight status carried over a crash.
-        if status == "apply_in_progress" or (
-            status in _RECOVERABLE_STATUSES and record.attempt_count > 0
+        # apply_in_progress recovers regardless of attempt_count; the other
+        # recoverable statuses only once an attempt has been made.
+        if status in _RECOVERABLE_STATUSES and (
+            status == "apply_in_progress" or record.attempt_count > 0
         ):
             return self._recover(spec, record, adapter, verifier)
         raise ValueError(f"unroutable external-effect status: {status}")

@@ -2363,7 +2363,7 @@ def build_runtime(
         name="skill_expand",
         handler=lambda: skill_expand_runner.run_available(limit=1),
     )
-    if config.f2_durability_enabled and config.notebooklm_research_durable:
+    if config.notebooklm_research_durable_active:
         from claw_v2.notebooklm_research_runner import (
             NotebookLMResearchRunner,
             make_nlm_deep_research_fn,

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import logging
 import re
 import threading
@@ -429,8 +428,9 @@ class NotebookLMService:
         # later re-request still creates a new job (spec §6 preserved).
         resume_key: str | None = None
         if durable:
-            content_hash = hashlib.sha256(f"{query}|{mode}".encode()).hexdigest()
-            resume_key = f"nlm-research:{full_id}:{content_hash}"
+            from claw_v2.notebooklm_research_effect import research_content_hash
+
+            resume_key = f"nlm-research:{full_id}:{research_content_hash(query, mode)}"
         job_id: str | None = None
         if self._job_service is not None:
             job = self._job_service.enqueue(

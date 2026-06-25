@@ -18,12 +18,13 @@ _EFFECT_KIND = "notebooklm_research"
 _PHASE = "research"
 
 
-def _imported_count_from_result(result_json: str | None) -> int | None:
+def imported_count_from_result(result_json: str | None) -> int | None:
     """Extract imported_count from a stored result JSON string.
 
     Returns None when the result is absent, unparseable, not a dict, missing the
     key, or non-int — so callers can fail closed on anything other than a clean
-    positive count.
+    positive count. Shared by the verifier (here) and the runner's completion
+    metadata.
     """
     if not result_json:
         return None
@@ -37,6 +38,16 @@ def _imported_count_from_result(result_json: str | None) -> int | None:
         return int(data["imported_count"])
     except (ValueError, TypeError):
         return None
+
+
+def research_content_hash(query: str, mode: str) -> str:
+    """Stable content hash for a (query, mode) research request.
+
+    Used both for ``EffectSpec.content_hash`` (idempotency-key input) and the
+    ``JobService`` resume_key in ``start_research`` — they MUST agree, so they
+    share this single definition.
+    """
+    return hashlib.sha256(f"{query}|{mode}".encode()).hexdigest()
 
 
 def build_research_effect_spec(
@@ -58,7 +69,7 @@ def build_research_effect_spec(
         raise ValueError(
             f"pre_intent_source_count must be a non-negative int, got {pre_intent_source_count!r}"
         )
-    content_hash = hashlib.sha256(f"{query}|{mode}".encode()).hexdigest()
+    content_hash = research_content_hash(query, mode)
     return EffectSpec(
         task_id=task_id or job_id,
         run_id=job_id,
@@ -129,7 +140,7 @@ def notebooklm_research_verifier(
         # imported_count > 0"). A committed result with no imports — or an
         # unparseable result — is not a silent success; fail closed.
         if record.result_json:
-            imported = _imported_count_from_result(record.result_json)
+            imported = imported_count_from_result(record.result_json)
             if imported is not None and imported > 0:
                 return VerifierVerdict(
                     "verified_applied",
@@ -146,13 +157,7 @@ def notebooklm_research_verifier(
         # rebuilt spec. record.request is the parsed dict (None on a JSON parse
         # error). Fail closed if the original request / baseline is unavailable.
         record_request = record.request
-        if record_request is None or not isinstance(record_request, dict):
-            return VerifierVerdict(
-                "blocked_manual_review",
-                {"pre": None, "current": None},
-                "pre_count_unavailable",
-            )
-        if "pre_intent_source_count" not in record_request:
+        if not isinstance(record_request, dict) or "pre_intent_source_count" not in record_request:
             return VerifierVerdict(
                 "blocked_manual_review",
                 {"pre": None, "current": None},

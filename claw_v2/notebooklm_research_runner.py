@@ -7,7 +7,6 @@ state. Maintenance-gate (A2) is enforced automatically by ``JobService.claim_nex
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Callable
 
@@ -17,6 +16,7 @@ from claw_v2.f2_durability_store import F2DurabilityStore
 from claw_v2.jobs import JobService
 from claw_v2.notebooklm_research_effect import (
     build_research_effect_spec,
+    imported_count_from_result,
     notebooklm_research_adapter,
     notebooklm_research_verifier,
 )
@@ -117,8 +117,11 @@ class NotebookLMResearchRunner:
     ) -> None:
         self._jobs = job_service
         self._executor = F2ExternalEffectExecutor(store)
-        self._deep_research_fn = deep_research_fn
         self._status_fn = status_fn
+        # Adapter and verifier are stateless wrappers over the injected callables;
+        # build them once rather than per run_once tick.
+        self._adapter = notebooklm_research_adapter(deep_research_fn)
+        self._verifier = notebooklm_research_verifier(status_fn)
         self._observe = observe
         self._notifier = notifier
 
@@ -172,11 +175,8 @@ class NotebookLMResearchRunner:
             max_attempts=job.max_attempts,
         )
 
-        adapter = notebooklm_research_adapter(self._deep_research_fn)
-        verifier = notebooklm_research_verifier(self._status_fn)
-
         try:
-            outcome = self._executor.execute(spec, adapter, verifier)
+            outcome = self._executor.execute(spec, self._adapter, self._verifier)
         except Exception as exc:
             logger.exception("notebooklm_research_runner: adapter raised for job %s", job_id)
             self._jobs.fail(job_id, error=str(exc), retry=True)
@@ -187,11 +187,7 @@ class NotebookLMResearchRunner:
                 job_id,
                 result={
                     "notebook_id": notebook_id,
-                    "imported_count": (
-                        outcome.record.result_json
-                        and _parse_imported_count(outcome.record.result_json)
-                    )
-                    or 0,
+                    "imported_count": imported_count_from_result(outcome.record.result_json) or 0,
                     "external_effect_id": outcome.record.external_effect_id,
                 },
             )
@@ -234,14 +230,3 @@ class NotebookLMResearchRunner:
                     )
 
         return True
-
-
-def _parse_imported_count(result_json: str) -> int | None:
-    """Extract imported_count from the stored result JSON string, if present."""
-    try:
-        data = json.loads(result_json)
-        if isinstance(data, dict):
-            return int(data.get("imported_count", 0))
-    except Exception:
-        pass
-    return None
