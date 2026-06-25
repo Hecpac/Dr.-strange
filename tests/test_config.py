@@ -24,6 +24,26 @@ class AppConfigDefaultsTests(unittest.TestCase):
                 os.chdir(previous_cwd)
         self.assertEqual(config.workspace_root, Path(tmpdir).resolve())
 
+    def test_brain_tooluse_verify_timeout_parsing(self) -> None:
+        home = str(Path.home())
+        with patch.dict(os.environ, {"HOME": home}, clear=True):
+            self.assertIsNone(AppConfig.from_env().brain_tooluse_verify_timeout_seconds)
+        with patch.dict(
+            os.environ,
+            {"HOME": home, "BRAIN_TOOLUSE_VERIFY_TIMEOUT_SECONDS": "30"},
+            clear=True,
+        ):
+            self.assertEqual(AppConfig.from_env().brain_tooluse_verify_timeout_seconds, 30.0)
+        # Invalid / non-positive -> fail closed to None (verifier keeps its
+        # bounded role-default timeout; the operator is not silently unbounded).
+        for bad in ("abc", "0", "-5"):
+            with patch.dict(
+                os.environ,
+                {"HOME": home, "BRAIN_TOOLUSE_VERIFY_TIMEOUT_SECONDS": bad},
+                clear=True,
+            ):
+                self.assertIsNone(AppConfig.from_env().brain_tooluse_verify_timeout_seconds)
+
     def test_max_autonomous_workers_defaults_and_env_override(self) -> None:
         home = str(Path.home())
         with patch.dict(os.environ, {"HOME": home}, clear=True):

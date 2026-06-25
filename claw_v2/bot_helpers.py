@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import unicodedata
 from contextvars import ContextVar
@@ -23,6 +24,8 @@ from claw_v2.turn_context import (  # P0-B: re-export the turn_id helpers from b
     new_turn_id,
     turn_id_context,
 )
+
+logger = logging.getLogger(__name__)
 
 _CRITICAL_WORKER_ERROR_PREFIX = "critical_worker_error:"
 _CRITICAL_WORKER_VISIBLE_MESSAGE = (
@@ -2003,11 +2006,18 @@ def verify_brain_tooluse(
     output_summaries: list[str] | None = None,
     response_excerpt: str = "",
     lane_overrides: dict[str, dict[str, Any]] | None = None,
+    timeout_seconds: float | None = None,
 ) -> str:
     """Verify a substantive brain-tool-use turn from its real artifacts.
 
     Dispatches one verifier-lane task directly, without research/synthesis
     phases. The close path does not call this helper until the B1 wiring lands.
+
+    ``timeout_seconds`` (from ``BRAIN_TOOLUSE_VERIFY_TIMEOUT_SECONDS``), when
+    set, bounds the verifier dispatch as its per-task provider timeout. A bound
+    that fires surfaces as a dispatch error with no verdict and resolves to
+    ``pending`` (fail-closed, never ``passed``). ``None`` keeps the verifier
+    lane's role-default timeout.
     """
     evidence_lines: list[str] = []
     if files_written:
@@ -2033,6 +2043,7 @@ def verify_brain_tooluse(
         name="verify_brain_action",
         instruction=instruction,
         lane="verifier",
+        timeout_seconds=timeout_seconds,
     )
     try:
         trace = new_trace_context(job_id=task_id, artifact_id=task_id)
@@ -2042,9 +2053,29 @@ def verify_brain_tooluse(
             lane_overrides=lane_overrides,
         )
     except Exception:
+        # Fail-closed: a dispatch failure (incl. a provider timeout) yields no
+        # verdict. Record it generically — never echo the raw error, which may
+        # carry secrets.
+        logger.warning(
+            "brain_tooluse verifier dispatch failed; returning pending (task_id=%s)",
+            task_id,
+        )
         return "pending"
     text = "\n".join(str(getattr(result, "content", "") or "") for result in results)
-    return _extract_verification_status(text) or "pending"
+    verdict = _extract_verification_status(text) or "pending"
+    if verdict == "pending" and any(
+        getattr(result, "error", None) and not str(getattr(result, "content", "") or "").strip()
+        for result in results
+    ):
+        # A verifier worker that returned an error with no content (e.g. the
+        # provider timeout from timeout_seconds) is fail-closed to pending.
+        # Generic marker only — the raw error is never logged.
+        logger.warning(
+            "brain_tooluse verifier produced no verdict (dispatch error/timeout); "
+            "returning pending (task_id=%s)",
+            task_id,
+        )
+    return verdict
 
 
 def _build_checkpoint(
