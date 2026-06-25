@@ -61,6 +61,11 @@ class Stage2C2SyntheticCanaryTests(unittest.TestCase):
                 "non_temp_db_path_refused_requires_future_operator_authorization",
                 report["reasons"],
             )
+            # FAIL paths must honor the full report contract (they share the
+            # _failed_report skeleton with the exception path), so the
+            # safety-reporting fields can't silently drift.
+            for field_name in _REQUIRED_JSON_FIELDS:
+                self.assertIn(field_name, report)
             # Untouched: not opened as sqlite, bytes and mtime unchanged.
             self.assertEqual(target.read_bytes(), before_bytes)
             self.assertEqual(target.stat().st_mtime_ns, before_mtime)
