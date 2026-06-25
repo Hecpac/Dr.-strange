@@ -511,6 +511,7 @@ class AppConfig:
     maintenance_mode_enabled: bool = False
     no_job_claim_enabled: bool = False
     f2_durability_enabled: bool = False
+    notebooklm_research_durable: bool = False
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -779,6 +780,7 @@ class AppConfig:
                 "CLAW_F2_DURABILITY_ENABLED",
                 _env_bool("F2_DURABILITY_ENABLED", False),
             ),
+            notebooklm_research_durable=_env_bool("CLAW_NOTEBOOKLM_RESEARCH_DURABLE", False),
         )
 
     def ensure_directories(self) -> None:
