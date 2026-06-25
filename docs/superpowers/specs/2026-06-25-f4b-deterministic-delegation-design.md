@@ -1,5 +1,7 @@
 # F4-B1 — Deterministic delegation for high-confidence authenticated browse intents (Design)
 
+> ⚠️ **SUPERSEDED in part (2026-06-25).** The original `start_autonomous_task(idempotency_key=…)` + gate pre-check approach described below was replaced during review by an **atomic `JobService.reserve` creator election** (the `idempotency_key` plumbing on `start_autonomous_task` was reverted — that API is NOT implemented). A further **recoverable delivery state-machine redesign** (durable `f4b.delegation` job + registered runner + idempotent task creation) is pending. Treat the `idempotency_key` references in this doc as historical; the live contract is in `INTERNAL_WIRING.md` invariant `high_confidence_delegation_intents_do_not_depend_on_model_tool_choice`.
+
 Status: Design, 2026-06-25. Scope = F4-B1 only. NOT F4-B2 (post-model anti-confabulation / forced-action loop). Behind a dedicated flag, default OFF.
 
 ## Problem (verified)
