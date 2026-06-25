@@ -135,11 +135,13 @@ from claw_v2.skill_expand_jobs import SkillExpandJobRunner, enqueue_skill_expand
 logger = logging.getLogger(__name__)
 
 AUTONOMY_STALE_RUNNING_JOB_KINDS = (
-    # NotebookLM jobs do not have a daemon-registered retry consumer yet.
-    # Keep stale rows visible in diagnostics until that durable lane exists.
+    # NotebookLM jobs have no daemon-registered retry consumer, so they must not
+    # be requeued here. Orphaned notebooklm.* running rows are instead retired to
+    # a terminal state by the notebooklm_stale_running_job_reconcile lane below.
     "coordinator.autonomous_task",
 )
 AUTONOMY_STALE_RUNNING_JOB_SECONDS = 6 * 60 * 60
+NOTEBOOKLM_STALE_RECONCILE_KIND_PREFIX = "notebooklm."
 
 
 @dataclass(slots=True)
@@ -1638,6 +1640,36 @@ def _setup_scheduler(
             interval=300.0,
         )
 
+        def _notebooklm_stale_job_reconcile_handler() -> int:
+            # NotebookLM jobs run in an ephemeral request-spawned thread with no
+            # durable consumer; a daemon restart mid-research orphans the row in
+            # `running` forever. Retire stale orphans to a terminal `failed`
+            # state (never retry — that would re-run expensive CDP/external work).
+            reconciled = job_service.recover_stale_running(
+                kind_prefix=NOTEBOOKLM_STALE_RECONCILE_KIND_PREFIX,
+                stale_after_seconds=AUTONOMY_STALE_RUNNING_JOB_SECONDS,
+                no_retry=True,
+                error="stale_running_no_durable_consumer",
+                event_type="notebooklm_stale_running_job_reconciled",
+            )
+            if reconciled:
+                observe.emit(
+                    "notebooklm_stale_running_jobs_reconciled",
+                    payload={
+                        "count": len(reconciled),
+                        "kinds": sorted({job.kind for job in reconciled}),
+                        "job_ids": [job.job_id for job in reconciled[:20]],
+                        "stale_after_seconds": AUTONOMY_STALE_RUNNING_JOB_SECONDS,
+                    },
+                )
+            return len(reconciled)
+
+        daemon.register_background_job_runner(
+            name="notebooklm_stale_running_job_reconcile",
+            handler=_notebooklm_stale_job_reconcile_handler,
+            interval=300.0,
+        )
+
     scheduler.register(
         ScheduledJob(
             name="heartbeat", interval_seconds=config.heartbeat_interval, handler=heartbeat.emit
@@ -2209,9 +2241,7 @@ def build_runtime(
     )
     observe.emit("agent_startup_context", payload=startup_context_report.to_dict())
     if config.maintenance_mode_enabled:
-        payload = maintenance_assertion_payload(
-            f2_durability_enabled=config.f2_durability_enabled
-        )
+        payload = maintenance_assertion_payload(f2_durability_enabled=config.f2_durability_enabled)
         logger.warning(payload["message"])
         observe.emit("maintenance_mode_gate_assertion", payload=payload)
     if (

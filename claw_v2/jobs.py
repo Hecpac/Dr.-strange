@@ -552,6 +552,8 @@ class JobService:
         *,
         stale_after_seconds: float,
         kinds: Iterable[str] | None = None,
+        kind_prefix: str | None = None,
+        no_retry: bool = False,
         now: float | None = None,
         limit: int = 100,
         retry_delay_seconds: float = 0.0,
@@ -575,6 +577,9 @@ class JobService:
             placeholders = ", ".join("?" for _ in kind_list)
             where += f" AND kind IN ({placeholders})"
             params.extend(kind_list)
+        if kind_prefix:
+            where += " AND kind LIKE ?"
+            params.append(f"{kind_prefix}%")
         params.append(max(1, min(int(limit), 100)))
 
         def candidate_ids_once() -> list[str]:
@@ -603,6 +608,7 @@ class JobService:
                 now=current,
                 retry_delay_seconds=retry_delay_seconds,
                 error=error,
+                no_retry=no_retry,
             )
             if record is None:
                 continue
@@ -619,6 +625,7 @@ class JobService:
         now: float,
         retry_delay_seconds: float,
         error: str,
+        no_retry: bool = False,
     ) -> JobRecord | None:
         def recover_once() -> sqlite3.Row | None:
             with self._lock:
@@ -643,7 +650,7 @@ class JobService:
                         return None
                     attempts = int(row["attempts"] or 0)
                     max_attempts = int(row["max_attempts"] or 1)
-                    should_retry = attempts < max_attempts
+                    should_retry = attempts < max_attempts and not no_retry
                     status = "retrying" if should_retry else "failed"
                     completed_at = None if should_retry else now
                     next_run_at = (
