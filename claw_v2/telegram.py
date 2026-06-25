@@ -2526,14 +2526,13 @@ class TelegramTransport:
             "session_id": session_id,
             "text": text,
         }
-        # The inbound-delivery id (F4-B1) is consumed only by the bot_service
-        # gate; do not forward it to the external agent runtime, preserving its
-        # prior reply-context-only metadata contract.
-        agent_metadata = context_metadata
-        if isinstance(agent_metadata, dict) and "inbound" in agent_metadata:
-            agent_metadata = {k: v for k, v in agent_metadata.items() if k != "inbound"} or None
-        if agent_metadata is not None:
-            kwargs["metadata"] = agent_metadata
+        # Forward the full metadata (incl. the F4-B1 inbound-delivery id): in
+        # prod TelegramTransport runs with an agent_runtime (lifecycle.py), and
+        # AgentRuntime.handle_text relays metadata → bot_service.handle_text
+        # `context_metadata`, which is where the deterministic-delegation gate
+        # reads the delivery id. Stripping it here would make the gate inert.
+        if context_metadata is not None:
+            kwargs["metadata"] = context_metadata
         response = self._agent_runtime.handle_text(**kwargs)
         return response.text
 

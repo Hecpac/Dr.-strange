@@ -3522,8 +3522,11 @@ class BotService:
         return match.group(1).strip(" .,:;!?`'\"") or None
 
     def _emit_f4_delegation_event(self, event: str, payload: dict[str, Any]) -> None:
+        observe = getattr(self, "observe", None)
+        if observe is None:
+            return
         try:
-            self.observe.emit(event, payload=payload)
+            observe.emit(event, payload=payload)
         except Exception:
             logger.debug("%s emit failed", event, exc_info=True)
 

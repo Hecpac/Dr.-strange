@@ -831,6 +831,7 @@ class HandleTextTests(unittest.IsolatedAsyncioTestCase):
             external_session_id="1",
             session_id="tg-1",
             text="hello",
+            metadata={"inbound": {"channel": "telegram"}},
         )
 
     async def test_reply_to_text_is_passed_as_context_metadata(self) -> None:

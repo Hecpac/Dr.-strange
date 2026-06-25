@@ -32,10 +32,28 @@ class ClassifierTests(unittest.TestCase):
             "revisa mi feed de X",
             "dale una vuelta a mi timeline de twitter",
             "chequea mi TL de X",
-            "repasa mi feed",
+            "repasa mi feed de X",
         ):
             with self.subTest(text=text):
                 self.assertTrue(self._match(text))
+
+    # P2: bare feed/timeline without X must NOT match (prefer false negatives).
+    def test_bare_feed_without_x_not_matched(self) -> None:
+        for text in ("repasa mi feed", "revisa mi timeline", "dale una vuelta a mi tl"):
+            with self.subTest(text=text):
+                self.assertFalse(self._match(text))
+
+    # P2: an explicit non-X platform must NOT enqueue an X review.
+    def test_other_platform_not_matched(self) -> None:
+        for text in (
+            "revisa mi feed de Instagram",
+            "revisa mi timeline de Facebook",
+            "dale una vuelta a mi feed de tiktok",
+            "chequea mi linkedin",
+            "haz un repaso de mi feed de threads",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(self._match(text))
 
     # --- must NOT match (explicit non-captures from the brief) ---
     def test_brief_non_matches(self) -> None:
@@ -277,6 +295,41 @@ class RealChainIntegrationTests(unittest.TestCase):
                 self.assertIn("tarea de fondo", reply)
                 self.assertNotIn("ToolSearch", reply)
                 job = runtime.job_service.get_by_resume_key("f4b-delegation:tg-1:777")
+                self.assertIsNotNone(job)
+                assert job is not None
+                self.assertEqual(job.kind, "coordinator.autonomous_task")
+
+    def test_agent_runtime_path_forwards_inbound_id_to_gate(self) -> None:
+        # The PROD path: TelegramTransport runs with an agent_runtime, whose
+        # handle_text relays metadata -> bot_service.handle_text context_metadata.
+        # This is the path the P1 regression (stripping inbound) silently broke.
+        def _no_model(request: Any) -> Any:
+            raise AssertionError("brain executor must not be called for deterministic delegation")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_F4_DETERMINISTIC_DELEGATION": "1",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=_no_model)
+                runtime.bot._task_handler.coordinator = MagicMock()
+                resp = runtime.agent_runtime.handle_text(
+                    channel="telegram",
+                    external_user_id="123",
+                    external_session_id="1",
+                    session_id="tg-1",
+                    text="Haz un repaso por X",
+                    metadata={"inbound": {"channel": "telegram", "message_id": 888}},
+                )
+                self.assertIn("tarea de fondo", resp.text)
+                job = runtime.job_service.get_by_resume_key("f4b-delegation:tg-1:888")
                 self.assertIsNotNone(job)
                 assert job is not None
                 self.assertEqual(job.kind, "coordinator.autonomous_task")

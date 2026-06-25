@@ -38,7 +38,7 @@ _REJECT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bredact"),  # redacta
     re.compile(r"\bpostea|\bpublica|\bpubliqu"),
     re.compile(r"\bborrador\b|\bdraft\b|\bhilo\b|\btweet\b|\bpost\b"),
-    re.compile(r"\bque es\b|\bqué es\b"),  # definitional ("¿qué es X?")
+    re.compile(r"\bque es\b"),  # definitional ("¿qué es X?" → norm "que es x")
     re.compile(r"\bopina|\bopinas|\bpiensas de\b|\bque opinas\b"),  # opinion
     re.compile(r"\bresume\b|\bresumen\b|\bresumeme\b"),  # summarize-text
     # X-as-placeholder, not the platform:
@@ -57,14 +57,19 @@ _REVIEW_PHRASES: tuple[str, ...] = (
     "echa un vistazo",
     "echale un vistazo",
     "ponme al dia",
-    "ponme al día",
 )
 
-# Strong, unambiguous platform/feed signals.
-_STRONG_PLATFORM = re.compile(r"\btwitter\b|\b(feed|timeline|tl)\b")
-# Incident idiom: a review verb followed by "(por|de|en|a) X" — X as the
-# platform. Guarded against placeholders by _REJECT_PATTERNS above.
-_INCIDENT_SHAPE = re.compile(rf"\b{_REVIEW}\b.*\b(por|de|en|a)\s+x\b")
+# An explicit non-X platform means this is NOT an X-feed review (prevents
+# "revisa mi feed de Instagram" from enqueuing an X review).
+_OTHER_PLATFORM = re.compile(
+    r"\b(instagram|insta|facebook|fb|linkedin|tiktok|threads|youtube|yt|reddit|"
+    r"mastodon|bluesky|bsky|whatsapp|telegram)\b"
+)
+# X / Twitter must be EXPLICITLY the target. "x" counts as the platform only
+# after a preposition/possessive ("por/de/en/a/mi x"), so placeholder "x"
+# (already rejected: "punto x", "valor de x") and bare "feed"/"timeline" without
+# X never qualify — prefer false negatives over enqueuing the wrong feed.
+_X_PLATFORM = re.compile(r"\btwitter\b|\b(?:de|en|por|a|mi)\s+x\b")
 
 _OBJECTIVE = (
     "Revisa el feed autenticado de X (Twitter) del usuario por el carril de "
@@ -80,7 +85,7 @@ def classify_authenticated_browse_intent(text: str) -> AuthenticatedBrowseIntent
         return None
     norm = _normalize(text)
 
-    if any(p.search(norm) for p in _REJECT_PATTERNS):
+    if any(p.search(norm) for p in _REJECT_PATTERNS) or _OTHER_PLATFORM.search(norm):
         return None
 
     has_review = bool(re.search(rf"\b{_REVIEW}\b", norm)) or any(
@@ -89,8 +94,8 @@ def classify_authenticated_browse_intent(text: str) -> AuthenticatedBrowseIntent
     if not has_review:
         return None
 
-    has_platform = bool(_STRONG_PLATFORM.search(norm)) or bool(_INCIDENT_SHAPE.search(norm))
-    if not has_platform:
+    # X / Twitter must be the explicit target (no bare feed/timeline, no bare X).
+    if not _X_PLATFORM.search(norm):
         return None
 
     return AuthenticatedBrowseIntent(kind="authenticated_browse", objective=_OBJECTIVE)
