@@ -147,6 +147,9 @@ def _finalize(result: _PathResult, ok_reason: str) -> _PathResult:
 
 
 def _check_schema(conn: sqlite3.Connection, expected: ExpectedSchema) -> _PathResult:
+    # Compares column NAMES only (subset), not declared types — same narrow gap
+    # as the partial-index predicate: it only bites if the primary were built by
+    # something other than the same F2 DDL.
     reasons: list[str] = []
     found: dict[str, list[str]] = {}
     for table, exp_cols in expected.tables.items():

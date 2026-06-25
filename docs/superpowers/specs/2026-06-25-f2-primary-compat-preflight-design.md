@@ -223,9 +223,11 @@ The preflight never restarts the daemon, never uses launchctl, never enables F2.
 
 ## 10. INTERNAL_WIRING invariant
 
-Add invariant `primary_f2_compatibility_preflight_is_read_only` (AST-enforced
-in `tests/test_architecture_invariants.py`, following
-`stage2c2_synthetic_canary_uses_isolated_f2_state_only` / `diagnostics_read_only`):
+Add invariant `primary_f2_compatibility_preflight_is_read_only`, documented in
+`claw_v2/INTERNAL_WIRING.md` and enforced by the listed unit tests (the same
+documented-invariant + `enforced_by` pattern as
+`stage2c2_synthetic_canary_uses_isolated_f2_state_only` and
+`maintenance_preflight` — not an AST scan):
 the module must never construct a writing `RuntimeDb`/`F2DurabilityStore` against
 a supplied `--db-path`, must open supplied paths `mode=ro` only, and must not
 open with `immutable=1`. Document in INTERNAL_WIRING: this replaces the proposed
