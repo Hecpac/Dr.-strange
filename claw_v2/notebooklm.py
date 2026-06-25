@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import re
 import threading
@@ -414,6 +415,22 @@ class NotebookLMService:
             title = self._get_notebook_title(full_id)
         if full_id in self._running and self._running[full_id].is_alive():
             return f"Ya hay una operación en curso para este notebook ({full_id[:8]}...)."
+        # The durable lane is deep-only by construction (the CDP backend is
+        # inherently deep-only and the runner does not thread mode through), so
+        # any non-deep mode falls through to the thread path.
+        durable = self._research_durable and mode == "deep"
+        # In-flight collapse for the durable path: the thread path guards
+        # concurrent identical requests via `_running`, but the durable path
+        # spawns no thread, so two rapid identical start_research calls would
+        # enqueue two jobs with distinct run_ids → distinct effect keys → both
+        # import. A stable resume_key (per notebook+query+mode, matching the
+        # effect content_hash) collapses a concurrent identical request onto the
+        # active job; once the job is terminal the key frees, so a legitimate
+        # later re-request still creates a new job (spec §6 preserved).
+        resume_key: str | None = None
+        if durable:
+            content_hash = hashlib.sha256(f"{query}|{mode}".encode()).hexdigest()
+            resume_key = f"nlm-research:{full_id}:{content_hash}"
         job_id: str | None = None
         if self._job_service is not None:
             job = self._job_service.enqueue(
@@ -426,6 +443,7 @@ class NotebookLMService:
                     "external_backend": external_mode,
                 },
                 metadata={"notebook_title": title},
+                resume_key=resume_key,
             )
             job_id = job.job_id
         self._emit(
@@ -434,10 +452,8 @@ class NotebookLMService:
 
         # Durable lane: the runner (NotebookLMResearchRunner) claims the job
         # off-tick and drives it through F2ExternalEffectExecutor. No thread is
-        # spawned here. The durable lane is deep-only by construction (the CDP
-        # backend is inherently deep-only and the runner does not thread mode
-        # through), so any non-deep mode falls through to the thread path.
-        if self._research_durable and mode == "deep":
+        # spawned here.
+        if durable:
             return f"Deep Research encolado para '{query}' en notebook {title}..."
 
         def _worker():

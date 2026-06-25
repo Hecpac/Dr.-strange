@@ -160,6 +160,28 @@ class BuildSpecTests(unittest.TestCase):
                 pre_intent_source_count="bad",  # type: ignore[arg-type]
             )
 
+    def test_max_attempts_defaults_to_three(self):
+        spec = build_research_effect_spec(
+            job_id="job:1",
+            notebook_id="nb-1",
+            query="q",
+            mode="deep",
+            pre_intent_source_count=0,
+        )
+        self.assertEqual(spec.max_attempts, 3)
+
+    def test_max_attempts_threads_through(self):
+        """Spec §7: the effect budget is bounded by the job's max_attempts."""
+        spec = build_research_effect_spec(
+            job_id="job:1",
+            notebook_id="nb-1",
+            query="q",
+            mode="deep",
+            pre_intent_source_count=0,
+            max_attempts=5,
+        )
+        self.assertEqual(spec.max_attempts, 5)
+
 
 # ---------------------------------------------------------------------------
 # Task 2.2 — notebooklm_research_adapter

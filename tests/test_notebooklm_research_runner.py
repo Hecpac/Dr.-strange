@@ -368,6 +368,40 @@ class StartResearchRoutingTests(unittest.TestCase):
             self.assertEqual(all_jobs[0].payload["notebook_id"], "nb-full-id")
             self.assertEqual(all_jobs[0].payload["query"], "climate change")
 
+    def test_durable_concurrent_identical_collapses_to_one_job(self) -> None:
+        """Item #3: two rapid identical durable start_research calls (same
+        notebook+query+mode) must collapse onto a single active job via a stable
+        resume_key — restoring the in-flight protection the thread path had via
+        _running. The second call returns the existing job, not a new one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            from claw_v2.notebooklm import NotebookLMService
+
+            db_path = Path(tmp) / "claw.db"
+            jobs = JobService(db_path)
+            svc = NotebookLMService(job_service=jobs, research_durable=True)
+
+            svc.start_research("nb-full-id", "climate change", mode="deep")
+            svc.start_research("nb-full-id", "climate change", mode="deep")
+
+            all_jobs = jobs.list()
+            self.assertEqual(len(all_jobs), 1)
+
+    def test_durable_different_query_creates_distinct_jobs(self) -> None:
+        """A genuinely different request (different query) still creates a new
+        job — the resume_key is per notebook+query+mode (spec §6 preserved)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            from claw_v2.notebooklm import NotebookLMService
+
+            db_path = Path(tmp) / "claw.db"
+            jobs = JobService(db_path)
+            svc = NotebookLMService(job_service=jobs, research_durable=True)
+
+            svc.start_research("nb-full-id", "query A", mode="deep")
+            svc.start_research("nb-full-id", "query B", mode="deep")
+
+            all_jobs = jobs.list()
+            self.assertEqual(len(all_jobs), 2)
+
     def test_durable_off_uses_thread_path(self) -> None:
         """With research_durable=False (default), start_research spawns a thread."""
         import time
@@ -473,6 +507,87 @@ class StatusFnAdaptationTests(unittest.TestCase):
         status_fn = make_nlm_status_fn(lambda: FakeNlm())
         with self.assertRaises(RuntimeError):
             status_fn("nb")
+
+
+class DeepResearchFnTests(unittest.TestCase):
+    """make_nlm_deep_research_fn backend selection. The durable lane does NOT
+    support SDK mode — it must loud-fail rather than silently run CDP for an
+    SDK-configured notebook (item #2)."""
+
+    def test_sdk_mode_raises(self) -> None:
+        from claw_v2.notebooklm_research_runner import make_nlm_deep_research_fn
+
+        class FakeNlm:
+            _use_sdk = True
+            _use_external_backend = False
+            _cdp_research_fn = staticmethod(lambda nb, q: 3)
+
+        fn = make_nlm_deep_research_fn(lambda: FakeNlm())
+        with self.assertRaises(RuntimeError):
+            fn("nb", "q")
+
+    def test_cdp_mode_uses_cdp_fn(self) -> None:
+        from claw_v2.notebooklm_research_runner import make_nlm_deep_research_fn
+
+        class FakeNlm:
+            _use_sdk = False
+            _use_external_backend = False
+            _cdp_research_fn = staticmethod(lambda nb, q: 4)
+
+        fn = make_nlm_deep_research_fn(lambda: FakeNlm())
+        self.assertEqual(fn("nb", "q"), 4)
+
+    def test_external_mode_uses_backend(self) -> None:
+        from claw_v2.notebooklm_research_runner import make_nlm_deep_research_fn
+
+        class FakeBackend:
+            def deep_research(self, nb: str, q: str, mode: str = "deep") -> int:
+                return 6
+
+        class FakeNlm:
+            _use_sdk = False
+            _use_external_backend = True
+            _external_backend = FakeBackend()
+
+        fn = make_nlm_deep_research_fn(lambda: FakeNlm())
+        self.assertEqual(fn("nb", "q"), 6)
+
+
+class RunnerMaxAttemptsTests(unittest.TestCase):
+    def test_job_max_attempts_threads_into_effect_spec(self) -> None:
+        """Spec §7: the effect budget is bounded by the job's max_attempts. The
+        runner must pass job.max_attempts into the spec (not the default 3)."""
+        from unittest.mock import patch
+
+        import claw_v2.notebooklm_research_runner as runner_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs, store = _setup(tmp)
+            jobs.enqueue(
+                kind="notebooklm.research",
+                payload={"notebook_id": "nb-1", "query": "q", "mode": "deep"},
+                max_attempts=7,
+            )
+
+            captured: dict = {}
+            real_build = runner_mod.build_research_effect_spec
+
+            def _spy(*args, **kwargs):
+                captured.update(kwargs)
+                return real_build(*args, **kwargs)
+
+            runner = NotebookLMResearchRunner(
+                job_service=jobs,
+                store=store,
+                observe=None,
+                notifier=None,
+                deep_research_fn=lambda nb, q: 3,
+                status_fn=lambda nb: {"source_count": 0},
+            )
+            with patch.object(runner_mod, "build_research_effect_spec", _spy):
+                runner.run_once()
+
+            self.assertEqual(captured.get("max_attempts"), 7)
 
 
 class RunnerBaselineExceptionTests(unittest.TestCase):

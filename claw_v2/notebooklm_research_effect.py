@@ -25,8 +25,13 @@ def build_research_effect_spec(
     mode: str,
     pre_intent_source_count: int,
     task_id: str | None = None,
+    max_attempts: int = 3,
 ) -> EffectSpec:
-    """Build a fully-populated EffectSpec for a notebooklm_research effect."""
+    """Build a fully-populated EffectSpec for a notebooklm_research effect.
+
+    ``max_attempts`` bounds the effect-level apply budget (spec §7: "bounded by
+    the job's max_attempts"); the runner passes the originating job's value.
+    """
     if not isinstance(pre_intent_source_count, int) or pre_intent_source_count < 0:
         raise ValueError(
             f"pre_intent_source_count must be a non-negative int, got {pre_intent_source_count!r}"
@@ -47,6 +52,7 @@ def build_research_effect_spec(
         content_hash=content_hash,
         job_id=job_id,
         verifier_kind=_EFFECT_KIND,
+        max_attempts=max_attempts,
     )
 
 

@@ -72,6 +72,10 @@ def make_nlm_deep_research_fn(
         nlm = nlm_getter()
         if nlm is None:
             return 0
+        # SDK mode is test-only and not wired for the durable lane. Loud-fail
+        # rather than silently running CDP for an SDK-configured notebook.
+        if getattr(nlm, "_use_sdk", False):
+            raise RuntimeError("durable notebooklm research lane does not support SDK mode")
         if getattr(nlm, "_use_external_backend", False):
             ext = getattr(nlm, "_external_backend", None)
             if ext is not None:
@@ -160,6 +164,8 @@ class NotebookLMResearchRunner:
             mode=mode,
             pre_intent_source_count=pre_count,
             task_id=job.metadata.get("task_id") if job.metadata else None,
+            # Spec §7: bound the effect apply budget by the job's max_attempts.
+            max_attempts=job.max_attempts,
         )
 
         adapter = notebooklm_research_adapter(self._deep_research_fn)
