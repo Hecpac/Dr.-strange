@@ -97,6 +97,11 @@ def _introspect(executor: Any) -> tuple[dict[str, tuple[str, ...]], dict[str, _I
             if not int(idx["unique"]):
                 continue
             name = idx["name"]
+            # Only the unique index's columns are captured; a partial-index
+            # predicate (e.g. `WHERE write_key IS NOT NULL` on
+            # ux_phase_checkpoint_writes_key) is intentionally NOT verified —
+            # acceptable because the expected schema is derived from the same DDL
+            # that builds the primary.
             info = executor.execute(f"PRAGMA index_info({name})").fetchall()
             unique_indexes[name] = _IndexSpec(
                 name=name,

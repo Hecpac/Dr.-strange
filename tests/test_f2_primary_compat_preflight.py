@@ -44,16 +44,13 @@ class ExpectedSchemaTests(unittest.TestCase):
 
 
 class PathCheckTests(unittest.TestCase):
-    def _open_primary(self, tmpdir: str, *, build: bool = True) -> sqlite3.Connection:
+    def _open_primary(self, tmpdir: str) -> tuple[sqlite3.Connection, RuntimeDb]:
         """Build a temp 'primary' with the F2 schema, keep a writer open (so the
         read-only open sees the WAL), and return a read-only connection."""
         path = Path(tmpdir) / "claw.db"
         wdb = RuntimeDb(path)
-        if build:
-            F2DurabilityStore(wdb)
+        F2DurabilityStore(wdb)
         self.addCleanup(wdb.close)
-        self._writers = getattr(self, "_writers", [])
-        self._writers.append(wdb)
         conn = preflight._open_readonly(path)
         self.addCleanup(conn.close)
         return conn, wdb
@@ -216,6 +213,33 @@ class RunReportTests(unittest.TestCase):
                 conn.execute("CREATE TABLE should_fail (x TEXT)")
             query_only = conn.execute("PRAGMA query_only").fetchone()[0]
         self.assertEqual(int(query_only), 1)
+
+    def test_schema_version_mismatch_needs_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path, wdb = self._primary_with_writer(tmpdir)
+            with wdb.transaction() as cur:
+                cur.execute(
+                    "INSERT INTO phase_checkpoint_writes "
+                    "(write_id, task_id, run_id, phase, write_order, write_kind, "
+                    "schema_version, payload_json, payload_sha256, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "w-ver",
+                        "t-ver",
+                        "t-ver",
+                        "implementation",
+                        1,
+                        "phase_started",
+                        2,
+                        "{}",
+                        "sha256:x",
+                        "2026-06-25T00:00:00Z",
+                    ),
+                )
+            report = preflight.run_primary_compat_preflight(db_path=str(path))
+        self.assertEqual(report["schema_version_found"], 2)
+        self.assertEqual(report["overall_status"], preflight.FAIL)
+        self.assertEqual(report["recommendation"], preflight.NEEDS_REPAIR)
 
 
 class CliTests(unittest.TestCase):
