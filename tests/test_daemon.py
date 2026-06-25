@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from claw_v2.cron import CronScheduler, ScheduledJob
 from claw_v2.daemon import (
@@ -243,6 +244,53 @@ class DaemonTickTests(unittest.TestCase):
             self.assertEqual(job.status, "completed")
             self.assertEqual(job.result["drain_result"], {"applied": 0})
             self.assertEqual(job.result["failure_review_result"], {"reconciled_count": 0})
+
+    def test_maintenance_mode_blocks_drain_apply_even_when_payload_requests_apply(
+        self,
+    ) -> None:
+        ledger = MagicMock()
+        ledger.list.return_value = []
+        ledger.drain_reconcilable_unverified.side_effect = AssertionError(
+            "maintenance mode must block reconcilable drain apply"
+        )
+        ledger.reconcile_failed_unverified.side_effect = AssertionError(
+            "maintenance mode must block failed-unverified reconciliation apply"
+        )
+        observe = MagicMock()
+        runner = PendingVerificationReconciliationJobRunner(
+            job_service=MagicMock(),
+            task_ledger=ledger,
+            observe=observe,
+        )
+        job = MagicMock()
+        job.job_id = "job:pending-maintenance"
+        job.payload = {
+            "drain_apply": True,
+            "drain_max_scan": 500,
+            "drain_max_apply": 10,
+        }
+
+        with patch.dict(
+            os.environ,
+            {"CLAW_MAINTENANCE_MODE": "1", "CLAW_PENDING_VERIFICATION_DRAIN_APPLY": "1"},
+            clear=False,
+        ):
+            result = runner._execute(job)
+
+        self.assertTrue(result["drain_apply_requested"])
+        self.assertFalse(result["drain_apply"])
+        self.assertEqual(result["drain_skip_reason"], "maintenance_mode_active")
+        ledger.drain_reconcilable_unverified.assert_not_called()
+        ledger.reconcile_failed_unverified.assert_not_called()
+        skipped_events = [
+            call.kwargs["payload"]
+            for call in observe.emit.call_args_list
+            if call.args[0] == "pending_verification_drain_apply_skipped"
+        ]
+        self.assertEqual(
+            skipped_events,
+            [{"job_id": "job:pending-maintenance", "reason": "maintenance_mode_active"}],
+        )
 
     def test_drain_enabled_shares_apply_cap_across_reconciliation_lanes(self) -> None:
         # FIX1: the daemon-level max_apply is an aggregate budget across the

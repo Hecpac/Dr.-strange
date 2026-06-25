@@ -678,6 +678,54 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(record.status, "running")
                     self.assertEqual(record.worker_id, "notebooklm")
 
+    def test_notebooklm_stale_reconcile_runner_fails_orphaned_jobs_terminally(self) -> None:
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+                "CLAW_AUTONOMOUS_MAINTENANCE": "true",
+                "CLAW_AUTONOMOUS_MAINTENANCE_ENABLED": "true",
+                "EVAL_ON_SELF_IMPROVE": "false",
+            }
+
+            with patch.dict("os.environ", env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                research = runtime.job_service.enqueue(kind="notebooklm.research", max_attempts=3)
+                orchestration = runtime.job_service.enqueue(
+                    kind="notebooklm.orchestrate", max_attempts=3
+                )
+                for created in (research, orchestration):
+                    runtime.job_service.claim(
+                        created.job_id,
+                        worker_id="notebooklm",
+                        now=time.time() - 7 * 60 * 60,
+                    )
+                runner = next(
+                    runner
+                    for runner in runtime.daemon._background_job_runners
+                    if runner.name == "notebooklm_stale_running_job_reconcile"
+                )
+
+                reconciled = runner.handler()
+
+                self.assertEqual(reconciled, 2)
+                for created in (research, orchestration):
+                    record = runtime.job_service.get(created.job_id)
+                    self.assertEqual(record.status, "failed")
+                    self.assertEqual(record.error, "stale_running_no_durable_consumer")
+                    self.assertEqual(record.attempts, 1)
+
     async def test_run_loop_processes_kairos_tick_job_outside_tick(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
             return LLMResponse(

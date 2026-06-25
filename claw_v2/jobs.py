@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from claw_v2.maintenance import job_claim_block_reason
 from claw_v2.sqlite_runtime import (
     WAL_HEAL_RETRY_LIMIT,
     RuntimeDb,
@@ -204,6 +205,15 @@ class JobService:
         now: float | None = None,
     ) -> JobRecord | None:
         now = time.time() if now is None else now
+        blocked_reason = job_claim_block_reason()
+        if blocked_reason:
+            self._emit_claim_blocked(
+                operation="claim",
+                reason=blocked_reason,
+                worker_id=worker_id,
+                job_id=job_id,
+            )
+            return None
 
         def claim_once() -> bool:
             with self._lock:
@@ -259,6 +269,15 @@ class JobService:
         if isinstance(kinds, str):
             kinds = (kinds,)
         kind_list = [kind for kind in (kinds or []) if kind]
+        blocked_reason = job_claim_block_reason()
+        if blocked_reason:
+            self._emit_claim_blocked(
+                operation="claim_next",
+                reason=blocked_reason,
+                worker_id=worker_id,
+                kinds=kind_list,
+            )
+            return None
         where = "status IN ('queued', 'retrying') AND COALESCE(next_run_at, 0) <= ?"
         params: list[Any] = [now]
         if kind_list:
@@ -533,6 +552,8 @@ class JobService:
         *,
         stale_after_seconds: float,
         kinds: Iterable[str] | None = None,
+        kind_prefix: str | None = None,
+        no_retry: bool = False,
         now: float | None = None,
         limit: int = 100,
         retry_delay_seconds: float = 0.0,
@@ -556,6 +577,9 @@ class JobService:
             placeholders = ", ".join("?" for _ in kind_list)
             where += f" AND kind IN ({placeholders})"
             params.extend(kind_list)
+        if kind_prefix:
+            where += " AND kind LIKE ?"
+            params.append(f"{kind_prefix}%")
         params.append(max(1, min(int(limit), 100)))
 
         def candidate_ids_once() -> list[str]:
@@ -584,6 +608,7 @@ class JobService:
                 now=current,
                 retry_delay_seconds=retry_delay_seconds,
                 error=error,
+                no_retry=no_retry,
             )
             if record is None:
                 continue
@@ -600,6 +625,7 @@ class JobService:
         now: float,
         retry_delay_seconds: float,
         error: str,
+        no_retry: bool = False,
     ) -> JobRecord | None:
         def recover_once() -> sqlite3.Row | None:
             with self._lock:
@@ -624,7 +650,7 @@ class JobService:
                         return None
                     attempts = int(row["attempts"] or 0)
                     max_attempts = int(row["max_attempts"] or 1)
-                    should_retry = attempts < max_attempts
+                    should_retry = attempts < max_attempts and not no_retry
                     status = "retrying" if should_retry else "failed"
                     completed_at = None if should_retry else now
                     next_run_at = (
@@ -873,6 +899,33 @@ class JobService:
             lane="job_service",
             job_id=record.job_id,
             payload=record.to_dict(),
+        )
+
+    def _emit_claim_blocked(
+        self,
+        *,
+        operation: str,
+        reason: str,
+        worker_id: str,
+        job_id: str | None = None,
+        kinds: Iterable[str] | None = None,
+    ) -> None:
+        if self.observe is None:
+            return
+        payload: dict[str, Any] = {
+            "operation": operation,
+            "reason": reason,
+            "worker_id": worker_id,
+        }
+        if job_id is not None:
+            payload["job_id"] = job_id
+        if kinds is not None:
+            payload["kinds"] = [kind for kind in kinds if kind]
+        self.observe.emit(
+            "job_claim_blocked",
+            lane="job_service",
+            job_id=job_id,
+            payload=payload,
         )
 
 

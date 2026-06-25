@@ -36,7 +36,9 @@ from claw_v2.bot_helpers import (
     detect_meta_introspection_request,
     has_explicit_implementation_request,
 )
+from claw_v2.coordinator import CoordinatorResult
 from claw_v2.evidence_ledger import EvidenceRef, record_claim
+from claw_v2.f2_recovery import F2RecoveryPlan, F2RecoveryStatus, plan_f2_recovery
 from claw_v2.goal_contract import create_goal
 from claw_v2.model_registry import model_overrides_from_state
 from claw_v2.verification import (
@@ -65,6 +67,7 @@ _MAX_VERIFICATION_DEFERRALS = 5
 # missed entries. This is the single status map; every queue write goes
 # through normalize_task_queue_status.
 TASK_QUEUE_STATUSES = ("pending", "in_progress", "done", "blocked", "deferred")
+F2_COORDINATOR_RESUME_PHASES = ("research", "synthesis", "implementation", "verification")
 
 _TASK_QUEUE_STATUS_ALIASES: dict[str, str] = {
     "pending": "pending",
@@ -700,6 +703,7 @@ class TaskHandler:
         mode: str,
         forced: bool,
         task_id: str,
+        run_id: str | None = None,
         resumed: bool = False,
     ) -> str:
         # Option (b), 2026-06-13: CDP/browser objectives run via the daemon's
@@ -718,23 +722,67 @@ class TaskHandler:
         # from scratch instead of re-running coordinator.run() from zero
         # (re-running implementation duplicated external side effects).
         start_phase: str | None = None
+        f2_recovery_checkpoint: dict[str, Any] | None = None
         if resumed:
-            try:
-                candidate = self.coordinator.detect_resume_phase(task_id)
-            except Exception:
-                candidate = None
-            if candidate in ("research", "synthesis", "implementation", "verification"):
-                start_phase = candidate
-        result = self.coordinator.run(
-            task_id,
-            objective,
-            research_tasks,
-            implementation_tasks=implementation_tasks,
-            verification_tasks=verification_tasks,
-            lane_overrides=self._lane_model_overrides(session_id),
-            start_phase=start_phase,
-            should_abort=lambda: self._is_cancelled(task_id),
-        )
+            legacy_start_phase = self._legacy_resume_start_phase(task_id)
+            f2_store = getattr(self.coordinator, "f2_durability_store", None)
+            if f2_store is None:
+                start_phase = legacy_start_phase
+            else:
+                resolved_run_id = run_id or task_id
+                try:
+                    recovery_plan = plan_f2_recovery(
+                        f2_store,
+                        task_id=task_id,
+                        run_id=resolved_run_id,
+                        persist_cursor=False,
+                    )
+                except Exception as exc:
+                    exception_type = type(exc).__name__
+                    reason = f"f2_recovery_planner_exception:{exception_type}"
+                    recovery_plan = F2RecoveryPlan(
+                        task_id=task_id,
+                        run_id=resolved_run_id,
+                        enabled=True,
+                        status=F2RecoveryStatus.BLOCKED,
+                        phase_decisions=(),
+                        next_phase=None,
+                        cursor_before=None,
+                        cursor_after=None,
+                        cursor_action="not_requested",
+                        reasons=(reason,),
+                        will_replay_external_effects=False,
+                    )
+                    result, f2_recovery_checkpoint = self._f2_recovery_no_run_result(
+                        task_id=task_id,
+                        objective=objective,
+                        plan=recovery_plan,
+                        reason=reason,
+                        verification_status="blocked",
+                        exception_type=exception_type,
+                    )
+                else:
+                    f2_result = self._f2_recovery_result_or_start_phase(
+                        task_id=task_id,
+                        objective=objective,
+                        plan=recovery_plan,
+                        legacy_start_phase=legacy_start_phase,
+                    )
+                    if isinstance(f2_result, tuple):
+                        result, f2_recovery_checkpoint = f2_result
+                    else:
+                        start_phase = f2_result
+        if f2_recovery_checkpoint is None:
+            result = self.coordinator.run(
+                task_id,
+                objective,
+                research_tasks,
+                implementation_tasks=implementation_tasks,
+                verification_tasks=verification_tasks,
+                lane_overrides=self._lane_model_overrides(session_id),
+                start_phase=start_phase,
+                should_abort=lambda: self._is_cancelled(task_id),
+            )
         # Record per-phase worker results to the target stream so the petri
         # judge has concrete evidence (file paths, commit hashes, exit codes)
         # to score against — not just the agent's final claim. Cheap append
@@ -769,7 +817,7 @@ class TaskHandler:
                     task_id,
                     exc_info=True,
                 )
-        checkpoint = _coordinator_checkpoint(result, objective=objective)
+        checkpoint = f2_recovery_checkpoint or _coordinator_checkpoint(result, objective=objective)
         current_queue = self._get_session_state(session_id).get("task_queue") or []
         self._update_session_state(
             session_id,
@@ -797,6 +845,164 @@ class TaskHandler:
             last_checkpoint=checkpoint,
         )
         return _format_coordinator_response(result, checkpoint=checkpoint, forced=forced)
+
+    def _legacy_resume_start_phase(self, task_id: str) -> str | None:
+        try:
+            candidate = self.coordinator.detect_resume_phase(task_id)
+        except Exception:
+            return None
+        return str(candidate) if candidate in F2_COORDINATOR_RESUME_PHASES else None
+
+    def _f2_recovery_result_or_start_phase(
+        self,
+        *,
+        task_id: str,
+        objective: str,
+        plan: F2RecoveryPlan,
+        legacy_start_phase: str | None,
+    ) -> str | tuple[CoordinatorResult, dict[str, Any]] | None:
+        if plan.status is F2RecoveryStatus.DISABLED and not plan.enabled:
+            return legacy_start_phase
+        if plan.status is F2RecoveryStatus.BLOCKED:
+            return self._f2_recovery_no_run_result(
+                task_id=task_id,
+                objective=objective,
+                plan=plan,
+                reason="f2_recovery_blocked",
+                verification_status="blocked",
+            )
+        if plan.status is F2RecoveryStatus.MANUAL_REVIEW_REQUIRED:
+            effect_ids = ",".join(
+                blocker.external_effect_id for blocker in plan.external_effect_blockers
+            )
+            suffix = f":{effect_ids}" if effect_ids else ""
+            return self._f2_recovery_no_run_result(
+                task_id=task_id,
+                objective=objective,
+                plan=plan,
+                reason=f"f2_recovery_manual_review_required{suffix}",
+                verification_status="blocked",
+            )
+        if plan.status is F2RecoveryStatus.COMPLETE:
+            return self._f2_recovery_no_run_result(
+                task_id=task_id,
+                objective=objective,
+                plan=plan,
+                reason="f2_recovery_complete_noop",
+                verification_status="unknown",
+            )
+        if plan.status is F2RecoveryStatus.RETRYABLE:
+            block_reason = self._f2_retryable_block_reason(plan, legacy_start_phase)
+            if block_reason is not None:
+                return self._f2_recovery_no_run_result(
+                    task_id=task_id,
+                    objective=objective,
+                    plan=plan,
+                    reason=block_reason,
+                    verification_status="blocked",
+                )
+            return plan.next_phase
+        return self._f2_recovery_no_run_result(
+            task_id=task_id,
+            objective=objective,
+            plan=plan,
+            reason=f"f2_recovery_unknown_status:{plan.status}",
+            verification_status="blocked",
+        )
+
+    def _f2_retryable_block_reason(
+        self,
+        plan: F2RecoveryPlan,
+        legacy_start_phase: str | None,
+    ) -> str | None:
+        if plan.next_phase not in F2_COORDINATOR_RESUME_PHASES:
+            return "f2_recovery_retry_missing_next_phase"
+        if plan.external_effect_blockers:
+            effect_ids = ",".join(
+                blocker.external_effect_id for blocker in plan.external_effect_blockers
+            )
+            return f"f2_recovery_retry_has_external_effect_blockers:{effect_ids}"
+        if plan.external_effects_requiring_future_execution:
+            effect_ids = ",".join(plan.external_effects_requiring_future_execution)
+            return f"f2_recovery_retry_requires_future_external_effect:{effect_ids}"
+        if plan.will_replay_external_effects:
+            return "f2_recovery_retry_would_replay_external_effects"
+        if plan.next_phase != legacy_start_phase:
+            return (
+                "f2_recovery_retry_not_allowed_by_legacy_resume:"
+                f"plan={plan.next_phase or 'none'} legacy={legacy_start_phase or 'none'}"
+            )
+        return None
+
+    def _f2_recovery_no_run_result(
+        self,
+        *,
+        task_id: str,
+        objective: str,
+        plan: F2RecoveryPlan,
+        reason: str,
+        verification_status: str,
+        exception_type: str | None = None,
+    ) -> tuple[CoordinatorResult, dict[str, Any]]:
+        summary = (
+            f"{reason}; F2 recovery plan status={plan.status.value}; "
+            "coordinator workers were not rerun."
+        )
+        error = "" if plan.status is F2RecoveryStatus.COMPLETE else reason
+        result = CoordinatorResult(
+            task_id=task_id,
+            phase_results={},
+            synthesis=summary,
+            error=error,
+            audit={
+                "f2_recovery_status": plan.status.value,
+                "f2_recovery_reason": reason,
+                "f2_recovery_next_phase": plan.next_phase,
+                "f2_recovery_cursor_action": plan.cursor_action,
+                "coordinator_workers_rerun": False,
+            },
+        )
+        if exception_type is not None:
+            result.audit["f2_recovery_exception_type"] = exception_type
+        blockers = [reason] if error else []
+        pending_action = (
+            "review F2 recovery evidence before resuming"
+            if verification_status == "blocked"
+            else None
+        )
+        checkpoint: dict[str, Any] = {
+            "summary": summary,
+            "verification_status": verification_status,
+            "f2_recovery_status": plan.status.value,
+            "f2_recovery_reason": reason,
+            "f2_recovery_next_phase": plan.next_phase or "",
+            "f2_recovery_cursor_action": plan.cursor_action,
+            "f2_recovery_reasons": list(plan.reasons),
+            "coordinator_workers_rerun": False,
+            "coordinator_result": {
+                "status": "blocked" if verification_status == "blocked" else "pending",
+                "task_kind": "f2_recovery",
+                "actions_taken": [],
+                "evidence": [],
+                "changed_files": [],
+                "verification": {
+                    "status": verification_status
+                    if verification_status in {"pending", "failed", "blocked"}
+                    else "pending",
+                    "checks": [],
+                },
+                "blockers": blockers,
+                "next_user_action": pending_action,
+                "summary_for_user": summary,
+            },
+        }
+        if error:
+            checkpoint["error"] = error
+        if exception_type is not None:
+            checkpoint["f2_recovery_exception_type"] = exception_type
+        if pending_action:
+            checkpoint["pending_action"] = pending_action
+        return result, checkpoint
 
     def _run_browser_executor_task(
         self,

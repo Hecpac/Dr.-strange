@@ -109,6 +109,7 @@ class F2PhaseCheckpointWriteTests(unittest.TestCase):
                     ).fetchall()
                 ]
             self.assertEqual(f2_tables, [])
+            self.assertNotIn("external_effect_records", f2_tables)
 
     def test_runtime_creates_runtimedb_backed_f2_store_when_flag_true(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

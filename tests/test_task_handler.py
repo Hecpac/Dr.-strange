@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from claw_v2.coordinator import CoordinatorResult, WorkerResult
 from claw_v2.bot_helpers import (
@@ -12,10 +13,16 @@ from claw_v2.bot_helpers import (
     _infer_session_mode,
     _should_use_browser_executor,
 )
+from claw_v2.f2_recovery import (
+    F2ExternalEffectBlocker,
+    F2RecoveryPlan,
+    F2RecoveryStatus,
+)
+from claw_v2.f2_durability_store import F2DurabilityStore
 from claw_v2.jobs import JobService
 from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
-from claw_v2.sqlite_runtime import RuntimeDatabaseError
+from claw_v2.sqlite_runtime import RuntimeDatabaseError, RuntimeDb
 from claw_v2.task_handler import TaskHandler
 from claw_v2.task_ledger import TaskLedger
 
@@ -530,14 +537,23 @@ class TaskHandlerTests(unittest.TestCase):
 class ResumeWiringTests(unittest.TestCase):
     """F3.1 — a resumed coordinated task passes the detected start_phase."""
 
-    def _handler_with_recording_coordinator(self, root: Path, recorded: dict):
+    def _handler_with_recording_coordinator(
+        self,
+        root: Path,
+        recorded: dict,
+        *,
+        f2_store: object | None = None,
+        detected_phase: str = "implementation",
+    ):
         memory = MemoryStore(root / "claw.db")
         observe = ObserveStream(root / "observe.db")
 
         class _RecordingCoordinator:
+            f2_durability_store = f2_store
+
             def detect_resume_phase(self, task_id):
                 recorded["detect_task_id"] = task_id
-                return "implementation"
+                return detected_phase
 
             def run(
                 self,
@@ -549,6 +565,7 @@ class ResumeWiringTests(unittest.TestCase):
                 lane_overrides=None,
                 **kwargs,
             ):
+                recorded["run_called"] = True
                 recorded["start_phase"] = kwargs.get("start_phase")
                 recorded["should_abort"] = kwargs.get("should_abort")
                 return CoordinatorResult(
@@ -573,13 +590,171 @@ class ResumeWiringTests(unittest.TestCase):
         )
         return handler
 
+    def _retryable_plan(
+        self,
+        *,
+        task_id: str = "t-99",
+        run_id: str = "t-99",
+        next_phase: str | None = "implementation",
+        external_effect_blockers: tuple[F2ExternalEffectBlocker, ...] = (),
+        external_effects_requiring_future_execution: tuple[str, ...] = (),
+        will_replay_external_effects: bool = False,
+    ) -> F2RecoveryPlan:
+        return F2RecoveryPlan(
+            task_id=task_id,
+            run_id=run_id,
+            enabled=True,
+            status=F2RecoveryStatus.RETRYABLE,
+            phase_decisions=(),
+            next_phase=next_phase,
+            cursor_before=None,
+            cursor_after=None,
+            cursor_action="not_requested",
+            external_effect_blockers=external_effect_blockers,
+            external_effects_requiring_future_execution=(
+                external_effects_requiring_future_execution
+            ),
+            will_replay_external_effects=will_replay_external_effects,
+        )
+
+    def _terminal_plan(
+        self,
+        *,
+        status: F2RecoveryStatus,
+        task_id: str = "t-99",
+        run_id: str = "t-99",
+        blockers: tuple[F2ExternalEffectBlocker, ...] = (),
+    ) -> F2RecoveryPlan:
+        return F2RecoveryPlan(
+            task_id=task_id,
+            run_id=run_id,
+            enabled=True,
+            status=status,
+            phase_decisions=(),
+            next_phase=None,
+            cursor_before=None,
+            cursor_after=None,
+            cursor_action="not_requested",
+            reasons=(status.value,),
+            external_effect_blockers=blockers,
+            will_replay_external_effects=False,
+        )
+
+    def test_startup_recovery_is_seeded_from_running_agent_tasks_not_phase_checkpoints(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runtime_db = RuntimeDb(root / "claw.db")
+            self.addCleanup(runtime_db.close)
+            f2_store = F2DurabilityStore(runtime_db)
+            ledger = TaskLedger(root / "claw.db", runtime_db=runtime_db)
+            ghost_task_id = "stage2c1-ghost-checkpoint-only"
+            checkpoint = f2_store.create_phase_checkpoint(
+                checkpoint_id="checkpoint-stage2c1-ghost-checkpoint-only",
+                task_id=ghost_task_id,
+                run_id=ghost_task_id,
+                phase="implementation",
+                phase_version=1,
+                status="started",
+                last_write_order=0,
+                payload={
+                    "synthetic": True,
+                    "source": "stage2c1",
+                    "task_id": ghost_task_id,
+                },
+            )
+            recorded: dict[str, object] = {}
+
+            class _ForbiddenStartupF2Store:
+                def _fail(self, operation: str):
+                    recorded["forbidden_f2_operation"] = operation
+                    raise AssertionError(
+                        f"startup recovery must not enumerate F2 evidence: {operation}"
+                    )
+
+                def get_recovery_cursor(self, *args, **kwargs):
+                    return self._fail("get_recovery_cursor")
+
+                def list_phase_checkpoints(self, *args, **kwargs):
+                    return self._fail("list_phase_checkpoints")
+
+                def list_checkpoint_writes(self, *args, **kwargs):
+                    return self._fail("list_checkpoint_writes")
+
+                def list_external_effects(self, *args, **kwargs):
+                    return self._fail("list_external_effects")
+
+                def upsert_recovery_cursor(self, *args, **kwargs):
+                    return self._fail("upsert_recovery_cursor")
+
+                def record_external_effect(self, *args, **kwargs):
+                    return self._fail("record_external_effect")
+
+                def update_external_effect_status(self, *args, **kwargs):
+                    return self._fail("update_external_effect_status")
+
+            class _NoRunCoordinator:
+                f2_durability_store = _ForbiddenStartupF2Store()
+
+                def detect_resume_phase(self, task_id):
+                    recorded["detect_resume_phase"] = task_id
+                    raise AssertionError("orphan checkpoint must not seed resume")
+
+                def run(self, *args, **kwargs):
+                    recorded["run_called"] = True
+                    raise AssertionError("orphan checkpoint must not rerun coordinator")
+
+            handler = TaskHandler(
+                coordinator=_NoRunCoordinator(),
+                observe=None,
+                task_ledger=ledger,
+                get_session_state=lambda _session_id: {},
+                update_session_state=lambda **_kwargs: None,
+            )
+
+            with patch(
+                "claw_v2.task_handler.plan_f2_recovery",
+                side_effect=AssertionError(
+                    "orphan checkpoint must not invoke F2 recovery planning"
+                ),
+            ) as planner, patch.object(ledger, "list", wraps=ledger.list) as list_tasks:
+                resumed = handler.resume_interrupted_autonomous_tasks()
+
+            self.assertEqual(resumed, 0)
+            list_tasks.assert_called_once_with(statuses=("running",), limit=20)
+            planner.assert_not_called()
+            self.assertEqual(recorded, {})
+            self.assertIsNone(ledger.get(ghost_task_id))
+            with runtime_db.cursor() as cur:
+                task_count = cur.execute("SELECT COUNT(*) AS count FROM agent_tasks").fetchone()
+            self.assertEqual(task_count["count"], 0)
+            self.assertEqual(f2_store.get_phase_checkpoint(checkpoint.checkpoint_id), checkpoint)
+            self.assertEqual(
+                [
+                    item.checkpoint_id
+                    for item in f2_store.list_phase_checkpoints(task_id=ghost_task_id)
+                ],
+                [checkpoint.checkpoint_id],
+            )
+            self.assertEqual(f2_store.list_external_effects(task_id=ghost_task_id), [])
+
     def test_resumed_run_passes_detected_start_phase_and_abort_callback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             recorded: dict = {}
             handler = self._handler_with_recording_coordinator(Path(tmpdir), recorded)
-            handler._run_coordinated_task(
-                "tg-1", "objetivo", mode="coding", forced=False, task_id="t-99", resumed=True
-            )
+            with patch(
+                "claw_v2.task_handler.plan_f2_recovery",
+                side_effect=AssertionError("planner must not run without an F2 store"),
+            ):
+                handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-99",
+                    resumed=True,
+                )
             self.assertEqual(recorded["detect_task_id"], "t-99")
             self.assertEqual(recorded["start_phase"], "implementation")
             self.assertTrue(callable(recorded["should_abort"]))
@@ -597,6 +772,331 @@ class ResumeWiringTests(unittest.TestCase):
             )
             self.assertIsNone(recorded["start_phase"])
             self.assertNotIn("detect_task_id", recorded)
+
+    def test_f2_retryable_safe_plan_uses_next_phase_with_explicit_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f2_store = object()
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(
+                Path(tmpdir),
+                recorded,
+                f2_store=f2_store,
+                detected_phase="implementation",
+            )
+            plan = self._retryable_plan(run_id="run-42", next_phase="implementation")
+
+            with patch("claw_v2.task_handler.plan_f2_recovery", return_value=plan) as planner:
+                handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-99",
+                    run_id="run-42",
+                    resumed=True,
+                )
+
+            planner.assert_called_once_with(
+                f2_store,
+                task_id="t-99",
+                run_id="run-42",
+                persist_cursor=False,
+            )
+            self.assertEqual(recorded["detect_task_id"], "t-99")
+            self.assertTrue(recorded["run_called"])
+            self.assertEqual(recorded["start_phase"], "implementation")
+
+    def test_f2_retryable_plan_falls_back_to_task_id_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f2_store = object()
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(
+                Path(tmpdir),
+                recorded,
+                f2_store=f2_store,
+                detected_phase="implementation",
+            )
+
+            with patch(
+                "claw_v2.task_handler.plan_f2_recovery",
+                return_value=self._retryable_plan(next_phase="implementation"),
+            ) as planner:
+                handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-99",
+                    resumed=True,
+                )
+
+            planner.assert_called_once_with(
+                f2_store,
+                task_id="t-99",
+                run_id="t-99",
+                persist_cursor=False,
+            )
+
+    def test_f2_recovery_planner_exception_fails_closed_without_coordinator_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f2_store = object()
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(
+                Path(tmpdir),
+                recorded,
+                f2_store=f2_store,
+                detected_phase="implementation",
+            )
+            secret_detail = "token=sk-secret api_key=secret-key cookie=session-secret"
+
+            with patch(
+                "claw_v2.task_handler.plan_f2_recovery",
+                side_effect=RuntimeError(secret_detail),
+            ) as planner:
+                response = handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-99",
+                    resumed=True,
+                )
+
+            planner.assert_called_once_with(
+                f2_store,
+                task_id="t-99",
+                run_id="t-99",
+                persist_cursor=False,
+            )
+            self.assertEqual(recorded["detect_task_id"], "t-99")
+            self.assertNotIn("run_called", recorded)
+            state = handler._get_session_state("tg-1")
+            checkpoint = state["last_checkpoint"]
+            self.assertEqual(state["verification_status"], "blocked")
+            self.assertEqual(checkpoint["verification_status"], "blocked")
+            self.assertEqual(
+                checkpoint["f2_recovery_reason"],
+                "f2_recovery_planner_exception:RuntimeError",
+            )
+            self.assertEqual(checkpoint["f2_recovery_exception_type"], "RuntimeError")
+            self.assertFalse(checkpoint["coordinator_workers_rerun"])
+            self.assertIn("f2_recovery_planner_exception:RuntimeError", response)
+            checkpoint_text = repr(checkpoint)
+            self.assertNotIn(secret_detail, response)
+            self.assertNotIn(secret_detail, checkpoint_text)
+            self.assertNotIn("sk-secret", response)
+            self.assertNotIn("sk-secret", checkpoint_text)
+
+    def test_f2_retryable_future_effect_execution_blocks_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f2_store = object()
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(
+                Path(tmpdir),
+                recorded,
+                f2_store=f2_store,
+                detected_phase="implementation",
+            )
+            plan = self._retryable_plan(
+                next_phase="implementation",
+                external_effects_requiring_future_execution=("effect-1",),
+            )
+
+            with patch("claw_v2.task_handler.plan_f2_recovery", return_value=plan):
+                response = handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-99",
+                    resumed=True,
+                )
+
+            self.assertNotIn("run_called", recorded)
+            state = handler._get_session_state("tg-1")
+            self.assertEqual(state["verification_status"], "blocked")
+            self.assertIn("f2_recovery_retry_requires_future_external_effect", response)
+
+    def test_f2_retryable_replay_flag_blocks_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f2_store = object()
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(
+                Path(tmpdir),
+                recorded,
+                f2_store=f2_store,
+                detected_phase="implementation",
+            )
+            plan = self._retryable_plan(
+                next_phase="implementation",
+                will_replay_external_effects=True,
+            )
+
+            with patch("claw_v2.task_handler.plan_f2_recovery", return_value=plan):
+                response = handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-99",
+                    resumed=True,
+                )
+
+            self.assertNotIn("run_called", recorded)
+            self.assertIn("f2_recovery_retry_would_replay_external_effects", response)
+
+    def test_f2_retryable_external_effect_blocker_blocks_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f2_store = object()
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(
+                Path(tmpdir),
+                recorded,
+                f2_store=f2_store,
+                detected_phase="implementation",
+            )
+            blocker = F2ExternalEffectBlocker(
+                external_effect_id="effect-1",
+                phase="implementation",
+                status="intent_recorded",
+                reason="unsafe_external_effect_status",
+            )
+            plan = self._retryable_plan(
+                next_phase="implementation",
+                external_effect_blockers=(blocker,),
+            )
+
+            with patch("claw_v2.task_handler.plan_f2_recovery", return_value=plan):
+                response = handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-99",
+                    resumed=True,
+                )
+
+            self.assertNotIn("run_called", recorded)
+            self.assertIn("f2_recovery_retry_has_external_effect_blockers", response)
+
+    def test_f2_retryable_legacy_policy_mismatch_blocks_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f2_store = object()
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(
+                Path(tmpdir),
+                recorded,
+                f2_store=f2_store,
+                detected_phase="synthesis",
+            )
+
+            with patch(
+                "claw_v2.task_handler.plan_f2_recovery",
+                return_value=self._retryable_plan(next_phase="implementation"),
+            ):
+                response = handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-99",
+                    resumed=True,
+                )
+
+            self.assertNotIn("run_called", recorded)
+            self.assertIn("f2_recovery_retry_not_allowed_by_legacy_resume", response)
+
+    def test_f2_blocked_plan_refuses_coordinator_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f2_store = object()
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(
+                Path(tmpdir),
+                recorded,
+                f2_store=f2_store,
+            )
+
+            with patch(
+                "claw_v2.task_handler.plan_f2_recovery",
+                return_value=self._terminal_plan(status=F2RecoveryStatus.BLOCKED),
+            ):
+                response = handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-99",
+                    resumed=True,
+                )
+
+            self.assertNotIn("run_called", recorded)
+            self.assertIn("f2_recovery_blocked", response)
+            self.assertEqual(handler._get_session_state("tg-1")["verification_status"], "blocked")
+
+    def test_f2_manual_review_plan_refuses_coordinator_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f2_store = object()
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(
+                Path(tmpdir),
+                recorded,
+                f2_store=f2_store,
+            )
+            blocker = F2ExternalEffectBlocker(
+                external_effect_id="effect-1",
+                phase="implementation",
+                status="applied",
+                reason="unsafe_external_effect_status",
+            )
+
+            with patch(
+                "claw_v2.task_handler.plan_f2_recovery",
+                return_value=self._terminal_plan(
+                    status=F2RecoveryStatus.MANUAL_REVIEW_REQUIRED,
+                    blockers=(blocker,),
+                ),
+            ):
+                response = handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-99",
+                    resumed=True,
+                )
+
+            self.assertNotIn("run_called", recorded)
+            self.assertIn("f2_recovery_manual_review_required", response)
+            self.assertIn("effect-1", response)
+
+    def test_f2_complete_plan_does_not_rerun_or_fabricate_passed_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f2_store = object()
+            recorded: dict = {}
+            handler = self._handler_with_recording_coordinator(
+                Path(tmpdir),
+                recorded,
+                f2_store=f2_store,
+            )
+
+            with patch(
+                "claw_v2.task_handler.plan_f2_recovery",
+                return_value=self._terminal_plan(status=F2RecoveryStatus.COMPLETE),
+            ):
+                response = handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-99",
+                    resumed=True,
+                )
+
+            self.assertNotIn("run_called", recorded)
+            state = handler._get_session_state("tg-1")
+            self.assertEqual(state["verification_status"], "unknown")
+            self.assertNotIn("Listo. Cerré la tarea", response)
+            self.assertIn("f2_recovery_complete_noop", response)
 
 
 class BrowserExecutorRoutingTests(unittest.TestCase):

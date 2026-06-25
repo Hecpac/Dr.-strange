@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: "e4a3ee2 live baseline + #112 browser atomic read-only smoke + watchdog smoke"
-doc_version: 2.31
-last_verified: 2026-06-23
+describes_commit: "A4 maintenance preflight no-work check"
+doc_version: 2.35
+last_verified: 2026-06-24
 verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -19,6 +19,14 @@ audience: claw_v2  # consumed by the agent itself
 If `git rev-parse HEAD` diverges substantially from `describes_commit`,
 assume parts of this doc may be stale. The invariants below are the most
 stable section; the layer detail decays fastest.
+
+F2 production state (2026-06-24): F2.0/F2.1 are merged; the four F2 tables
+(`phase_checkpoints`, `phase_checkpoint_writes`, `external_effect_records`,
+`phase_recovery_cursors`) physically exist in production `claw.db` but are empty
+after purging a Stage 2C1 synthetic-record seed. `CLAW_F2_DURABILITY_ENABLED` is
+unset, so the live daemon constructs no `F2DurabilityStore` and performs no F2
+reads/writes. Older commit-keyed `operational_status` blocks below that read
+"F2: design-only" are point-in-time snapshots, not current state.
 
 ## e4a3ee2 browser atomic tools live smoke status
 
@@ -261,6 +269,165 @@ invariants:
          subprocess/codegen scheduler job enqueues a durable agent_job and
          executes in a ClawDaemon background runner off-tick. The backstop fails
          if any future job re-introduces inline heavy work.
+
+  startup_recovery_is_seeded_from_running_agent_tasks_not_phase_checkpoints:
+    rule: Startup recovery roots come from `agent_tasks` records that are
+          running/resumable. Startup recovery must not globally enumerate
+          `phase_checkpoints`.
+    checkpoint_only_orphans: Checkpoint-only orphan rows, including old
+          synthetic `stage2c1-*` rows with no `agent_tasks` record, are not
+          recovery roots at startup.
+    effective_startup_state: These rows are not classified at startup as
+          `complete`, `retryable`, `manual_review_required`, or
+          `verified_absent`; their effective startup state is
+          `not_classified_not_reached`.
+    f2_boundary: This is independent of `CLAW_F2_DURABILITY_ENABLED`; F2 ON
+          only affects per-resumed-task planning after an `agent_tasks` record
+          has seeded resume.
+    no_side_effects: No replay or coordinator rerun is allowed solely because an
+          orphan F2 checkpoint exists.
+    enforced_by:
+      - tests/test_task_handler.py::ResumeWiringTests::test_startup_recovery_is_seeded_from_running_agent_tasks_not_phase_checkpoints
+
+  maintenance_mode_blocks_claims_scheduler_work_and_drain_applies:
+    rule: With `CLAW_MAINTENANCE_MODE` truthy, the daemon may stay up but must
+          not pick up work through the A2 chokepoints: JobService claims are
+          blocked, scheduler work enqueue is blocked for `approval_sweep` and
+          `pipeline_poll_merges`, and pending-verification drain apply is
+          blocked.
+    flags:
+      CLAW_MAINTENANCE_MODE: Truthy values (`1`, `true`, `yes`, `on`) block
+          JobService.claim(), JobService.claim_next(), scheduler enqueue work
+          for `approval_sweep` / `pipeline_poll_merges`, and the mutating
+          pending-verification drain apply path. Absence/default preserves
+          current production behavior.
+      CLAW_NO_JOB_CLAIM: Truthy values block only JobService.claim() and
+          JobService.claim_next(). Absence/default preserves current production
+          behavior.
+    existing_maintenance_relationship: `CLAW_AUTONOMOUS_MAINTENANCE` /
+          `CLAW_AUTONOMOUS_MAINTENANCE_ENABLED` still control autonomous
+          maintenance jobs and keep their existing skip reason
+          `autonomous_maintenance_disabled`. `CLAW_MAINTENANCE_MODE` is a
+          broader no-work gate and is checked before the autonomous-maintenance
+          and capability skip reasons on jobs that use the combined skip
+          helper.
+    drain_relationship: `CLAW_PENDING_VERIFICATION_DRAIN_APPLY` still defaults
+          off and is still required before any drain apply is requested. When
+          `CLAW_MAINTENANCE_MODE` is truthy, the runner reports
+          `maintenance_mode_active` and does not call
+          drain_reconcilable_unverified(apply=True) or
+          reconcile_failed_unverified(apply=True), even if a queued payload asks
+          for `drain_apply=true`.
+    f2_boundary: This invariant is independent of F2 durability flags.
+          `daemon up + maintenance ON + F2 OFF` is a valid positive control and
+          emits `maintenance_mode_gate_assertion` with `claim=off`,
+          `scheduler=off`, and `drain=off`.
+    scheduler_chokepoint: Scheduler work must be gated before
+          enqueue_scheduled_background_job(), not only by blocking JobService
+          claims. Claim-only blocking would still allow scheduler ticks to
+          create queued work and emit enqueue side effects.
+    drain_chokepoint: Drain apply has its own gate even when claims are
+          blocked because `_execute()` is the mutating boundary and can be
+          called directly in tests or by future runner paths.
+    enforced_by:
+      - tests/test_jobs.py::JobServiceTests::test_claims_allowed_when_maintenance_flags_absent
+      - tests/test_jobs.py::JobServiceTests::test_claims_blocked_by_maintenance_mode_before_running_transition
+      - tests/test_jobs.py::JobServiceTests::test_claims_blocked_by_no_job_claim_before_running_transition
+      - tests/test_approval_runtime_wiring.py::ApprovalRuntimeWiringTests::test_maintenance_mode_blocks_approval_and_pipeline_merge_enqueues_with_f2_off
+      - tests/test_approval_runtime_wiring.py::ApprovalRuntimeWiringTests::test_pipeline_poll_merges_preserves_autonomous_maintenance_skip
+      - tests/test_daemon.py::DaemonTickTests::test_maintenance_mode_blocks_drain_apply_even_when_payload_requests_apply
+
+  maintenance_preflight_proves_no_work_pickup_before_canary:
+    rule: Before Fase B / Stage 2C2 canary, operators must run the
+          maintenance preflight in the intended runtime posture. The preflight
+          reports explicit PASS/FAIL for claim, scheduler, and drain paths and
+          fails closed when `CLAW_MAINTENANCE_MODE` is absent or a path cannot
+          be verified.
+    entrypoint: `python -m claw_v2.maintenance_preflight`
+    proves:
+      claim_path: With the supplied flags, JobService.claim() and
+          JobService.claim_next() do not transition queued/retrying jobs to
+          `running`. The proof uses isolated temp job state and the real claim
+          methods.
+      scheduler_path: With the supplied flags, `approval_sweep` and
+          `pipeline_poll_merges` are blocked before
+          enqueue_scheduled_background_job(). The proof uses isolated temp job
+          state and the registered scheduler job kinds/resume keys.
+      drain_path: With the supplied flags, observe/report-only reconciliation
+          may run, but the mutating calls
+          drain_reconcilable_unverified(apply=True) and
+          reconcile_failed_unverified(apply=True) are blocked even when a
+          payload asks for `drain_apply=true`.
+    does_not_prove: The preflight does not start/restart the daemon, run a live
+          scheduler loop, claim live jobs, apply live drains, or prove a
+          launched process is using a specific environment. Live daemon
+          confirmation remains a separate smoke after operator authorization.
+    flags:
+      CLAW_MAINTENANCE_MODE: Must be truthy for PASS. This is the required
+          canary no-work posture.
+      CLAW_NO_JOB_CLAIM: Reported separately. It can block claim path only, but
+          cannot make scheduler or drain paths PASS without
+          `CLAW_MAINTENANCE_MODE`.
+      CLAW_F2_DURABILITY_ENABLED: Reported as `f2_enabled`; PASS/FAIL for the
+          no-work paths is independent of F2 ON/OFF.
+    read_only_safety: Tests and local smoke use temp DBs/fakes only. If a live
+          DB path is supplied, the preflight opens it read-only/immutable for a
+          liveness check and still proves work paths with temp/fake state.
+          Operator procedure still requires the approved backup +
+          `integrity_check` pattern before primary DB inspection.
+    output_contract: Structured output includes `overall_status`, `claim_path`,
+          `scheduler_path`, `drain_path`, `maintenance_mode_active`,
+          `no_job_claim_active`, `f2_enabled`, `db_path_checked`, and
+          path-level reasons/details. Any path FAIL makes
+          `overall_status=FAIL`.
+    enforced_by:
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_preflight_passes_with_maintenance_on_and_f2_off
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_preflight_passes_with_maintenance_on_and_f2_on
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_preflight_fails_when_maintenance_is_off
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_claim_path_fails_if_runtime_claim_gates_are_inactive
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_scheduler_path_fails_if_scheduled_work_would_enqueue
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_drain_path_fails_if_apply_would_run
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_output_is_structured_with_path_level_reasons
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_cli_smoke_outputs_json_pass_with_temp_state
+      - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_supplied_db_path_is_opened_read_only_immutable
+
+  external_effect_recovery_is_idempotent_and_never_auto_replays:
+    rule: F2 recovery classifies external-effect evidence only; it never
+          executes external effects directly and never sets
+          `will_replay_external_effects=true`.
+    idempotency_key: `external_effect_records.idempotency_key` is unique.
+          A duplicate idempotency key must reuse the existing
+          `external_effect_records` row; executor behavior must treat that as a
+          no-op and must not call the external provider again.
+    executor_ordering: Executors for real external effects must write durable
+          intent (`intent_recorded` plus a linked checkpoint write) before any
+          real-world effect is attempted. Ledger dedup only protects effects
+          after that durable intent exists.
+    verified_applied: `verified_applied` means the effect is already applied.
+          Recovery may classify the phase as complete or retryable depending on
+          checkpoint state, but the effect itself must be reused/no-op by
+          idempotency key and never replayed.
+    verified_absent: `verified_absent` means the effect was checked and is
+          absent. Recovery records the effect as requiring future execution,
+          keeps `will_replay_external_effects=false`, and TaskHandler blocks
+          coordinator auto-rerun with
+          `f2_recovery_retry_requires_future_external_effect`.
+    manual_review: Unsafe statuses (`intent_recorded`, `apply_in_progress`,
+          `applied`, `failed`, `verification_required`,
+          `blocked_manual_review`) and orphan/unlinked external-effect rows
+          require manual review. They may not be auto-replayed by recovery.
+    crash_before_ledger: If a crash occurs after a real-world effect starts but
+          before `external_effect_records` is written, F2 has no durable row to
+          dedup or classify. Current recovery treats the phase from checkpoint
+          evidence alone, usually as retryable when the latest checkpoint is
+          `started`; this remains outside ledger dedup and must be controlled
+          by executor ordering and the future Stage 3 design.
+    enforced_by:
+      - tests/test_f2_external_effect_synthetics.py::F2ExternalEffectSyntheticTests::test_same_idempotency_key_executes_fake_effect_once_and_reuses_record
+      - tests/test_f2_external_effect_synthetics.py::F2ExternalEffectSyntheticTests::test_crash_before_ledger_write_is_undetectable_retryable_risk
+      - tests/test_f2_external_effect_synthetics.py::F2ExternalEffectSyntheticTests::test_effect_then_crash_before_checkpoint_does_not_reexecute_verified_applied
+      - tests/test_f2_external_effect_synthetics.py::F2ExternalEffectSyntheticTests::test_orphaned_verified_applied_effect_requires_manual_review
+      - tests/test_f2_external_effect_synthetics.py::F2ExternalEffectSyntheticTests::test_verified_absent_future_effect_blocks_taskhandler_auto_rerun
 
   self_improve_promotion_gate:
     rule: self-improve promotion actions must pass through BrainService

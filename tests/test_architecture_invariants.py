@@ -1623,6 +1623,207 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
             f"external-effect execution wiring belongs to later PRs: {offenders}",
         )
 
+    def test_f2_4a_recovery_planner_is_classification_only(self) -> None:
+        path = REPO_ROOT / "claw_v2" / "f2_recovery.py"
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+
+        self.assertIn(
+            'F2_COORDINATOR_PHASES = ("research", "synthesis", "implementation", "verification")',
+            source,
+        )
+        self.assertIn("will_replay_external_effects=False", source)
+        self.assertNotIn("CLAW_F2_DURABILITY_ENABLED", source)
+        self.assertNotIn("F2_DURABILITY_ENABLED", source)
+
+        forbidden_imports = {
+            "sqlite3",
+            "claw_v2.config",
+            "claw_v2.main",
+            "claw_v2.browser",
+            "claw_v2.browser_tools",
+            "claw_v2.chrome",
+            "claw_v2.chrome_handler",
+            "claw_v2.computer",
+            "claw_v2.computer_handler",
+            "claw_v2.tools",
+            "subprocess",
+        }
+        forbidden_names = {
+            "record_external_effect",
+            "update_external_effect_status",
+            "append_checkpoint_write",
+            "create_phase_checkpoint",
+            "connect_runtime_sqlite",
+            "delegate_task",
+            "ThreadPoolExecutor",
+            "Popen",
+            "run",
+        }
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                offenders.extend(
+                    alias.name for alias in node.names if alias.name in forbidden_imports
+                )
+            elif isinstance(node, ast.ImportFrom):
+                if node.module in forbidden_imports:
+                    offenders.append(f"from {node.module} import ...")
+            elif isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id in forbidden_names:
+                    offenders.append(node.func.id)
+                elif (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr in forbidden_names
+                ):
+                    offenders.append(node.func.attr)
+                elif (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "ask"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "router"
+                ):
+                    offenders.append("router.ask")
+        self.assertEqual(offenders, [])
+
+    def test_f2_4b_taskhandler_consumes_planner_without_effect_execution(self) -> None:
+        from claw_v2.task_handler import TaskHandler
+
+        task_handler_source = (REPO_ROOT / "claw_v2" / "task_handler.py").read_text(
+            encoding="utf-8"
+        )
+        coordinator_source = (REPO_ROOT / "claw_v2" / "coordinator.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("plan_f2_recovery", task_handler_source)
+        self.assertIn("persist_cursor=False", task_handler_source)
+        self.assertIn('("research", "synthesis", "implementation", "verification")', task_handler_source)
+        self.assertIn("PHASE_ORDER = (\"research\", \"synthesis\", \"implementation\", \"verification\")", coordinator_source)
+        self.assertNotIn("plan_f2_recovery", coordinator_source)
+
+        f2_helper_source = "\n".join(
+            inspect.getsource(getattr(TaskHandler, name))
+            for name in (
+                "_f2_recovery_result_or_start_phase",
+                "_f2_retryable_block_reason",
+                "_f2_recovery_no_run_result",
+            )
+        )
+        forbidden_symbols = (
+            "record_external_effect",
+            "get_external_effect_by_idempotency_key",
+            "update_external_effect_status",
+            "create_phase_checkpoint",
+            "append_checkpoint_write",
+            "upsert_recovery_cursor",
+            "BrowserUseService",
+            "ComputerService",
+            "delegate_task",
+            "dynamic_fanout",
+        )
+        offenders = {
+            "TaskHandler F2.4B helpers": [
+                symbol for symbol in forbidden_symbols if symbol in f2_helper_source
+            ],
+            "claw_v2/coordinator.py": [
+                symbol
+                for symbol in (
+                    "record_external_effect",
+                    "get_external_effect_by_idempotency_key",
+                    "update_external_effect_status",
+                    "dynamic_fanout",
+                )
+                if symbol in coordinator_source
+            ],
+        }
+        self.assertEqual(
+            {path: symbols for path, symbols in offenders.items() if symbols},
+            {},
+            "F2.4B may consume the recovery classifier only; side-effect wiring, "
+            f"cursor persistence, and dynamic fanout are out of scope: {offenders}",
+        )
+
+    def test_f2_5a_diagnostics_collector_is_read_only_and_local(self) -> None:
+        import claw_v2.diagnostics as diagnostics_module
+
+        path = REPO_ROOT / "claw_v2" / "diagnostics.py"
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+
+        self.assertIn("def collect_f2_recovery_report", source)
+        self.assertIn("mode=ro", inspect.getsource(diagnostics_module._open_readonly_sqlite))
+        self.assertNotIn("mode=rw", inspect.getsource(diagnostics_module._open_readonly_sqlite))
+        self.assertNotIn("mode=rwc", inspect.getsource(diagnostics_module._open_readonly_sqlite))
+        self.assertNotIn("from claw_v2.sqlite_runtime", source)
+        self.assertNotIn("from claw_v2.f2_durability_store", source)
+        self.assertNotIn("from claw_v2.task_handler", source)
+        self.assertNotIn("from claw_v2.coordinator", source)
+
+        f2_function_names = {
+            "collect_f2_recovery_report",
+            "_collect_f2_recovery_cli_report",
+            "_open_readonly_sqlite",
+            "_empty_f2_report",
+            "_empty_f2_counts",
+            "_empty_f2_recent_records",
+            "_safe_f2_text_summary",
+            "format_f2_recovery_text",
+        }
+        f2_function_nodes = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and (node.name in f2_function_names or node.name.startswith("_f2_"))
+        ]
+        self.assertTrue(f2_function_nodes)
+
+        forbidden_call_names = {
+            "RuntimeDb",
+            "F2DurabilityStore",
+            "ensure_f2_durability_schema",
+            "plan_f2_recovery",
+            "TaskHandler",
+            "Coordinator",
+            "CoordinatorService",
+            "connect_runtime_sqlite",
+            "record_external_effect",
+            "update_external_effect_status",
+            "append_checkpoint_write",
+            "create_phase_checkpoint",
+            "upsert_recovery_cursor",
+            "get_recovery_cursor",
+            "BrowserUseService",
+            "ComputerService",
+            "delegate_task",
+            "dynamic_fanout",
+            "Popen",
+        }
+        forbidden_write_methods = {"commit", "rollback", "executescript", "executemany"}
+        offenders: list[str] = []
+        for function_node in f2_function_nodes:
+            for node in ast.walk(function_node):
+                if not isinstance(node, ast.Call):
+                    continue
+                if isinstance(node.func, ast.Name) and node.func.id in forbidden_call_names:
+                    offenders.append(f"{function_node.name}:{node.func.id}")
+                elif isinstance(node.func, ast.Attribute):
+                    if node.func.attr in forbidden_call_names | forbidden_write_methods:
+                        offenders.append(f"{function_node.name}:{node.func.attr}")
+        self.assertEqual(offenders, [])
+
+        payload_policy_source = inspect.getsource(diagnostics_module._empty_f2_report)
+        self.assertIn("raw_payloads_included", payload_policy_source)
+        self.assertIn("False", payload_policy_source)
+        cli_source = inspect.getsource(diagnostics_module._collect_f2_recovery_cli_report)
+        self.assertIn("collect_f2_recovery_report", cli_source)
+        self.assertNotIn("DEFAULT_DB_PATH", cli_source)
+        self.assertNotIn("os.getenv", cli_source)
+        main_source = inspect.getsource(diagnostics_module.main)
+        self.assertIn("--f2-recovery-report", main_source)
+        self.assertIn("--f2-db", main_source)
+        self.assertIn("parser.error", main_source)
+
 
 if __name__ == "__main__":
     unittest.main()

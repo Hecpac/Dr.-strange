@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from claw_v2.jobs import JOB_TERMINAL_STATUSES, JobService
 from claw_v2.observe import ObserveStream
@@ -115,6 +117,97 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(claimed.worker_id, "worker-1")
             self.assertIsNone(claimed_again)
             self.assertEqual(service.get(created.job_id).worker_id, "worker-1")
+
+    def test_claims_allowed_when_maintenance_flags_absent(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CLAW_MAINTENANCE_MODE": "0", "CLAW_NO_JOB_CLAIM": "0"},
+            clear=False,
+        ):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                service = JobService(Path(tmpdir) / "claw.db")
+                specific = service.enqueue(kind="notebooklm.research")
+                next_job = service.enqueue(kind="pipeline.issue")
+
+                claimed_specific = service.claim(specific.job_id, worker_id="worker-1")
+                claimed_next = service.claim_next(
+                    worker_id="worker-2",
+                    kinds=("pipeline.issue",),
+                )
+
+                self.assertIsNotNone(claimed_specific)
+                self.assertIsNotNone(claimed_next)
+                assert claimed_specific is not None
+                assert claimed_next is not None
+                self.assertEqual(claimed_specific.status, "running")
+                self.assertEqual(claimed_next.job_id, next_job.job_id)
+                self.assertEqual(claimed_next.status, "running")
+
+    def test_claims_blocked_by_maintenance_mode_before_running_transition(self) -> None:
+        self._assert_claim_gate_blocks_transitions(
+            flag_name="CLAW_MAINTENANCE_MODE",
+            expected_reason="maintenance_mode_active",
+        )
+
+    def test_claims_blocked_by_no_job_claim_before_running_transition(self) -> None:
+        self._assert_claim_gate_blocks_transitions(
+            flag_name="CLAW_NO_JOB_CLAIM",
+            expected_reason="no_job_claim_active",
+        )
+
+    def _assert_claim_gate_blocks_transitions(
+        self,
+        *,
+        flag_name: str,
+        expected_reason: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            observe = ObserveStream(root / "observe.db")
+            service = JobService(root / "claw.db", observe=observe)
+            queued = service.enqueue(kind="notebooklm.research")
+            retrying = service.enqueue(kind="pipeline.issue")
+            service.claim(retrying.job_id, worker_id="setup-worker")
+            service.fail(
+                retrying.job_id,
+                error="setup_retry",
+                retry=True,
+                retry_delay_seconds=0,
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "CLAW_MAINTENANCE_MODE": "0",
+                    "CLAW_NO_JOB_CLAIM": "0",
+                    flag_name: "1",
+                },
+                clear=False,
+            ):
+                specific_claim = service.claim(queued.job_id, worker_id="worker-1")
+                next_claim = service.claim_next(
+                    worker_id="worker-2",
+                    kinds=("pipeline.issue",),
+                    now=time.time() + 1,
+                )
+
+            self.assertIsNone(specific_claim)
+            self.assertIsNone(next_claim)
+            self.assertEqual(service.get(queued.job_id).status, "queued")
+            self.assertEqual(service.get(retrying.job_id).status, "retrying")
+            events = [
+                event
+                for event in observe.recent_events(limit=20)
+                if event["event_type"] == "job_claim_blocked"
+            ]
+            self.assertEqual(len(events), 2)
+            payloads = [event["payload"] for event in events]
+            self.assertEqual(
+                {payload["operation"] for payload in payloads},
+                {"claim", "claim_next"},
+            )
+            self.assertEqual({payload["reason"] for payload in payloads}, {expected_reason})
+            self.assertNotIn("setup_retry", str(payloads))
 
     def test_claim_checkpoint_complete_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -440,6 +533,54 @@ class JobServiceTests(unittest.TestCase):
 
             self.assertEqual(recovered, [])
             self.assertEqual(service.get(created.job_id).status, "running")
+
+    def test_recover_stale_running_no_retry_fails_terminally_below_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            service = JobService(Path(tmpdir) / "claw.db", observe=observe)
+            now = time.time()
+            created = service.enqueue(kind="notebooklm.research", max_attempts=3)
+            claimed = service.claim(created.job_id, worker_id="notebooklm", now=now)
+            self.assertEqual(claimed.status, "running")
+
+            recovered = service.recover_stale_running(
+                kinds=("notebooklm.research",),
+                stale_after_seconds=60,
+                now=now + 120,
+                no_retry=True,
+                error="stale_running_no_durable_consumer",
+            )
+
+            self.assertEqual(len(recovered), 1)
+            job = service.get(created.job_id)
+            self.assertEqual(job.status, "failed")
+            self.assertEqual(job.error, "stale_running_no_durable_consumer")
+            self.assertIsNotNone(job.completed_at)
+            self.assertEqual(job.attempts, 1)
+            events = [event["event_type"] for event in observe.job_events(created.job_id)]
+            self.assertIn("job_failed", events)
+            self.assertNotIn("job_retrying", events)
+
+    def test_recover_stale_running_matches_kind_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db")
+            research = service.enqueue(kind="notebooklm.research", max_attempts=3)
+            podcast = service.enqueue(kind="notebooklm.podcast", max_attempts=3)
+            unrelated = service.enqueue(kind="coordinator.autonomous_task", max_attempts=3)
+            for rec in (research, podcast, unrelated):
+                service.claim(rec.job_id, worker_id="w", now=1000.0)
+
+            recovered = service.recover_stale_running(
+                kind_prefix="notebooklm.",
+                stale_after_seconds=60,
+                now=2000.0,
+                no_retry=True,
+            )
+
+            self.assertEqual({job.job_id for job in recovered}, {research.job_id, podcast.job_id})
+            self.assertEqual(service.get(research.job_id).status, "failed")
+            self.assertEqual(service.get(podcast.job_id).status, "failed")
+            self.assertEqual(service.get(unrelated.job_id).status, "running")
 
 
 if __name__ == "__main__":
