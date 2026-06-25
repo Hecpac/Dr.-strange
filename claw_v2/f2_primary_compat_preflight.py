@@ -132,3 +132,79 @@ def _open_readonly(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA query_only = ON")
     conn.execute("PRAGMA busy_timeout = 5000")
     return conn
+
+
+def _finalize(result: _PathResult, ok_reason: str) -> _PathResult:
+    """FAIL keeps its reasons; PASS gets the success marker appended."""
+    if result.status == PASS:
+        result.reasons.append(ok_reason)
+    return result
+
+
+def _check_schema(conn: sqlite3.Connection, expected: ExpectedSchema) -> _PathResult:
+    reasons: list[str] = []
+    found: dict[str, list[str]] = {}
+    for table, exp_cols in expected.tables.items():
+        cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        actual = [row["name"] for row in cols]
+        found[table] = actual
+        if not actual:
+            reasons.append(f"missing_table:{table}")
+            continue
+        missing = [c for c in exp_cols if c not in actual]
+        if missing:
+            reasons.append(f"missing_columns:{table}:{missing}")
+    result = _PathResult(
+        status=PASS if not reasons else FAIL, reasons=reasons, details={"tables": found}
+    )
+    return _finalize(result, "schema_subset_satisfied")
+
+
+def _check_indexes(conn: sqlite3.Connection, expected: ExpectedSchema) -> _PathResult:
+    reasons: list[str] = []
+    _, actual_unique = _introspect(conn)
+    for name, spec in expected.unique_indexes.items():
+        found = actual_unique.get(name)
+        if found is None:
+            reasons.append(f"missing_unique_index:{name}")
+        elif set(found.columns) != set(spec.columns):
+            reasons.append(f"index_columns_mismatch:{name}:{sorted(found.columns)}")
+    result = _PathResult(
+        status=PASS if not reasons else FAIL,
+        reasons=reasons,
+        details={"required_unique_indexes": sorted(expected.unique_indexes)},
+    )
+    return _finalize(result, "required_unique_indexes_present")
+
+
+def _check_counts(conn: sqlite3.Connection) -> _PathResult:
+    reasons: list[str] = []
+    counts: dict[str, int | None] = {}
+    non_empty: list[str] = []
+    for table in F2_DURABILITY_TABLES:
+        try:
+            row = conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
+            counts[table] = int(row["c"])
+            if counts[table]:
+                non_empty.append(table)
+        except sqlite3.OperationalError:
+            counts[table] = None
+            reasons.append(f"count_failed_missing_table:{table}")
+    result = _PathResult(
+        status=PASS if not reasons else FAIL,
+        reasons=reasons,
+        details={"f2_table_counts": counts, "non_empty_f2_tables": non_empty},
+    )
+    return _finalize(result, "counts_collected")
+
+
+def _check_integrity(conn: sqlite3.Connection) -> _PathResult:
+    rows = conn.execute("PRAGMA quick_check").fetchall()
+    results = [row[0] for row in rows]
+    ok = results == ["ok"]
+    result = _PathResult(
+        status=PASS if ok else FAIL,
+        reasons=[] if ok else [f"integrity_check_failed:{results[:3]}"],
+        details={"quick_check": results[:5]},
+    )
+    return _finalize(result, "integrity_ok")
