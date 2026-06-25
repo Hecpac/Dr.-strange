@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from claw_v2.f2_durability_store import F2DurabilityStore
+from claw_v2.notebooklm_research_effect import build_research_effect_spec
 from claw_v2.sqlite_runtime import RuntimeDb
 
 
@@ -20,8 +21,6 @@ def _store(tmp: str) -> F2DurabilityStore:
 
 
 def _nb_spec(pre_count: int = 0):
-    from claw_v2.notebooklm_research_effect import build_research_effect_spec
-
     return build_research_effect_spec(
         job_id="job:1",
         notebook_id="nb-1",
@@ -121,8 +120,6 @@ class BuildSpecTests(unittest.TestCase):
         self.assertEqual(spec.task_id, "task:custom")
 
     def test_request_contains_expected_keys(self):
-        from claw_v2.notebooklm_research_effect import build_research_effect_spec
-
         spec = build_research_effect_spec(
             job_id="job:1",
             notebook_id="nb-1",
@@ -138,6 +135,26 @@ class BuildSpecTests(unittest.TestCase):
         self.assertEqual(spec.request["query"], "q")
         self.assertEqual(spec.request["mode"], "deep")
         self.assertEqual(spec.request["pre_intent_source_count"], 5)
+
+    def test_negative_pre_count_rejected(self):
+        with self.assertRaises(ValueError):
+            build_research_effect_spec(
+                job_id="job:1",
+                notebook_id="nb-1",
+                query="q",
+                mode="deep",
+                pre_intent_source_count=-1,
+            )
+
+    def test_non_int_pre_count_rejected(self):
+        with self.assertRaises(ValueError):
+            build_research_effect_spec(
+                job_id="job:1",
+                notebook_id="nb-1",
+                query="q",
+                mode="deep",
+                pre_intent_source_count="bad",  # type: ignore[arg-type]
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +224,17 @@ class AdapterTests(unittest.TestCase):
         spec = _nb_spec()
         notebooklm_research_adapter(deep_research)(spec)
         self.assertEqual(calls, [("nb-1", "q")])
+
+    def test_negative_import_treated_as_not_applied(self):
+        from claw_v2.notebooklm_research_effect import notebooklm_research_adapter
+
+        def deep_research(nb, q):
+            return -1
+
+        ar = notebooklm_research_adapter(deep_research)(_nb_spec())
+        self.assertFalse(ar.applied)
+        self.assertEqual(ar.result["imported_count"], 0)
+        self.assertEqual(ar.reason, "zero_imports")
 
 
 # ---------------------------------------------------------------------------
@@ -321,3 +349,49 @@ class VerifierTests(unittest.TestCase):
             self.assertEqual(verdict.classification, "verified_absent")
             self.assertEqual(verdict.verification["pre"], 7)
             self.assertEqual(verdict.verification["current"], 7)
+
+    def test_non_int_source_count_is_blocked(self):
+        from claw_v2.notebooklm_research_effect import notebooklm_research_verifier
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = _record_no_result(tmp)
+            v = notebooklm_research_verifier(status_fn=lambda nb: {"source_count": "oops"})
+            verdict = v(_nb_spec(pre_count=0), rec)
+            self.assertEqual(verdict.classification, "blocked_manual_review")
+
+    def test_non_int_pre_count_is_blocked(self):
+        """A foreign/old record whose persisted pre_intent_source_count is non-int
+        must fail closed (the verifier guard, not the builder, covers this path)."""
+        from claw_v2.notebooklm_research_effect import notebooklm_research_verifier
+        from claw_v2.external_effect_executor import EffectSpec
+
+        spec = EffectSpec(
+            task_id="t1",
+            run_id="r1",
+            phase="research",
+            effect_kind="notebooklm_research",
+            target="nb-1",
+            request={
+                "notebook_id": "nb-1",
+                "query": "q",
+                "mode": "deep",
+                "pre_intent_source_count": "bad",
+            },
+            content_hash="ch1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _store(tmp)
+            rec = store.record_external_effect(
+                task_id=spec.task_id,
+                run_id=spec.run_id,
+                phase=spec.phase,
+                effect_kind=spec.effect_kind,
+                target=spec.target,
+                request=spec.request,
+                content_hash=spec.content_hash,
+                status="apply_in_progress",
+                attempt_count=1,
+            )
+            v = notebooklm_research_verifier(status_fn=lambda nb: {"source_count": 0})
+            verdict = v(spec, rec)
+            self.assertEqual(verdict.classification, "blocked_manual_review")

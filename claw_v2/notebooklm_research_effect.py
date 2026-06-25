@@ -13,6 +13,9 @@ from typing import Any, Callable
 from claw_v2.external_effect_executor import AdapterResult, EffectSpec, VerifierVerdict
 from claw_v2.f2_durability_store import ExternalEffectRecord
 
+_EFFECT_KIND = "notebooklm_research"
+_PHASE = "research"
+
 
 def build_research_effect_spec(
     *,
@@ -24,12 +27,16 @@ def build_research_effect_spec(
     task_id: str | None = None,
 ) -> EffectSpec:
     """Build a fully-populated EffectSpec for a notebooklm_research effect."""
+    if not isinstance(pre_intent_source_count, int) or pre_intent_source_count < 0:
+        raise ValueError(
+            f"pre_intent_source_count must be a non-negative int, got {pre_intent_source_count!r}"
+        )
     content_hash = hashlib.sha256(f"{query}|{mode}".encode()).hexdigest()
     return EffectSpec(
         task_id=task_id or job_id,
         run_id=job_id,
-        phase="research",
-        effect_kind="notebooklm_research",
+        phase=_PHASE,
+        effect_kind=_EFFECT_KIND,
         target=notebook_id,
         request={
             "notebook_id": notebook_id,
@@ -39,7 +46,7 @@ def build_research_effect_spec(
         },
         content_hash=content_hash,
         job_id=job_id,
-        verifier_kind="notebooklm_research",
+        verifier_kind=_EFFECT_KIND,
     )
 
 
@@ -49,13 +56,14 @@ def notebooklm_research_adapter(
     """Wrap a deep_research callable as an F2 Adapter.
 
     deep_research_fn(notebook_id, query) -> int | None  (imported source count)
-    Classification: imported_count > 0 → applied; == 0 → not applied (zero_imports).
+    Classification: imported_count > 0 → applied; <= 0 → not applied (zero_imports).
+    A negative return is an anomaly and is clamped to 0 (not applied).
     """
 
     def adapter(spec: EffectSpec) -> AdapterResult:
         notebook_id: str = spec.request["notebook_id"]
         query: str = spec.request["query"]
-        imported = int(deep_research_fn(notebook_id, query) or 0)
+        imported = max(0, int(deep_research_fn(notebook_id, query) or 0))
         return AdapterResult(
             applied=imported > 0,
             result={"imported_count": imported},
@@ -87,8 +95,17 @@ def notebooklm_research_verifier(
                 "result_present",
             )
 
-        # 2. Need live count to decide.
-        pre = int(spec.request.get("pre_intent_source_count", -1))
+        # 2. Need live count to decide. Coerce pre fail-closed: a non-int
+        # persisted on an old/foreign record must not escape verify().
+        pre_raw = spec.request.get("pre_intent_source_count", -1)
+        try:
+            pre = int(pre_raw)
+        except (ValueError, TypeError):
+            return VerifierVerdict(
+                "blocked_manual_review",
+                {"pre": pre_raw, "current": None},
+                "pre_count_not_int",
+            )
         if pre < 0:
             # pre_intent_source_count not recorded → cannot make a safe decision.
             return VerifierVerdict(
@@ -114,7 +131,14 @@ def notebooklm_research_verifier(
                 "source_count_missing",
             )
 
-        current = int(current_raw)
+        try:
+            current = int(current_raw)
+        except (ValueError, TypeError):
+            return VerifierVerdict(
+                "blocked_manual_review",
+                {"pre": pre, "current": current_raw},
+                "source_count_not_int",
+            )
         if current == pre:
             return VerifierVerdict(
                 "verified_absent",
