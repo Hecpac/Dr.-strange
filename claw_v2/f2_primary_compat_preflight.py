@@ -216,9 +216,7 @@ def _read_found_schema_version(conn: sqlite3.Connection) -> int | None:
     best: int | None = None
     for table in F2_DURABILITY_TABLES:
         try:
-            row = conn.execute(
-                f"SELECT MAX(schema_version) AS v FROM {table}"
-            ).fetchone()
+            row = conn.execute(f"SELECT MAX(schema_version) AS v FROM {table}").fetchone()
         except sqlite3.OperationalError:
             continue
         value = row["v"]
@@ -272,9 +270,7 @@ def _run_checks(
     if not version_ok:
         reasons.append(f"schema_version_mismatch:found={found_version}")
 
-    paths_pass = all(
-        p.status == PASS for p in (schema, index, counts, integrity)
-    ) and version_ok
+    paths_pass = all(p.status == PASS for p in (schema, index, counts, integrity)) and version_ok
     overall = PASS if paths_pass else FAIL
     if overall == PASS:
         recommendation = READY
@@ -365,3 +361,63 @@ def run_primary_compat_preflight(*, db_path: str | None = None) -> dict[str, Any
         )
     finally:
         conn.close()
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Read-only F2 primary DB compatibility preflight. Opens a supplied "
+            "--db-path strictly read-only (mode=ro, never immutable); proves "
+            "schema/index/integrity compatibility, not the live F2 write path."
+        ),
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--temp-db",
+        action="store_true",
+        help="Smoke: build an isolated temp DB and check it (default).",
+    )
+    group.add_argument(
+        "--db-path",
+        default=None,
+        help="Path to a DB to check. Opened read-only only; never written.",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit structured JSON only.")
+    return parser
+
+
+def _format_human(report: dict[str, Any]) -> str:
+    lines = [
+        f"overall_status: {report['overall_status']}",
+        f"recommendation: {report['recommendation']}",
+        f"db_path_checked: {report['db_path_checked']}",
+        f"opened_read_only: {str(report['opened_read_only']).lower()}",
+        f"immutable_mode_used: {str(report['immutable_mode_used']).lower()}",
+        f"primary_db_touched: {str(report['primary_db_touched']).lower()}",
+        f"schema_version_expected: {report['schema_version_expected']}",
+        f"schema_version_found: {report['schema_version_found']}",
+        f"schema_path: {report['schema_path']}",
+        f"index_path: {report['index_path']}",
+        f"counts_path: {report['counts_path']}",
+        f"integrity_path: {report['integrity_path']}",
+        f"f2_table_counts: {report['f2_table_counts']}",
+        f"non_empty_f2_tables: {report['non_empty_f2_tables']}",
+        "reasons:",
+    ]
+    lines.extend(f"  - {reason}" for reason in report["reasons"])
+    lines.append(f"does_not_prove: {report['does_not_prove']}")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    report = run_primary_compat_preflight(db_path=args.db_path)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(_format_human(report))
+    return 0 if report["overall_status"] == PASS else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

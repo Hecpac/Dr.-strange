@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -33,8 +36,7 @@ class ExpectedSchemaTests(unittest.TestCase):
         # The 5 F2 unique indexes are a subset of what was introspected.
         self.assertTrue(
             _EXPECTED_UNIQUE_INDEXES.issubset(set(expected.unique_indexes)),
-            f"missing F2 unique indexes: "
-            f"{_EXPECTED_UNIQUE_INDEXES - set(expected.unique_indexes)}",
+            f"missing F2 unique indexes: {_EXPECTED_UNIQUE_INDEXES - set(expected.unique_indexes)}",
         )
         idem = expected.unique_indexes["ux_external_effect_records_idempotency_key"]
         self.assertTrue(idem.unique)
@@ -82,8 +84,10 @@ class PathCheckTests(unittest.TestCase):
             result = preflight._check_indexes(conn, expected)
         self.assertEqual(result.status, preflight.FAIL)
         self.assertTrue(
-            any("missing_unique_index:ux_external_effect_records_idempotency_key" in r
-                for r in result.reasons)
+            any(
+                "missing_unique_index:ux_external_effect_records_idempotency_key" in r
+                for r in result.reasons
+            )
         )
 
     def test_counts_check_empty_db(self) -> None:
@@ -92,17 +96,18 @@ class PathCheckTests(unittest.TestCase):
             result = preflight._check_counts(conn)
         self.assertEqual(result.status, preflight.PASS)
         self.assertEqual(result.details["non_empty_f2_tables"], [])
-        self.assertEqual(
-            set(result.details["f2_table_counts"]), set(F2_DURABILITY_TABLES)
-        )
+        self.assertEqual(set(result.details["f2_table_counts"]), set(F2_DURABILITY_TABLES))
 
     def test_counts_check_nonempty_db(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             conn, wdb = self._open_primary(tmpdir)
             store = F2DurabilityStore(wdb)
             store.append_checkpoint_write(
-                task_id="compat-probe", run_id="compat-probe", phase="implementation",
-                write_kind="phase_started", payload={"event": "probe"},
+                task_id="compat-probe",
+                run_id="compat-probe",
+                phase="implementation",
+                write_kind="phase_started",
+                payload={"event": "probe"},
             )
             result = preflight._check_counts(conn)
         self.assertEqual(result.status, preflight.PASS)
@@ -211,6 +216,31 @@ class RunReportTests(unittest.TestCase):
                 conn.execute("CREATE TABLE should_fail (x TEXT)")
             query_only = conn.execute("PRAGMA query_only").fetchone()[0]
         self.assertEqual(int(query_only), 1)
+
+
+class CliTests(unittest.TestCase):
+    def test_cli_temp_db_json_smoke_exits_zero(self) -> None:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = preflight.main(["--temp-db", "--json"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["overall_status"], preflight.PASS)
+        self.assertFalse(payload["primary_db_touched"])
+
+    def test_cli_db_path_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "claw.db"
+            wdb = RuntimeDb(path)
+            F2DurabilityStore(wdb)
+            self.addCleanup(wdb.close)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = preflight.main(["--db-path", str(path), "--json"])
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["recommendation"], preflight.READY)
+        self.assertTrue(payload["opened_read_only"])
 
 
 if __name__ == "__main__":
