@@ -76,6 +76,7 @@ class ExecutorDedupTests(unittest.TestCase):
             outcome = ex.execute(spec, adapter, verifier)  # same key -> dedup
             self.assertEqual(n["calls"], 1)
             self.assertEqual(outcome.status, "applied")
+            self.assertEqual(outcome.record.status, "applied")
 
 
 class ExecutorRecoveryTests(unittest.TestCase):
@@ -112,6 +113,7 @@ class ExecutorRecoveryTests(unittest.TestCase):
             outcome = ex.execute(spec, adapter, verifier)
             self.assertEqual(outcome.status, "applied")  # verified_absent -> retry -> applied
             self.assertEqual(n["calls"], 1)
+            self.assertEqual(outcome.record.attempt_count, 2)
 
     def test_recovery_verified_applied_completes_without_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,7 +139,7 @@ class ExecutorRecoveryTests(unittest.TestCase):
                 return VerifierVerdict("verified_applied", {"imported_count": 5}, "result_present")
 
             outcome = ex.execute(spec, adapter, verifier)
-            self.assertEqual(outcome.status, "applied")
+            self.assertEqual(outcome.status, "verified_applied")
 
     def test_recovery_blocked_is_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,6 +166,44 @@ class ExecutorRecoveryTests(unittest.TestCase):
 
             outcome = ex.execute(spec, adapter, verifier)
             self.assertEqual(outcome.status, "blocked_manual_review")
+
+    def test_adapter_raise_leaves_apply_in_progress_then_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ = _store(tmp)
+            ex = F2ExternalEffectExecutor(store)
+            spec = _spec()
+            n = {"calls": 0}
+
+            def raising_adapter(spec: EffectSpec) -> AdapterResult:
+                n["calls"] += 1
+                raise RuntimeError("boom")
+
+            def no_verifier(spec: EffectSpec, record: object) -> VerifierVerdict:
+                raise AssertionError("verifier must not run on first attempt")
+
+            # First attempt: adapter raises -> execute re-raises.
+            with self.assertRaises(RuntimeError):
+                ex.execute(spec, raising_adapter, no_verifier)
+            self.assertEqual(n["calls"], 1)
+            key = store.list_external_effects()[0].idempotency_key
+            interrupted = store.get_external_effect_by_idempotency_key(key)
+            assert interrupted is not None
+            self.assertEqual(interrupted.status, "apply_in_progress")
+            self.assertEqual(interrupted.attempt_count, 1)
+            self.assertIsNotNone(interrupted.error)
+
+            # Second attempt: verifier says absent -> retry; adapter now succeeds.
+            def ok_adapter(spec: EffectSpec) -> AdapterResult:
+                n["calls"] += 1
+                return AdapterResult(applied=True, result={"imported_count": 7})
+
+            def absent_verifier(spec: EffectSpec, record: object) -> VerifierVerdict:
+                return VerifierVerdict("verified_absent", {"reason": "no-op"}, "count_unchanged")
+
+            outcome = ex.execute(spec, ok_adapter, absent_verifier)
+            self.assertEqual(n["calls"], 2)
+            self.assertEqual(outcome.status, "applied")
+            self.assertEqual(outcome.record.attempt_count, 2)
 
 
 class ExecutorAttemptBudgetTests(unittest.TestCase):

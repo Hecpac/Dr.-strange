@@ -46,6 +46,13 @@ Adapter = Callable[["EffectSpec"], "AdapterResult"]
 # verifier: (EffectSpec, ExternalEffectRecord) -> VerifierVerdict
 Verifier = Callable[["EffectSpec", "ExternalEffectRecord"], "VerifierVerdict"]
 
+# Statuses an interrupted record may carry into a recovery pass.
+_RECOVERABLE_STATUSES = frozenset({"intent_recorded", "apply_in_progress", "verification_required"})
+# Verdict classifications the verifier is allowed to return.
+_VERIFIER_CLASSIFICATIONS = frozenset(
+    {"verified_applied", "verified_absent", "blocked_manual_review"}
+)
+
 
 class F2ExternalEffectExecutor:
     def __init__(self, store: F2DurabilityStore) -> None:
@@ -66,6 +73,16 @@ class F2ExternalEffectExecutor:
         )
         return self._drive(spec, record, adapter, verifier)
 
+    def _transition(
+        self,
+        external_effect_id: str,
+        **kwargs: Any,
+    ) -> ExternalEffectRecord:
+        updated = self._store.update_external_effect_status(external_effect_id, **kwargs)
+        if updated is None:
+            raise RuntimeError(f"external_effect {external_effect_id} disappeared mid-transition")
+        return updated
+
     def _drive(
         self,
         spec: EffectSpec,
@@ -82,8 +99,12 @@ class F2ExternalEffectExecutor:
             status == "intent_recorded" and record.attempt_count == 0
         ):
             return self._apply(spec, record, adapter, verifier)
-        # interrupted attempt (intent_recorded/apply_in_progress with attempt>0, no result)
-        return self._recover(spec, record, adapter, verifier)
+        # Interrupted attempt: a recoverable in-flight status carried over a crash.
+        if status == "apply_in_progress" or (
+            status in _RECOVERABLE_STATUSES and record.attempt_count > 0
+        ):
+            return self._recover(spec, record, adapter, verifier)
+        raise ValueError(f"unroutable external-effect status: {status}")
 
     def _apply(
         self,
@@ -93,13 +114,13 @@ class F2ExternalEffectExecutor:
         verifier: Verifier,
     ) -> EffectOutcome:
         if record.attempt_count >= spec.max_attempts:
-            blocked = self._store.update_external_effect_status(
+            blocked = self._transition(
                 record.external_effect_id,
                 status="blocked_manual_review",
                 error="max_attempts_exhausted",
             )
-            return EffectOutcome("blocked_manual_review", blocked, should_retry=False)  # type: ignore[arg-type]
-        record = self._store.update_external_effect_status(  # type: ignore[assignment]
+            return EffectOutcome("blocked_manual_review", blocked, should_retry=False)
+        record = self._transition(
             record.external_effect_id,
             status="apply_in_progress",
             increment_attempt_count=True,
@@ -108,26 +129,26 @@ class F2ExternalEffectExecutor:
             ar = adapter(spec)
         except Exception as exc:
             # Leave apply_in_progress + record error; next attempt enters _recover
-            self._store.update_external_effect_status(
-                record.external_effect_id,  # type: ignore[union-attr]
+            self._transition(
+                record.external_effect_id,
                 status="apply_in_progress",
                 error=str(exc),
             )
             raise
         if ar.applied:
-            applied = self._store.update_external_effect_status(
-                record.external_effect_id,  # type: ignore[union-attr]
+            applied = self._transition(
+                record.external_effect_id,
                 status="applied",
                 result=ar.result,
             )
-            return EffectOutcome("applied", applied, should_retry=False)  # type: ignore[arg-type]
-        blocked = self._store.update_external_effect_status(
-            record.external_effect_id,  # type: ignore[union-attr]
+            return EffectOutcome("applied", applied, should_retry=False)
+        blocked = self._transition(
+            record.external_effect_id,
             status="blocked_manual_review",
             result=ar.result,
             error=ar.reason or "adapter_not_applied",
         )
-        return EffectOutcome("blocked_manual_review", blocked, should_retry=False)  # type: ignore[arg-type]
+        return EffectOutcome("blocked_manual_review", blocked, should_retry=False)
 
     def _recover(
         self,
@@ -137,14 +158,16 @@ class F2ExternalEffectExecutor:
         verifier: Verifier,
     ) -> EffectOutcome:
         verdict = verifier(spec, record)
-        updated = self._store.update_external_effect_status(
+        if verdict.classification not in _VERIFIER_CLASSIFICATIONS:
+            raise ValueError(f"invalid verifier classification: {verdict.classification}")
+        updated = self._transition(
             record.external_effect_id,
             status=verdict.classification,
             verification=verdict.verification,
             verifier_kind=spec.verifier_kind,
         )
         if verdict.classification == "verified_applied":
-            return EffectOutcome("applied", updated, should_retry=False)  # type: ignore[arg-type]
+            return EffectOutcome("verified_applied", updated, should_retry=False)
         if verdict.classification == "verified_absent":
-            return self._apply(spec, updated, adapter, verifier)  # type: ignore[arg-type]
-        return EffectOutcome("blocked_manual_review", updated, should_retry=False)  # type: ignore[arg-type]
+            return self._apply(spec, updated, adapter, verifier)
+        return EffectOutcome("blocked_manual_review", updated, should_retry=False)
