@@ -332,6 +332,7 @@ class TaskHandler:
         verification_requirement: str | None = None,
         verify: str | None = None,
         delegation_metadata: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> str:
         if self.coordinator is None:
             return "coordinator unavailable"
@@ -462,6 +463,7 @@ class TaskHandler:
             mode=mode,
             route=active_route,
             reason="task_started",
+            idempotency_key=idempotency_key,
         )
         if not self._start_autonomous_thread(
             session_id=session_id,
@@ -2725,6 +2727,7 @@ class TaskHandler:
         route: dict[str, Any],
         reason: str,
         reclaim_running: bool = False,
+        idempotency_key: str | None = None,
     ) -> str | None:
         if self.job_service is None:
             return None
@@ -2737,7 +2740,7 @@ class TaskHandler:
                 "objective": objective,
                 "mode": mode,
             },
-            resume_key=self._resume_key_for_task(task_id),
+            resume_key=idempotency_key or self._resume_key_for_task(task_id),
             metadata={
                 "runtime": "coordinator",
                 "provider": provider,

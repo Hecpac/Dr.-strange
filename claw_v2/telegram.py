@@ -326,6 +326,24 @@ def _reply_context_metadata(update: Update) -> dict[str, Any] | None:
     }
 
 
+def _inbound_context_metadata(update: Update) -> dict[str, Any] | None:
+    """Reply context (if any) plus a stable per-delivery id (`inbound`) so
+    deterministic routing (F4-B1) can dedup duplicate Telegram deliveries from a
+    legitimate repeat of the same text. message_id/update_id are stable across a
+    redelivery of the same update and differ for a new message."""
+    metadata: dict[str, Any] = dict(_reply_context_metadata(update) or {})
+    message = getattr(update, "message", None)
+    message_id = getattr(message, "message_id", None)
+    update_id = getattr(update, "update_id", None)
+    inbound: dict[str, Any] = {"channel": "telegram"}
+    if isinstance(message_id, int):
+        inbound["message_id"] = message_id
+    if isinstance(update_id, int):
+        inbound["update_id"] = update_id
+    metadata["inbound"] = inbound
+    return metadata
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -1468,7 +1486,7 @@ class TelegramTransport:
                         user_id=user_id,
                         session_id=session_id,
                         text=text,
-                        context_metadata=_reply_context_metadata(update),
+                        context_metadata=_inbound_context_metadata(update),
                     )
                 )
                 self._attach_late_text_delivery_guard(
@@ -2508,8 +2526,14 @@ class TelegramTransport:
             "session_id": session_id,
             "text": text,
         }
-        if context_metadata is not None:
-            kwargs["metadata"] = context_metadata
+        # The inbound-delivery id (F4-B1) is consumed only by the bot_service
+        # gate; do not forward it to the external agent runtime, preserving its
+        # prior reply-context-only metadata contract.
+        agent_metadata = context_metadata
+        if isinstance(agent_metadata, dict) and "inbound" in agent_metadata:
+            agent_metadata = {k: v for k, v in agent_metadata.items() if k != "inbound"} or None
+        if agent_metadata is not None:
+            kwargs["metadata"] = agent_metadata
         response = self._agent_runtime.handle_text(**kwargs)
         return response.text
 

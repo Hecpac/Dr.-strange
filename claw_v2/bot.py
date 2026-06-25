@@ -49,6 +49,7 @@ from claw_v2.terminal_handler import TerminalHandler
 from claw_v2.task_ledger import TERMINAL_STATUSES
 from claw_v2.wiki_handler import WikiHandler
 from claw_v2.coordinator import CoordinatorService
+from claw_v2.delegation_intents import classify_authenticated_browse_intent
 from claw_v2.content import ContentEngine
 from claw_v2.redaction import redact_sensitive
 from claw_v2.github import GitHubPullRequestService
@@ -3520,6 +3521,107 @@ class BotService:
             return None
         return match.group(1).strip(" .,:;!?`'\"") or None
 
+    def _emit_f4_delegation_event(self, event: str, payload: dict[str, Any]) -> None:
+        try:
+            self.observe.emit(event, payload=payload)
+        except Exception:
+            logger.debug("%s emit failed", event, exc_info=True)
+
+    @staticmethod
+    def _f4_delegation_ack(*, deduped: bool) -> str:
+        if deduped:
+            return (
+                "Ese repaso de tu feed de X ya está en marcha como tarea de fondo "
+                "(no dupliqué nada). Te aviso cuando termine."
+            )
+        return (
+            "Lancé el repaso de tu feed de X en una tarea de fondo (navegación "
+            "autenticada, fuera del chat para no cortarse a mitad). Te aviso "
+            "cuando termine."
+        )
+
+    @staticmethod
+    def _f4_delegation_failure_message() -> str:
+        return (
+            "No pude crear la tarea de fondo para el repaso de X; no quedó nada "
+            "encolado. No es un problema de permisos ni de tu mensaje — fue un "
+            "fallo interno de encolado. No necesitas reenviar el comando; lo "
+            "reintento yo cuando se resuelva."
+        )
+
+    def _maybe_handle_f4_deterministic_delegation(
+        self, text: str, *, session_id: str, context_metadata: dict[str, Any] | None
+    ) -> str | None:
+        """F4-B1: deterministically route an unambiguous "review my authenticated
+        X feed" request to a durable background delegation job WITHOUT depending on
+        the model to call delegate_task (the 2026-06-25 confabulation failure).
+        Gated by CLAW_F4_DETERMINISTIC_DELEGATION (default OFF); exactly-once on the
+        inbound delivery id. See INTERNAL_WIRING
+        ``high_confidence_delegation_intents_do_not_depend_on_model_tool_choice``."""
+        if not getattr(self.config, "f4_deterministic_delegation", False):
+            return None
+        intent = classify_authenticated_browse_intent(text)
+        if intent is None:
+            return None
+        task_handler = getattr(self, "_task_handler", None)
+        job_service = getattr(task_handler, "job_service", None)
+        inbound = context_metadata.get("inbound") if isinstance(context_metadata, dict) else None
+        message_id = inbound.get("message_id") if isinstance(inbound, dict) else None
+        if task_handler is None or job_service is None or not isinstance(message_id, int):
+            # No durable enqueue boundary or no stable delivery id → never enqueue
+            # without dedup capability; fall through to the brain.
+            self._emit_f4_delegation_event(
+                "f4_deterministic_delegation_skipped_no_delivery_id",
+                {"session_id": session_id, "has_delivery_id": isinstance(message_id, int)},
+            )
+            return None
+        resume_key = f"f4b-delegation:{session_id}:{message_id}"
+        # Any-status dedup: a completed job keeps the resume_key (the unique index
+        # is not active-scoped), so a redelivery must dedup on get_by_resume_key,
+        # not the active-only lookup — otherwise enqueue would re-raise on the
+        # completed-key collision and surface as a false failure.
+        if job_service.get_by_resume_key(resume_key) is not None:
+            self._emit_f4_delegation_event(
+                "f4_deterministic_delegation_matched",
+                {"session_id": session_id, "resume_key": resume_key, "deduped": True},
+            )
+            return self._f4_delegation_ack(deduped=True)
+        self._emit_f4_delegation_event(
+            "f4_deterministic_delegation_matched",
+            {"session_id": session_id, "resume_key": resume_key, "deduped": False},
+        )
+        try:
+            task_handler.start_autonomous_task(
+                session_id,
+                intent.objective,
+                source_text=text,
+                task_kind=intent.kind,
+                delegation_metadata={
+                    "source": "f4_deterministic_delegation",
+                    "channel": inbound.get("channel"),
+                },
+                idempotency_key=resume_key,
+            )
+        except Exception:
+            self._emit_f4_delegation_event(
+                "f4_deterministic_delegation_failed",
+                {"session_id": session_id, "reason": "enqueue_exception"},
+            )
+            return self._f4_delegation_failure_message()
+        # Truthful success only if the durable job actually exists now (do not
+        # claim a task that was not created — the failure mode we are fixing).
+        if job_service.get_by_resume_key(resume_key) is None:
+            self._emit_f4_delegation_event(
+                "f4_deterministic_delegation_failed",
+                {"session_id": session_id, "reason": "no_job_after_enqueue"},
+            )
+            return self._f4_delegation_failure_message()
+        self._emit_f4_delegation_event(
+            "f4_deterministic_delegation_enqueued",
+            {"session_id": session_id, "resume_key": resume_key},
+        )
+        return self._f4_delegation_ack(deduped=False)
+
     def handle_text(
         self,
         *,
@@ -3885,6 +3987,27 @@ class BotService:
             )
             self._remember_assistant_turn_state(session_id, stripped, actionable_task_response)
             return actionable_task_response
+        f4_delegation_response = self._maybe_handle_f4_deterministic_delegation(
+            stripped, session_id=session_id, context_metadata=context_metadata
+        )
+        self._emit_dispatch_decision(
+            handler="f4_deterministic_delegation",
+            route="intercepted" if f4_delegation_response is not None else "fall_through",
+            reason=(
+                "f4_deterministic_delegation_handled"
+                if f4_delegation_response is not None
+                else "f4_deterministic_delegation_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=f4_delegation_response is not None,
+        )
+        if f4_delegation_response is not None:
+            self._store_memory_turn(
+                session_id, stripped, f4_delegation_response, assistant_limit=2000
+            )
+            self._remember_assistant_turn_state(session_id, stripped, f4_delegation_response)
+            return f4_delegation_response
         task_intent_response = self._maybe_handle_task_intent(stripped, session_id=session_id)
         # The task intent router is gated by CLAW_DISABLE_TASK_INTENT_ROUTER
         # (default ON); a fall_through can be either "disabled by flag" or

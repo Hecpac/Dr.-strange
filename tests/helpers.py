@@ -53,6 +53,7 @@ def make_config(root: Path) -> AppConfig:
         use_compaction=False,
         brain_tooluse_verify=False,
         brain_tooluse_verify_timeout_seconds=None,
+        f4_deterministic_delegation=False,
         cache_prefix_ttl=3600,
         allowed_paths=[],
         approvals_root=root / "approvals",

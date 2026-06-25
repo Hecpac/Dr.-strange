@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: "brain tool-use verifier timeout hygiene (F4-A)"
-doc_version: 2.38
+describes_commit: "F4-B1 deterministic delegation for authenticated browse intents"
+doc_version: 2.39
 last_verified: 2026-06-25
 verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks + stage2c2_synthetic_canary --temp-db --json smoke (overall PASS, temp_db_only/primary_db_touched verified) and targeted pytest + f2_primary_compat_preflight --temp-db --json smoke (overall PASS, opened_read_only/immutable_mode_used/primary_db_touched verified) and targeted pytest"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -840,6 +840,63 @@ invariants:
          F4-A makes it real (provider-call bound, fail-closed); silently
          ignoring it misled the operator about how long the inline verifier can
          block a brain turn.
+
+  high_confidence_delegation_intents_do_not_depend_on_model_tool_choice:
+    rule: A narrow, unambiguous "review my authenticated X / Twitter feed" intent
+          is routed deterministically to a durable background delegation job in
+          `_maybe_handle_f4_deterministic_delegation` (`bot.py`) — it does NOT
+          depend on the brain choosing to call `mcp__claw__delegate_task`. Fixes
+          the 2026-06-25 failure where the brain emitted zero tool calls,
+          enqueued nothing, and confabulated a `ToolSearch`/tool_policy rejection
+          that never happened (`ToolSearch` does not exist in claw_v2). F4-B1
+          only; broader forced-action + post-model anti-confabulation = F4-B2.
+    flag: `CLAW_F4_DETERMINISTIC_DELEGATION` (config `f4_deterministic_delegation`),
+          default OFF. OFF = exact prior behavior (gate returns None first). Does
+          NOT touch `CLAW_DISABLE_TASK_INTENT_ROUTER`.
+    placement: Runs in `_handle_text_body` BEFORE `_maybe_handle_task_intent` /
+          `_maybe_handle_capability_route` and captures on match, so if the broad
+          task-intent router is ever re-enabled the request is still handled
+          exactly once (no double routing/enqueue).
+    classifier: `classify_authenticated_browse_intent` (`delegation_intents.py`)
+          is a conservative pure function (review-verb AND explicit X/feed target,
+          minus authoring/definitional/opinion/placeholder markers). Prefers
+          false negatives; matches "Haz un repaso por X"; rejects "¿Qué es X?" /
+          "Escribe un post para X" / "Qué opinas de Twitter" / "Resume este
+          texto…" and X-as-placeholder ("punto X", "por X razón").
+    deterministic_enqueue: Reuses `TaskHandler.start_autonomous_task` (additive
+          optional `idempotency_key` → `JobService.enqueue(resume_key=...)`), not
+          a hand-rolled job. No MCP tool call is emitted.
+    exactly_once: resume_key = `f4b-delegation:{session_id}:{telegram message_id}`.
+          The gate pre-checks `JobService.get_by_resume_key` (ANY status — a
+          completed job keeps the key because the unique index is `WHERE
+          resume_key IS NOT NULL`, and `enqueue` re-raises on a completed-key
+          collision) and dedups before any side effect; the DB unique index is
+          the concurrency backstop. The Telegram delivery id is plumbed via
+          `context_metadata["inbound"]` (`telegram._inbound_context_metadata`);
+          the agent-runtime path is NOT given the inbound id (unchanged
+          contract). No delivery id → fall through (never enqueue without dedup
+          capability). Same message twice → one job; new message, identical text
+          → new job.
+    truthful: Success is claimed only after `get_by_resume_key` confirms the
+          durable job exists; failure emits `f4_deterministic_delegation_failed`
+          (reason code only, never raw error/secrets) and a concise "no task
+          created" message — no fabricated tool/policy/loader detail, no "send
+          the same command again".
+    observe: f4_deterministic_delegation_matched (deduped) / _enqueued / _failed /
+          _skipped_no_delivery_id — safe ids/reason codes only.
+    why_not_reprompt: A re-prompt re-enters the same model that just confabulated
+          and can be talked around; deterministic routing removes the enqueue
+          from model discretion for this narrow case. Broader forced-action /
+          post-model anti-confabulation stays F4-B2.
+    enforced_by:
+      - tests/test_f4b_deterministic_delegation.py::ClassifierTests
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_incident_enqueues_one_durable_job_with_truthful_ack
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_flag_off_falls_through_no_enqueue
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_gate_independent_of_broad_router_flag
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_duplicate_delivery_creates_one_job
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_legitimate_repeat_creates_new_job
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_no_delivery_id_falls_through
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_enqueue_exception_is_truthful_with_no_job
 ```
 
 ---
@@ -1149,6 +1206,7 @@ in `_handle_text_body` (verified 2026-06-10):
 | 6 | `_maybe_handle_operational_status` | operational status questions |
 | 7 | cleanup status / owner delegation / `_maybe_handle_telegram_imperative_request` | explicit operator imperatives; unresolved context → fallthrough_to_brain (never clarifies) |
 | 8 | `_maybe_handle_actionable_task_request` | runtime=Telegram + state-derived objective; unresolved follow-up → fallthrough |
+| 8b | `_maybe_handle_f4_deterministic_delegation` | **F4-B1**, gated OFF by `CLAW_F4_DETERMINISTIC_DELEGATION` (default); narrow authenticated-X-feed-review intent → deterministic durable enqueue via `start_autonomous_task(idempotency_key=…)`; captures BEFORE the broad router (exactly-once on telegram message_id). See invariant `high_confidence_delegation_intents_do_not_depend_on_model_tool_choice` |
 | 9 | `_maybe_handle_task_intent` | **gated OFF** by `CLAW_DISABLE_TASK_INTENT_ROUTER=1` (default) |
 | 10 | `_maybe_handle_change_status_question` | change-status questions |
 | 11 | meta introspection guard + `_maybe_handle_capability_route` | classify_autonomy_intent → CRITICAL_TASK_KINDS gate |
