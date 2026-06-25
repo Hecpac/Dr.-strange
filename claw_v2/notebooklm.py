@@ -115,6 +115,7 @@ class NotebookLMService:
         runtime_policy: Any | None = None,
         policy_context: str = "telegram",
         external_backend: Any | None = None,
+        research_durable: bool = False,
     ) -> None:
         self._notify = notify or (lambda msg: None)
         self._observe = observe
@@ -123,6 +124,7 @@ class NotebookLMService:
         self._runtime_policy = runtime_policy
         self._policy_context = policy_context
         self._external_backend = external_backend
+        self._research_durable = research_durable
         self._running: dict[str, threading.Thread] = {}
         self._client_factory: Callable[[], Any] | None = None
         # Optional override for CDP-backed methods (used by tests). Defaults to
@@ -429,6 +431,11 @@ class NotebookLMService:
         self._emit(
             "nlm_research_started", notebook_id=full_id, query=query, mode=mode, job_id=job_id
         )
+
+        # Durable lane: the runner (NotebookLMResearchRunner) claims the job off-tick
+        # and drives it through F2ExternalEffectExecutor. No thread is spawned here.
+        if self._research_durable:
+            return f"Deep Research encolado para '{query}' en notebook {title}..."
 
         def _worker():
             try:
