@@ -34,9 +34,10 @@ class AppConfigDefaultsTests(unittest.TestCase):
             clear=True,
         ):
             self.assertEqual(AppConfig.from_env().brain_tooluse_verify_timeout_seconds, 30.0)
-        # Invalid / non-positive -> fail closed to None (verifier keeps its
-        # bounded role-default timeout; the operator is not silently unbounded).
-        for bad in ("abc", "0", "-5"):
+        # Invalid / non-positive / non-finite -> fail closed to None (verifier
+        # keeps its bounded role-default timeout; the operator is not silently
+        # unbounded). nan/inf parse via float() and slip past `<= 0`.
+        for bad in ("abc", "0", "-5", "nan", "inf", "-inf"):
             with patch.dict(
                 os.environ,
                 {"HOME": home, "BRAIN_TOOLUSE_VERIFY_TIMEOUT_SECONDS": bad},

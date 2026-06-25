@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import secrets
@@ -93,10 +94,12 @@ def _brain_tooluse_verify_timeout_from_env() -> float | None:
             raw,
         )
         return None
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
+        # nan/inf parse without ValueError and nan/inf <= 0 is False, so guard
+        # finiteness explicitly — a non-finite bound would defeat fail-closed.
         logger.warning(
-            "BRAIN_TOOLUSE_VERIFY_TIMEOUT_SECONDS=%r is not positive; ignoring "
-            "(verifier keeps its role-default timeout)",
+            "BRAIN_TOOLUSE_VERIFY_TIMEOUT_SECONDS=%r is not a positive finite "
+            "number; ignoring (verifier keeps its role-default timeout)",
             raw,
         )
         return None
