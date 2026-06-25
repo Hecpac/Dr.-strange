@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "A4 maintenance preflight no-work check"
-doc_version: 2.35
-last_verified: 2026-06-24
-verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks"
+describes_commit: "Stage 2C2 isolated synthetic F2 canary harness"
+doc_version: 2.36
+last_verified: 2026-06-25
+verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks + stage2c2_synthetic_canary --temp-db --json smoke (overall PASS, temp_db_only/primary_db_touched verified) and targeted pytest"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -390,6 +390,56 @@ invariants:
       - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_output_is_structured_with_path_level_reasons
       - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_cli_smoke_outputs_json_pass_with_temp_state
       - tests/test_maintenance_preflight.py::MaintenancePreflightTests::test_supplied_db_path_is_opened_read_only_immutable
+
+  stage2c2_synthetic_canary_uses_isolated_f2_state_only:
+    rule: The Stage 2C2 synthetic F2 canary runs only against an isolated temp
+          DB it creates, using synthetic `stage2c2-*` IDs. It must never be
+          invented against the primary live `data/claw.db`: the live daemon is
+          the single RuntimeDb writer, so a second writer would violate the
+          single-writer invariant (WAL-corruption risk), and ad-hoc primary
+          synthetic seeds are exactly the Stage 2C1 mistake that had to be
+          purged (2026-06-24).
+    entrypoint: `python -m claw_v2.stage2c2_synthetic_canary --temp-db --json`
+    temp_db_default: A supplied `--db-path` is refused before any DB is opened
+          (`primary_db_touched=false`); the harness writes only to its own temp
+          DB. `--temp-db` and `--db-path` are mutually exclusive.
+    synthetic_prefix: All seeded task/run/effect IDs use the `stage2c2-` prefix.
+          The harness scans the four F2 tables and fails if any row lacks it
+          (`non_synthetic_records_created`).
+    proves: F2 store + recovery-planner LOGIC on isolated synthetic state —
+          phase checkpoints (started→succeeded), contiguously ordered + linked
+          checkpoint writes with payload hashes, external-effect idempotency
+          (same idempotency_key returns the existing first row), and recovery
+          classifications COMPLETE / RETRYABLE / BLOCKED /
+          MANUAL_REVIEW_REQUIRED, plus verified_applied (no replay) and
+          verified_absent (future execution required, no replay).
+          `will_replay_external_effects` is always False.
+    does_not_prove: It does NOT exercise the live daemon's F2 path against the
+          primary DB. That remains UNBUILT and still requires injection through
+          the daemon single-writer path or a quiesced daemon. A PASS here is
+          not a signal that enabling F2 live is safe.
+    relationship_to_gate_b: The Gate B live idle canary (maintenance ON + F2
+          ON, Posturas 1/2, 2026-06-25) proved F2 ON is inert/idle-safe on the
+          live daemon; this harness proves the F2 logic on synthetic state.
+          Neither proves live F2 with real work. Stage 3 remains a separate
+          gate.
+    output_contract: Structured `--json` includes `overall_status`,
+          `db_path_checked`, `temp_db_only`, `primary_db_touched`,
+          `synthetic_prefix`, `phase_checkpoint_path`, `recovery_planner_path`,
+          `external_effect_path`, `counts_before`, `counts_after`,
+          `synthetic_ids`, `reasons`, and `does_not_prove`. Fails closed: any
+          path FAIL, any non-synthetic write, a supplied non-temp DB path, or
+          any exception makes `overall_status=FAIL`.
+    enforced_by:
+      - tests/test_stage2c2_synthetic_canary.py::Stage2C2SyntheticCanaryTests::test_harness_passes_on_temp_db
+      - tests/test_stage2c2_synthetic_canary.py::Stage2C2SyntheticCanaryTests::test_refuses_supplied_db_path_and_leaves_it_untouched
+      - tests/test_stage2c2_synthetic_canary.py::Stage2C2SyntheticCanaryTests::test_only_stage2c2_ids_used
+      - tests/test_stage2c2_synthetic_canary.py::Stage2C2SyntheticCanaryTests::test_recovery_classifications
+      - tests/test_stage2c2_synthetic_canary.py::Stage2C2SyntheticCanaryTests::test_verified_absent_requires_future_execution_and_no_replay
+      - tests/test_stage2c2_synthetic_canary.py::Stage2C2SyntheticCanaryTests::test_verified_applied_does_not_replay
+      - tests/test_stage2c2_synthetic_canary.py::Stage2C2SyntheticCanaryTests::test_duplicate_idempotency_returns_existing_row
+      - tests/test_stage2c2_synthetic_canary.py::Stage2C2SyntheticCanaryTests::test_json_output_contains_required_fields
+      - tests/test_stage2c2_synthetic_canary.py::Stage2C2SyntheticCanaryTests::test_no_real_work_paths_invoked
 
   external_effect_recovery_is_idempotent_and_never_auto_replays:
     rule: F2 recovery classifies external-effect evidence only; it never
