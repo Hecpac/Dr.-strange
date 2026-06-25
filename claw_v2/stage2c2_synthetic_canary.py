@@ -66,6 +66,21 @@ class _PathResult:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+def _finalize(
+    reasons: list[str],
+    details: dict[str, Any],
+    ids: list[str],
+    *,
+    ok_reason: str,
+) -> tuple[_PathResult, list[str]]:
+    """Shared PASS/FAIL assembly for the path checks: FAIL if any reason was
+    recorded, else PASS plus the success marker."""
+    status = PASS if not reasons else FAIL
+    if status == PASS:
+        reasons.append(ok_reason)
+    return _PathResult(status=status, reasons=reasons, details=details), ids
+
+
 # --------------------------------------------------------------------------- #
 # Synthetic seeding helpers (stage2c2-* IDs only)                             #
 # --------------------------------------------------------------------------- #
@@ -78,39 +93,34 @@ def _seed_phase(
 ) -> None:
     """Seed a phase: a ``started`` write+checkpoint, then an optional terminal
     write+checkpoint. ``terminal_status=None`` leaves the phase started-only."""
-    start_write = store.append_checkpoint_write(
-        task_id=task_id,
-        run_id=task_id,
-        phase=phase,
-        write_kind="phase_started",
-        payload={"event": "phase_started", "phase": phase},
-    )
-    store.create_phase_checkpoint(
-        task_id=task_id,
-        run_id=task_id,
-        phase=phase,
-        phase_version=1,
-        status="started",
-        last_write_order=start_write.write_order,
-        payload={"event": "phase_started", "phase": phase},
-    )
+
+    def _step(*, write_kind: str, phase_version: int, status: str, event: str) -> None:
+        payload = {"event": event, "phase": phase}
+        write = store.append_checkpoint_write(
+            task_id=task_id,
+            run_id=task_id,
+            phase=phase,
+            write_kind=write_kind,
+            payload=payload,
+        )
+        store.create_phase_checkpoint(
+            task_id=task_id,
+            run_id=task_id,
+            phase=phase,
+            phase_version=phase_version,
+            status=status,
+            last_write_order=write.write_order,
+            payload=payload,
+        )
+
+    _step(write_kind="phase_started", phase_version=1, status="started", event="phase_started")
     if terminal_status is None:
         return
-    finish_write = store.append_checkpoint_write(
-        task_id=task_id,
-        run_id=task_id,
-        phase=phase,
+    _step(
         write_kind="phase_return" if terminal_status == "succeeded" else "phase_error",
-        payload={"event": f"phase_{terminal_status}", "phase": phase},
-    )
-    store.create_phase_checkpoint(
-        task_id=task_id,
-        run_id=task_id,
-        phase=phase,
         phase_version=2,
         status=terminal_status,
-        last_write_order=finish_write.write_order,
-        payload={"event": f"phase_{terminal_status}", "phase": phase},
+        event=f"phase_{terminal_status}",
     )
 
 
@@ -218,10 +228,7 @@ def _check_phase_checkpoint_path(
         "write_orders": orders,
         "schema_version": F2_DURABILITY_SCHEMA_VERSION,
     }
-    status = PASS if not reasons else FAIL
-    if status == PASS:
-        reasons.append("phase_checkpoint_structure_verified")
-    return _PathResult(status=status, reasons=reasons, details=details), [task_id]
+    return _finalize(reasons, details, [task_id], ok_reason="phase_checkpoint_structure_verified")
 
 
 def _check_recovery_planner_path(
@@ -305,10 +312,7 @@ def _check_recovery_planner_path(
         reasons.append("verified_absent_will_replay_true")
 
     details = {"classifications": classifications}
-    status = PASS if not reasons else FAIL
-    if status == PASS:
-        reasons.append("recovery_classifications_verified")
-    return _PathResult(status=status, reasons=reasons, details=details), ids
+    return _finalize(reasons, details, ids, ok_reason="recovery_classifications_verified")
 
 
 def _check_external_effect_path(
@@ -375,10 +379,7 @@ def _check_external_effect_path(
         reasons.append("unsafe_will_replay_true")
 
     details = {"idempotency_row_count": len(rows)}
-    status = PASS if not reasons else FAIL
-    if status == PASS:
-        reasons.append("external_effect_behaviour_verified")
-    return _PathResult(status=status, reasons=reasons, details=details), ids
+    return _finalize(reasons, details, ids, ok_reason="external_effect_behaviour_verified")
 
 
 # --------------------------------------------------------------------------- #
@@ -404,48 +405,48 @@ def _non_synthetic_row_count(db: RuntimeDb) -> int:
     return total
 
 
+def _failed_report(
+    *, db_path_checked: str, temp_db_only: bool, reasons: list[str]
+) -> dict[str, Any]:
+    """Shared fail-closed report skeleton for the paths where no path check ran
+    (refusal, exception). One source of truth for the report contract keeps the
+    FAIL paths — the safety-reporting paths that matter most — from drifting."""
+    return {
+        "overall_status": FAIL,
+        "db_path_checked": db_path_checked,
+        "temp_db_only": temp_db_only,
+        "primary_db_touched": False,
+        "synthetic_prefix": SYNTHETIC_PREFIX,
+        "phase_checkpoint_path": FAIL,
+        "recovery_planner_path": FAIL,
+        "external_effect_path": FAIL,
+        "non_synthetic_records_created": False,
+        "real_external_effects_executed": False,
+        "counts_before": {table: None for table in _F2_TABLES},
+        "counts_after": {table: None for table in _F2_TABLES},
+        "synthetic_ids": [],
+        "reasons": reasons,
+        "checks": {},
+        "does_not_prove": _DOES_NOT_PROVE,
+    }
+
+
 def _refused_report(db_path: str) -> dict[str, Any]:
     """Pure-path refusal: a supplied non-temp DB path is rejected before any DB
     is opened, so the primary DB is never touched."""
-    return {
-        "overall_status": FAIL,
-        "db_path_checked": str(db_path),
-        "temp_db_only": False,
-        "primary_db_touched": False,
-        "synthetic_prefix": SYNTHETIC_PREFIX,
-        "phase_checkpoint_path": FAIL,
-        "recovery_planner_path": FAIL,
-        "external_effect_path": FAIL,
-        "non_synthetic_records_created": False,
-        "real_external_effects_executed": False,
-        "counts_before": {table: None for table in _F2_TABLES},
-        "counts_after": {table: None for table in _F2_TABLES},
-        "synthetic_ids": [],
-        "reasons": ["non_temp_db_path_refused_requires_future_operator_authorization"],
-        "checks": {},
-        "does_not_prove": _DOES_NOT_PROVE,
-    }
+    return _failed_report(
+        db_path_checked=str(db_path),
+        temp_db_only=False,
+        reasons=["non_temp_db_path_refused_requires_future_operator_authorization"],
+    )
 
 
 def _exception_report(exc: BaseException) -> dict[str, Any]:
-    return {
-        "overall_status": FAIL,
-        "db_path_checked": "temp",
-        "temp_db_only": True,
-        "primary_db_touched": False,
-        "synthetic_prefix": SYNTHETIC_PREFIX,
-        "phase_checkpoint_path": FAIL,
-        "recovery_planner_path": FAIL,
-        "external_effect_path": FAIL,
-        "non_synthetic_records_created": False,
-        "real_external_effects_executed": False,
-        "counts_before": {table: None for table in _F2_TABLES},
-        "counts_after": {table: None for table in _F2_TABLES},
-        "synthetic_ids": [],
-        "reasons": [f"unexpected_exception:{exc.__class__.__name__}", str(exc)],
-        "checks": {},
-        "does_not_prove": _DOES_NOT_PROVE,
-    }
+    return _failed_report(
+        db_path_checked="temp",
+        temp_db_only=True,
+        reasons=[f"unexpected_exception:{exc.__class__.__name__}", str(exc)],
+    )
 
 
 def run_stage2c2_synthetic_canary(*, db_path: str | None = None) -> dict[str, Any]:
