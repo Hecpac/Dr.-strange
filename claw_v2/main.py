@@ -2363,6 +2363,56 @@ def build_runtime(
         name="skill_expand",
         handler=lambda: skill_expand_runner.run_available(limit=1),
     )
+    if config.f2_durability_enabled and config.notebooklm_research_durable:
+        from claw_v2 import notebooklm_cdp as _nlm_cdp
+        from claw_v2.notebooklm_research_runner import NotebookLMResearchRunner
+
+        def _nlm_deep_research_fn(notebook_id: str, query: str) -> int:
+            # Lazy: bot.notebooklm is set by lifecycle after build_runtime returns.
+            nlm = bot.notebooklm
+            if nlm is None:
+                return 0
+            if getattr(nlm, "_use_external_backend", False):
+                ext = getattr(nlm, "_external_backend", None)
+                if ext is not None:
+                    return int(ext.deep_research(notebook_id, query, mode="deep") or 0)
+            cdp_fn = getattr(nlm, "_cdp_research_fn", None) or _nlm_cdp.deep_research
+            return int(cdp_fn(notebook_id, query) or 0)
+
+        def _nlm_status_fn(notebook_id: str) -> dict:
+            nlm = bot.notebooklm
+            if nlm is None:
+                return {"source_count": 0}
+            try:
+                return nlm.status(notebook_id)
+            except Exception:
+                return {"source_count": 0}
+
+        _nlm_notifier: Callable[[str], None] | None = None
+        if config.telegram_bot_token and config.telegram_allowed_user_id:
+            from claw_v2.stop_notifier import send_telegram_message as _send_tg
+
+            def _nlm_notifier(message: str) -> None:
+                _send_tg(
+                    config.telegram_bot_token or "",
+                    config.telegram_allowed_user_id or "",
+                    message,
+                )
+
+        _nlm_research_runner = NotebookLMResearchRunner(
+            job_service=job_service,
+            store=f2_durability_store,  # type: ignore[arg-type]  # guarded above
+            deep_research_fn=_nlm_deep_research_fn,
+            status_fn=_nlm_status_fn,
+            observe=observe,
+            notifier=_nlm_notifier,
+        )
+        daemon.register_background_job_runner(
+            name="notebooklm_research",
+            handler=_nlm_research_runner.run_once,
+            interval=300.0,
+        )
+
     brain.wiki = wiki
     agent_runtime = AgentRuntime(bot_service=bot, memory=memory, observe=observe)
     recovered_orphans = recover_orphan_actions(config.telemetry_root, observe=observe)

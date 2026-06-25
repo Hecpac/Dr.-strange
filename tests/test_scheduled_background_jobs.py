@@ -726,6 +726,60 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(record.error, "stale_running_no_durable_consumer")
                     self.assertEqual(record.attempts, 1)
 
+    def test_notebooklm_research_runner_registered_when_both_flags_on(self) -> None:
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+                "CLAW_F2_DURABILITY_ENABLED": "1",
+                "CLAW_NOTEBOOKLM_RESEARCH_DURABLE": "1",
+                "EVAL_ON_SELF_IMPROVE": "false",
+            }
+
+            with patch.dict("os.environ", env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+            runner_names = {r.name for r in runtime.daemon._background_job_runners}
+            self.assertIn("notebooklm_research", runner_names)
+
+    def test_notebooklm_research_runner_not_registered_when_dedicated_flag_off(self) -> None:
+        def fake_anthropic(req: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                content="<response>ok</response>", lane=req.lane, provider="anthropic"
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "WORKER_PROVIDER": "anthropic",
+                "CLAW_F2_DURABILITY_ENABLED": "1",
+                "CLAW_NOTEBOOKLM_RESEARCH_DURABLE": "0",
+                "EVAL_ON_SELF_IMPROVE": "false",
+            }
+
+            with patch.dict("os.environ", env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+
+            runner_names = {r.name for r in runtime.daemon._background_job_runners}
+            self.assertNotIn("notebooklm_research", runner_names)
+
     async def test_run_loop_processes_kairos_tick_job_outside_tick(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
             return LLMResponse(
