@@ -488,11 +488,14 @@ class StatusFnAdaptationTests(unittest.TestCase):
         status_fn = make_nlm_status_fn(lambda: FakeNlm())
         self.assertEqual(status_fn("nb"), {"source_count": 0})
 
-    def test_status_fn_nlm_none_yields_zero(self) -> None:
+    def test_status_fn_nlm_none_raises(self) -> None:
+        """Fail closed when the service is unavailable: raise rather than return a
+        fake 0 that could read as an unchanged baseline → false verified_absent."""
         from claw_v2.notebooklm_research_runner import make_nlm_status_fn
 
         status_fn = make_nlm_status_fn(lambda: None)
-        self.assertEqual(status_fn("nb"), {"source_count": 0})
+        with self.assertRaises(RuntimeError):
+            status_fn("nb")
 
     def test_status_fn_propagates_status_exception(self) -> None:
         """The closure must NOT swallow status() errors — let them raise so the

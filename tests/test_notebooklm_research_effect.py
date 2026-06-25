@@ -278,6 +278,18 @@ class VerifierTests(unittest.TestCase):
             verdict = v(_nb_spec(), rec)
             self.assertEqual(verdict.classification, "verified_applied")
 
+    def test_result_present_zero_imports_is_blocked(self):
+        # Spec §5: a committed result is only verified_applied when imported_count
+        # > 0. A result with zero imports must fail closed, not silently complete.
+        from claw_v2.notebooklm_research_effect import notebooklm_research_verifier
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = _record_with_result(tmp, imported_count=0)
+            v = notebooklm_research_verifier(status_fn=lambda nb: {"source_count": 5})
+            verdict = v(_nb_spec(), rec)
+            self.assertEqual(verdict.classification, "blocked_manual_review")
+            self.assertEqual(verdict.reason, "result_present_but_no_imports")
+
     def test_count_unchanged_no_result_is_verified_absent(self):
         from claw_v2.notebooklm_research_effect import notebooklm_research_verifier
 

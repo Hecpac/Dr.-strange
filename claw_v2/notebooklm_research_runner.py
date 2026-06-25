@@ -48,7 +48,11 @@ def make_nlm_status_fn(
     def status_fn(notebook_id: str) -> dict[str, Any]:
         nlm = nlm_getter()
         if nlm is None:
-            return {"source_count": 0}
+            # Fail closed: a fake 0 could read as an unchanged baseline at verify
+            # time and produce a false verified_absent → re-import. The runner's
+            # pre-intent read (retry) and the verifier (status_unavailable →
+            # blocked) both handle this raise.
+            raise RuntimeError("notebooklm service unavailable for status read")
         raw = nlm.status(notebook_id) or {}
         notebook = raw.get("notebook") or {}
         return {"source_count": int(notebook.get("sources_count") or 0)}

@@ -8,6 +8,7 @@ that belongs in Phase 3.
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any, Callable
 
 from claw_v2.external_effect_executor import AdapterResult, EffectSpec, VerifierVerdict
@@ -15,6 +16,27 @@ from claw_v2.f2_durability_store import ExternalEffectRecord
 
 _EFFECT_KIND = "notebooklm_research"
 _PHASE = "research"
+
+
+def _imported_count_from_result(result_json: str | None) -> int | None:
+    """Extract imported_count from a stored result JSON string.
+
+    Returns None when the result is absent, unparseable, not a dict, missing the
+    key, or non-int — so callers can fail closed on anything other than a clean
+    positive count.
+    """
+    if not result_json:
+        return None
+    try:
+        data = json.loads(result_json)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or "imported_count" not in data:
+        return None
+    try:
+        return int(data["imported_count"])
+    except (ValueError, TypeError):
+        return None
 
 
 def build_research_effect_spec(
@@ -102,12 +124,22 @@ def notebooklm_research_verifier(
     """
 
     def verify(_spec: EffectSpec, record: ExternalEffectRecord) -> VerifierVerdict:
-        # 1. Adapter committed its result before the crash → already applied.
+        # 1. Adapter committed its result before the crash. Only a positive
+        # imported_count is a clean apply (spec §5: "result_json exists AND
+        # imported_count > 0"). A committed result with no imports — or an
+        # unparseable result — is not a silent success; fail closed.
         if record.result_json:
+            imported = _imported_count_from_result(record.result_json)
+            if imported is not None and imported > 0:
+                return VerifierVerdict(
+                    "verified_applied",
+                    {"source": "result_json", "imported_count": imported},
+                    "result_present",
+                )
             return VerifierVerdict(
-                "verified_applied",
-                {"source": "result_json"},
-                "result_present",
+                "blocked_manual_review",
+                {"source": "result_json", "imported_count": imported},
+                "result_present_but_no_imports",
             )
 
         # 2. Baseline comes from the PERSISTED RECORD (first intent), not the
