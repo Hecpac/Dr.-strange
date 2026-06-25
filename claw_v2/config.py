@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import math
 import os
 import re
 import secrets
@@ -12,6 +14,8 @@ from claw_v2.approval import APPROVAL_TTL_SECONDS
 from claw_v2.maintenance import maintenance_mode_enabled, no_job_claim_enabled
 
 from .types import Lane, ProviderRole
+
+logger = logging.getLogger(__name__)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -65,6 +69,41 @@ def _autonomous_maintenance_from_env() -> bool:
     if "CLAW_AUTONOMOUS_MAINTENANCE" in os.environ:
         return _env_bool("CLAW_AUTONOMOUS_MAINTENANCE", True)
     return _env_bool("CLAW_AUTONOMOUS_MAINTENANCE_ENABLED", True)
+
+
+def _brain_tooluse_verify_timeout_from_env() -> float | None:
+    """Optional bound (seconds) for the brain tool-use verifier dispatch.
+
+    - Absent → ``None``: the verifier lane keeps its role-default timeout
+      (``coordinator_verification`` ≈ 60s); existing behavior is unchanged.
+    - A positive number → that value, enforced as the per-dispatch provider
+      timeout in ``verify_brain_tooluse`` (overrides the role default).
+    - Invalid / non-positive → ``None`` + a warning: an operator typo fails
+      closed to the bounded role default instead of silently unbounding the
+      verifier. A timeout always resolves to ``pending`` (never ``succeeded``).
+    """
+    raw = os.getenv("BRAIN_TOOLUSE_VERIFY_TIMEOUT_SECONDS")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "BRAIN_TOOLUSE_VERIFY_TIMEOUT_SECONDS=%r is not a number; ignoring "
+            "(verifier keeps its role-default timeout)",
+            raw,
+        )
+        return None
+    if not math.isfinite(value) or value <= 0:
+        # nan/inf parse without ValueError and nan/inf <= 0 is False, so guard
+        # finiteness explicitly — a non-finite bound would defeat fail-closed.
+        logger.warning(
+            "BRAIN_TOOLUSE_VERIFY_TIMEOUT_SECONDS=%r is not a positive finite "
+            "number; ignoring (verifier keeps its role-default timeout)",
+            raw,
+        )
+        return None
+    return value
 
 
 _SECONDARY_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
@@ -398,6 +437,7 @@ class AppConfig:
     autonomous_maintenance_enabled: bool
     use_compaction: bool
     brain_tooluse_verify: bool
+    brain_tooluse_verify_timeout_seconds: float | None
     cache_prefix_ttl: int
     allowed_paths: list[Path]
     approvals_root: Path
@@ -601,6 +641,7 @@ class AppConfig:
             autonomous_maintenance_enabled=_autonomous_maintenance_from_env(),
             use_compaction=_env_bool("USE_COMPACTION", True),
             brain_tooluse_verify=_env_bool("BRAIN_TOOLUSE_VERIFY", False),
+            brain_tooluse_verify_timeout_seconds=_brain_tooluse_verify_timeout_from_env(),
             cache_prefix_ttl=_env_int("CACHE_PREFIX_TTL", 3600),
             allowed_paths=[Path(p) for p in os.getenv("ALLOWED_PATHS", "").split(":") if p],
             approvals_root=Path(

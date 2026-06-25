@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: "F2 primary DB compatibility preflight (read-only)"
-doc_version: 2.37
+describes_commit: "brain tool-use verifier timeout hygiene (F4-A)"
+doc_version: 2.38
 last_verified: 2026-06-25
 verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks + stage2c2_synthetic_canary --temp-db --json smoke (overall PASS, temp_db_only/primary_db_touched verified) and targeted pytest + f2_primary_compat_preflight --temp-db --json smoke (overall PASS, opened_read_only/immutable_mode_used/primary_db_touched verified) and targeted pytest"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -792,6 +792,54 @@ invariants:
          effects, not only a small allowlist of request text. The flag preserves
          rollout control because each verified turn spends an additional
          verifier-lane call.
+
+  brain_tooluse_verify_timeout_is_real_or_explicitly_unsupported:
+    rule: `BRAIN_TOOLUSE_VERIFY` (the active inline verifier) has CODE default
+          OFF (`config.py` `_env_bool(..., False)`) but may be RUNTIME ON via
+          `~/.claw/env` — do NOT read "code default OFF" as "off in prod".
+          `BRAIN_TOOLUSE_VERIFY_TIMEOUT_SECONDS` is a REAL, leak-free bound (not
+          a wall-clock around a leaked thread): parsed into
+          `AppConfig.brain_tooluse_verify_timeout_seconds`
+          (`_brain_tooluse_verify_timeout_from_env`) and threaded by
+          `verify_brain_tooluse` as the verifier `WorkerTask.timeout_seconds`,
+          which `_execute_worker` passes as the per-dispatch provider timeout
+          (`router.ask(timeout=...)`). The bound is the provider call itself, so
+          a timeout raises inside the worker (no runaway) → `WorkerResult` with
+          an error and no content → `pending` → the mutation-aware blocker. A
+          timeout NEVER yields `passed`/`succeeded`.
+    semantics: Absent → `None`: the verifier lane keeps its role-default
+          timeout (`coordinator_verification` ≈ 60s) — this env OVERRIDES the
+          existing ~60s bound, it does not add a bound where none existed.
+          Positive number → that value (e.g. 30s tightens 60→30 and may
+          marginally raise pending/blocked — fail-closed-safe). Invalid /
+          non-positive → `None` + a startup warning (the operator keeps the
+          bounded role default instead of being silently unbounded).
+    no_clobber: `verify_brain_tooluse` runs with
+          `lane_overrides=_lane_model_overrides(session_id)`, and
+          `_execute_worker` lets an override `timeout` key win over
+          `WorkerTask.timeout_seconds`. `ModelOverride.to_dict()` (the override
+          source) emits only provider/model/billing/effort/source/key — NO
+          `timeout` key — so the verifier task timeout is never clobbered; a
+          regression test fails if a `timeout` field is ever added to
+          `ModelOverride`.
+    record: A timeout (or any dispatch error with no verdict) is logged with a
+          GENERIC marker only — the raw `WorkerResult.error` is never echoed
+          (it may carry secrets).
+    not_f4_forced_action: Verifier ON is the honest-COMPLETION gate (verify/
+          block a turn that already ran), NOT F4 forced-action. Forced action
+          (synchronous post-model gate + re-prompt when the brain promises
+          without acting + deterministic-router reactivation) is UNBUILT and is
+          a SEPARATE track (F4-B). This invariant is timeout/config hygiene only.
+    enforced_by:
+      - tests/test_config.py::AppConfigDefaultsTests::test_brain_tooluse_verify_timeout_parsing
+      - tests/test_brain_tooluse_verify.py::test_verify_task_carries_timeout_when_set
+      - tests/test_brain_tooluse_verify.py::test_verify_task_timeout_defaults_none_keeps_role_default
+      - tests/test_brain_tooluse_verify.py::test_verify_timeout_error_returns_pending_without_echoing_raw_error
+      - tests/test_brain_tooluse_verify.py::test_model_override_to_dict_has_no_timeout_key_so_verifier_timeout_not_clobbered
+    why: The operator set a 30s verify timeout that no code consumed (a no-op).
+         F4-A makes it real (provider-call bound, fail-closed); silently
+         ignoring it misled the operator about how long the inline verifier can
+         block a brain turn.
 ```
 
 ---

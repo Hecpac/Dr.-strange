@@ -6098,6 +6098,7 @@ class BotService:
                 output_summaries=output_summaries[:20],
                 response_excerpt=str(getattr(response, "content", "") or ""),
                 lane_overrides=lane_overrides,
+                timeout_seconds=getattr(self.config, "brain_tooluse_verify_timeout_seconds", None),
             )
             if verdict == "passed":
                 evidence_manifest["completed_at"] = time.time()
