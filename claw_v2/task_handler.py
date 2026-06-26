@@ -557,7 +557,30 @@ class TaskHandler:
             return AutonomousTaskBootstrapResult(
                 task_id, None, False, False, "failed", "job_service unavailable"
             )
-        existed_task = self.task_ledger is not None and self.task_ledger.get(task_id) is not None
+        existing_record = self.task_ledger.get(task_id) if self.task_ledger is not None else None
+        existed_task = existing_record is not None
+        # Terminal-aware guard: if the task already reached a terminal state, its
+        # prior ``coordinator:{task_id}`` job is terminal too and therefore out of
+        # the ACTIVE-resume_key partial unique index (jobs.py), so the unconditional
+        # ``reserve`` below would re-INSERT a SPURIOUS coordinator job for an
+        # already-finished task. That job would never re-execute the task (ledger-
+        # driven resume lists only RUNNING rows, and no runner claims
+        # ``coordinator.autonomous_task`` directly; orphan reconciliation cancels
+        # such jobs of terminal tasks), but it is needless audit noise. Skip the
+        # reserve and reflect the existing terminal task, surfacing the prior
+        # coordinator job id when still discoverable by resume_key.
+        from claw_v2.task_ledger import TERMINAL_STATUSES
+
+        if existing_record is not None and existing_record.status in TERMINAL_STATUSES:
+            existing_job = self.job_service.get_by_resume_key(self._resume_key_for_task(task_id))
+            return AutonomousTaskBootstrapResult(
+                task_id,
+                existing_job.job_id if existing_job is not None else None,
+                False,
+                False,
+                "started",
+                "task already terminal",
+            )
         # Write the ledger row ONLY on first materialisation. ``TaskLedger.create``
         # is idempotent on row COUNT (ON CONFLICT(task_id) DO UPDATE) but NOT on row
         # STATE: re-running it would overwrite status/completed_at/metadata/artifacts

@@ -194,6 +194,70 @@ class BootstrapIdempotencyTests(unittest.TestCase):
         self.assertFalse(second.task_created)
         self.assertEqual(second.status, "started")
 
+    def test_bootstrap_on_terminal_task_mints_no_new_coordinator_job(self) -> None:
+        # Part A guard: a crash-recovery re-invocation of the bootstrap against an
+        # ALREADY-TERMINAL task (e.g. stale-reclaim re-running it after the task
+        # finished) must NOT mint a spurious coordinator job. The prior coordinator
+        # job is terminal too, so it is out of the ACTIVE-resume_key partial unique
+        # index (jobs.py:58-61) and an unconditional reserve() would re-INSERT.
+        handler = self._handler()
+        tid = "f4bdeliv:tg-1:terminal"
+
+        first = self._bootstrap(handler, tid)
+        self.assertEqual(first.status, "started")
+        coord_job_id = first.coordinator_job_id
+        self.assertIsNotNone(coord_job_id)
+
+        # Drive BOTH the coordinator job and the ledger row terminal, mirroring real
+        # completion + orphan reconciliation. Without terminalising the job too the
+        # guard would never be exercised (reserve would find it active and dedup).
+        self.jobs.cancel(coord_job_id, reason="orphaned_by_task:failed")
+        self.ledger.mark_terminal(tid, status="failed", error="boom")
+        before = self.jobs.list(kinds=["coordinator.autonomous_task"], limit=50)
+        self.assertEqual(len(before), 1)
+
+        second = self._bootstrap(handler, tid)
+
+        # No SPURIOUS coordinator job minted.
+        after = self.jobs.list(kinds=["coordinator.autonomous_task"], limit=50)
+        self.assertEqual(len(after), 1)
+        self.assertEqual(after[0].job_id, coord_job_id)
+        self.assertFalse(second.task_created)
+        self.assertFalse(second.job_created)
+        self.assertEqual(second.status, "started")
+        # Discoverable existing/terminal coordinator job id is reflected back.
+        self.assertEqual(second.coordinator_job_id, coord_job_id)
+        # No resumable/running row resurrected: still terminal.
+        record = self.ledger.get(tid)
+        assert record is not None
+        self.assertEqual(record.status, "failed")
+
+    def test_terminal_task_not_resumed_no_reexecution(self) -> None:
+        # Confirms WHY a (hypothetical) spurious coordinator job cannot cause
+        # re-execution: ledger-driven recovery only lists status="running" rows
+        # (task_handler.py:1928), so a terminal row never reaches
+        # _resume_autonomous_record. (Independently: no runtime runner ever does
+        # claim_next(kinds=("coordinator.autonomous_task",)) — the coordinator job
+        # is a reservation/tracking handle, never directly executed.)
+        handler = self._handler()
+        tid = "f4bdeliv:tg-1:terminal-resume"
+        self.ledger.create(
+            task_id=tid,
+            session_id="tg-1",
+            objective="Revisa el feed de X",
+            runtime="coordinator",
+            mode="chat",
+            status="failed",
+            metadata={"autonomous": True},
+        )
+
+        resumed = handler.resume_interrupted_autonomous_tasks()
+
+        self.assertEqual(resumed, 0)
+        record = self.ledger.get(tid)
+        assert record is not None
+        self.assertEqual(record.status, "failed")
+
 
 class DeliveryTaskIdTests(unittest.TestCase):
     def test_deterministic_and_stable(self) -> None:
@@ -448,6 +512,212 @@ class F4DelegationRunnerTests(unittest.TestCase):
         self.assertEqual(after.status, "queued")
         self.assertIsNone(self.ledger.get(task_id))
         self.assertEqual(self._coordinator_jobs(), [])
+
+
+class F4DelegationCrashBoundaryTests(unittest.TestCase):
+    """Crash-boundary matrix for the durable delegation lane.
+
+    At each window we simulate a process crash by CLOSING every sqlite connection
+    on the shared DB files and rebuilding fresh service instances on the SAME
+    paths (reopen == process restart), then resume the lane (run the runner /
+    redeliver). Invariants asserted at EVERY window:
+
+      * exactly one ``agent_tasks`` row for the deterministic ``task_id``,
+      * exactly one ``coordinator.autonomous_task`` job (no second logical task),
+      * an eventual terminal / ``completed`` delegation job.
+    """
+
+    delivery_key = "f4b-delegation:tg-1:111"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.task_id = f4b_delivery_task_id(self.delivery_key)
+        self._open()
+
+    def _open(self) -> None:
+        self.memory = MemoryStore(self.root / "claw.db")
+        self.observe = ObserveStream(self.root / "observe.db")
+        self.ledger = TaskLedger(self.root / "claw.db", observe=self.observe)
+        self.jobs = JobService(self.root / "claw.db", observe=self.observe)
+
+    def _reopen(self) -> None:
+        # Simulate a process crash + restart. There is no close() API; on the test
+        # path each service owns its sqlite connection on ``_conn``, so close those
+        # (releasing WAL/locks deterministically for the 25x loop) and rebuild every
+        # service on the same DB paths.
+        for service in (self.jobs, self.ledger, self.memory, self.observe):
+            try:
+                service._conn.close()
+            except Exception:  # pragma: no cover - best-effort teardown
+                pass
+        self._open()
+
+    def _handler(self) -> TaskHandler:
+        return TaskHandler(
+            coordinator=_StubCoordinator(),
+            observe=self.observe,
+            task_ledger=self.ledger,
+            job_service=self.jobs,
+            get_session_state=self.memory.get_session_state,
+            update_session_state=self.memory.update_session_state,
+            workspace_root=self.root,
+        )
+
+    def _runner(self) -> F4DelegationJobRunner:
+        return F4DelegationJobRunner(
+            job_service=self.jobs,
+            task_handler=self._handler(),
+            observe=self.observe,
+        )
+
+    def _payload(self) -> dict:
+        return {
+            "task_id": self.task_id,
+            "session_id": "tg-1",
+            "objective": "Revisa el feed de X",
+            "mode": "chat",
+            "task_kind": "authenticated_browse",
+            "source_text": "Haz un repaso por X",
+            "delegation_metadata": {"source": "f4_deterministic_delegation"},
+        }
+
+    def _enqueue_delivery(self):
+        return self.jobs.reserve(
+            resume_key=self.delivery_key,
+            kind=F4_DELEGATION_JOB_KIND,
+            payload=self._payload(),
+        )
+
+    def _delivery_jobs(self) -> list:
+        return self.jobs.list(kinds=[F4_DELEGATION_JOB_KIND], limit=50)
+
+    def _coordinator_jobs(self) -> list:
+        return self.jobs.list(kinds=["coordinator.autonomous_task"], limit=50)
+
+    def _assert_one_logical_task(self):
+        record = self.ledger.get(self.task_id)
+        self.assertIsNotNone(record)
+        coord = self._coordinator_jobs()
+        self.assertEqual(len(coord), 1)
+        return record, coord[0]
+
+    def test_window1_crash_before_delivery_commit_redelivery_enqueues_one(self) -> None:
+        # Crash BEFORE the delivery job committed: nothing persisted. Reopen
+        # (restart) then redeliver -> exactly one f4b.delegation job; the runner
+        # then bootstraps exactly one logical task and completes the delivery job.
+        self._reopen()
+        self.assertEqual(self._delivery_jobs(), [])
+
+        job, created = self._enqueue_delivery()
+        self.assertTrue(created)
+        self.assertEqual(len(self._delivery_jobs()), 1)
+
+        self.assertEqual(self._runner().run_available(), 1)
+
+        self._assert_one_logical_task()
+        final = self.jobs.get(job.job_id)
+        assert final is not None
+        self.assertEqual(final.status, "completed")
+
+    def test_window2_crash_after_commit_before_claim_runner_bootstraps_once(self) -> None:
+        # Crash AFTER the delivery job committed but BEFORE any claim.
+        job, created = self._enqueue_delivery()
+        self.assertTrue(created)
+        self._reopen()
+
+        self.assertEqual(self._runner().run_available(), 1)
+
+        _, coord = self._assert_one_logical_task()
+        final = self.jobs.get(job.job_id)
+        assert final is not None
+        self.assertEqual(final.status, "completed")
+        self.assertEqual(final.checkpoint.get("task_id"), self.task_id)
+        self.assertEqual(final.checkpoint.get("coordinator_job_id"), coord.job_id)
+
+    def test_window3_crash_after_claim_before_bootstrap_reclaim_bootstraps_once(self) -> None:
+        # Crash AFTER claim, BEFORE bootstrap: the delivery job is left 'running'.
+        job, _ = self._enqueue_delivery()
+        claimed = self.jobs.claim_next(worker_id="f4b_delegation", kinds=(F4_DELEGATION_JOB_KIND,))
+        assert claimed is not None
+        self.assertEqual(claimed.job_id, job.job_id)
+        self.assertEqual(claimed.status, "running")
+        self._reopen()
+
+        # run_available reclaims the stale 'running' job (default 6h window vs a
+        # now far in the future), then claims + bootstraps it exactly once.
+        now_future = time.time() + 7 * 60 * 60
+        self.assertEqual(self._runner().run_available(now=now_future), 1)
+
+        _, coord = self._assert_one_logical_task()
+        final = self.jobs.get(job.job_id)
+        assert final is not None
+        self.assertEqual(final.status, "completed")
+        self.assertEqual(final.checkpoint.get("coordinator_job_id"), coord.job_id)
+
+    def test_window4_crash_after_bootstrap_before_complete_idempotent(self) -> None:
+        # Crash AFTER claim + bootstrap, BEFORE checkpoint/complete: the task +
+        # coordinator job already exist; the delivery job is left 'running'.
+        job, _ = self._enqueue_delivery()
+        claimed = self.jobs.claim_next(worker_id="f4b_delegation", kinds=(F4_DELEGATION_JOB_KIND,))
+        assert claimed is not None
+        boot = self._handler().ensure_autonomous_task_enqueued(**self._payload())
+        self.assertEqual(boot.status, "started")
+        self.assertTrue(boot.task_created)
+        _, coord_before = self._assert_one_logical_task()
+        self._reopen()
+
+        now_future = time.time() + 7 * 60 * 60
+        self.assertEqual(self._runner().run_available(now=now_future), 1)
+
+        # Idempotent: still exactly ONE task row + ONE coordinator job (same one).
+        _, coord_after = self._assert_one_logical_task()
+        self.assertEqual(coord_after.job_id, coord_before.job_id)
+        final = self.jobs.get(job.job_id)
+        assert final is not None
+        self.assertEqual(final.status, "completed")
+        self.assertEqual(final.checkpoint.get("task_id"), self.task_id)
+        self.assertEqual(final.checkpoint.get("coordinator_job_id"), coord_after.job_id)
+
+    def test_window5_crash_after_delivery_completion_terminal_task_no_new_work(self) -> None:
+        # First delivery runs to completion: task 'running', coordinator job active.
+        job1, _ = self._enqueue_delivery()
+        self.assertEqual(self._runner().run_available(), 1)
+        _, coord1 = self._assert_one_logical_task()
+        first_final = self.jobs.get(job1.job_id)
+        assert first_final is not None
+        self.assertEqual(first_final.status, "completed")
+
+        # The coordinator finished: terminalise BOTH the coordinator job (mirrors
+        # orphan reconciliation) AND the ledger row, so the deterministic task_id is
+        # fully terminal before the redelivery. (Without terminalising the job too,
+        # reserve would dedup on the still-active job and the guard would be moot.)
+        self.jobs.cancel(coord1.job_id, reason="orphaned_by_task:failed")
+        self.ledger.mark_terminal(self.task_id, status="failed", error="boom")
+        self.assertEqual(len(self._coordinator_jobs()), 1)
+
+        self._reopen()
+
+        # Redeliver the SAME delivery_key: the prior delivery job is terminal (out
+        # of the active resume_key index), so reserve mints a fresh delivery job.
+        job2, created = self._enqueue_delivery()
+        self.assertTrue(created)
+        self.assertNotEqual(job2.job_id, job1.job_id)
+
+        self.assertEqual(self._runner().run_available(), 1)
+
+        # Part A guard: terminal task -> NO new coordinator job, NO second task row,
+        # row NOT resurrected (stays terminal -> no re-execution scheduling).
+        self.assertEqual(len(self._coordinator_jobs()), 1)
+        record_after = self.ledger.get(self.task_id)
+        assert record_after is not None
+        self.assertEqual(record_after.status, "failed")
+        # The redelivery job terminalises (bootstrap returned "started").
+        final2 = self.jobs.get(job2.job_id)
+        assert final2 is not None
+        self.assertEqual(final2.status, "completed")
+        self.assertEqual(final2.checkpoint.get("coordinator_job_id"), coord1.job_id)
 
 
 if __name__ == "__main__":  # pragma: no cover
