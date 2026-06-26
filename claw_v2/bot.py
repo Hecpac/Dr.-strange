@@ -49,6 +49,8 @@ from claw_v2.terminal_handler import TerminalHandler
 from claw_v2.task_ledger import TERMINAL_STATUSES
 from claw_v2.wiki_handler import WikiHandler
 from claw_v2.coordinator import CoordinatorService
+from claw_v2.delegation_intents import classify_authenticated_browse_intent
+from claw_v2.f4_delegation import F4_DELEGATION_JOB_KIND, f4b_delivery_task_id
 from claw_v2.content import ContentEngine
 from claw_v2.redaction import redact_sensitive
 from claw_v2.github import GitHubPullRequestService
@@ -3520,6 +3522,158 @@ class BotService:
             return None
         return match.group(1).strip(" .,:;!?`'\"") or None
 
+    def _emit_f4_delegation_event(self, event: str, payload: dict[str, Any]) -> None:
+        observe = getattr(self, "observe", None)
+        if observe is None:
+            return
+        try:
+            observe.emit(event, payload=payload)
+        except Exception:
+            logger.debug("%s emit failed", event, exc_info=True)
+
+    @staticmethod
+    def _f4_delegation_accepted_ack() -> str:
+        # Truthful: the delivery job is QUEUED (not running). The runner +
+        # ledger-driven recovery materialise and execute it off-tick, then the
+        # task-completion notification delivers the result — so promising "te
+        # aviso cuando termine" is honest.
+        return (
+            "Registré tu pedido de repaso de tu feed de X; lo proceso en una "
+            "tarea de fondo (navegación autenticada) y te aviso cuando termine."
+        )
+
+    @staticmethod
+    def _f4_delegation_dedup_ack_for_status(status: str | None) -> str:
+        """Truthful status→ack for a duplicate delivery. Never claims "en marcha"
+        unless the linked task is actually running; never "procesada" unless it is
+        terminal. ``None`` (no linked task row yet) → still-queued ack."""
+        if status == "running":
+            return "Ese repaso de tu feed de X ya está en marcha; no generé otra tarea."
+        if status in TERMINAL_STATUSES:
+            return "Esa solicitud de repaso de X ya fue procesada; no generé otra."
+        return "Esta misma solicitud de repaso de X ya fue aceptada y está en cola; no generé otra."
+
+    def _f4_delegation_dedup_ack(self, job: Any) -> str:
+        """Truthful status-aware ack for a duplicate delivery whose delivery job is
+        still active (created=False). Looks up the linked task by the payload's
+        deterministic ``task_id`` so the ack reflects the REAL task state in the
+        narrow window where the bootstrap raced ahead of this redelivery."""
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        task_id = payload.get("task_id")
+        status: str | None = None
+        if task_id:
+            ledger = getattr(getattr(self, "_task_handler", None), "task_ledger", None)
+            record = ledger.get(task_id) if ledger is not None else None
+            if record is not None:
+                status = record.status
+        return self._f4_delegation_dedup_ack_for_status(status)
+
+    @staticmethod
+    def _f4_delegation_failure_message() -> str:
+        # Strictly truthful: the durable enqueue itself failed, so nothing was
+        # recorded. No retry job/scheduler is promised, and no internal
+        # error/tool/policy detail is exposed.
+        return (
+            "No pude registrar el pedido de repaso de X ahora mismo; no se encoló "
+            "nada. No voy a afirmar que el repaso esté en curso."
+        )
+
+    def _maybe_handle_f4_deterministic_delegation(
+        self, text: str, *, session_id: str, context_metadata: dict[str, Any] | None
+    ) -> str | None:
+        """F4-B1: deterministically route an unambiguous "review my authenticated
+        X feed" request to a durable background delegation job WITHOUT depending on
+        the model to call delegate_task (the 2026-06-25 confabulation failure).
+        Gated by CLAW_F4_DETERMINISTIC_DELEGATION (default OFF).
+
+        The gate enqueues exactly ONE durable ``f4b.delegation`` job (keyed by
+        ``f4b-delegation:{session_id}:{message_id}`` via the atomic JobService
+        creator election, cross-process). It does NOT start a task, a thread, or
+        a coordinator job — :class:`~claw_v2.f4_delegation.F4DelegationJobRunner`
+        claims the job off-tick and runs the idempotent bootstrap, so a crash
+        recovers through JobService claim/retry. The ack is truthful and
+        status-aware: a duplicate reflects the real state of the linked task. See
+        INTERNAL_WIRING
+        ``high_confidence_delegation_intents_do_not_depend_on_model_tool_choice``."""
+        if not getattr(self.config, "f4_deterministic_delegation", False):
+            return None
+        intent = classify_authenticated_browse_intent(text)
+        if intent is None:
+            return None
+        task_handler = getattr(self, "_task_handler", None)
+        job_service = getattr(task_handler, "job_service", None)
+        inbound = context_metadata.get("inbound") if isinstance(context_metadata, dict) else None
+        message_id = inbound.get("message_id") if isinstance(inbound, dict) else None
+        if task_handler is None or job_service is None or not isinstance(message_id, int):
+            # No durable enqueue boundary or no stable delivery id → never enqueue
+            # without dedup capability; fall through to the brain.
+            self._emit_f4_delegation_event(
+                "f4_deterministic_delegation_skipped_no_delivery_id",
+                {"session_id": session_id, "has_delivery_id": isinstance(message_id, int)},
+            )
+            return None
+        delivery_key = f"f4b-delegation:{session_id}:{message_id}"
+        task_id = f4b_delivery_task_id(delivery_key)
+        try:
+            # After-terminalize dedup: ``idx_agent_jobs_active_resume_key`` is
+            # ACTIVE-ONLY, so once the delivery job terminalizes it stops deduping
+            # and a redelivery would re-`reserve` (created=True) → a 2nd job + a
+            # false "accepted" ack. The deterministic ``task_id`` is stable
+            # forever, so if its ledger row EXISTS the bootstrap already
+            # materialised this delivery → dedup, never enqueue a second job.
+            # Keyed on row EXISTENCE (not "terminal"): coordinator_unavailable /
+            # failed bootstraps write NO ledger row (TaskHandler returns before the
+            # write), so those redeliveries correctly fall through and re-attempt.
+            ledger = getattr(task_handler, "task_ledger", None)
+            existing_task = ledger.get(task_id) if ledger is not None else None
+            if existing_task is not None:
+                self._emit_f4_delegation_event(
+                    "f4_deterministic_delegation_matched",
+                    {"session_id": session_id, "delivery_key": delivery_key, "deduped": True},
+                )
+                return self._f4_delegation_dedup_ack_for_status(existing_task.status)
+            # Atomic creator election: JobService.reserve enqueues exactly one
+            # durable delivery job via the resume_key DB unique index
+            # (cross-process). A duplicate while the job is still active gets
+            # `created=False`; this handles the queued-before-bootstrap window (no
+            # ledger row yet). The runner — not the gate — executes the job, so a
+            # crash recovers via JobService claim/retry/stale-recovery.
+            job, created = job_service.reserve(
+                resume_key=delivery_key,
+                kind=F4_DELEGATION_JOB_KIND,
+                payload={
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "objective": intent.objective,
+                    "mode": "chat",
+                    "task_kind": intent.kind,
+                    "source_text": text,
+                    "delegation_metadata": {
+                        "source": "f4_deterministic_delegation",
+                        "channel": (inbound or {}).get("channel"),
+                    },
+                },
+            )
+        except Exception:
+            logger.debug("f4 delegation reserve failed", exc_info=True)
+            self._emit_f4_delegation_event(
+                "f4_deterministic_delegation_failed",
+                {"session_id": session_id, "reason": "reserve_failed"},
+            )
+            return self._f4_delegation_failure_message()
+        if created:
+            self._emit_f4_delegation_event(
+                "f4_deterministic_delegation_enqueued",
+                {"session_id": session_id, "delivery_key": delivery_key, "task_id": task_id},
+            )
+            return self._f4_delegation_accepted_ack()
+        self._emit_f4_delegation_event(
+            "f4_deterministic_delegation_matched",
+            {"session_id": session_id, "delivery_key": delivery_key, "deduped": True},
+        )
+        return self._f4_delegation_dedup_ack(job)
+
     def handle_text(
         self,
         *,
@@ -3885,6 +4039,27 @@ class BotService:
             )
             self._remember_assistant_turn_state(session_id, stripped, actionable_task_response)
             return actionable_task_response
+        f4_delegation_response = self._maybe_handle_f4_deterministic_delegation(
+            stripped, session_id=session_id, context_metadata=context_metadata
+        )
+        self._emit_dispatch_decision(
+            handler="f4_deterministic_delegation",
+            route="intercepted" if f4_delegation_response is not None else "fall_through",
+            reason=(
+                "f4_deterministic_delegation_handled"
+                if f4_delegation_response is not None
+                else "f4_deterministic_delegation_no_match"
+            ),
+            session_id=session_id,
+            text=stripped,
+            captured=f4_delegation_response is not None,
+        )
+        if f4_delegation_response is not None:
+            self._store_memory_turn(
+                session_id, stripped, f4_delegation_response, assistant_limit=2000
+            )
+            self._remember_assistant_turn_state(session_id, stripped, f4_delegation_response)
+            return f4_delegation_response
         task_intent_response = self._maybe_handle_task_intent(stripped, session_id=session_id)
         # The task intent router is gated by CLAW_DISABLE_TASK_INTENT_ROUTER
         # (default ON); a fall_through can be either "disabled by flag" or

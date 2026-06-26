@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import os
 import sqlite3
@@ -8,6 +9,8 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+from claw_v2.f4_delegation import F4_DELEGATION_JOB_KIND
 
 from claw_v2.cron import CronScheduler, ScheduledJob
 from claw_v2.daemon import (
@@ -919,6 +922,174 @@ class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("pending_verification_reconciliation_enqueued", emitted)
             self.assertIn("pending_verification_reconciliation", emitted)
             self.assertIn("pending_verification_reconciliation_job_completed", emitted)
+
+
+class DaemonF4DelegationRunnerWiringTests(unittest.IsolatedAsyncioTestCase):
+    """Task 6: the daemon registers exactly one F4DelegationJobRunner off-tick.
+
+    Mirrors the pending-verification reconciliation runner wiring: a dedicated
+    run-loop coroutine constructs the runner with ``should_stop=shutdown.is_set``
+    so graceful shutdown propagates into ``run_available``.
+    """
+
+    def _heartbeat(self) -> MagicMock:
+        heartbeat = MagicMock()
+        heartbeat.collect.return_value = HeartbeatSnapshot(
+            timestamp="t",
+            pending_approvals=0,
+            pending_approval_ids=[],
+            agents={},
+            lane_metrics={},
+        )
+        return heartbeat
+
+    async def test_run_loop_constructs_single_f4_runner_with_should_stop(self) -> None:
+        observe = MagicMock()
+        task_handler = MagicMock()
+        job_service = MagicMock()
+        # task_ledger left None so the pending-verification loop is inert and the
+        # F4 delegation runner is the only off-tick runner exercised here.
+        daemon = ClawDaemon(
+            scheduler=CronScheduler(),
+            heartbeat=self._heartbeat(),
+            observe=observe,
+            job_service=job_service,
+            task_handler=task_handler,
+        )
+        shutdown = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        with patch("claw_v2.daemon.F4DelegationJobRunner") as runner_cls:
+            instance = runner_cls.return_value
+
+            def _run_available(**kwargs: object) -> int:
+                # Stop the loop as soon as the runner ticks once.
+                loop.call_soon_threadsafe(shutdown.set)
+                return 0
+
+            instance.run_available.side_effect = _run_available
+            await asyncio.wait_for(daemon.run_loop(shutdown, interval=0.01), timeout=5)
+
+        runner_cls.assert_called_once()
+        kwargs = runner_cls.call_args.kwargs
+        self.assertIs(kwargs["job_service"], job_service)
+        self.assertIs(kwargs["task_handler"], task_handler)
+        self.assertIs(kwargs["observe"], observe)
+        # should_stop is shutdown.is_set (a fresh bound method per access, so
+        # compare by equality / bound instance rather than identity).
+        self.assertEqual(kwargs["should_stop"], shutdown.is_set)
+        self.assertIs(kwargs["should_stop"].__self__, shutdown)
+        instance.run_available.assert_called()
+
+    async def test_run_loop_skips_f4_runner_without_task_handler(self) -> None:
+        daemon = ClawDaemon(
+            scheduler=CronScheduler(),
+            heartbeat=self._heartbeat(),
+            observe=MagicMock(),
+            job_service=MagicMock(),
+            # No task_handler -> the F4 delegation loop must not construct a runner.
+        )
+        shutdown = asyncio.Event()
+        shutdown.set()
+        with patch("claw_v2.daemon.F4DelegationJobRunner") as runner_cls:
+            await asyncio.wait_for(daemon.run_loop(shutdown, interval=0.01), timeout=5)
+        runner_cls.assert_not_called()
+
+
+class F4DelegationRunnerWiredIntoRuntimeTests(unittest.TestCase):
+    def test_main_hands_task_handler_to_daemon(self) -> None:
+        # run_loop only registers the F4DelegationJobRunner when
+        # daemon.task_handler is set. main.py must hand the bot's TaskHandler to
+        # the daemon post-construction, or the runner silently never runs in
+        # production while every unit test (which injects task_handler) stays
+        # green. Mirrors test_recovery_job_drainer_stays_wired_into_runtime.
+        main_source = (Path(__file__).resolve().parents[1] / "claw_v2" / "main.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("daemon.task_handler = bot._task_handler", main_source)
+
+
+class AutonomyStaleRunningAllowlistTests(unittest.TestCase):
+    def test_f4b_delegation_in_stale_running_allowlist(self) -> None:
+        # A crashed runner's claimed 'running' f4b.delegation job must be
+        # recovered to 'retrying'; this is only safe because the runner has a
+        # daemon-registered retry consumer + idempotent bootstrap.
+        from claw_v2.main import AUTONOMY_STALE_RUNNING_JOB_KINDS
+
+        self.assertEqual(F4_DELEGATION_JOB_KIND, "f4b.delegation")
+        self.assertIn(F4_DELEGATION_JOB_KIND, AUTONOMY_STALE_RUNNING_JOB_KINDS)
+
+
+class F4DelegationClaimExclusivityTests(unittest.TestCase):
+    """No generic/unfiltered worker may consume the f4b.delegation kind.
+
+    Source-level invariant (there is no clean seam to introspect the full set of
+    constructed daemon runners without building the whole runtime): every runtime
+    ``claim_next`` call must carry a ``kinds=`` filter, and the f4b.delegation
+    kind may only appear as a ``claim_next`` kind filter inside f4_delegation.py.
+    """
+
+    _REPO_ROOT = Path(__file__).resolve().parents[1]
+    # jobs.py defines the generic claim_next primitive; maintenance_preflight.py
+    # self-tests it with its own throwaway kind. Neither is a registered runner.
+    _SKIP_FILES = {"jobs.py", "maintenance_preflight.py"}
+
+    @staticmethod
+    def _kinds_references_f4b(value: ast.AST) -> bool:
+        for node in ast.walk(value):
+            if isinstance(node, ast.Constant) and node.value == F4_DELEGATION_JOB_KIND:
+                return True
+            if isinstance(node, ast.Name) and node.id == "F4_DELEGATION_JOB_KIND":
+                return True
+        return False
+
+    def test_claim_next_calls_are_filtered_and_f4b_kind_is_exclusive(self) -> None:
+        pkg = self._REPO_ROOT / "claw_v2"
+        unfiltered: list[str] = []
+        f4b_callsites: set[str] = set()
+        for path in sorted(pkg.rglob("*.py")):
+            if path.name in self._SKIP_FILES:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "claim_next"
+                ):
+                    continue
+                rel = path.relative_to(self._REPO_ROOT).as_posix()
+                kinds_kw = next((kw for kw in node.keywords if kw.arg == "kinds"), None)
+                if kinds_kw is None:
+                    unfiltered.append(f"{rel}:{node.lineno}")
+                    continue
+                if self._kinds_references_f4b(kinds_kw.value):
+                    f4b_callsites.add(rel)
+
+        self.assertEqual(
+            unfiltered,
+            [],
+            f"unfiltered claim_next (no kinds=) could consume f4b.delegation: {unfiltered}",
+        )
+        self.assertEqual(
+            f4b_callsites,
+            {"claw_v2/f4_delegation.py"},
+            f"f4b.delegation must be claimed only by F4DelegationJobRunner: {f4b_callsites}",
+        )
+
+    def test_main_does_not_wire_a_generic_consumer_for_f4b_kind(self) -> None:
+        # main.py references f4b.delegation only in the stale-running requeue
+        # allowlist (recover_stale_running requeues; it never consumes). Guard
+        # against a future generic runner being registered for this kind.
+        main_source = (self._REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
+        for lineno, line in enumerate(main_source.splitlines(), 1):
+            if '"f4b.delegation"' not in line:
+                continue
+            for forbidden in ("job_kind", "claim_next", "ScheduledBackgroundJobRunner"):
+                self.assertNotIn(
+                    forbidden,
+                    line,
+                    f"main.py:{lineno} wires f4b.delegation into a generic consumer ({forbidden})",
+                )
 
 
 if __name__ == "__main__":

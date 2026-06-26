@@ -197,6 +197,38 @@ class JobService:
         self._emit("job_enqueued", record)
         return self.get(record.job_id) or record
 
+    def reserve(
+        self,
+        *,
+        resume_key: str,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[JobRecord, bool]:
+        """Atomically elect a single creator for ``resume_key``.
+
+        Returns ``(record, created)`` where ``created`` is True for exactly one
+        concurrent caller (the winner) and False for every duplicate — including
+        a redelivery after the key's job already completed. The DB unique index
+        on ``resume_key`` is the cross-process election primitive; the winner is
+        identified by the generated ``job_id`` round-tripping back unchanged."""
+        my_id = f"job:{uuid.uuid4().hex[:12]}"
+        try:
+            record = self.enqueue(
+                kind=kind,
+                payload=payload,
+                resume_key=resume_key,
+                metadata=metadata,
+                job_id=my_id,
+            )
+        except sqlite3.IntegrityError:
+            # resume_key collided with a non-active (e.g. completed) job.
+            existing = self.get_by_resume_key(resume_key)
+            if existing is None:  # pragma: no cover - the unique index guarantees a row
+                raise
+            return existing, False
+        return record, record.job_id == my_id
+
     def claim(
         self,
         job_id: str,

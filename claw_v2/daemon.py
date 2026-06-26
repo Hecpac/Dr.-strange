@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
 from claw_v2.cron import CronScheduler
+from claw_v2.f4_delegation import F4DelegationJobRunner
 from claw_v2.heartbeat import HeartbeatService, HeartbeatSnapshot
 from claw_v2.maintenance import drain_apply_block_reason
 from claw_v2.observe import ObserveStream
@@ -49,6 +50,7 @@ class ClawDaemon:
         observe: ObserveStream | None = None,
         task_ledger: TaskLedger | None = None,
         job_service: Any | None = None,
+        task_handler: Any | None = None,
         stale_task_seconds: float = 6 * 60 * 60,
         task_reconciliation_interval: float = 5 * 60,
         pending_verification_interval: float = 15 * 60,
@@ -64,6 +66,10 @@ class ClawDaemon:
         self.observe = observe
         self.task_ledger = task_ledger
         self.job_service = job_service
+        # Wired post-construction (mirrors ``daemon.scheduler``): the bot owns the
+        # single TaskHandler, which is built after this daemon. Needed by the F4
+        # delegation runner's idempotent bootstrap.
+        self.task_handler = task_handler
         self.stale_task_seconds = stale_task_seconds
         self.task_reconciliation_interval = task_reconciliation_interval
         self._last_task_reconciliation_at = 0.0
@@ -293,6 +299,12 @@ class ClawDaemon:
                     )
                 )
             )
+        if self.job_service is not None and self.task_handler is not None:
+            background_tasks.append(
+                asyncio.create_task(
+                    self._run_f4_delegation_runner_loop(shutdown, interval=interval)
+                )
+            )
         for runner in self._background_job_runners:
             background_tasks.append(
                 asyncio.create_task(self._run_background_job_runner_loop(shutdown, runner=runner))
@@ -394,6 +406,37 @@ class ClawDaemon:
                 logger.exception("pending verification reconciliation runner failed")
                 await self._emit_off_loop(
                     "pending_verification_reconciliation_runner_error",
+                    payload={"error": str(exc)},
+                )
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _run_f4_delegation_runner_loop(
+        self,
+        shutdown: asyncio.Event,
+        *,
+        interval: float,
+    ) -> None:
+        # Mirrors _run_pending_verification_reconciliation_job_loop: exactly one
+        # F4DelegationJobRunner ticks run_available off-tick, wired with
+        # should_stop=shutdown.is_set for graceful shutdown.
+        if self.job_service is None or self.task_handler is None:
+            return
+        runner = F4DelegationJobRunner(
+            job_service=self.job_service,
+            task_handler=self.task_handler,
+            observe=self.observe,
+            should_stop=shutdown.is_set,
+        )
+        while not shutdown.is_set():
+            try:
+                await asyncio.to_thread(runner.run_available, limit=1)
+            except Exception as exc:
+                logger.exception("f4 delegation runner failed")
+                await self._emit_off_loop(
+                    "f4_delegation_runner_error",
                     payload={"error": str(exc)},
                 )
             try:

@@ -438,6 +438,7 @@ class AppConfig:
     use_compaction: bool
     brain_tooluse_verify: bool
     brain_tooluse_verify_timeout_seconds: float | None
+    f4_deterministic_delegation: bool
     cache_prefix_ttl: int
     allowed_paths: list[Path]
     approvals_root: Path
@@ -642,6 +643,7 @@ class AppConfig:
             use_compaction=_env_bool("USE_COMPACTION", True),
             brain_tooluse_verify=_env_bool("BRAIN_TOOLUSE_VERIFY", False),
             brain_tooluse_verify_timeout_seconds=_brain_tooluse_verify_timeout_from_env(),
+            f4_deterministic_delegation=_env_bool("CLAW_F4_DETERMINISTIC_DELEGATION", False),
             cache_prefix_ttl=_env_int("CACHE_PREFIX_TTL", 3600),
             allowed_paths=[Path(p) for p in os.getenv("ALLOWED_PATHS", "").split(":") if p],
             approvals_root=Path(
