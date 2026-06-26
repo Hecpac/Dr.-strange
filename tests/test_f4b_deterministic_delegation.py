@@ -325,6 +325,36 @@ class GateTests(unittest.TestCase):
         assert resp is not None
         self.assertIn("ya fue aceptada y está en cola", resp)
 
+    # 7d. BLOCKER regression: once the delivery job TERMINALIZES, the active-only
+    # resume_key index stops deduping; the deterministic-task_id ledger pre-check
+    # must still dedup (no second delivery job, truthful "ya fue procesada").
+    def test_redelivery_after_terminalized_delivery_job_dedups_no_new_job(self) -> None:
+        self._gate("Haz un repaso por X", ctx=_ctx(111))
+        job = self._delivery_job(111)
+        assert job is not None
+        self.jobs.complete(job.job_id, result={"task_id": "x"})  # terminalize delivery job
+        self._seed_linked_task(111, "succeeded")  # bootstrap already materialised the task
+        resp = self._gate("Haz un repaso por X", ctx=_ctx(111))
+        assert resp is not None
+        self.assertIn("ya fue procesada", resp)
+        self.assertNotIn("tarea de fondo", resp)
+        # No SECOND delivery job was enqueued.
+        self.assertEqual(len(self.jobs.list(kinds=[F4_DELEGATION_JOB_KIND], limit=50)), 1)
+        self.assertEqual(self.th.start_calls, [])
+
+    # 7e. existence-keying preserves legitimate retry: a redelivery whose
+    # deterministic task_id has NO ledger row (e.g. a prior coordinator_unavailable
+    # bootstrap that wrote no row) falls through -> accepted ack + a new job.
+    def test_redelivery_without_ledger_row_falls_through_to_accepted(self) -> None:
+        self._gate("Haz un repaso por X", ctx=_ctx(111))
+        job = self._delivery_job(111)
+        assert job is not None
+        self.jobs.fail(job.job_id, error="coordinator_unavailable", retry=False)  # terminal, no row
+        resp = self._gate("Haz un repaso por X", ctx=_ctx(111))
+        assert resp is not None
+        self.assertIn("en una tarea de fondo", resp)  # legitimate re-attempt
+        self.assertEqual(len(self.jobs.list(kinds=[F4_DELEGATION_JOB_KIND], limit=50)), 2)
+
     # 8. non-matching conversation not captured
     def test_non_matching_not_captured(self) -> None:
         for text in ("¿Qué es X?", "Escribe un post para X", "hola"):

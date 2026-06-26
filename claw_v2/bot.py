@@ -3542,23 +3542,31 @@ class BotService:
             "tarea de fondo (navegación autenticada) y te aviso cuando termine."
         )
 
+    @staticmethod
+    def _f4_delegation_dedup_ack_for_status(status: str | None) -> str:
+        """Truthful status→ack for a duplicate delivery. Never claims "en marcha"
+        unless the linked task is actually running; never "procesada" unless it is
+        terminal. ``None`` (no linked task row yet) → still-queued ack."""
+        if status == "running":
+            return "Ese repaso de tu feed de X ya está en marcha; no generé otra tarea."
+        if status in TERMINAL_STATUSES:
+            return "Esa solicitud de repaso de X ya fue procesada; no generé otra."
+        return "Esta misma solicitud de repaso de X ya fue aceptada y está en cola; no generé otra."
+
     def _f4_delegation_dedup_ack(self, job: Any) -> str:
-        """Truthful status-aware ack for a duplicate delivery (the delivery job
-        already exists). Reflects the REAL state of the linked autonomous task —
-        never claims "en marcha" unless that task is actually running."""
+        """Truthful status-aware ack for a duplicate delivery whose delivery job is
+        still active (created=False). Looks up the linked task by the payload's
+        deterministic ``task_id`` so the ack reflects the REAL task state in the
+        narrow window where the bootstrap raced ahead of this redelivery."""
         payload = job.payload if isinstance(job.payload, dict) else {}
         task_id = payload.get("task_id")
+        status: str | None = None
         if task_id:
             ledger = getattr(getattr(self, "_task_handler", None), "task_ledger", None)
             record = ledger.get(task_id) if ledger is not None else None
             if record is not None:
-                if record.status == "running":
-                    return "Ese repaso de tu feed de X ya está en marcha; no generé otra tarea."
-                if record.status in TERMINAL_STATUSES:
-                    return "Esa solicitud de repaso de X ya fue procesada; no generé otra."
-        # No linked task yet (runner not run), or the delivery job is still
-        # queued — truthful: accepted and waiting, nothing duplicated.
-        return "Esta misma solicitud de repaso de X ya fue aceptada y está en cola; no generé otra."
+                status = record.status
+        return self._f4_delegation_dedup_ack_for_status(status)
 
     @staticmethod
     def _f4_delegation_failure_message() -> str:
@@ -3606,13 +3614,30 @@ class BotService:
             return None
         delivery_key = f"f4b-delegation:{session_id}:{message_id}"
         task_id = f4b_delivery_task_id(delivery_key)
-        # Atomic creator election: JobService.reserve enqueues exactly one durable
-        # delivery job for this delivery via the resume_key DB unique index
-        # (cross-process). Every duplicate (concurrent, or a redelivery while the
-        # job is still active) gets `created=False` and the winner's record. The
-        # runner — not the gate — executes the job, so a crash recovers via
-        # JobService claim/retry/stale-recovery.
         try:
+            # After-terminalize dedup: ``idx_agent_jobs_active_resume_key`` is
+            # ACTIVE-ONLY, so once the delivery job terminalizes it stops deduping
+            # and a redelivery would re-`reserve` (created=True) → a 2nd job + a
+            # false "accepted" ack. The deterministic ``task_id`` is stable
+            # forever, so if its ledger row EXISTS the bootstrap already
+            # materialised this delivery → dedup, never enqueue a second job.
+            # Keyed on row EXISTENCE (not "terminal"): coordinator_unavailable /
+            # failed bootstraps write NO ledger row (TaskHandler returns before the
+            # write), so those redeliveries correctly fall through and re-attempt.
+            ledger = getattr(task_handler, "task_ledger", None)
+            existing_task = ledger.get(task_id) if ledger is not None else None
+            if existing_task is not None:
+                self._emit_f4_delegation_event(
+                    "f4_deterministic_delegation_matched",
+                    {"session_id": session_id, "delivery_key": delivery_key, "deduped": True},
+                )
+                return self._f4_delegation_dedup_ack_for_status(existing_task.status)
+            # Atomic creator election: JobService.reserve enqueues exactly one
+            # durable delivery job via the resume_key DB unique index
+            # (cross-process). A duplicate while the job is still active gets
+            # `created=False`; this handles the queued-before-bootstrap window (no
+            # ledger row yet). The runner — not the gate — executes the job, so a
+            # crash recovers via JobService claim/retry/stale-recovery.
             job, created = job_service.reserve(
                 resume_key=delivery_key,
                 kind=F4_DELEGATION_JOB_KIND,
