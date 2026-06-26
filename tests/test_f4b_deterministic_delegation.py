@@ -11,10 +11,10 @@ from unittest.mock import MagicMock, patch
 
 from claw_v2.bot import BotService
 from claw_v2.delegation_intents import classify_authenticated_browse_intent
+from claw_v2.f4_delegation import F4_DELEGATION_JOB_KIND, f4b_delivery_task_id
 from claw_v2.jobs import JobService
 from claw_v2.main import build_runtime
-
-_STARTED_MARKER = "Voy con eso.\n\nTarea autónoma iniciada: `t`\nModo: chat"
+from claw_v2.task_ledger import TERMINAL_STATUSES, TaskLedger
 
 
 class ClassifierTests(unittest.TestCase):
@@ -136,42 +136,24 @@ class _Observe:
         return [event for event, _ in self.events]
 
 
-class _FakeTaskHandler:
-    """Stand-in for the delegation boundary. The gate elects the creator via the
-    real JobService.reserve, then calls start_autonomous_task on the winner only;
-    this fake returns the positive durable-start marker (or a non-start result /
-    raises / has no coordinator) so the gate's "did a task start" check is real."""
+class _StubTaskHandler:
+    """Gate boundary stub for the durable-delivery model.
 
-    def __init__(
-        self,
-        job_service: JobService,
-        *,
-        result: str = _STARTED_MARKER,
-        raise_exc: bool = False,
-        coordinator: bool = True,
-    ) -> None:
+    The rewritten gate depends only on the real ``JobService`` (durable enqueue)
+    and the real ``TaskLedger`` (status-aware dedup lookup). It must NEVER call
+    ``start_autonomous_task`` — that boundary moved to the runner — so this stub
+    records (and loudly rejects) any accidental call so tests can assert it
+    stayed unused.
+    """
+
+    def __init__(self, job_service: JobService, task_ledger: TaskLedger) -> None:
         self.job_service = job_service
-        self.coordinator = object() if coordinator else None
-        self._result = result
-        self._raise = raise_exc
-        self._lock = threading.Lock()
-        self.calls: list[str] = []
+        self.task_ledger = task_ledger
+        self.start_calls: list[Any] = []
 
-    def start_autonomous_task(
-        self,
-        session_id: str,
-        objective: str,
-        *,
-        source_text: str | None = None,
-        task_kind: str | None = None,
-        delegation_metadata: dict[str, Any] | None = None,
-        **_: Any,
-    ) -> str:
-        with self._lock:
-            self.calls.append(objective)
-        if self._raise:
-            raise RuntimeError("simulated start failure")
-        return self._result
+    def start_autonomous_task(self, *args: Any, **kwargs: Any) -> str:
+        self.start_calls.append((args, kwargs))
+        raise AssertionError("gate must not call start_autonomous_task")
 
 
 def _ctx(message_id: int | None = 111) -> dict[str, Any]:
@@ -181,7 +163,7 @@ def _ctx(message_id: int | None = 111) -> dict[str, Any]:
     return {"inbound": inbound}
 
 
-def _bot(job_service: JobService, *, flag: bool, task_handler: Any, observe: Any) -> BotService:
+def _bot(*, flag: bool, task_handler: Any, observe: Any) -> BotService:
     bot = BotService.__new__(BotService)
     bot.config = SimpleNamespace(f4_deterministic_delegation=flag)
     bot.observe = observe
@@ -193,18 +175,34 @@ class GateTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.jobs = JobService(Path(self._tmp.name) / "claw.db")
+        db = Path(self._tmp.name) / "claw.db"
+        self.jobs = JobService(db)
+        self.ledger = TaskLedger(db)
         self.observe = _Observe()
-        self.th = _FakeTaskHandler(self.jobs)
+        self.th = _StubTaskHandler(self.jobs, self.ledger)
 
     def _gate(self, text: str, *, flag: bool = True, ctx: Any = "__default__", th: Any = None):
-        bot = _bot(self.jobs, flag=flag, task_handler=th or self.th, observe=self.observe)
+        bot = _bot(flag=flag, task_handler=th or self.th, observe=self.observe)
         return bot._maybe_handle_f4_deterministic_delegation(
             text, session_id="tg-1", context_metadata=_ctx() if ctx == "__default__" else ctx
         )
 
-    def _reservation(self, message_id: int = 111):
-        return self.jobs.get_by_resume_key(f"f4b-delegation:tg-1:{message_id}")
+    def _delivery_key(self, message_id: int = 111) -> str:
+        return f"f4b-delegation:tg-1:{message_id}"
+
+    def _delivery_job(self, message_id: int = 111):
+        return self.jobs.get_by_resume_key(self._delivery_key(message_id))
+
+    def _seed_linked_task(self, message_id: int, status: str) -> str:
+        task_id = f4b_delivery_task_id(self._delivery_key(message_id))
+        self.ledger.create(
+            task_id=task_id,
+            session_id="tg-1",
+            objective="Revisa el feed de X",
+            runtime="coordinator",
+            status=status,
+        )
+        return task_id
 
     def _assert_no_unsupported_promise(self, resp: str) -> None:
         low = resp.lower()
@@ -217,141 +215,194 @@ class GateTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, low)
 
-    # 1. incident: one creator, one reservation, one start, truthful ack
-    def test_incident_elects_one_creator_with_truthful_ack(self) -> None:
+    # 1. match -> exactly one durable f4b.delegation job + truthful accepted ack
+    def test_match_enqueues_one_delivery_job_with_accepted_ack(self) -> None:
         resp = self._gate("Haz un repaso por X")
         self.assertIsNotNone(resp)
         assert resp is not None
-        self.assertIn("repaso de tu feed de X", resp)
+        self.assertIn("en una tarea de fondo", resp)
         self.assertNotIn("ToolSearch", resp)
-        self.assertEqual(len(self.th.calls), 1)
-        res = self._reservation()
-        self.assertIsNotNone(res)
-        assert res is not None
-        self.assertEqual(res.kind, "f4b.delegation_reservation")
+        # the durable delivery job exists with the right kind + deterministic id
+        job = self._delivery_job()
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job.kind, F4_DELEGATION_JOB_KIND)
+        self.assertEqual(job.payload["task_id"], f4b_delivery_task_id(self._delivery_key()))
+        self.assertEqual(job.payload["session_id"], "tg-1")
+        self.assertEqual(job.payload["mode"], "chat")
+        self.assertEqual(job.payload["task_kind"], "authenticated_browse")
+        # the runner is NOT run here -> no coordinator job yet, no start_autonomous_task
+        self.assertEqual(self.jobs.list(kinds=["coordinator.autonomous_task"], limit=50), [])
+        self.assertEqual(self.th.start_calls, [])
         self.assertIn("f4_deterministic_delegation_enqueued", self.observe.types())
 
-    # 2. flag OFF: fall through, no reservation, no start
+    # 2. flag OFF: fall through, no job, no start
     def test_flag_off_falls_through(self) -> None:
         self.assertIsNone(self._gate("Haz un repaso por X", flag=False))
-        self.assertEqual(self.th.calls, [])
-        self.assertIsNone(self._reservation())
+        self.assertIsNone(self._delivery_job())
+        self.assertEqual(self.th.start_calls, [])
 
     # 3 + 4. gate independent of CLAW_DISABLE_TASK_INTENT_ROUTER; captures first
     def test_gate_independent_of_broad_router_flag(self) -> None:
         for val in ("0", "1"):
             with self.subTest(broad_router=val), tempfile.TemporaryDirectory() as tmp:
-                jobs = JobService(Path(tmp) / "claw.db")
-                th = _FakeTaskHandler(jobs)
-                bot = _bot(jobs, flag=True, task_handler=th, observe=_Observe())
+                db = Path(tmp) / "claw.db"
+                jobs = JobService(db)
+                th = _StubTaskHandler(jobs, TaskLedger(db))
+                bot = _bot(flag=True, task_handler=th, observe=_Observe())
                 with patch.dict(os.environ, {"CLAW_DISABLE_TASK_INTENT_ROUTER": val}):
                     resp = bot._maybe_handle_f4_deterministic_delegation(
                         "Haz un repaso por X", session_id="tg-1", context_metadata=_ctx()
                     )
                 self.assertIsNotNone(resp)
-                self.assertEqual(len(th.calls), 1)
+                job = jobs.get_by_resume_key("f4b-delegation:tg-1:111")
+                self.assertIsNotNone(job)
+                assert job is not None
+                self.assertEqual(job.kind, F4_DELEGATION_JOB_KIND)
+                self.assertEqual(th.start_calls, [])
 
-    # 5. duplicate delivery (same message_id) -> one creator
-    def test_duplicate_delivery_one_creator(self) -> None:
+    # 5. duplicate delivery (same message_id) while queued -> one job, queued dedup ack
+    def test_duplicate_delivery_one_job_queued_dedup_ack(self) -> None:
         r1 = self._gate("Haz un repaso por X", ctx=_ctx(111))
         r2 = self._gate("Haz un repaso por X", ctx=_ctx(111))
         self.assertIsNotNone(r1)
         self.assertIsNotNone(r2)
-        assert r2 is not None
-        self.assertEqual(len(self.th.calls), 1)  # 2nd deduped, no start
-        self.assertIn("ya está en marcha", r2)
+        assert r1 is not None and r2 is not None
+        self.assertIn("en una tarea de fondo", r1)
+        # No linked task row exists yet (runner not run) -> queued dedup ack.
+        self.assertIn("ya fue aceptada y está en cola", r2)
+        self.assertNotIn("en marcha", r2)
+        self.assertEqual(len(self.jobs.list(kinds=[F4_DELEGATION_JOB_KIND], limit=50)), 1)
+        self.assertEqual(self.th.start_calls, [])
+        self.assertIn("f4_deterministic_delegation_matched", self.observe.types())
 
-    # 6. legitimate repeat (new message_id) -> new task
-    def test_legitimate_repeat_new_creator(self) -> None:
+    # 6. legitimate repeat (new message_id) -> new job
+    def test_legitimate_repeat_new_job(self) -> None:
         self._gate("Haz un repaso por X", ctx=_ctx(111))
         self._gate("Haz un repaso por X", ctx=_ctx(222))
-        self.assertEqual(len(self.th.calls), 2)
-        self.assertIsNotNone(self._reservation(111))
-        self.assertIsNotNone(self._reservation(222))
+        self.assertIsNotNone(self._delivery_job(111))
+        self.assertIsNotNone(self._delivery_job(222))
+        self.assertEqual(len(self.jobs.list(kinds=[F4_DELEGATION_JOB_KIND], limit=50)), 2)
+        self.assertEqual(self.th.start_calls, [])
 
-    # 7. non-matching conversation not captured
+    # 7a. status-aware dedup: linked task running -> "ya está en marcha"
+    def test_dedup_ack_running_when_linked_task_running(self) -> None:
+        self._gate("Haz un repaso por X", ctx=_ctx(111))
+        self._seed_linked_task(111, "running")
+        resp = self._gate("Haz un repaso por X", ctx=_ctx(111))
+        assert resp is not None
+        self.assertIn("ya está en marcha", resp)
+
+    # 7b. status-aware dedup: linked task terminal -> "ya fue procesada"
+    def test_dedup_ack_processed_when_linked_task_terminal(self) -> None:
+        for status in sorted(TERMINAL_STATUSES):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                db = Path(tmp) / "claw.db"
+                jobs = JobService(db)
+                ledger = TaskLedger(db)
+                th = _StubTaskHandler(jobs, ledger)
+                bot = _bot(flag=True, task_handler=th, observe=_Observe())
+                bot._maybe_handle_f4_deterministic_delegation(
+                    "Haz un repaso por X", session_id="tg-1", context_metadata=_ctx(111)
+                )
+                ledger.create(
+                    task_id=f4b_delivery_task_id("f4b-delegation:tg-1:111"),
+                    session_id="tg-1",
+                    objective="Revisa el feed de X",
+                    runtime="coordinator",
+                    status=status,
+                )
+                resp = bot._maybe_handle_f4_deterministic_delegation(
+                    "Haz un repaso por X", session_id="tg-1", context_metadata=_ctx(111)
+                )
+                assert resp is not None
+                self.assertIn("ya fue procesada", resp)
+
+    # 7c. status-aware dedup: no linked task row -> "ya fue aceptada y está en cola"
+    def test_dedup_ack_queued_when_no_linked_task(self) -> None:
+        self._gate("Haz un repaso por X", ctx=_ctx(111))
+        resp = self._gate("Haz un repaso por X", ctx=_ctx(111))
+        assert resp is not None
+        self.assertIn("ya fue aceptada y está en cola", resp)
+
+    # 8. non-matching conversation not captured
     def test_non_matching_not_captured(self) -> None:
         for text in ("¿Qué es X?", "Escribe un post para X", "hola"):
             with self.subTest(text=text):
                 self.assertIsNone(self._gate(text))
-        self.assertEqual(self.th.calls, [])
+        self.assertEqual(self.th.start_calls, [])
 
     def test_no_delivery_id_falls_through(self) -> None:
         resp = self._gate("Haz un repaso por X", ctx=_ctx(message_id=None))
         self.assertIsNone(resp)
-        self.assertEqual(self.th.calls, [])
+        self.assertEqual(self.th.start_calls, [])
+        self.assertIsNone(self._delivery_job())
         self.assertIn("f4_deterministic_delegation_skipped_no_delivery_id", self.observe.types())
 
-    # 8 / #4. start failure -> reservation released, truthful, no orphan
-    def test_start_returning_no_task_releases_reservation(self) -> None:
-        th = _FakeTaskHandler(self.jobs, result="coordinator unavailable")
-        resp = self._gate("Haz un repaso por X", th=th)
+    # 9. reserve raises (job_service down) -> truthful failure, no fabricated promise
+    def test_reserve_failure_returns_truthful_message(self) -> None:
+        def _boom(*_: Any, **__: Any):
+            raise RuntimeError("simulated job_service down")
+
+        with patch.object(self.jobs, "reserve", side_effect=_boom):
+            resp = self._gate("Haz un repaso por X")
         self.assertIsNotNone(resp)
         assert resp is not None
-        self.assertIn("no quedó nada encolado", resp)
+        self.assertIn("no se encoló nada", resp)
         self._assert_no_unsupported_promise(resp)
-        self.assertIsNone(self._reservation())  # released -> no claimable orphan, retry possible
+        self.assertEqual(self.th.start_calls, [])
         self.assertIn("f4_deterministic_delegation_failed", self.observe.types())
 
-    def test_start_exception_releases_reservation(self) -> None:
-        th = _FakeTaskHandler(self.jobs, raise_exc=True)
-        resp = self._gate("Haz un repaso por X", th=th)
-        self.assertIsNotNone(resp)
-        assert resp is not None
-        self.assertIn("no quedó nada encolado", resp)
-        self._assert_no_unsupported_promise(resp)
-        self.assertIsNone(self._reservation())
-
-    def test_no_coordinator_releases_reservation(self) -> None:
-        th = _FakeTaskHandler(self.jobs, coordinator=False)
-        resp = self._gate("Haz un repaso por X", th=th)
-        assert resp is not None
-        self.assertIn("no quedó nada encolado", resp)
-        self.assertEqual(th.calls, [])  # never called start without a coordinator
-        self.assertIsNone(self._reservation())
-
-    # Concurrent duplicate delivery: prove ONE execution + ONE logical task.
+    # 10. concurrent duplicate delivery: ONE job, exactly one creator, both truthful.
     def test_concurrent_duplicate_elects_one_creator(self) -> None:
-        th = _FakeTaskHandler(self.jobs)
-        bot = _bot(self.jobs, flag=True, task_handler=th, observe=self.observe)
-        barrier = threading.Barrier(2)
-        results: dict[int, Any] = {}
+        for _ in range(25):
+            with tempfile.TemporaryDirectory() as tmp:
+                db = Path(tmp) / "claw.db"
+                jobs = JobService(db)
+                th = _StubTaskHandler(jobs, TaskLedger(db))
+                bot = _bot(flag=True, task_handler=th, observe=_Observe())
+                barrier = threading.Barrier(2)
+                results: dict[int, Any] = {}
 
-        def worker(i: int) -> None:
-            barrier.wait()
-            results[i] = bot._maybe_handle_f4_deterministic_delegation(
-                "Haz un repaso por X", session_id="tg-1", context_metadata=_ctx(111)
-            )
+                def worker(
+                    i: int, _bot_ref: BotService = bot, _res: dict[int, Any] = results
+                ) -> None:
+                    barrier.wait()
+                    _res[i] = _bot_ref._maybe_handle_f4_deterministic_delegation(
+                        "Haz un repaso por X", session_id="tg-1", context_metadata=_ctx(111)
+                    )
 
-        threads = [threading.Thread(target=worker, args=(i,)) for i in (0, 1)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+                threads = [threading.Thread(target=worker, args=(i,)) for i in (0, 1)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
 
-        self.assertEqual(len(th.calls), 1)  # exactly one creator started a task
-        self.assertIsNotNone(self._reservation())  # one reservation row
-        self.assertEqual(len(results), 2)
-        for r in results.values():
-            self.assertIsNotNone(r)
-            self.assertIn("repaso de tu feed de X", r)
-        dedup = sum(1 for r in results.values() if "ya está en marcha" in r)
-        self.assertEqual(dedup, 1)  # exactly one duplicate got the dedup ack
+                self.assertEqual(len(jobs.list(kinds=[F4_DELEGATION_JOB_KIND], limit=50)), 1)
+                self.assertEqual(th.start_calls, [])
+                self.assertEqual(len(results), 2)
+                for r in results.values():
+                    self.assertIsNotNone(r)
+                accepted = sum(1 for r in results.values() if "en una tarea de fondo" in r)
+                dedup = sum(1 for r in results.values() if "ya fue aceptada y está en cola" in r)
+                self.assertEqual(accepted, 1)  # exactly one creator got the accepted ack
+                self.assertEqual(dedup, 1)  # exactly one duplicate got the dedup ack
 
     def test_observe_none_does_not_crash(self) -> None:
-        bot = _bot(self.jobs, flag=True, task_handler=self.th, observe=None)
+        bot = _bot(flag=True, task_handler=self.th, observe=None)
         resp = bot._maybe_handle_f4_deterministic_delegation(
             "Haz un repaso por X", session_id="tg-1", context_metadata=_ctx(111)
         )
         self.assertIsNotNone(resp)
-        self.assertEqual(len(self.th.calls), 1)
-        self.assertIsNotNone(self._reservation())
+        self.assertIsNotNone(self._delivery_job())
+        self.assertEqual(self.th.start_calls, [])
 
 
 class RealChainIntegrationTests(unittest.TestCase):
-    """End-to-end through the REAL gate → JobService.reserve → start_autonomous_task
-    → _reject_non_actionable_objective → coordinator job enqueue (the gate unit
-    tests stub the boundary; these exercise the real chain incl. the prod path)."""
+    """End-to-end through the REAL gate -> JobService.reserve: the gate now
+    enqueues exactly one durable ``f4b.delegation`` job (no inline start, no
+    coordinator job yet — the runner materialises those off-tick). The brain
+    executor must never be called."""
 
     def _env(self, root: Path) -> dict[str, str]:
         return {
@@ -364,15 +415,19 @@ class RealChainIntegrationTests(unittest.TestCase):
             "CLAW_F4_DETERMINISTIC_DELEGATION": "1",
         }
 
-    def _assert_durable_task(self, runtime: Any, message_id: int) -> None:
-        reservation = runtime.job_service.get_by_resume_key(f"f4b-delegation:tg-1:{message_id}")
-        self.assertIsNotNone(reservation)
-        assert reservation is not None
-        self.assertEqual(reservation.kind, "f4b.delegation_reservation")
-        coordinator_jobs = runtime.job_service.list(kinds=["coordinator.autonomous_task"], limit=50)
-        self.assertGreaterEqual(len(coordinator_jobs), 1)
+    def _assert_durable_delivery_job(self, runtime: Any, message_id: int) -> None:
+        delivery_key = f"f4b-delegation:tg-1:{message_id}"
+        job = runtime.job_service.get_by_resume_key(delivery_key)
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job.kind, F4_DELEGATION_JOB_KIND)
+        self.assertEqual(job.payload["task_id"], f4b_delivery_task_id(delivery_key))
+        # The gate does NOT execute the job: no coordinator task is enqueued yet.
+        self.assertEqual(
+            runtime.job_service.list(kinds=["coordinator.autonomous_task"], limit=50), []
+        )
 
-    def test_real_bot_handle_text_creates_durable_task(self) -> None:
+    def test_real_bot_handle_text_enqueues_durable_delivery_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.dict(os.environ, self._env(Path(tmpdir)), clear=False):
                 runtime = build_runtime(anthropic_executor=lambda r: self.fail("no model call"))
@@ -385,7 +440,7 @@ class RealChainIntegrationTests(unittest.TestCase):
                 )
                 assert reply is not None
                 self.assertIn("tarea de fondo", reply)
-                self._assert_durable_task(runtime, 777)
+                self._assert_durable_delivery_job(runtime, 777)
 
     def test_agent_runtime_path_forwards_inbound_id_to_gate(self) -> None:
         # The PROD path the P1 regression silently broke: AgentRuntime relays
@@ -403,7 +458,7 @@ class RealChainIntegrationTests(unittest.TestCase):
                     metadata={"inbound": {"channel": "telegram", "message_id": 888}},
                 )
                 self.assertIn("tarea de fondo", resp.text)
-                self._assert_durable_task(runtime, 888)
+                self._assert_durable_delivery_job(runtime, 888)
 
 
 if __name__ == "__main__":

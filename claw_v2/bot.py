@@ -50,6 +50,7 @@ from claw_v2.task_ledger import TERMINAL_STATUSES
 from claw_v2.wiki_handler import WikiHandler
 from claw_v2.coordinator import CoordinatorService
 from claw_v2.delegation_intents import classify_authenticated_browse_intent
+from claw_v2.f4_delegation import F4_DELEGATION_JOB_KIND, f4b_delivery_task_id
 from claw_v2.content import ContentEngine
 from claw_v2.redaction import redact_sensitive
 from claw_v2.github import GitHubPullRequestService
@@ -3531,28 +3532,42 @@ class BotService:
             logger.debug("%s emit failed", event, exc_info=True)
 
     @staticmethod
-    def _f4_delegation_ack(*, deduped: bool) -> str:
-        if deduped:
-            return (
-                "Ese repaso de tu feed de X ya está en marcha como tarea de fondo "
-                "(no dupliqué nada). Te aviso cuando termine."
-            )
+    def _f4_delegation_accepted_ack() -> str:
+        # Truthful: the delivery job is QUEUED (not running). The runner +
+        # ledger-driven recovery materialise and execute it off-tick, then the
+        # task-completion notification delivers the result — so promising "te
+        # aviso cuando termine" is honest.
         return (
-            "Lancé el repaso de tu feed de X en una tarea de fondo (navegación "
-            "autenticada, fuera del chat para no cortarse a mitad). Te aviso "
-            "cuando termine."
+            "Registré tu pedido de repaso de tu feed de X; lo proceso en una "
+            "tarea de fondo (navegación autenticada) y te aviso cuando termine."
         )
+
+    def _f4_delegation_dedup_ack(self, job: Any) -> str:
+        """Truthful status-aware ack for a duplicate delivery (the delivery job
+        already exists). Reflects the REAL state of the linked autonomous task —
+        never claims "en marcha" unless that task is actually running."""
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        task_id = payload.get("task_id")
+        if task_id:
+            ledger = getattr(getattr(self, "_task_handler", None), "task_ledger", None)
+            record = ledger.get(task_id) if ledger is not None else None
+            if record is not None:
+                if record.status == "running":
+                    return "Ese repaso de tu feed de X ya está en marcha; no generé otra tarea."
+                if record.status in TERMINAL_STATUSES:
+                    return "Esa solicitud de repaso de X ya fue procesada; no generé otra."
+        # No linked task yet (runner not run), or the delivery job is still
+        # queued — truthful: accepted and waiting, nothing duplicated.
+        return "Esta misma solicitud de repaso de X ya fue aceptada y está en cola; no generé otra."
 
     @staticmethod
     def _f4_delegation_failure_message() -> str:
-        # Strictly truthful: the reservation is released on failure (nothing is
-        # durably recorded by this path beyond a best-effort observe event), and
-        # no retry job/scheduler exists — so we claim neither a durable record
-        # nor a retry/notification/future execution, and expose no internal
-        # error/tool/policy detail.
+        # Strictly truthful: the durable enqueue itself failed, so nothing was
+        # recorded. No retry job/scheduler is promised, and no internal
+        # error/tool/policy detail is exposed.
         return (
-            "No pude crear la tarea de fondo para el repaso de X; no quedó nada "
-            "encolado. No voy a afirmar que el repaso esté en curso."
+            "No pude registrar el pedido de repaso de X ahora mismo; no se encoló "
+            "nada. No voy a afirmar que el repaso esté en curso."
         )
 
     def _maybe_handle_f4_deterministic_delegation(
@@ -3561,10 +3576,16 @@ class BotService:
         """F4-B1: deterministically route an unambiguous "review my authenticated
         X feed" request to a durable background delegation job WITHOUT depending on
         the model to call delegate_task (the 2026-06-25 confabulation failure).
-        Gated by CLAW_F4_DETERMINISTIC_DELEGATION (default OFF). Exactly-once under
-        concurrent duplicate delivery via an atomic JobService.reserve creator
-        election on `f4b-delegation:{session_id}:{message_id}` (only the winner
-        runs start_autonomous_task). See INTERNAL_WIRING
+        Gated by CLAW_F4_DETERMINISTIC_DELEGATION (default OFF).
+
+        The gate enqueues exactly ONE durable ``f4b.delegation`` job (keyed by
+        ``f4b-delegation:{session_id}:{message_id}`` via the atomic JobService
+        creator election, cross-process). It does NOT start a task, a thread, or
+        a coordinator job — :class:`~claw_v2.f4_delegation.F4DelegationJobRunner`
+        claims the job off-tick and runs the idempotent bootstrap, so a crash
+        recovers through JobService claim/retry. The ack is truthful and
+        status-aware: a duplicate reflects the real state of the linked task. See
+        INTERNAL_WIRING
         ``high_confidence_delegation_intents_do_not_depend_on_model_tool_choice``."""
         if not getattr(self.config, "f4_deterministic_delegation", False):
             return None
@@ -3583,85 +3604,50 @@ class BotService:
                 {"session_id": session_id, "has_delivery_id": isinstance(message_id, int)},
             )
             return None
-        resume_key = f"f4b-delegation:{session_id}:{message_id}"
-        # Atomic creator election: JobService.reserve elects exactly one creator
-        # for this delivery via the resume_key DB unique index (cross-process).
-        # The reservation kind is claimed by NO runner — it is a pure durable
-        # dedup token. Only the winner performs side effects; every duplicate
-        # (concurrent, or a redelivery after completion) returns the dedup ack
-        # untouched. This is the exactly-once boundary: the prior
-        # check-then-start was a TOCTOU race that let two concurrent deliveries
-        # each run start_autonomous_task → two task_ids/threads for one delivery.
-        reservation, created = job_service.reserve(
-            resume_key=resume_key,
-            kind="f4b.delegation_reservation",
-            payload={"session_id": session_id, "kind": intent.kind},
-        )
-        if not created:
-            self._emit_f4_delegation_event(
-                "f4_deterministic_delegation_matched",
-                {"session_id": session_id, "resume_key": resume_key, "deduped": True},
-            )
-            return self._f4_delegation_ack(deduped=True)
-        self._emit_f4_delegation_event(
-            "f4_deterministic_delegation_matched",
-            {"session_id": session_id, "resume_key": resume_key, "deduped": False},
-        )
-        started = self._f4_start_delegated_task(
-            task_handler, session_id=session_id, intent=intent, source_text=text, inbound=inbound
-        )
-        if not started:
-            # Creator failed before durable setup → release the reservation so a
-            # redelivery can re-elect. The reservation kind runs nowhere, so the
-            # released token never leaves a claimable orphan, and dropping it
-            # closes the false-dedup window (no task was created).
-            try:
-                job_service.delete(reservation.job_id)
-            except Exception:
-                logger.debug("f4 reservation release failed", exc_info=True)
-            self._emit_f4_delegation_event(
-                "f4_deterministic_delegation_failed",
-                {"session_id": session_id, "reason": "task_not_started"},
-            )
-            return self._f4_delegation_failure_message()
-        self._emit_f4_delegation_event(
-            "f4_deterministic_delegation_enqueued",
-            {"session_id": session_id, "resume_key": resume_key},
-        )
-        return self._f4_delegation_ack(deduped=False)
-
-    @staticmethod
-    def _f4_start_delegated_task(
-        task_handler: Any,
-        *,
-        session_id: str,
-        intent: Any,
-        source_text: str,
-        inbound: dict[str, Any],
-    ) -> bool:
-        """Start the delegated browse task via the real `start_autonomous_task`
-        boundary; return True ONLY if a durable task was actually created
-        (positive marker) so the gate never claims success for a task that did
-        not start (`coordinator unavailable` / non-actionable rejection)."""
-        if getattr(task_handler, "coordinator", None) is None:
-            return False
+        delivery_key = f"f4b-delegation:{session_id}:{message_id}"
+        task_id = f4b_delivery_task_id(delivery_key)
+        # Atomic creator election: JobService.reserve enqueues exactly one durable
+        # delivery job for this delivery via the resume_key DB unique index
+        # (cross-process). Every duplicate (concurrent, or a redelivery while the
+        # job is still active) gets `created=False` and the winner's record. The
+        # runner — not the gate — executes the job, so a crash recovers via
+        # JobService claim/retry/stale-recovery.
         try:
-            result = task_handler.start_autonomous_task(
-                session_id,
-                intent.objective,
-                source_text=source_text,
-                task_kind=intent.kind,
-                delegation_metadata={
-                    "source": "f4_deterministic_delegation",
-                    "channel": inbound.get("channel"),
+            job, created = job_service.reserve(
+                resume_key=delivery_key,
+                kind=F4_DELEGATION_JOB_KIND,
+                payload={
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "objective": intent.objective,
+                    "mode": "chat",
+                    "task_kind": intent.kind,
+                    "source_text": text,
+                    "delegation_metadata": {
+                        "source": "f4_deterministic_delegation",
+                        "channel": (inbound or {}).get("channel"),
+                    },
                 },
             )
         except Exception:
-            logger.debug("f4 start_autonomous_task raised", exc_info=True)
-            return False
-        return isinstance(result, str) and (
-            "Tarea autónoma iniciada" in result or "Tarea autónoma en cola" in result
+            logger.debug("f4 delegation reserve failed", exc_info=True)
+            self._emit_f4_delegation_event(
+                "f4_deterministic_delegation_failed",
+                {"session_id": session_id, "reason": "reserve_failed"},
+            )
+            return self._f4_delegation_failure_message()
+        if created:
+            self._emit_f4_delegation_event(
+                "f4_deterministic_delegation_enqueued",
+                {"session_id": session_id, "delivery_key": delivery_key, "task_id": task_id},
+            )
+            return self._f4_delegation_accepted_ack()
+        self._emit_f4_delegation_event(
+            "f4_deterministic_delegation_matched",
+            {"session_id": session_id, "delivery_key": delivery_key, "deduped": True},
         )
+        return self._f4_delegation_dedup_ack(job)
 
     def handle_text(
         self,
