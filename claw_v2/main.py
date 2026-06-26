@@ -139,6 +139,11 @@ AUTONOMY_STALE_RUNNING_JOB_KINDS = (
     # be requeued here. Orphaned notebooklm.* running rows are instead retired to
     # a terminal state by the notebooklm_stale_running_job_reconcile lane below.
     "coordinator.autonomous_task",
+    # f4b.delegation IS safe to requeue: its daemon-registered retry consumer is
+    # F4DelegationJobRunner (wired in ClawDaemon.run_loop), and its bootstrap is
+    # idempotent on the deterministic task_id, so a recovered claim re-runs safely
+    # and converges on one logical autonomous task.
+    "f4b.delegation",
 )
 AUTONOMY_STALE_RUNNING_JOB_SECONDS = 6 * 60 * 60
 NOTEBOOKLM_STALE_RECONCILE_KIND_PREFIX = "notebooklm."
@@ -2354,6 +2359,11 @@ def build_runtime(
         daemon=daemon,
     )
     daemon.scheduler = scheduler
+    # Hand the bot's single TaskHandler to the daemon so its run loop can register
+    # the F4DelegationJobRunner (idempotent autonomous-task bootstrap consumer for
+    # the f4b.delegation delivery lane). Set post-construction because the daemon
+    # is built before the bot (mirrors daemon.scheduler above).
+    daemon.task_handler = bot._task_handler
     skill_expand_runner = SkillExpandJobRunner(
         job_service=job_service,
         skill_registry=skill_registry,
