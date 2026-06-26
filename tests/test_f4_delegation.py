@@ -514,6 +514,35 @@ class F4DelegationRunnerTests(unittest.TestCase):
         self.assertEqual(self._coordinator_jobs(), [])
 
 
+# ---------------------------------------------------------------------------
+# Operator crash-window -> test-method map (1:1). The operator mandates SEVEN
+# crash windows across the durable F4-B delivery state machine; each MUST converge
+# to exactly ONE task/job identity. NOTE: the local ``windowN`` method numbering in
+# F4DelegationCrashBoundaryTests is this file's own sequence and does NOT equal the
+# operator's window numbering (they diverge from window 4 on). Authoritative map:
+#
+#   1 before delivery-job commit
+#       F4DelegationCrashBoundaryTests.test_window1_crash_before_delivery_commit_redelivery_enqueues_one
+#   2 after commit, before claim
+#       F4DelegationCrashBoundaryTests.test_window2_crash_after_commit_before_claim_runner_bootstraps_once
+#   3 after claim, before bootstrap
+#       F4DelegationCrashBoundaryTests.test_window3_crash_after_claim_before_bootstrap_reclaim_bootstraps_once
+#   4 during bootstrap (after agent_tasks commit, before coordinator reserve)
+#       F4DelegationCrashBoundaryTests.test_window4b_crash_during_bootstrap_between_ledger_and_reserve_converges
+#   5 after task/job commit, before checkpoint
+#       F4DelegationRunnerTests.test_runner_checkpoint_raise_retries_not_stuck_running
+#   6 after checkpoint, before complete
+#       F4DelegationRunnerTests.test_runner_complete_raise_retries_not_stuck_running
+#   7 redelivery after terminal
+#       F4DelegationCrashBoundaryTests.test_window5_crash_after_delivery_completion_terminal_task_no_new_work
+#
+# Supplementary reopen-based coverage of operator window 5's region (BOTH bootstrap
+# commits done, crash before checkpoint/complete):
+#   F4DelegationCrashBoundaryTests.test_window4_crash_after_bootstrap_before_complete_idempotent
+# Despite its ``window4`` name this is the post-BOTH-commits case (= operator window
+# 5 region, the process-restart variant of the runner checkpoint/complete tests); it
+# does NOT cover operator window 4 -- window4b does.
+# ---------------------------------------------------------------------------
 class F4DelegationCrashBoundaryTests(unittest.TestCase):
     """Crash-boundary matrix for the durable delegation lane.
 
@@ -657,8 +686,11 @@ class F4DelegationCrashBoundaryTests(unittest.TestCase):
         self.assertEqual(final.checkpoint.get("coordinator_job_id"), coord.job_id)
 
     def test_window4_crash_after_bootstrap_before_complete_idempotent(self) -> None:
-        # Crash AFTER claim + bootstrap, BEFORE checkpoint/complete: the task +
-        # coordinator job already exist; the delivery job is left 'running'.
+        # OPERATOR WINDOW 5 region (NOT operator window 4 -- that is window4b; see
+        # the module-level crash-window map): a crash AFTER claim + the FULL
+        # bootstrap (BOTH commits done -> task + coordinator job already exist),
+        # BEFORE checkpoint/complete; the delivery job is left 'running'. This is the
+        # process-restart variant of test_runner_checkpoint_raise_retries_not_stuck_running.
         job, _ = self._enqueue_delivery()
         claimed = self.jobs.claim_next(worker_id="f4b_delegation", kinds=(F4_DELEGATION_JOB_KIND,))
         assert claimed is not None
@@ -679,6 +711,71 @@ class F4DelegationCrashBoundaryTests(unittest.TestCase):
         self.assertEqual(final.status, "completed")
         self.assertEqual(final.checkpoint.get("task_id"), self.task_id)
         self.assertEqual(final.checkpoint.get("coordinator_job_id"), coord_after.job_id)
+
+    def test_window4b_crash_during_bootstrap_between_ledger_and_reserve_converges(self) -> None:
+        # OPERATOR WINDOW 4 (see the module-level crash-window map): a crash DURING
+        # the bootstrap transaction -- AFTER ``TaskLedger.create`` committed the
+        # agent_tasks row (task_handler.py ``if not existed_task:
+        # _record_ledger_task_started``) but BEFORE the coordinator ``reserve``
+        # committed its job. The bootstrap is TWO SEPARATE commits, so this
+        # inter-commit crash leaves a DIVERGENT state -- a ledger row with NO
+        # coordinator job. Recovery must reconverge to ONE task + ONE coordinator
+        # job without clobbering the ledger row. Convergence holds because only the
+        # ledger write is guarded on ``existed_task``; the ``reserve`` is called
+        # UNCONDITIONALLY, so the re-run mints the (still-missing) coordinator job.
+        job, _ = self._enqueue_delivery()
+
+        # Force the inter-commit crash: make the coordinator ``reserve`` raise at its
+        # very top (no partial DB work), AFTER the delivery job is already enqueued
+        # and AFTER the bootstrap writes the ledger row. The runner uses
+        # claim/checkpoint/complete/fail -- never reserve -- so ONLY the bootstrap's
+        # coordinator reserve is hit; its raise propagates to the runner's
+        # try/except -> fail(retry=True).
+        original_reserve = self.jobs.reserve
+
+        def _reserve_boom(*_a: object, **_k: object) -> object:
+            raise RuntimeError("crash between ledger create and coordinator reserve")
+
+        self.jobs.reserve = _reserve_boom  # type: ignore[method-assign]
+        try:
+            self.assertEqual(self._runner().run_available(), 1)
+        finally:
+            self.jobs.reserve = original_reserve  # type: ignore[method-assign]
+
+        # Intermediate DIVERGENT state (the whole point of window 4): the ledger row
+        # is committed, but the coordinator reserve never committed -> NO coordinator
+        # job yet. The delivery job recovered for retry (not wedged 'running', never
+        # deleted).
+        crashed_record = self.ledger.get(self.task_id)
+        self.assertIsNotNone(crashed_record)
+        assert crashed_record is not None
+        self.assertEqual(crashed_record.status, "running")
+        self.assertEqual(self._coordinator_jobs(), [])
+        retrying = self.jobs.get(job.job_id)
+        assert retrying is not None
+        self.assertEqual(retrying.status, "retrying")
+
+        # Process restart, then resume the lane (past the 60s retry backoff).
+        self._reopen()
+        now_future = time.time() + 7 * 60 * 60
+        self.assertEqual(self._runner().run_available(now=now_future), 1)
+
+        # CONVERGED: the re-run sees existed_task=True (skips the ledger write -> no
+        # clobber) but calls ``reserve`` unconditionally -> exactly ONE coordinator
+        # job is finally minted. One logical task, same identity, delivery completed.
+        record_after, coord = self._assert_one_logical_task()
+        self.assertEqual(record_after.task_id, self.task_id)
+        # Ledger row NOT clobbered across the crash + re-run: identity/state preserved
+        # (a re-``create`` would have reset created_at to a fresh now).
+        self.assertEqual(record_after.status, "running")
+        self.assertEqual(record_after.runtime, "coordinator")
+        self.assertIs(record_after.metadata.get("autonomous"), True)
+        self.assertEqual(record_after.created_at, crashed_record.created_at)
+        final = self.jobs.get(job.job_id)
+        assert final is not None
+        self.assertEqual(final.status, "completed")
+        self.assertEqual(final.checkpoint.get("task_id"), self.task_id)
+        self.assertEqual(final.checkpoint.get("coordinator_job_id"), coord.job_id)
 
     def test_window5_crash_after_delivery_completion_terminal_task_no_new_work(self) -> None:
         # First delivery runs to completion: task 'running', coordinator job active.
