@@ -18,9 +18,13 @@ from claw_v2.observe import ObserveStream
 
 F4_DELEGATION_JOB_KIND = "f4b.delegation"
 
-# Default: a delegation job claimed by a worker that then disappeared is
-# considered stale (and reclaimed for retry) after this long.
-F4_DELEGATION_STALE_RUNNING_SECONDS = 6 * 60 * 60
+# The bootstrap (one idempotent ledger upsert + one reserve) is sub-second, so a
+# delivery job stuck `running` past this window means the claiming worker crashed
+# mid-bootstrap. Reclaim aggressively (15 min) — far below the 6h coordinator-task
+# default — so a crash-after-claim-before-bootstrap delivery recovers in minutes,
+# not hours; reclaim + re-run is safe because the bootstrap is idempotent on the
+# deterministic task_id.
+F4_DELEGATION_STALE_RUNNING_SECONDS = 15 * 60
 
 
 def f4b_delivery_task_id(delivery_key: str) -> str:
@@ -45,18 +49,23 @@ class F4DelegationJobRunner:
     checkpoint/complete linkage — terminalize the delivery job via
     ``fail(retry=True)`` (-> retrying, then ``failed`` after ``max_attempts``).
     No in-process error leaves the claimed job wedged in ``running`` until the
-    6h stale reclaim, and the row is NEVER deleted so the audit trail is preserved.
+    stale reclaim (``F4_DELEGATION_STALE_RUNNING_SECONDS``), and the row is NEVER
+    deleted so the audit trail is preserved.
 
     Execution is intentionally NOT triggered here. The bootstrap leaves a
     resumable ``running`` / ``coordinator`` / ``autonomous`` ledger row, and the
     already-wired ledger-driven recovery picks it up: startup recovery plus the
     300s ``task_lifecycle_watchdog`` both call
     ``bot.resume_interrupted_tasks`` -> ``TaskHandler.resume_interrupted_autonomous_tasks``.
-    Worst-case start latency is therefore the watchdog interval (<= ~300s) when
-    the daemon sits idle between ticks; on a crash that same watchdog is the
-    backstop. Starting the coordinator thread from this runner would only shave
-    that idle-start latency while coupling the runner to coordinator execution,
-    so we deliberately rely on the existing watchdog instead.
+    Recovery has two windows: (1) ONCE the bootstrap ledger row exists, start
+    latency is the watchdog interval (<= ~300s) — that watchdog is also the
+    crash backstop for a row that already exists; (2) a crash AFTER the runner
+    claimed the job but BEFORE the bootstrap committed the row has no resumable
+    row yet, so it recovers via the stale-running reclaim
+    (``F4_DELEGATION_STALE_RUNNING_SECONDS``, 15 min) -> retry -> bootstrap.
+    Starting the coordinator thread from this runner would only shave the idle
+    case (1) latency while coupling the runner to coordinator execution, so we
+    deliberately rely on the existing watchdog instead.
     """
 
     def __init__(

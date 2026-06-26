@@ -852,8 +852,16 @@ invariants:
           that never happened (`ToolSearch` does not exist in claw_v2). F4-B1
           only; broader forced-action + post-model anti-confabulation = F4-B2.
     flag: `CLAW_F4_DETERMINISTIC_DELEGATION` (config `f4_deterministic_delegation`),
-          default OFF. OFF = exact prior behavior (gate returns None first). Does
-          NOT touch `CLAW_DISABLE_TASK_INTENT_ROUTER`.
+          default OFF. OFF = exact prior behavior (gate returns None first; the
+          off-tick runner + stale-recovery allowlist run but no-op with no
+          `f4b.delegation` jobs). Does NOT touch `CLAW_DISABLE_TASK_INTENT_ROUTER`.
+          ONE deliberate, flag-INDEPENDENT carve-out: the Telegram transport
+          always attaches `context_metadata["inbound"]` (message_id/update_id —
+          Telegram's own ids, not secrets), which is persisted into
+          `session_state.last_channel_route`/`task_ledger.route`/observe payloads
+          even when OFF. No consumer branches on it while OFF (functionally
+          inert); it is the gate's delivery identity when ON. Gate the attach on
+          the flag if strict storage parity is required.
     placement: Runs in `_handle_text_body` BEFORE `_maybe_handle_task_intent` /
           `_maybe_handle_capability_route` and captures on match, so if the broad
           task-intent router is ever re-enabled the request is still handled
