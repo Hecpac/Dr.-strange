@@ -205,12 +205,17 @@ class JobService:
         payload: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> tuple[JobRecord, bool]:
-        """Atomically elect a single creator for ``resume_key``.
+        """Atomically elect a single creator for an *active* ``resume_key``.
 
         Returns ``(record, created)`` where ``created`` is True for exactly one
-        concurrent caller (the winner) and False for every duplicate — including
-        a redelivery after the key's job already completed. The DB unique index
-        on ``resume_key`` is the cross-process election primitive; the winner is
+        concurrent caller (the winner) and False for every duplicate that races
+        while the key's job is still active (queued/running/waiting_approval/
+        retrying). Dedup is scoped to that active window: the unique index
+        ``idx_agent_jobs_active_resume_key`` is PARTIAL (active statuses only), so
+        once the job terminalizes (completed/failed/cancelled) the key is released
+        — a later ``reserve`` of the same key creates a NEW job and returns
+        ``created=True``. Callers needing terminal-aware dedup must add their own
+        existence check (e.g. the F4 delegation ledger pre-check). The winner is
         identified by the generated ``job_id`` round-tripping back unchanged."""
         my_id = f"job:{uuid.uuid4().hex[:12]}"
         try:
@@ -222,7 +227,8 @@ class JobService:
                 job_id=my_id,
             )
         except sqlite3.IntegrityError:
-            # resume_key collided with a non-active (e.g. completed) job.
+            # resume_key collided with an ACTIVE reserved/running job (the only
+            # rows the partial unique index covers) — dedup to that winner.
             existing = self.get_by_resume_key(resume_key)
             if existing is None:  # pragma: no cover - the unique index guarantees a row
                 raise

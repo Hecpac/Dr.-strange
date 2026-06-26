@@ -66,10 +66,13 @@ _OTHER_PLATFORM = re.compile(
     r"mastodon|bluesky|bsky|whatsapp|telegram)\b"
 )
 # X / Twitter must be EXPLICITLY the target. "x" counts as the platform only
-# after a preposition/possessive ("por/de/en/a/mi x"), so placeholder "x"
-# (already rejected: "punto x", "valor de x") and bare "feed"/"timeline" without
-# X never qualify — prefer false negatives over enqueuing the wrong feed.
-_X_PLATFORM = re.compile(r"\btwitter\b|\b(?:de|en|por|a|mi)\s+x\b")
+# when bound to a review verb/noun ("repaso por X", "barrido de X") or a feed
+# word ("feed/timeline/TL de X") — NOT after an arbitrary object noun, where X
+# is a placeholder for a project/repo/topic ("código/repo/PR de X"). Placeholder
+# "x" ("punto x", "valor de x") is already rejected above, and bare
+# "feed"/"timeline" without X never qualifies — prefer false negatives over
+# enqueuing the wrong feed.
+_X_PLATFORM = re.compile(rf"\btwitter\b|\b(?:{_REVIEW}|feed|timeline|tl)\s+(?:de|en|por|a)\s+x\b")
 
 _OBJECTIVE = (
     "Revisa el feed autenticado de X (Twitter) del usuario por el carril de "

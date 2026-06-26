@@ -9,9 +9,9 @@
 
 ```yaml
 describes_commit: "F4-B1 recoverable delivery state machine"
-doc_version: 2.40
-last_verified: 2026-06-25
-verification_method: "code cross-read of the F4-B1 delivery path (bot.py gate, f4_delegation.py runner, task_handler.py ensure_autonomous_task_enqueued, daemon.py/main.py registration) against this doc + targeted pytest (test_f4_delegation, test_f4b_deterministic_delegation, test_telegram, test_task_handler, test_jobs, test_config, test_brain_tooluse_ledger, test_brain_tooluse_verify, test_architecture_invariants, test_daemon, test_lifecycle — all green) + uvx ruff check / ruff format --check on branch-changed py files + git diff --check, all clean"
+doc_version: 2.41
+last_verified: 2026-06-26
+verification_method: "code cross-read of the F4-B1 delivery path (bot.py gate, f4_delegation.py runner, task_handler.py ensure_autonomous_task_enqueued, daemon.py/main.py registration) against this doc + targeted pytest (test_f4_delegation, test_f4b_deterministic_delegation, test_telegram, test_task_handler, test_jobs, test_config, test_brain_tooluse_ledger, test_brain_tooluse_verify, test_architecture_invariants, test_daemon, test_lifecycle — all green) + uvx ruff check / ruff format --check on branch-changed py files + git diff --check, all clean + 2026-06-26 classifier precision follow-up: `_X_PLATFORM` now anchors X to a review verb/noun or feed word (rejects '<object-noun> de X'); ClassifierTests extended (test_x_object_noun_placeholder_non_matches); full ClassifierTests + test_jobs green; reserve() docstring corrected to scope dedup to the active-only window"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -871,7 +871,9 @@ invariants:
           minus authoring/definitional/opinion/placeholder markers). Prefers
           false negatives; matches "Haz un repaso por X"; rejects "¿Qué es X?" /
           "Escribe un post para X" / "Qué opinas de Twitter" / "Resume este
-          texto…" and X-as-placeholder ("punto X", "por X razón").
+          texto…" and X-as-placeholder ("punto X", "por X razón", or X behind an
+          object noun — "código/repo/PR de X" — since `_X_PLATFORM` only counts X
+          when bound to a review verb/noun or a feed word, not an arbitrary noun).
     architecture: A two-stage durable pipeline. (1) The GATE only enqueues a
           durable `f4b.delegation` delivery job — it does NOT call
           `start_autonomous_task`, start a thread, run the coordinator, or delete.
