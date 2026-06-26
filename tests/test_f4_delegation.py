@@ -765,8 +765,9 @@ class F4DelegationCrashBoundaryTests(unittest.TestCase):
         # job is finally minted. One logical task, same identity, delivery completed.
         record_after, coord = self._assert_one_logical_task()
         self.assertEqual(record_after.task_id, self.task_id)
-        # Ledger row NOT clobbered across the crash + re-run: identity/state preserved
-        # (a re-``create`` would have reset created_at to a fresh now).
+        # Ledger row NOT clobbered across the crash + re-run: identity/state preserved.
+        # The re-run skips ``_record_ledger_task_started`` entirely (existed_task=True),
+        # so created_at stays byte-identical to the crashed row.
         self.assertEqual(record_after.status, "running")
         self.assertEqual(record_after.runtime, "coordinator")
         self.assertIs(record_after.metadata.get("autonomous"), True)
