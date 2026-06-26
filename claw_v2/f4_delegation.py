@@ -12,7 +12,7 @@ materialises exactly one ``agent_tasks`` row plus one
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+from typing import Any, Callable
 
 from claw_v2.observe import ObserveStream
 
@@ -40,9 +40,12 @@ class F4DelegationJobRunner:
     Mirrors ``PendingVerificationReconciliationJobRunner``: it reclaims stale
     claimed jobs, claims the next queued delivery job through ``JobService``, and
     on a successful bootstrap links the materialised task + coordinator job into
-    the delivery job's checkpoint/result before completing it. Bootstrap failures
-    terminalize the delivery job (``fail`` -> retrying, then ``failed`` after
-    ``max_attempts``); the row is NEVER deleted so the audit trail is preserved.
+    the delivery job's checkpoint/result before completing it. A structured
+    bootstrap failure AND any raised error — from the bootstrap *or* the
+    checkpoint/complete linkage — terminalize the delivery job via
+    ``fail(retry=True)`` (-> retrying, then ``failed`` after ``max_attempts``).
+    No in-process error leaves the claimed job wedged in ``running`` until the
+    6h stale reclaim, and the row is NEVER deleted so the audit trail is preserved.
 
     Execution is intentionally NOT triggered here. The bootstrap leaves a
     resumable ``running`` / ``coordinator`` / ``autonomous`` ledger row, and the
@@ -65,6 +68,7 @@ class F4DelegationJobRunner:
         worker_id: str = "f4b_delegation",
         stale_running_seconds: float = F4_DELEGATION_STALE_RUNNING_SECONDS,
         retry_delay_seconds: float = 60.0,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         self.job_service = job_service
         self.task_handler = task_handler
@@ -72,16 +76,26 @@ class F4DelegationJobRunner:
         self.worker_id = worker_id
         self.stale_running_seconds = max(0.001, float(stale_running_seconds))
         self.retry_delay_seconds = max(0.0, float(retry_delay_seconds))
+        # Lets the daemon (Task 6) wire graceful shutdown, e.g.
+        # should_stop=shutdown.is_set, mirroring the reference runner.
+        self.should_stop = should_stop
 
     def run_available(self, *, limit: int = 1, now: float | None = None) -> int:
         """Reclaim stale claims, then process up to ``limit`` delivery jobs."""
+        if self._should_stop():
+            return 0
         self.reclaim_stale_running(now=now)
         processed = 0
         for _ in range(max(0, int(limit))):
+            if self._should_stop():
+                break
             if not self._run_once(now=now):
                 break
             processed += 1
         return processed
+
+    def _should_stop(self) -> bool:
+        return bool(self.should_stop and self.should_stop())
 
     def reclaim_stale_running(self, *, now: float | None = None) -> int:
         """Re-queue ``f4b.delegation`` jobs whose claiming worker disappeared."""
@@ -115,11 +129,24 @@ class F4DelegationJobRunner:
                 source_text=payload.get("source_text", ""),
                 delegation_metadata=payload.get("delegation_metadata"),
             )
+            if result.status == "started":
+                # Link task + coordinator job into the delivery job, then complete.
+                # checkpoint()/complete() are INSIDE the guard: a raise here (e.g.
+                # SQLITE_BUSY in checkpoint, which is not retry-wrapped) must
+                # recover via the 60s fail(retry=True) path below, not wedge the
+                # claimed job in 'running' until the 6h stale reclaim. fail() is
+                # idempotent on terminal jobs, so a raise AFTER complete()
+                # committed won't double-fail.
+                linkage = {
+                    "task_id": result.task_id,
+                    "coordinator_job_id": result.coordinator_job_id,
+                }
+                self.job_service.checkpoint(job.job_id, linkage)
+                self.job_service.complete(job.job_id, result=linkage)
         except Exception as exc:
-            # A *raised* bootstrap error (e.g. a transient DB write failure) must
-            # not leave the claimed job wedged in 'running' until the 6h stale
-            # reclaim: recover it for retry now (terminal 'failed' only after
-            # max_attempts), mirroring the reference runner. NEVER delete.
+            # A *raised* error from the bootstrap or the linkage (e.g. a transient
+            # DB write failure): recover for retry now (terminal 'failed' only
+            # after max_attempts), mirroring the reference runner. NEVER delete.
             self.job_service.fail(
                 job.job_id,
                 error=f"f4b_delegation_runner_error: {exc}"[:500],
@@ -133,15 +160,11 @@ class F4DelegationJobRunner:
             )
             return True
         if result.status == "started":
-            linkage = {
-                "task_id": result.task_id,
-                "coordinator_job_id": result.coordinator_job_id,
-            }
-            self.job_service.checkpoint(job.job_id, linkage)
-            self.job_service.complete(job.job_id, result=linkage)
             self._emit("f4_delegation_runner_completed", job, extra={"reason": result.reason})
             return True
-        # coordinator_unavailable / failed: terminalize (NEVER delete).
+        # coordinator_unavailable / failed: terminalize (NEVER delete). The fail()
+        # + emit stay OUTSIDE the guard so an emit error can't re-fail a job that
+        # fail() just moved to the non-terminal 'retrying' state (double attempt).
         self.job_service.fail(job.job_id, error=result.reason)
         self._emit(
             "f4_delegation_runner_failed",

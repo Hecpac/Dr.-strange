@@ -382,6 +382,73 @@ class F4DelegationRunnerTests(unittest.TestCase):
         self.assertIsNone(self.ledger.get(task_id))
         self.assertEqual(self._coordinator_jobs(), [])
 
+    def _assert_linkage_raise_recovers(self, broken_attr: str) -> None:
+        # A *raised* error from the checkpoint/complete linkage (which sits AFTER
+        # a successful bootstrap) must recover via fail(retry=True), not wedge the
+        # claimed job in 'running' until the 6h stale reclaim. The bootstrap has
+        # already materialised exactly one task + coordinator job; a re-run must
+        # NOT duplicate either.
+        runner = self._runner()
+        task_id = "f4bdeliv:tg-1:111"
+        job = self._enqueue_delivery(delivery_key="f4b-delegation:tg-1:111", task_id=task_id)
+
+        original = getattr(self.jobs, broken_attr)
+
+        def _boom(*_a: object, **_k: object) -> object:
+            raise RuntimeError(f"{broken_attr} disk failure")
+
+        setattr(self.jobs, broken_attr, _boom)
+        try:
+            self.assertEqual(runner.run_available(), 1)
+        finally:
+            setattr(self.jobs, broken_attr, original)
+
+        after = self.jobs.get(job.job_id)
+        assert after is not None
+        self.assertEqual(after.status, "retrying")  # NOT stuck 'running', NOT deleted
+        # Bootstrap already materialised exactly one task + coordinator job.
+        self.assertIsNotNone(self.ledger.get(task_id))
+        self.assertEqual(len(self._coordinator_jobs()), 1)
+
+        # Re-run with the real method restored -> idempotent: completes cleanly,
+        # no duplicate task or coordinator job.
+        now_future = time.time() + 7 * 60 * 60
+        self.assertEqual(runner.run_available(now=now_future), 1)
+        final = self.jobs.get(job.job_id)
+        assert final is not None
+        self.assertEqual(final.status, "completed")
+        self.assertIsNotNone(self.ledger.get(task_id))
+        coord_jobs = self._coordinator_jobs()
+        self.assertEqual(len(coord_jobs), 1)
+        self.assertEqual(final.checkpoint.get("task_id"), task_id)
+        self.assertEqual(final.checkpoint.get("coordinator_job_id"), coord_jobs[0].job_id)
+
+    def test_runner_checkpoint_raise_retries_not_stuck_running(self) -> None:
+        self._assert_linkage_raise_recovers("checkpoint")
+
+    def test_runner_complete_raise_retries_not_stuck_running(self) -> None:
+        self._assert_linkage_raise_recovers("complete")
+
+    def test_runner_honors_should_stop(self) -> None:
+        task_id = "f4bdeliv:tg-1:111"
+        job = self._enqueue_delivery(delivery_key="f4b-delegation:tg-1:111", task_id=task_id)
+        runner = F4DelegationJobRunner(
+            job_service=self.jobs,
+            task_handler=self._handler(),
+            observe=self.observe,
+            should_stop=lambda: True,
+        )
+
+        processed = runner.run_available()
+
+        self.assertEqual(processed, 0)
+        # Graceful stop: claim never happened, nothing materialised.
+        after = self.jobs.get(job.job_id)
+        assert after is not None
+        self.assertEqual(after.status, "queued")
+        self.assertIsNone(self.ledger.get(task_id))
+        self.assertEqual(self._coordinator_jobs(), [])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
