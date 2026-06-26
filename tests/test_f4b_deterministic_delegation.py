@@ -81,6 +81,21 @@ class ClassifierTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertFalse(self._match(text))
 
+    # adversarial X-as-placeholder via an intervening object noun:
+    # "<review-verb> el <noun> de X" — X qualifies a project/repo/topic, NOT the
+    # platform, so it must fall through (the false-positive class this fix closes).
+    def test_x_object_noun_placeholder_non_matches(self) -> None:
+        for text in (
+            "revisa el código de X",
+            "revisa el repo de X",
+            "revisa el PR de X",
+            "revisa la documentación de X",
+            "repasa el plan de X",
+            "revisa el ticket de X",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(self._match(text))
+
     def test_empty_and_unrelated_non_matches(self) -> None:
         for text in ("", "   ", "hola", "qué hora es", "haz un resumen del día"):
             with self.subTest(text=text):
