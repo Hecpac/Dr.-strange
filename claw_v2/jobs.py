@@ -229,13 +229,6 @@ class JobService:
             return existing, False
         return record, record.job_id == my_id
 
-    def delete(self, job_id: str) -> None:
-        """Remove a job row. Used to release a reservation whose creator failed
-        before durable task setup, so a redelivery can re-elect a creator."""
-        with self._lock:
-            self._conn.execute("DELETE FROM agent_jobs WHERE job_id = ?", (job_id,))
-            self._conn.commit()
-
     def claim(
         self,
         job_id: str,

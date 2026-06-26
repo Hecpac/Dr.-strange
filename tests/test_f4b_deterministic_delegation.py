@@ -95,31 +95,22 @@ class JobServiceReserveTests(unittest.TestCase):
         self.jobs = JobService(Path(self._tmp.name) / "claw.db")
 
     def test_reserve_elects_exactly_one_creator(self) -> None:
-        rec1, created1 = self.jobs.reserve(resume_key="k", kind="f4b.delegation_reservation")
-        rec2, created2 = self.jobs.reserve(resume_key="k", kind="f4b.delegation_reservation")
+        rec1, created1 = self.jobs.reserve(resume_key="k", kind="test.reserve")
+        rec2, created2 = self.jobs.reserve(resume_key="k", kind="test.reserve")
         self.assertTrue(created1)
         self.assertFalse(created2)
         self.assertEqual(rec1.job_id, rec2.job_id)  # duplicate gets the winner's row
 
     def test_reservation_stays_active_as_dedup_token(self) -> None:
-        # The reservation kind is claimed by no runner, so it stays an active
-        # (queued) durable dedup token — every later reserve dedups against it,
-        # independent of any task's lifecycle (the "redelivery after completion"
-        # guarantee). It only releases on an explicit delete.
-        rec, created = self.jobs.reserve(resume_key="k", kind="f4b.delegation_reservation")
+        # An unclaimed reserved key stays an active (queued) durable dedup
+        # token — every later reserve dedups against it, independent of any
+        # task's lifecycle (the "redelivery after completion" guarantee).
+        rec, created = self.jobs.reserve(resume_key="k", kind="test.reserve")
         self.assertTrue(created)
         self.assertEqual(self.jobs.get_by_resume_key("k").status, "queued")
         for _ in range(3):
-            _, dup = self.jobs.reserve(resume_key="k", kind="f4b.delegation_reservation")
+            _, dup = self.jobs.reserve(resume_key="k", kind="test.reserve")
             self.assertFalse(dup)
-
-    def test_delete_releases_key_for_recreate(self) -> None:
-        rec, created = self.jobs.reserve(resume_key="k", kind="f4b.delegation_reservation")
-        self.assertTrue(created)
-        self.jobs.delete(rec.job_id)
-        self.assertIsNone(self.jobs.get_by_resume_key("k"))
-        _, created2 = self.jobs.reserve(resume_key="k", kind="f4b.delegation_reservation")
-        self.assertTrue(created2)
 
 
 # ---- gate helpers ----------------------------------------------------------
