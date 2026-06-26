@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "F4-B1 deterministic delegation for authenticated browse intents"
-doc_version: 2.39
+describes_commit: "F4-B1 recoverable delivery state machine"
+doc_version: 2.40
 last_verified: 2026-06-25
-verification_method: "operator field verification from observe_stream agent_startup_context payload.code_version + ToolRegistry browser atomic read-only smoke + watchdog read-only smoke + pytest/AST sentinel cross-checks + stage2c2_synthetic_canary --temp-db --json smoke (overall PASS, temp_db_only/primary_db_touched verified) and targeted pytest + f2_primary_compat_preflight --temp-db --json smoke (overall PASS, opened_read_only/immutable_mode_used/primary_db_touched verified) and targeted pytest"
+verification_method: "code cross-read of the F4-B1 delivery path (bot.py gate, f4_delegation.py runner, task_handler.py ensure_autonomous_task_enqueued, daemon.py/main.py registration) against this doc + targeted pytest (test_f4_delegation, test_f4b_deterministic_delegation, test_telegram, test_task_handler, test_jobs, test_config, test_brain_tooluse_ledger, test_brain_tooluse_verify, test_architecture_invariants, test_daemon, test_lifecycle — all green) + uvx ruff check / ruff format --check on branch-changed py files + git diff --check, all clean"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -843,9 +843,10 @@ invariants:
 
   high_confidence_delegation_intents_do_not_depend_on_model_tool_choice:
     rule: A narrow, unambiguous "review my authenticated X / Twitter feed" intent
-          is routed deterministically to a durable background delegation job in
-          `_maybe_handle_f4_deterministic_delegation` (`bot.py`) — it does NOT
-          depend on the brain choosing to call `mcp__claw__delegate_task`. Fixes
+          is routed deterministically to a durable, crash-recoverable delivery
+          state machine seeded in `_maybe_handle_f4_deterministic_delegation`
+          (`bot.py`) — it does NOT depend on the brain choosing to call
+          `mcp__claw__delegate_task`. Fixes
           the 2026-06-25 failure where the brain emitted zero tool calls,
           enqueued nothing, and confabulated a `ToolSearch`/tool_policy rejection
           that never happened (`ToolSearch` does not exist in claw_v2). F4-B1
@@ -863,59 +864,143 @@ invariants:
           false negatives; matches "Haz un repaso por X"; rejects "¿Qué es X?" /
           "Escribe un post para X" / "Qué opinas de Twitter" / "Resume este
           texto…" and X-as-placeholder ("punto X", "por X razón").
-    deterministic_enqueue: Reuses `TaskHandler.start_autonomous_task` (additive
-          optional `idempotency_key` → `JobService.enqueue(resume_key=...)`), not
-          a hand-rolled job. No MCP tool call is emitted.
-    exactly_once: **Atomic creator election** on resume_key =
-          `f4b-delegation:{session_id}:{telegram message_id}` BEFORE any
-          externally visible side effect. `JobService.reserve(resume_key, kind=
-          "f4b.delegation_reservation")` returns `(record, created)`: the DB
-          unique index on `resume_key` elects exactly one creator under
-          concurrent duplicate delivery (cross-process), identified by the
-          generated `job_id` round-tripping unchanged. ONLY the winner runs
-          `start_autonomous_task` (one task_id / goal / ledger / thread); every
-          duplicate (concurrent, or a redelivery) gets `created=False` and
-          returns the dedup ack with ZERO side effects. The reservation kind is
-          claimed by no runner, so it is a pure durable dedup token that stays
-          `queued` (active) for the delivery's life — making dedup independent of
-          the task's lifecycle (redelivery-after-completion still dedups). This
-          replaced a check-then-`start_autonomous_task` TOCTOU race where two
-          concurrent deliveries each ran the side effects (two task_ids/threads,
-          one job). Delivery id plumbed via `context_metadata["inbound"]`; in
-          prod the chain is `TelegramTransport → AgentRuntime.handle_text →
+    architecture: A two-stage durable pipeline. (1) The GATE only enqueues a
+          durable `f4b.delegation` delivery job — it does NOT call
+          `start_autonomous_task`, start a thread, run the coordinator, or delete.
+          (2) `F4DelegationJobRunner` (`f4_delegation.py`), registered off-tick in
+          the daemon (`_run_f4_delegation_runner_loop`, `daemon.py`;
+          `daemon.task_handler` wired in `main.py`), claims that job and runs the
+          idempotent bootstrap. Execution is then ledger-driven, not job-claimed
+          (see start_latency). This supersedes the earlier inert
+          `f4b.delegation_reservation` + `JobService.delete` design: the delivery
+          job IS the recoverable state machine.
+    delivery_identity: `delivery_key = f"f4b-delegation:{session_id}:{message_id}"`
+          and a deterministic `task_id = f4b_delivery_task_id(delivery_key)`
+          (`f4_delegation.py` → `f4bdeliv:{sha1(delivery_key)[:16]}`, stable
+          forever, so a redelivery / reclaim converges on ONE logical task).
+          Delivery id plumbed via `context_metadata["inbound"]`; the prod chain is
+          `TelegramTransport → AgentRuntime.handle_text →
           BotService.handle_text(context_metadata) → gate` (AgentRuntime forwards
           inbound; stripping it was the P1 regression). No delivery id → fall
-          through. Same message twice → one task; new message id → new task.
-    crash_window: If the winner fails before durable setup
-          (`start_autonomous_task` raises / returns a non-start marker / no
-          coordinator), the gate `JobService.delete`s the reservation, so the
-          released token leaves no claimable orphan (the reservation kind runs
-          nowhere) and a redelivery can re-elect a creator (no false dedup).
-    truthful: Success is claimed only when `start_autonomous_task` returns a
-          positive durable-start marker; failure releases the reservation, emits
-          `f4_deterministic_delegation_failed` (reason code only, never raw
-          error/secrets) and a concise "no task created" message — no fabricated
-          tool/policy/loader detail, no retry/notification/future-execution
-          promise, no "send the same command again".
+          through (skipped_no_delivery_id).
+    gate_dedup: Two-window, existence-keyed, BEFORE any second side effect.
+          WINDOW 1 — check the `task_id`'s `agent_tasks` ledger row FIRST
+          (`task_ledger.get(task_id)`): if it EXISTS the bootstrap already
+          materialised this delivery → status-aware dedup ack, never a second job.
+          This survives the ACTIVE-ONLY `idx_agent_jobs_active_resume_key` index
+          AFTER the delivery job terminalizes, and is keyed on row EXISTENCE — so
+          coordinator_unavailable / failed bootstraps (which write NO ledger row)
+          correctly fall through and re-attempt. WINDOW 2 — else
+          `job_service.reserve(resume_key=delivery_key, kind="f4b.delegation",
+          payload={task_id, session_id, message_id, objective, mode, task_kind,
+          source_text, delegation_metadata})` returns `(record, created)`: the DB
+          unique index elects exactly one creator under concurrent duplicate
+          delivery (cross-process). `created=True` → truthful accepted/queued ack;
+          `created=False` (duplicate while the job is still active, no ledger row
+          yet) → status-aware dedup ack. The gate NEVER calls
+          `start_autonomous_task` and NEVER deletes.
+    runner: `F4DelegationJobRunner` claims `kind="f4b.delegation"` ONLY
+          (`JobService.claim_next(kinds=("f4b.delegation",))`); no generic /
+          unfiltered consumer claims it (AST-proven — see enforced_by). It is
+          maintenance-aware (claim_next returns None while `job_claim_block_reason`
+          is set → the job stays queued) and `should_stop`-wired
+          (`shutdown.is_set`) for graceful shutdown. Per claimed job it calls
+          `TaskHandler.ensure_autonomous_task_enqueued(...)`, checkpoints
+          `{task_id, coordinator_job_id}`, then completes the delivery job.
+    bootstrap: `ensure_autonomous_task_enqueued` (`task_handler.py`, ADDITIVE —
+          `start_autonomous_task` is unchanged) is idempotent on the deterministic
+          `task_id`: ONE `agent_tasks` row via `_record_ledger_task_started` →
+          `TaskLedger.create` (`ON CONFLICT(task_id) DO UPDATE`) guarded by
+          `if not existed_task` (a retry never clobbers coordinator progress or
+          resurrects a terminal task), and ONE `coordinator.autonomous_task` job
+          via `reserve(resume_key="coordinator:{task_id}")` with a TERMINAL-TASK
+          guard (skip the reserve when the existing task is already terminal → no
+          spurious coordinator job). Returns a structured
+          `AutonomousTaskBootstrapResult`.
+    start_latency: Execution is LEDGER-DRIVEN, not job-claimed. Nothing
+          claim-executes the `coordinator.autonomous_task` job — it is a
+          tracking / lease handle; `_reconcile_orphaned_jobs` cancels it for a
+          terminal task. `resume_interrupted_autonomous_tasks` (startup + the 300s
+          `task_lifecycle_watchdog`) resumes the `running` ledger row, so the start
+          latency is ≤300s by design.
+    crash_recovery: Crash-recoverable at every transition (verified by a 25×
+          looped crash matrix). The JobService claim lease + `recover_stale_running`
+          (`f4b.delegation` ∈ `AUTONOMY_STALE_RUNNING_JOB_KINDS`, `main.py`) + the
+          runner's own `reclaim_stale_running` re-queue a job whose worker
+          disappeared; the idempotent bootstrap guarantees no second task/job on
+          retry. Each window converges to ONE delivery job, ONE `agent_tasks` row,
+          ONE coordinator job, terminal delegation:
+            - crash BEFORE delivery-job commit          → redelivery enqueues one job
+            - crash AFTER commit, BEFORE claim          → runner bootstraps once
+            - crash AFTER claim, BEFORE bootstrap       → reclaim → bootstraps once
+            - crash AFTER bootstrap, BEFORE checkpoint  → idempotent retry, no dup
+            - crash AFTER completion                    → terminal task, no new work
+    no_delete: Failures TERMINALIZE, never delete (the audit row is preserved). A
+          raised error from the bootstrap OR the checkpoint/complete linkage →
+          `fail(retry=True)` (→ retrying, then `failed` after max_attempts); a
+          structured `coordinator_unavailable` / `failed` result → `fail(reason)`.
+          No delivery-path code deletes the durable job (quarantine / terminalize
+          only) — the row always survives for the audit trail.
+    exactly_once: ONE logical task (one `agent_tasks` row + one
+          `coordinator.autonomous_task` job) per delivery identity, crash-
+          recoverable. This is NOT exactly-once browser / external-effect
+          execution — that lives in the F5 / execution track.
+    truthful: Acks are status-aware and never fabricated. A fresh creator gets
+          accepted/queued; a duplicate reflects the REAL linked-task state (queued
+          when no linked task yet, running when it is running, processed when it is
+          terminal). A reserve failure emits `f4_deterministic_delegation_failed`
+          (reason code only, never raw error/secrets) and a concise truthful
+          failure message — no fabricated tool/policy/loader detail, no
+          retry/future-execution promise, no "send the same command again".
     observe: f4_deterministic_delegation_matched (deduped) / _enqueued / _failed /
-          _skipped_no_delivery_id — best-effort, safe ids/reason codes only.
+          _skipped_no_delivery_id, plus runner events f4_delegation_runner_started
+          / _completed / _failed / f4_delegation_stale_running_recovered —
+          best-effort, safe ids/reason codes only.
     why_not_reprompt: A re-prompt re-enters the same model that just confabulated
           and can be talked around; deterministic routing removes the enqueue
           from model discretion for this narrow case. Broader forced-action /
           post-model anti-confabulation stays F4-B2.
     enforced_by:
+      # gate: classifier, reserve dedup token, ledger-first + reserve windows, acks
       - tests/test_f4b_deterministic_delegation.py::ClassifierTests
       - tests/test_f4b_deterministic_delegation.py::JobServiceReserveTests
-      - tests/test_f4b_deterministic_delegation.py::GateTests::test_incident_elects_one_creator_with_truthful_ack
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_match_enqueues_one_delivery_job_with_accepted_ack
       - tests/test_f4b_deterministic_delegation.py::GateTests::test_flag_off_falls_through
       - tests/test_f4b_deterministic_delegation.py::GateTests::test_gate_independent_of_broad_router_flag
-      - tests/test_f4b_deterministic_delegation.py::GateTests::test_duplicate_delivery_one_creator
-      - tests/test_f4b_deterministic_delegation.py::GateTests::test_legitimate_repeat_new_creator
-      - tests/test_f4b_deterministic_delegation.py::GateTests::test_concurrent_duplicate_elects_one_creator
-      - tests/test_f4b_deterministic_delegation.py::GateTests::test_start_returning_no_task_releases_reservation
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_duplicate_delivery_one_job_queued_dedup_ack
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_legitimate_repeat_new_job
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_dedup_ack_running_when_linked_task_running
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_dedup_ack_processed_when_linked_task_terminal
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_dedup_ack_queued_when_no_linked_task
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_redelivery_after_terminalized_delivery_job_dedups_no_new_job
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_redelivery_without_ledger_row_falls_through_to_accepted
       - tests/test_f4b_deterministic_delegation.py::GateTests::test_no_delivery_id_falls_through
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_reserve_failure_returns_truthful_message
+      - tests/test_f4b_deterministic_delegation.py::GateTests::test_concurrent_duplicate_elects_one_creator
       - tests/test_f4b_deterministic_delegation.py::GateTests::test_observe_none_does_not_crash
+      - tests/test_f4b_deterministic_delegation.py::RealChainIntegrationTests::test_real_bot_handle_text_enqueues_durable_delivery_job
       - tests/test_f4b_deterministic_delegation.py::RealChainIntegrationTests::test_agent_runtime_path_forwards_inbound_id_to_gate
+      # deterministic task_id + idempotent bootstrap + terminal-task guard
+      - tests/test_f4_delegation.py::DeliveryTaskIdTests::test_deterministic_and_stable
+      - tests/test_f4_delegation.py::BootstrapIdempotencyTests::test_bootstrap_is_idempotent_on_deterministic_task_id
+      - tests/test_f4_delegation.py::BootstrapIdempotencyTests::test_bootstrap_on_terminal_task_mints_no_new_coordinator_job
+      - tests/test_f4_delegation.py::BootstrapIdempotencyTests::test_terminal_task_not_resumed_no_reexecution
+      # runner: bootstrap+complete, terminalize-not-delete, maintenance, should_stop
+      - tests/test_f4_delegation.py::F4DelegationRunnerTests::test_runner_bootstraps_one_task_and_completes_delivery_job
+      - tests/test_f4_delegation.py::F4DelegationRunnerTests::test_runner_bootstrap_failure_terminalizes_not_deletes
+      - tests/test_f4_delegation.py::F4DelegationRunnerTests::test_runner_maintenance_leaves_job_queued
+      - tests/test_f4_delegation.py::F4DelegationRunnerTests::test_runner_honors_should_stop
+      # crash matrix (each window → one task, one coordinator job, terminal delegation)
+      - tests/test_f4_delegation.py::F4DelegationCrashBoundaryTests::test_window1_crash_before_delivery_commit_redelivery_enqueues_one
+      - tests/test_f4_delegation.py::F4DelegationCrashBoundaryTests::test_window2_crash_after_commit_before_claim_runner_bootstraps_once
+      - tests/test_f4_delegation.py::F4DelegationCrashBoundaryTests::test_window3_crash_after_claim_before_bootstrap_reclaim_bootstraps_once
+      - tests/test_f4_delegation.py::F4DelegationCrashBoundaryTests::test_window4_crash_after_bootstrap_before_complete_idempotent
+      - tests/test_f4_delegation.py::F4DelegationCrashBoundaryTests::test_window5_crash_after_delivery_completion_terminal_task_no_new_work
+      # daemon registration + stale-recovery allowlist + runner kind exclusivity (AST)
+      - tests/test_daemon.py::DaemonF4DelegationRunnerWiringTests::test_run_loop_constructs_single_f4_runner_with_should_stop
+      - tests/test_daemon.py::AutonomyStaleRunningAllowlistTests::test_f4b_delegation_in_stale_running_allowlist
+      - tests/test_daemon.py::F4DelegationClaimExclusivityTests::test_claim_next_calls_are_filtered_and_f4b_kind_is_exclusive
+      - tests/test_daemon.py::F4DelegationClaimExclusivityTests::test_main_does_not_wire_a_generic_consumer_for_f4b_kind
 ```
 
 ---
@@ -1225,7 +1310,7 @@ in `_handle_text_body` (verified 2026-06-10):
 | 6 | `_maybe_handle_operational_status` | operational status questions |
 | 7 | cleanup status / owner delegation / `_maybe_handle_telegram_imperative_request` | explicit operator imperatives; unresolved context → fallthrough_to_brain (never clarifies) |
 | 8 | `_maybe_handle_actionable_task_request` | runtime=Telegram + state-derived objective; unresolved follow-up → fallthrough |
-| 8b | `_maybe_handle_f4_deterministic_delegation` | **F4-B1**, gated OFF by `CLAW_F4_DETERMINISTIC_DELEGATION` (default); narrow authenticated-X-feed-review intent → atomic creator election via `JobService.reserve` (only the winner runs `start_autonomous_task`); captures BEFORE the broad router (exactly-once on telegram message_id). See invariant `high_confidence_delegation_intents_do_not_depend_on_model_tool_choice` |
+| 8b | `_maybe_handle_f4_deterministic_delegation` | **F4-B1**, gated OFF by `CLAW_F4_DETERMINISTIC_DELEGATION` (default); narrow authenticated-X-feed-review intent → enqueues ONE durable `f4b.delegation` delivery job (ledger-row-first dedup on the deterministic `task_id`, else `JobService.reserve(resume_key=delivery_key)`); does NOT call `start_autonomous_task`/start a thread/delete — `F4DelegationJobRunner` claims the job off-tick and runs the idempotent bootstrap. Captures BEFORE the broad router (exactly-once on telegram message_id). See invariant `high_confidence_delegation_intents_do_not_depend_on_model_tool_choice` |
 | 9 | `_maybe_handle_task_intent` | **gated OFF** by `CLAW_DISABLE_TASK_INTENT_ROUTER=1` (default) |
 | 10 | `_maybe_handle_change_status_question` | change-status questions |
 | 11 | meta introspection guard + `_maybe_handle_capability_route` | classify_autonomy_intent → CRITICAL_TASK_KINDS gate |
