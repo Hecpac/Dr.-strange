@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from claw_v2.adapters.base import AdapterError
+from claw_v2.browser_evidence import BrowserEvidenceCollector
+from claw_v2.langgraph_coordinator import LangGraphShadowRunner
 from claw_v2.redaction import redact_text
 from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
 from claw_v2.types import ProviderRole
@@ -93,6 +95,8 @@ class CoordinatorService:
         default_implementation_timeout_seconds: float = 180.0,
         scratch_retention_days: float = DEFAULT_SCRATCH_RETENTION_DAYS,
         f2_durability_store: Any | None = None,
+        browser_evidence_collector: BrowserEvidenceCollector | None = None,
+        langgraph_shadow_runner: LangGraphShadowRunner | None = None,
     ) -> None:
         self.router = router
         self.observe = observe
@@ -112,6 +116,8 @@ class CoordinatorService:
             1.0, float(default_implementation_timeout_seconds)
         )
         self.f2_durability_store = f2_durability_store
+        self.browser_evidence_collector = browser_evidence_collector
+        self.langgraph_shadow_runner = langgraph_shadow_runner
 
     def run(
         self,
@@ -282,6 +288,12 @@ class CoordinatorService:
                     self._with_phase_timeout(research_tasks, self.default_research_timeout_seconds),
                     trace,
                     lane_overrides=lane_overrides,
+                )
+                research_results = self._append_browser_evidence(
+                    task_id=task_id,
+                    objective=objective,
+                    research_results=research_results,
+                    trace_context=trace,
                 )
                 result.phase_results["research"] = research_results
                 self._write_scratch(scratch, "research", research_results)
@@ -628,6 +640,16 @@ class CoordinatorService:
 
             result.duration_seconds = time.time() - start
             _mark_f2_task_terminal("succeeded")
+            self._run_langgraph_shadow(
+                task_id=task_id,
+                objective=objective,
+                research_tasks=research_tasks,
+                implementation_tasks=implementation_tasks,
+                verification_tasks=verification_tasks,
+                lane_overrides=lane_overrides,
+                start_phase=start_phase,
+                legacy_result=result,
+            )
             self._orchestration_complete_run(
                 orchestration_run_id,
                 status="succeeded",
@@ -675,7 +697,7 @@ class CoordinatorService:
         if not tasks:
             return []
 
-        results: list[WorkerResult] = []
+        results_by_index: list[WorkerResult | None] = [None] * len(tasks)
         pool = ThreadPoolExecutor(max_workers=min(self.max_workers, len(tasks)))
         shutdown_early = False
         from claw_v2.verification.local_tool_runner import (
@@ -692,9 +714,12 @@ class CoordinatorService:
             return self._execute_worker(task, trace_context, lane_overrides=lane_overrides)
 
         try:
-            futures = {pool.submit(_execute_scoped_worker, task): task for task in tasks}
+            futures = {
+                pool.submit(_execute_scoped_worker, task): (index, task)
+                for index, task in enumerate(tasks)
+            }
             for future in as_completed(futures):
-                task = futures[future]
+                index, task = futures[future]
                 try:
                     worker_result = future.result()
                 except Exception as exc:
@@ -704,18 +729,18 @@ class CoordinatorService:
                         duration_seconds=0.0,
                         error=str(exc),
                     )
-                results.append(worker_result)
+                results_by_index[index] = worker_result
                 if _has_critical_worker_error(worker_result):
                     for pending in futures:
                         if pending is not future:
                             pending.cancel()
                     pool.shutdown(wait=False, cancel_futures=True)
                     shutdown_early = True
-                    return results
+                    return [result for result in results_by_index if result is not None]
         finally:
             if not shutdown_early:
                 pool.shutdown(wait=True)
-        return results
+        return [result for result in results_by_index if result is not None]
 
     _RETRY_LANES: frozenset[str] = frozenset({"worker", "worker_heavy"})
 
@@ -788,6 +813,98 @@ class CoordinatorService:
             duration_seconds=time.time() - start,
             error=str(last_exc) if last_exc else "unknown_error",
         )
+
+    def _run_langgraph_shadow(
+        self,
+        *,
+        task_id: str,
+        objective: str,
+        research_tasks: list[WorkerTask],
+        implementation_tasks: list[WorkerTask] | None,
+        verification_tasks: list[WorkerTask] | None,
+        lane_overrides: dict[str, dict[str, Any]] | None,
+        start_phase: str | None,
+        legacy_result: CoordinatorResult,
+    ) -> None:
+        runner = self.langgraph_shadow_runner
+        if runner is None:
+            return
+        try:
+            runner.run(
+                task_id=task_id,
+                objective=objective,
+                research_tasks=research_tasks,
+                implementation_tasks=implementation_tasks,
+                verification_tasks=verification_tasks,
+                lane_overrides=lane_overrides,
+                start_phase=start_phase,
+                legacy_result=legacy_result,
+            )
+        except Exception as exc:  # noqa: BLE001 - shadow mode cannot affect productive result
+            logger.exception("LangGraph shadow runner failed")
+            emit = getattr(self.observe, "emit", None)
+            if callable(emit):
+                emit(
+                    "langgraph_shadow_failed",
+                    payload={
+                        "task_id": task_id,
+                        "error_type": type(exc).__name__,
+                        "objective_chars": len(objective or ""),
+                    },
+                )
+
+    def _append_browser_evidence(
+        self,
+        *,
+        task_id: str,
+        objective: str,
+        research_results: list[WorkerResult],
+        trace_context: dict[str, Any] | None = None,
+    ) -> list[WorkerResult]:
+        collector = self.browser_evidence_collector
+        if collector is None:
+            return research_results
+        start = time.time()
+        try:
+            report = collector.collect(
+                task_id=task_id,
+                objective=objective,
+                research_results=research_results,
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve coordinator progress, surface gap
+            logger.exception("Coordinator browser evidence collection failed")
+            evidence_trace = child_trace_context(trace_context, artifact_id="browser_evidence")
+            emit = getattr(self.observe, "emit", None)
+            if callable(emit):
+                emit(
+                    "coordinator_browser_evidence_failed",
+                    trace_id=evidence_trace["trace_id"],
+                    root_trace_id=evidence_trace["root_trace_id"],
+                    span_id=evidence_trace["span_id"],
+                    parent_span_id=evidence_trace["parent_span_id"],
+                    job_id=evidence_trace["job_id"],
+                    artifact_id=evidence_trace["artifact_id"],
+                    payload={"task_id": task_id, "error_type": type(exc).__name__},
+                )
+            return [
+                *research_results,
+                WorkerResult(
+                    task_name="browser_evidence",
+                    content="",
+                    duration_seconds=time.time() - start,
+                    error=f"{type(exc).__name__}: {exc}"[:300],
+                ),
+            ]
+        if report is None:
+            return research_results
+        return [
+            *research_results,
+            WorkerResult(
+                task_name="browser_evidence",
+                content=report.content,
+                duration_seconds=report.duration_seconds,
+            ),
+        ]
 
     def _synthesize(
         self,
@@ -1884,10 +2001,7 @@ def _f2_compact_payload(value: Any) -> Any:
     if isinstance(value, str):
         return redact_text(value, limit=F2_PAYLOAD_TEXT_LIMIT)
     if isinstance(value, dict):
-        return {
-            str(key)[:80]: _f2_compact_payload(item)
-            for key, item in list(value.items())[:20]
-        }
+        return {str(key)[:80]: _f2_compact_payload(item) for key, item in list(value.items())[:20]}
     if isinstance(value, (list, tuple)):
         return [_f2_compact_payload(item) for item in list(value)[:20]]
     return redact_text(str(value), limit=F2_PAYLOAD_TEXT_LIMIT)
