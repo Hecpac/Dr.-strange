@@ -326,7 +326,9 @@ class F2ExternalEffectSyntheticTests(unittest.TestCase):
             self.assertFalse(second.executed)
             self.assertEqual(len(fake_effect.calls), 1)
             self.assertIs(plan.status, F2RecoveryStatus.RETRYABLE)
-            self.assertEqual(decision.verified_applied_effect_ids, (first.effect.external_effect_id,))
+            self.assertEqual(
+                decision.verified_applied_effect_ids, (first.effect.external_effect_id,)
+            )
             self.assertEqual(decision.external_effect_blockers, ())
             self.assertFalse(plan.will_replay_external_effects)
 

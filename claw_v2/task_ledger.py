@@ -963,8 +963,7 @@ class TaskLedger:
                                 "age_seconds": int(now - float(record.completed_at or now)),
                                 "recommended_action": "investigate_failure",
                                 "reason": (
-                                    "reconciled error-bearing completed_unverified row "
-                                    "to failed"
+                                    "reconciled error-bearing completed_unverified row to failed"
                                 ),
                                 "apply": True,
                                 "dry_run": False,

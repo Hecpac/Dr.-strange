@@ -5,7 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from claw_v2.coordinator import CoordinatorResult, WorkerResult
 from claw_v2.bot_helpers import (
@@ -422,7 +422,7 @@ class TaskHandlerTests(unittest.TestCase):
                                     content="Verification Status: passed",
                                     duration_seconds=0.1,
                                 )
-                            ]
+                            ],
                         },
                         synthesis="claimed write complete",
                     )
@@ -437,7 +437,9 @@ class TaskHandlerTests(unittest.TestCase):
                 workspace_root=root,
             )
 
-            ack = handler.start_autonomous_task("s1", "write the contracted artifact", mode="coding")
+            ack = handler.start_autonomous_task(
+                "s1", "write the contracted artifact", mode="coding"
+            )
             task_id = ack.split("`", 2)[1]
             self.assertTrue(handler.wait_for_task(task_id, timeout=2))
 
@@ -713,12 +715,15 @@ class ResumeWiringTests(unittest.TestCase):
                 update_session_state=lambda **_kwargs: None,
             )
 
-            with patch(
-                "claw_v2.task_handler.plan_f2_recovery",
-                side_effect=AssertionError(
-                    "orphan checkpoint must not invoke F2 recovery planning"
-                ),
-            ) as planner, patch.object(ledger, "list", wraps=ledger.list) as list_tasks:
+            with (
+                patch(
+                    "claw_v2.task_handler.plan_f2_recovery",
+                    side_effect=AssertionError(
+                        "orphan checkpoint must not invoke F2 recovery planning"
+                    ),
+                ) as planner,
+                patch.object(ledger, "list", wraps=ledger.list) as list_tasks,
+            ):
                 resumed = handler.resume_interrupted_autonomous_tasks()
 
             self.assertEqual(resumed, 0)
@@ -762,6 +767,48 @@ class ResumeWiringTests(unittest.TestCase):
             with handler._task_lock:
                 handler._cancelled_tasks.add("t-99")
             self.assertTrue(recorded["should_abort"]())
+
+    def test_resumed_run_ignores_unconfigured_mock_f2_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            memory = MemoryStore(Path(tmpdir) / "claw.db")
+            coordinator = MagicMock()
+            coordinator.detect_resume_phase.return_value = "verification"
+            coordinator.run.return_value = CoordinatorResult(
+                task_id="t-99",
+                phase_results={
+                    "verification": [
+                        WorkerResult(
+                            task_name="verify_change",
+                            content="Verification Status: passed",
+                            duration_seconds=0.1,
+                        )
+                    ]
+                },
+                synthesis="done",
+            )
+            handler = TaskHandler(
+                coordinator=coordinator,
+                observe=None,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+            )
+
+            with patch(
+                "claw_v2.task_handler.plan_f2_recovery",
+                side_effect=AssertionError("mock coordinator must not imply F2 store"),
+            ) as planner:
+                handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-99",
+                    resumed=True,
+                )
+
+            planner.assert_not_called()
+            coordinator.detect_resume_phase.assert_called_once_with("t-99")
+            self.assertEqual(coordinator.run.call_args.kwargs["start_phase"], "verification")
 
     def test_fresh_run_passes_no_start_phase(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

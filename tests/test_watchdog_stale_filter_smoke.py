@@ -246,9 +246,7 @@ class WatchdogStaleFilterSmokeTests(unittest.TestCase):
             self.assertIn("REDACTED", rendered)
 
     def test_script_has_no_restart_or_reload_execution_calls(self) -> None:
-        source = Path("scripts/audit/watchdog_stale_filter_smoke.py").read_text(
-            encoding="utf-8"
-        )
+        source = Path("scripts/audit/watchdog_stale_filter_smoke.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         forbidden_calls: list[str] = []
         for node in ast.walk(tree):

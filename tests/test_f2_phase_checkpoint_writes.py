@@ -10,10 +10,17 @@ from claw_v2.adapters.base import LLMRequest
 from claw_v2.config import AppConfig
 from claw_v2.coordinator import (
     IMPLEMENTATION_STARTED_MARKER,
+    CoordinatorResult,
     CoordinatorService,
+    WorkerResult,
     WorkerTask,
 )
 from claw_v2.f2_durability_store import F2DurabilityStore
+from claw_v2.langgraph_coordinator import (
+    LANGGRAPH_SHADOW_NODE_SEQUENCE,
+    LangGraphF2CheckpointAdapter,
+    LangGraphShadowRunner,
+)
 from claw_v2.main import build_runtime
 from claw_v2.sqlite_runtime import RuntimeDb
 from claw_v2.types import LLMResponse
@@ -28,7 +35,12 @@ def _fake_anthropic(request: LLMRequest) -> LLMResponse:
     )
 
 
-def _runtime_env(root: Path, *, enabled: bool | None = None) -> dict[str, str]:
+def _runtime_env(
+    root: Path,
+    *,
+    enabled: bool | None = None,
+    langgraph_shadow_enabled: bool | None = None,
+) -> dict[str, str]:
     env = {
         "DB_PATH": str(root / "data" / "claw.db"),
         "WORKSPACE_ROOT": str(root / "workspace"),
@@ -40,6 +52,8 @@ def _runtime_env(root: Path, *, enabled: bool | None = None) -> dict[str, str]:
     }
     if enabled is not None:
         env["CLAW_F2_DURABILITY_ENABLED"] = "1" if enabled else "0"
+    if langgraph_shadow_enabled is not None:
+        env["CLAW_LANGGRAPH_SHADOW_ENABLED"] = "1" if langgraph_shadow_enabled else "0"
     return env
 
 
@@ -122,6 +136,176 @@ class F2PhaseCheckpointWriteTests(unittest.TestCase):
             self.assertIsInstance(runtime.f2_durability_store, F2DurabilityStore)
             self.assertIs(runtime.coordinator.f2_durability_store, runtime.f2_durability_store)
             self.assertIs(runtime.f2_durability_store._db, runtime.memory._db)
+
+    def test_runtime_wires_langgraph_checkpoint_adapter_only_when_both_flags_true(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict(
+                os.environ,
+                _runtime_env(root, enabled=True, langgraph_shadow_enabled=True),
+                clear=False,
+            ):
+                runtime = build_runtime(anthropic_executor=_fake_anthropic)
+            self.addCleanup(runtime.memory._db.close)
+
+            runner = runtime.coordinator.langgraph_shadow_runner
+            self.assertIsInstance(runner, LangGraphShadowRunner)
+            self.assertIsInstance(runner.checkpoint_adapter, LangGraphF2CheckpointAdapter)
+            self.assertIs(runner.checkpoint_adapter._store, runtime.f2_durability_store)
+            self.assertIs(runtime.f2_durability_store._db, runtime.memory._db)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict(
+                os.environ,
+                _runtime_env(root, enabled=False, langgraph_shadow_enabled=True),
+                clear=False,
+            ):
+                runtime = build_runtime(anthropic_executor=_fake_anthropic)
+            self.addCleanup(runtime.memory._db.close)
+
+            self.assertIsNotNone(runtime.coordinator.langgraph_shadow_runner)
+            self.assertIsNone(runtime.coordinator.langgraph_shadow_runner.checkpoint_adapter)
+
+    def test_langgraph_shadow_checkpoint_adapter_records_each_node(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+            store = F2DurabilityStore(db)
+            adapter = LangGraphF2CheckpointAdapter(store)
+            runner = LangGraphShadowRunner(checkpoint_adapter=adapter)
+            legacy_result = CoordinatorResult(
+                task_id="lg-task",
+                phase_results={
+                    "research": [
+                        WorkerResult(
+                            task_name="r1",
+                            content="legacy research",
+                            duration_seconds=0.1,
+                        )
+                    ]
+                },
+                synthesis="legacy synthesis",
+            )
+
+            report = runner.run(
+                task_id="lg-task",
+                objective="objective",
+                research_tasks=[WorkerTask(name="r1", instruction="find")],
+                implementation_tasks=None,
+                verification_tasks=None,
+                lane_overrides=None,
+                start_phase=None,
+                legacy_result=legacy_result,
+            )
+
+            self.assertTrue(report.matched_legacy_result)
+            for node_name in LANGGRAPH_SHADOW_NODE_SEQUENCE:
+                phase = adapter.phase_for_node(node_name)
+                writes = store.list_checkpoint_writes(
+                    task_id="lg-task",
+                    run_id="lg-task",
+                    phase=phase,
+                )
+                self.assertEqual(
+                    [(row.write_order, row.write_kind) for row in writes],
+                    [(1, "langgraph_node_started"), (2, "langgraph_node_completed")],
+                    msg=node_name,
+                )
+                checkpoints = store.list_phase_checkpoints(
+                    task_id="lg-task",
+                    run_id="lg-task",
+                    phase=phase,
+                    order="phase_version_asc",
+                )
+                self.assertEqual(
+                    [(row.phase_version, row.status) for row in checkpoints],
+                    [(1, "started"), (2, "succeeded")],
+                    msg=node_name,
+                )
+                self.assertEqual(checkpoints[-1].payload["thread_id"], "lg-task")
+                self.assertEqual(checkpoints[-1].payload["namespace"], "langgraph_shadow")
+                self.assertEqual(checkpoints[-1].payload["node"], node_name)
+
+    def test_langgraph_shadow_checkpoint_adapter_resumes_after_between_node_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+            store = F2DurabilityStore(db)
+            adapter = LangGraphF2CheckpointAdapter(store)
+            legacy_result = CoordinatorResult(
+                task_id="lg-resume",
+                phase_results={
+                    "research": [
+                        WorkerResult(
+                            task_name="r1",
+                            content="legacy research",
+                            duration_seconds=0.1,
+                        )
+                    ]
+                },
+                synthesis="legacy synthesis",
+            )
+
+            failing_runner = LangGraphShadowRunner(
+                checkpoint_adapter=adapter,
+                fail_after_node="research",
+            )
+            with self.assertRaises(RuntimeError):
+                failing_runner.run(
+                    task_id="lg-resume",
+                    objective="objective",
+                    research_tasks=[WorkerTask(name="r1", instruction="find")],
+                    implementation_tasks=None,
+                    verification_tasks=None,
+                    lane_overrides=None,
+                    start_phase=None,
+                    legacy_result=legacy_result,
+                )
+
+            intake_phase = adapter.phase_for_node("intake")
+            research_phase = adapter.phase_for_node("research")
+            synthesis_phase = adapter.phase_for_node("synthesis")
+            self.assertEqual(
+                [row.write_kind for row in store.list_checkpoint_writes(phase=intake_phase)],
+                ["langgraph_node_started", "langgraph_node_completed"],
+            )
+            self.assertEqual(
+                [row.write_kind for row in store.list_checkpoint_writes(phase=research_phase)],
+                ["langgraph_node_started", "langgraph_node_completed"],
+            )
+            self.assertEqual(store.list_checkpoint_writes(phase=synthesis_phase), [])
+
+            resumed_runner = LangGraphShadowRunner(checkpoint_adapter=adapter)
+            report = resumed_runner.run(
+                task_id="lg-resume",
+                objective="objective",
+                research_tasks=[WorkerTask(name="r1", instruction="find")],
+                implementation_tasks=None,
+                verification_tasks=None,
+                lane_overrides=None,
+                start_phase=None,
+                legacy_result=legacy_result,
+            )
+
+            node_statuses = {node.name: node.status for node in report.node_reports}
+            self.assertEqual(node_statuses["intake"], "resumed")
+            self.assertEqual(node_statuses["research"], "resumed")
+            self.assertTrue(report.matched_legacy_result)
+            self.assertEqual(
+                [row.write_kind for row in store.list_checkpoint_writes(phase=intake_phase)],
+                ["langgraph_node_started", "langgraph_node_completed"],
+            )
+            self.assertEqual(
+                [row.write_kind for row in store.list_checkpoint_writes(phase=research_phase)],
+                ["langgraph_node_started", "langgraph_node_completed"],
+            )
+            self.assertEqual(
+                [row.write_kind for row in store.list_checkpoint_writes(phase=synthesis_phase)],
+                ["langgraph_node_started", "langgraph_node_completed"],
+            )
 
     def test_enabled_coordinator_writes_phase_checkpoints_and_ordered_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

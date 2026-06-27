@@ -353,13 +353,11 @@ class F2DurabilityStoreTests(unittest.TestCase):
             self.assertEqual(persisted_request["items"][0]["access_token"], "[REDACTED]")
             self.assertEqual(
                 row["request_sha256"],
-                "sha256:"
-                + hashlib.sha256(row["request_json"].encode("utf-8")).hexdigest(),
+                "sha256:" + hashlib.sha256(row["request_json"].encode("utf-8")).hexdigest(),
             )
             self.assertEqual(
                 row["result_sha256"],
-                "sha256:"
-                + hashlib.sha256(row["result_json"].encode("utf-8")).hexdigest(),
+                "sha256:" + hashlib.sha256(row["result_json"].encode("utf-8")).hexdigest(),
             )
 
     def test_update_external_effect_status(self) -> None:

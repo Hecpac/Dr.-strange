@@ -40,9 +40,7 @@ class F2DurabilitySchemaTests(unittest.TestCase):
                 self.assertTrue(set(F2_DURABILITY_TABLES).issubset(tables))
 
                 for table in F2_DURABILITY_TABLES:
-                    columns = {
-                        row["name"] for row in cur.execute(f"PRAGMA table_info({table})")
-                    }
+                    columns = {row["name"] for row in cur.execute(f"PRAGMA table_info({table})")}
                     self.assertIn("schema_version", columns)
 
                 writes_fk = {
@@ -87,9 +85,7 @@ class F2DurabilitySchemaTests(unittest.TestCase):
                     row["name"]
                     for row in cur.execute(
                         "SELECT name FROM sqlite_master WHERE type = 'table' "
-                        "AND name IN ({})".format(
-                            ",".join("?" for _ in F2_DURABILITY_TABLES)
-                        ),
+                        "AND name IN ({})".format(",".join("?" for _ in F2_DURABILITY_TABLES)),
                         F2_DURABILITY_TABLES,
                     ).fetchall()
                 ]
