@@ -39,6 +39,22 @@ This workspace is the agent's home.
 - Do not delete or overwrite memory files; append concise dated notes when durable memory is needed.
 - Do not commit unless Hector asks.
 
+## Engineering Workflow
+- For non-trivial changes, write a brief spec before implementation: goal,
+  scope, expected files, acceptance criteria, and verification.
+- Define the verification plan before mutating files.
+- Work in small checkpoints that can be reviewed and verified independently.
+- Read-only triage is allowed unless the user forbids it.
+- Edits, staging, commits, installs, migrations, deploys, deletes, and external
+  mutations require explicit written approval.
+- Never use `git add .`.
+- In a dirty working tree, close isolated PRs with an exact manifest and
+  staged-only validation in a temporary worktree before committing.
+- Do not mix fronts without explicit approval: F2 RuntimeDb/durability, F3
+  leases, F4 Browser, F5 brief/task, docs/memory.
+- Do not activate `CLAW_FORMAL_JOB_LEASES_ENABLED` until runners propagate
+  `lease_owner` + `lease_generation` and heartbeat works end-to-end.
+
 ## Verification
 - Focused boot/context check: `.venv/bin/python -m pytest tests/test_workspace.py tests/test_lifecycle.py -q`.
 - Focused runtime prompt check: `.venv/bin/python -m pytest tests/test_brain_core.py tests/test_memory_core.py -q`.
