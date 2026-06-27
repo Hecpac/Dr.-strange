@@ -24,6 +24,7 @@ from claw_v2.sqlite_runtime import (
 JOB_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 JOB_ACTIVE_STATUSES = frozenset({"queued", "running", "waiting_approval", "retrying"})
 JOB_VALID_STATUSES = frozenset({*JOB_ACTIVE_STATUSES, *JOB_TERMINAL_STATUSES})
+DEFAULT_JOB_LEASE_SECONDS = 15 * 60
 
 
 JOBS_TABLE_SCHEMA = """
@@ -40,6 +41,10 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
     attempts INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
     worker_id TEXT,
+    lease_owner TEXT,
+    lease_expires_at REAL,
+    lease_heartbeat_at REAL,
+    lease_generation INTEGER NOT NULL DEFAULT 0,
     next_run_at REAL,
     created_at REAL NOT NULL,
     started_at REAL,
@@ -54,6 +59,9 @@ CREATE INDEX IF NOT EXISTS idx_agent_jobs_status_next_run
 
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_kind_status
     ON agent_jobs(kind, status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_agent_jobs_lease_expiry
+    ON agent_jobs(status, lease_expires_at, lease_generation);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_jobs_active_resume_key
     ON agent_jobs(resume_key)
@@ -76,6 +84,10 @@ class JobRecord:
     attempts: int = 0
     max_attempts: int = 3
     worker_id: str | None = None
+    lease_owner: str | None = None
+    lease_expires_at: float | None = None
+    lease_heartbeat_at: float | None = None
+    lease_generation: int = 0
     next_run_at: float | None = None
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
@@ -95,10 +107,14 @@ class JobService:
         *,
         observe: Any | None = None,
         runtime_db: RuntimeDb | None = None,
+        formal_leases_enabled: bool = False,
+        default_lease_seconds: float = DEFAULT_JOB_LEASE_SECONDS,
     ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.observe = observe
+        self.formal_leases_enabled = bool(formal_leases_enabled)
+        self.default_lease_seconds = max(1.0, float(default_lease_seconds))
         if runtime_db is not None:
             # F1.1a1 production path: share the single RuntimeDb connection +
             # lock; RuntimeDb owns the connection lifecycle.
@@ -114,6 +130,7 @@ class JobService:
         with self._lock:
             self._conn.executescript(JOBS_TABLE_SCHEMA)
             self._migrate_resume_key_uniqueness()
+            self._ensure_lease_columns()
             self._conn.executescript(JOBS_INDEX_SCHEMA)
             self._conn.commit()
 
@@ -180,9 +197,10 @@ class JobService:
                     INSERT INTO agent_jobs (
                         job_id, kind, status, payload_json, checkpoint_json, result_json,
                         metadata_json, error, resume_key, attempts, max_attempts, worker_id,
+                        lease_owner, lease_expires_at, lease_heartbeat_at, lease_generation,
                         next_run_at, created_at, started_at, completed_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     self._record_values(record),
                 )
@@ -241,6 +259,7 @@ class JobService:
         *,
         worker_id: str,
         now: float | None = None,
+        lease_seconds: float | None = None,
     ) -> JobRecord | None:
         now = time.time() if now is None else now
         blocked_reason = job_claim_block_reason()
@@ -252,6 +271,14 @@ class JobService:
                 job_id=job_id,
             )
             return None
+        if self.formal_leases_enabled:
+            return self._acquire_lease(
+                job_id,
+                worker_id=worker_id,
+                now=now,
+                lease_seconds=lease_seconds,
+                emit_claimed=True,
+            )
 
         def claim_once() -> bool:
             with self._lock:
@@ -296,12 +323,340 @@ class JobService:
             self._emit("job_claimed", record)
         return record
 
+    def acquire_lease(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        now: float | None = None,
+        lease_seconds: float | None = None,
+    ) -> JobRecord | None:
+        current = time.time() if now is None else float(now)
+        blocked_reason = job_claim_block_reason()
+        if blocked_reason:
+            self._emit_claim_blocked(
+                operation="acquire_lease",
+                reason=blocked_reason,
+                worker_id=worker_id,
+                job_id=job_id,
+            )
+            return None
+        return self._acquire_lease(
+            job_id,
+            worker_id=worker_id,
+            now=current,
+            lease_seconds=lease_seconds,
+            emit_claimed=False,
+        )
+
+    def acquire_next_lease(
+        self,
+        *,
+        worker_id: str,
+        kinds: Iterable[str] | None = None,
+        now: float | None = None,
+        lease_seconds: float | None = None,
+        emit_claimed: bool = False,
+    ) -> JobRecord | None:
+        current = time.time() if now is None else float(now)
+        if isinstance(kinds, str):
+            kinds = (kinds,)
+        kind_list = [kind for kind in (kinds or []) if kind]
+        blocked_reason = job_claim_block_reason()
+        if blocked_reason:
+            self._emit_claim_blocked(
+                operation="acquire_next_lease",
+                reason=blocked_reason,
+                worker_id=worker_id,
+                kinds=kind_list,
+            )
+            return None
+        where = "status IN ('queued', 'retrying') AND COALESCE(next_run_at, 0) <= ?"
+        params: list[Any] = [current]
+        if kind_list:
+            placeholders = ", ".join("?" for _ in kind_list)
+            where += f" AND kind IN ({placeholders})"
+            params.extend(kind_list)
+
+        def acquire_next_once() -> sqlite3.Row | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    row = self._conn.execute(
+                        f"""
+                        SELECT *
+                        FROM agent_jobs
+                        WHERE {where}
+                        ORDER BY created_at ASC
+                        LIMIT 1
+                        """,
+                        params,
+                    ).fetchone()
+                    if row is None:
+                        self._conn.commit()
+                        return None
+                    updated = self._update_row_to_running_with_lease(
+                        row,
+                        worker_id=worker_id,
+                        now=current,
+                        lease_seconds=lease_seconds,
+                    )
+                    self._conn.commit()
+                    return updated
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        row = self._retry_after_disk_io("JobService.acquire_next_lease", acquire_next_once)
+        record = self._row_to_record(row) if row is not None else None
+        if record is not None:
+            self._emit("job_lease_acquired", record)
+            if emit_claimed:
+                self._emit("job_claimed", record)
+        return record
+
+    def _acquire_lease(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        now: float,
+        lease_seconds: float | None,
+        emit_claimed: bool,
+    ) -> JobRecord | None:
+        def acquire_once() -> sqlite3.Row | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    row = self._conn.execute(
+                        """
+                        SELECT *
+                        FROM agent_jobs
+                        WHERE job_id = ?
+                          AND status IN ('queued', 'retrying')
+                        """,
+                        (job_id,),
+                    ).fetchone()
+                    if row is None:
+                        self._conn.commit()
+                        return None
+                    updated = self._update_row_to_running_with_lease(
+                        row,
+                        worker_id=worker_id,
+                        now=now,
+                        lease_seconds=lease_seconds,
+                    )
+                    self._conn.commit()
+                    return updated
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        row = self._retry_after_disk_io("JobService.acquire_lease", acquire_once)
+        record = self._row_to_record(row) if row is not None else None
+        if record is not None:
+            self._emit("job_lease_acquired", record)
+            if emit_claimed:
+                self._emit("job_claimed", record)
+        return record
+
+    def _update_row_to_running_with_lease(
+        self,
+        row: sqlite3.Row,
+        *,
+        worker_id: str,
+        now: float,
+        lease_seconds: float | None,
+    ) -> sqlite3.Row | None:
+        attempts = int(row["attempts"] or 0) + 1
+        lease_expires_at = now + self._lease_seconds(lease_seconds)
+        cursor = self._conn.execute(
+            """
+            UPDATE agent_jobs
+            SET status = 'running',
+                worker_id = ?,
+                lease_owner = ?,
+                lease_expires_at = ?,
+                lease_heartbeat_at = ?,
+                lease_generation = COALESCE(lease_generation, 0) + 1,
+                attempts = ?,
+                started_at = COALESCE(started_at, ?),
+                updated_at = ?
+            WHERE job_id = ?
+              AND status IN ('queued', 'retrying')
+            """,
+            (
+                worker_id,
+                worker_id,
+                lease_expires_at,
+                now,
+                attempts,
+                now,
+                now,
+                row["job_id"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            return None
+        return self._conn.execute(
+            "SELECT * FROM agent_jobs WHERE job_id = ?",
+            (row["job_id"],),
+        ).fetchone()
+
+    def heartbeat_lease(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        lease_generation: int | None = None,
+        now: float | None = None,
+        lease_seconds: float | None = None,
+    ) -> JobRecord | None:
+        if lease_generation is None:
+            return None
+        lease_generation_value = int(lease_generation)
+        current = time.time() if now is None else float(now)
+        expires_at = current + self._lease_seconds(lease_seconds)
+
+        def heartbeat_once() -> sqlite3.Row | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    row = self._conn.execute(
+                        """
+                        SELECT *
+                        FROM agent_jobs
+                        WHERE job_id = ?
+                          AND status = 'running'
+                          AND lease_owner = ?
+                          AND lease_generation = ?
+                        """,
+                        (job_id, worker_id, lease_generation_value),
+                    ).fetchone()
+                    if row is None:
+                        self._conn.commit()
+                        return None
+                    current_expiry = _as_optional_float(row["lease_expires_at"])
+                    if current_expiry is not None and current_expiry <= current:
+                        self._conn.commit()
+                        return None
+                    cursor = self._conn.execute(
+                        """
+                        UPDATE agent_jobs
+                        SET lease_expires_at = ?,
+                            lease_heartbeat_at = ?,
+                            updated_at = ?
+                        WHERE job_id = ?
+                          AND status = 'running'
+                          AND lease_owner = ?
+                          AND lease_generation = ?
+                          AND lease_expires_at IS NOT NULL
+                          AND lease_expires_at > ?
+                        """,
+                        (
+                            expires_at,
+                            current,
+                            current,
+                            job_id,
+                            worker_id,
+                            lease_generation_value,
+                            current,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        self._conn.commit()
+                        return None
+                    updated = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    self._conn.commit()
+                    return updated
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        row = self._retry_after_disk_io("JobService.heartbeat_lease", heartbeat_once)
+        record = self._row_to_record(row) if row is not None else None
+        if record is not None:
+            self._emit("job_lease_heartbeat", record)
+        return record
+
+    def release_lease(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        lease_generation: int | None = None,
+        now: float | None = None,
+        retry_delay_seconds: float = 0.0,
+    ) -> JobRecord | None:
+        if lease_generation is None:
+            return None
+        lease_generation_value = int(lease_generation)
+        current = time.time() if now is None else float(now)
+        next_run_at = current + max(0.0, float(retry_delay_seconds))
+
+        def release_once() -> sqlite3.Row | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    row = self._conn.execute(
+                        """
+                        SELECT *
+                        FROM agent_jobs
+                        WHERE job_id = ?
+                          AND status = 'running'
+                          AND lease_owner = ?
+                          AND lease_generation = ?
+                        """,
+                        (job_id, worker_id, lease_generation_value),
+                    ).fetchone()
+                    if row is None:
+                        self._conn.commit()
+                        return None
+                    cursor = self._conn.execute(
+                        """
+                        UPDATE agent_jobs
+                        SET status = 'retrying',
+                            lease_owner = NULL,
+                            lease_expires_at = NULL,
+                            lease_heartbeat_at = NULL,
+                            next_run_at = ?,
+                            updated_at = ?
+                        WHERE job_id = ?
+                          AND status = 'running'
+                          AND lease_owner = ?
+                          AND lease_generation = ?
+                        """,
+                        (next_run_at, current, job_id, worker_id, lease_generation_value),
+                    )
+                    if cursor.rowcount != 1:
+                        self._conn.commit()
+                        return None
+                    updated = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    self._conn.commit()
+                    return updated
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        row = self._retry_after_disk_io("JobService.release_lease", release_once)
+        record = self._row_to_record(row) if row is not None else None
+        if record is not None and record.status == "retrying":
+            self._emit("job_lease_released", record)
+        return record
+
     def claim_next(
         self,
         *,
         worker_id: str,
         kinds: Iterable[str] | None = None,
         now: float | None = None,
+        lease_seconds: float | None = None,
     ) -> JobRecord | None:
         now = time.time() if now is None else now
         if isinstance(kinds, str):
@@ -316,6 +671,14 @@ class JobService:
                 kinds=kind_list,
             )
             return None
+        if self.formal_leases_enabled:
+            return self.acquire_next_lease(
+                worker_id=worker_id,
+                kinds=kind_list,
+                now=now,
+                lease_seconds=lease_seconds,
+                emit_claimed=True,
+            )
         where = "status IN ('queued', 'retrying') AND COALESCE(next_run_at, 0) <= ?"
         params: list[Any] = [now]
         if kind_list:
@@ -369,41 +732,114 @@ class JobService:
             self._emit("job_claimed", record)
         return record
 
-    def checkpoint(self, job_id: str, checkpoint: dict[str, Any]) -> JobRecord | None:
+    def checkpoint(
+        self,
+        job_id: str,
+        checkpoint: dict[str, Any],
+        *,
+        lease_owner: str | None = None,
+        lease_generation: int | None = None,
+    ) -> JobRecord | None:
         now = time.time()
-        with self._lock:
-            self._conn.execute(
-                """
-                UPDATE agent_jobs
-                SET checkpoint_json = ?,
-                    updated_at = ?
-                WHERE job_id = ?
-                """,
-                (json.dumps(dict(checkpoint), sort_keys=True), now, job_id),
-            )
-            self._conn.commit()
-        record = self.get(job_id)
+        lease_generation_value = self._normalize_lease_generation(lease_generation)
+        lease_guard_enabled = self.formal_leases_enabled
+        if lease_guard_enabled and not self._lease_credentials_provided(
+            lease_owner,
+            lease_generation_value,
+        ):
+            return None
+
+        params: list[Any] = [json.dumps(dict(checkpoint), sort_keys=True), now, job_id]
+        where_clause = "job_id = ?"
+        if lease_guard_enabled:
+            where_clause += """
+              AND status = 'running'
+              AND lease_owner = ?
+              AND lease_generation = ?
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at > ?
+            """
+            params.extend([lease_owner, lease_generation_value, now])
+
+        def checkpoint_once() -> sqlite3.Row | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    current = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?", (job_id,)
+                    ).fetchone()
+                    if current is None:
+                        self._conn.commit()
+                        return None
+                    if lease_guard_enabled and not self._current_lease_matches(
+                        current,
+                        lease_owner=lease_owner,
+                        lease_generation=lease_generation_value,
+                        now=now,
+                    ):
+                        self._conn.commit()
+                        return None
+                    cursor = self._conn.execute(
+                        f"""
+                        UPDATE agent_jobs
+                        SET checkpoint_json = ?,
+                            updated_at = ?
+                        WHERE {where_clause}
+                        """,
+                        params,
+                    )
+                    if cursor.rowcount != 1:
+                        self._conn.commit()
+                        return None
+                    updated = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    self._conn.commit()
+                    return updated
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        row = self._retry_after_disk_io("JobService.checkpoint", checkpoint_once)
+        record = self._row_to_record(row) if row is not None else None
         if record is not None:
             self._emit("job_checkpointed", record)
         return record
 
     def wait_for_approval(
-        self, job_id: str, *, checkpoint: dict[str, Any] | None = None
+        self,
+        job_id: str,
+        *,
+        checkpoint: dict[str, Any] | None = None,
+        lease_owner: str | None = None,
+        lease_generation: int | None = None,
     ) -> JobRecord | None:
         return self._update(
             job_id,
             status="waiting_approval",
             checkpoint=checkpoint,
             event_type="job_waiting_approval",
+            lease_owner=lease_owner,
+            lease_generation=lease_generation,
         )
 
-    def complete(self, job_id: str, *, result: dict[str, Any] | None = None) -> JobRecord | None:
+    def complete(
+        self,
+        job_id: str,
+        *,
+        result: dict[str, Any] | None = None,
+        lease_owner: str | None = None,
+        lease_generation: int | None = None,
+    ) -> JobRecord | None:
         return self._update(
             job_id,
             status="completed",
             result=result,
             completed_at=time.time(),
             event_type="job_completed",
+            lease_owner=lease_owner,
+            lease_generation=lease_generation,
         )
 
     def fail(
@@ -414,10 +850,19 @@ class JobService:
         retry: bool = True,
         retry_delay_seconds: float = 60.0,
         checkpoint: dict[str, Any] | None = None,
+        lease_owner: str | None = None,
+        lease_generation: int | None = None,
     ) -> JobRecord | None:
         now = time.time()
+        lease_generation_value = self._normalize_lease_generation(lease_generation)
+        lease_guard_enabled = self.formal_leases_enabled
+        if lease_guard_enabled and not self._lease_credentials_provided(
+            lease_owner,
+            lease_generation_value,
+        ):
+            return None
 
-        def fail_once() -> JobRecord | None:
+        def fail_once() -> JobRecord | sqlite3.Row | None:
             with self._lock:
                 try:
                     self._conn.execute("BEGIN IMMEDIATE")
@@ -427,6 +872,15 @@ class JobService:
                     if row is None:
                         self._conn.commit()
                         return None
+                    if lease_guard_enabled:
+                        if not self._current_lease_matches(
+                            row,
+                            lease_owner=lease_owner,
+                            lease_generation=lease_generation_value,
+                            now=now,
+                        ):
+                            self._conn.commit()
+                            return None
                     if row["status"] in JOB_TERMINAL_STATUSES:
                         # Idempotent: a job already terminal must not be moved back to
                         # failed/retrying. Return the row we just read (NOT self.get(),
@@ -446,29 +900,58 @@ class JobService:
                         if checkpoint is not None
                         else row["checkpoint_json"]
                     )
-                    self._conn.execute(
+                    params: list[Any] = [
+                        status,
+                        error,
+                        checkpoint_json,
+                        next_run_at,
+                        completed_at,
+                        now,
+                        job_id,
+                    ]
+                    where_clause = "job_id = ?"
+                    if lease_guard_enabled:
+                        where_clause += """
+                          AND status = 'running'
+                          AND lease_owner = ?
+                          AND lease_generation = ?
+                          AND lease_expires_at IS NOT NULL
+                          AND lease_expires_at > ?
                         """
+                        params.extend([lease_owner, lease_generation_value, now])
+                    cursor = self._conn.execute(
+                        f"""
                         UPDATE agent_jobs
                         SET status = ?,
                             error = ?,
                             checkpoint_json = ?,
                             next_run_at = ?,
                             completed_at = ?,
+                            lease_owner = NULL,
+                            lease_expires_at = NULL,
+                            lease_heartbeat_at = NULL,
                             updated_at = ?
-                        WHERE job_id = ?
+                        WHERE {where_clause}
                         """,
-                        (status, error, checkpoint_json, next_run_at, completed_at, now, job_id),
+                        params,
                     )
+                    if cursor.rowcount != 1:
+                        self._conn.commit()
+                        return None
+                    updated = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
                     self._conn.commit()
-                    return None
+                    return updated
                 except Exception:
                     self._conn.rollback()
                     raise
 
-        terminal_record = self._retry_after_disk_io("JobService.fail", fail_once)
-        if terminal_record is not None:
-            return terminal_record
-        record = self.get(job_id)
+        updated = self._retry_after_disk_io("JobService.fail", fail_once)
+        if isinstance(updated, JobRecord):
+            return updated
+        record = self._row_to_record(updated) if updated is not None else None
         if record is not None:
             self._emit("job_retrying" if record.status == "retrying" else "job_failed", record)
         return record
@@ -480,6 +963,8 @@ class JobService:
         checkpoint: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
         next_run_at: float | None = None,
+        lease_owner: str | None = None,
+        lease_generation: int | None = None,
     ) -> JobRecord | None:
         """Move a claimed job back to retrying without recording a failure.
 
@@ -493,6 +978,8 @@ class JobService:
             result=result,
             next_run_at=time.time() if next_run_at is None else next_run_at,
             event_type="job_rescheduled",
+            lease_owner=lease_owner,
+            lease_generation=lease_generation,
         )
 
     def cancel(self, job_id: str, *, reason: str = "cancelled") -> JobRecord | None:
@@ -507,6 +994,7 @@ class JobService:
             error=reason,
             completed_at=time.time(),
             event_type="job_cancelled",
+            require_lease=False,
         )
 
     def get(self, job_id: str) -> JobRecord | None:
@@ -585,6 +1073,148 @@ class JobService:
             statuses=("queued", "running", "waiting_approval", "retrying"), limit=limit
         )
 
+    def reclaim_expired_leases(
+        self,
+        *,
+        kinds: Iterable[str] | None = None,
+        kind_prefix: str | None = None,
+        no_retry: bool = False,
+        now: float | None = None,
+        limit: int = 100,
+        retry_delay_seconds: float = 0.0,
+        error: str = "lease_expired",
+        event_type: str = "job_lease_reclaimed",
+    ) -> list[JobRecord]:
+        current = time.time() if now is None else float(now)
+        if isinstance(kinds, str):
+            kinds = (kinds,)
+        kind_list = [kind for kind in (kinds or []) if kind]
+        where = "status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?"
+        params: list[Any] = [current]
+        if kind_list:
+            placeholders = ", ".join("?" for _ in kind_list)
+            where += f" AND kind IN ({placeholders})"
+            params.extend(kind_list)
+        if kind_prefix:
+            where += " AND kind LIKE ?"
+            params.append(f"{kind_prefix}%")
+        params.append(max(1, min(int(limit), 100)))
+
+        def candidate_ids_once() -> list[str]:
+            with self._lock:
+                rows = self._conn.execute(
+                    f"""
+                    SELECT job_id
+                    FROM agent_jobs
+                    WHERE {where}
+                    ORDER BY lease_expires_at ASC, updated_at ASC
+                    LIMIT ?
+                    """,
+                    params,
+                ).fetchall()
+            return [str(row["job_id"]) for row in rows]
+
+        job_ids = self._retry_after_disk_io(
+            "JobService.reclaim_expired_leases.candidates",
+            candidate_ids_once,
+        )
+        recovered: list[JobRecord] = []
+        for job_id in job_ids:
+            record = self._reclaim_expired_lease_job(
+                job_id,
+                now=current,
+                retry_delay_seconds=retry_delay_seconds,
+                error=error,
+                no_retry=no_retry,
+            )
+            if record is None:
+                continue
+            recovered.append(record)
+            self._emit("job_retrying" if record.status == "retrying" else "job_failed", record)
+            self._emit(event_type, record)
+        return recovered
+
+    def _reclaim_expired_lease_job(
+        self,
+        job_id: str,
+        *,
+        now: float,
+        retry_delay_seconds: float,
+        error: str,
+        no_retry: bool,
+    ) -> JobRecord | None:
+        def reclaim_once() -> sqlite3.Row | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    row = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    if row is None or row["status"] != "running":
+                        self._conn.commit()
+                        return None
+                    lease_expires_at = _as_optional_float(row["lease_expires_at"])
+                    if lease_expires_at is None or lease_expires_at > now:
+                        self._conn.commit()
+                        return None
+                    attempts = int(row["attempts"] or 0)
+                    max_attempts = int(row["max_attempts"] or 1)
+                    should_retry = attempts < max_attempts and not no_retry
+                    status = "retrying" if should_retry else "failed"
+                    completed_at = None if should_retry else now
+                    next_run_at = (
+                        now + max(0.0, retry_delay_seconds) if should_retry else row["next_run_at"]
+                    )
+                    checkpoint = _loads_json(row["checkpoint_json"])
+                    checkpoint["lease_reclaim"] = {
+                        "reclaimed_at": now,
+                        "lease_owner": row["lease_owner"] or "",
+                        "lease_generation": int(row["lease_generation"] or 0),
+                        "lease_expired_by_seconds": max(0.0, now - lease_expires_at),
+                        "reason": error,
+                    }
+                    self._conn.execute(
+                        """
+                        UPDATE agent_jobs
+                        SET status = ?,
+                            error = ?,
+                            checkpoint_json = ?,
+                            next_run_at = ?,
+                            completed_at = ?,
+                            lease_owner = NULL,
+                            lease_expires_at = NULL,
+                            lease_heartbeat_at = NULL,
+                            updated_at = ?
+                        WHERE job_id = ?
+                          AND status = 'running'
+                          AND lease_expires_at IS NOT NULL
+                          AND lease_expires_at <= ?
+                        """,
+                        (
+                            status,
+                            error,
+                            json.dumps(checkpoint, sort_keys=True),
+                            next_run_at,
+                            completed_at,
+                            now,
+                            job_id,
+                            now,
+                        ),
+                    )
+                    updated = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    self._conn.commit()
+                    return updated
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        row = self._retry_after_disk_io("JobService.reclaim_expired_lease", reclaim_once)
+        return self._row_to_record(row) if row is not None else None
+
     def recover_stale_running(
         self,
         *,
@@ -605,6 +1235,17 @@ class JobService:
         Recent running jobs are ignored; terminal jobs are never resurrected.
         """
         current = time.time() if now is None else float(now)
+        if self.formal_leases_enabled:
+            return self.reclaim_expired_leases(
+                kinds=kinds,
+                kind_prefix=kind_prefix,
+                no_retry=no_retry,
+                now=current,
+                limit=limit,
+                retry_delay_seconds=retry_delay_seconds,
+                error=error,
+                event_type=event_type,
+            )
         cutoff = current - max(0.001, float(stale_after_seconds))
         if isinstance(kinds, str):
             kinds = (kinds,)
@@ -709,6 +1350,9 @@ class JobService:
                             checkpoint_json = ?,
                             next_run_at = ?,
                             completed_at = ?,
+                            lease_owner = NULL,
+                            lease_expires_at = NULL,
+                            lease_heartbeat_at = NULL,
                             updated_at = ?
                         WHERE job_id = ?
                           AND status = 'running'
@@ -747,9 +1391,19 @@ class JobService:
         next_run_at: float | None = None,
         completed_at: float | None = None,
         event_type: str,
+        lease_owner: str | None = None,
+        lease_generation: int | None = None,
+        require_lease: bool = True,
     ) -> JobRecord | None:
         self._validate_status(status)
         now = time.time()
+        lease_generation_value = self._normalize_lease_generation(lease_generation)
+        lease_guard_enabled = self.formal_leases_enabled and require_lease
+        if lease_guard_enabled and not self._lease_credentials_provided(
+            lease_owner,
+            lease_generation_value,
+        ):
+            return None
         assignments = ["status = ?", "updated_at = ?"]
         params: list[Any] = [status, now]
         if checkpoint is not None:
@@ -767,7 +1421,25 @@ class JobService:
         if completed_at is not None:
             assignments.append("completed_at = ?")
             params.append(completed_at)
-        params.append(job_id)
+        if status != "running":
+            assignments.extend(
+                [
+                    "lease_owner = NULL",
+                    "lease_expires_at = NULL",
+                    "lease_heartbeat_at = NULL",
+                ]
+            )
+        where_clause = "job_id = ?"
+        where_params: list[Any] = [job_id]
+        if lease_guard_enabled:
+            where_clause += """
+              AND status = 'running'
+              AND lease_owner = ?
+              AND lease_generation = ?
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at > ?
+            """
+            where_params.extend([lease_owner, lease_generation_value, now])
 
         def update_once() -> JobRecord | sqlite3.Row | None:
             with self._lock:
@@ -779,7 +1451,16 @@ class JobService:
                     if current is None:
                         self._conn.commit()
                         return None
-                    if current["status"] in JOB_TERMINAL_STATUSES:
+                    if lease_guard_enabled:
+                        if not self._current_lease_matches(
+                            current,
+                            lease_owner=lease_owner,
+                            lease_generation=lease_generation_value,
+                            now=now,
+                        ):
+                            self._conn.commit()
+                            return None
+                    elif current["status"] in JOB_TERMINAL_STATUSES:
                         # Idempotent: never resurrect a terminal job. BEGIN IMMEDIATE
                         # holds the write lock across this read+UPDATE so a sibling
                         # connection cannot flip the row terminal between them. Return
@@ -787,10 +1468,13 @@ class JobService:
                         # the non-reentrant lock).
                         self._conn.commit()
                         return self._row_to_record(current)
-                    self._conn.execute(
-                        f"UPDATE agent_jobs SET {', '.join(assignments)} WHERE job_id = ?",
-                        params,
+                    cursor = self._conn.execute(
+                        f"UPDATE agent_jobs SET {', '.join(assignments)} WHERE {where_clause}",
+                        [*params, *where_params],
                     )
+                    if cursor.rowcount != 1:
+                        self._conn.commit()
+                        return None
                     # Read the fresh row inside the same locked transaction: a later
                     # self.get() would re-acquire the lock and reopen a window for a
                     # sibling connection to mutate the row before we read it back.
@@ -882,6 +1566,23 @@ class JobService:
             self._conn.execute("ROLLBACK")
             raise
 
+    def _ensure_lease_columns(self) -> None:
+        columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(agent_jobs)").fetchall()
+        }
+        migrations = {
+            "lease_owner": "ALTER TABLE agent_jobs ADD COLUMN lease_owner TEXT",
+            "lease_expires_at": "ALTER TABLE agent_jobs ADD COLUMN lease_expires_at REAL",
+            "lease_heartbeat_at": "ALTER TABLE agent_jobs ADD COLUMN lease_heartbeat_at REAL",
+            "lease_generation": (
+                "ALTER TABLE agent_jobs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0"
+            ),
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                self._conn.execute(statement)
+
     def _record_values(self, record: JobRecord) -> tuple[Any, ...]:
         return (
             record.job_id,
@@ -896,6 +1597,10 @@ class JobService:
             record.attempts,
             record.max_attempts,
             record.worker_id,
+            record.lease_owner,
+            record.lease_expires_at,
+            record.lease_heartbeat_at,
+            record.lease_generation,
             record.next_run_at,
             record.created_at,
             record.started_at,
@@ -917,6 +1622,10 @@ class JobService:
             attempts=int(row["attempts"] or 0),
             max_attempts=int(row["max_attempts"] or 1),
             worker_id=_as_optional_str(row["worker_id"]),
+            lease_owner=_as_optional_str(row["lease_owner"]),
+            lease_expires_at=_as_optional_float(row["lease_expires_at"]),
+            lease_heartbeat_at=_as_optional_float(row["lease_heartbeat_at"]),
+            lease_generation=int(row["lease_generation"] or 0),
             next_run_at=_as_optional_float(row["next_run_at"]),
             created_at=float(row["created_at"]),
             started_at=_as_optional_float(row["started_at"]),
@@ -928,6 +1637,43 @@ class JobService:
     def _validate_status(status: str) -> None:
         if status not in JOB_VALID_STATUSES:
             raise ValueError(f"invalid job status: {status}")
+
+    def _lease_seconds(self, lease_seconds: float | None) -> float:
+        if lease_seconds is None:
+            return self.default_lease_seconds
+        return max(1.0, float(lease_seconds))
+
+    @staticmethod
+    def _normalize_lease_generation(lease_generation: int | None) -> int | None:
+        if lease_generation is None:
+            return None
+        return int(lease_generation)
+
+    @staticmethod
+    def _lease_credentials_provided(
+        lease_owner: str | None,
+        lease_generation: int | None,
+    ) -> bool:
+        return bool(lease_owner) and lease_generation is not None
+
+    def _current_lease_matches(
+        self,
+        row: sqlite3.Row,
+        *,
+        lease_owner: str | None,
+        lease_generation: int | None,
+        now: float,
+    ) -> bool:
+        if not self._lease_credentials_provided(lease_owner, lease_generation):
+            return False
+        expires_at = _as_optional_float(row["lease_expires_at"])
+        return (
+            row["status"] == "running"
+            and row["lease_owner"] == lease_owner
+            and int(row["lease_generation"] or 0) == lease_generation
+            and expires_at is not None
+            and expires_at > now
+        )
 
     def _emit(self, event_type: str, record: JobRecord) -> None:
         if self.observe is None:

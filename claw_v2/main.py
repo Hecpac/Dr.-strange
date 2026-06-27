@@ -44,6 +44,7 @@ from claw_v2.approval_gate import (
 from claw_v2.bot import BotService
 from claw_v2.brain import BrainService
 from claw_v2.browser import DevBrowserService
+from claw_v2.browser_evidence import BrowserEvidenceCollector
 from claw_v2.checkpoint import CheckpointService
 from claw_v2.buddy import BuddyService
 from claw_v2.bus import AgentBus
@@ -65,6 +66,7 @@ from claw_v2.heartbeat import HeartbeatService
 from claw_v2.hooks import make_anti_distillation_hook, make_daily_cost_gate, make_decision_logger
 from claw_v2.jobs import JobService
 from claw_v2.kairos import KairosService
+from claw_v2.langgraph_coordinator import LangGraphF2CheckpointAdapter, LangGraphShadowRunner
 from claw_v2.learning import LearningLoop
 from claw_v2.linear import LinearService, build_linear_api_caller
 from claw_v2.llm import LLMRouter
@@ -239,10 +241,8 @@ def build_runtime_approval_gate(approvals: ApprovalManager) -> Callable[[object,
     return gate
 
 
-def build_runtime_policy_engine(
-    config: AppConfig, approvals: ApprovalManager
-) -> RuntimePolicyEngine:
-    sandbox_policy = SandboxPolicy(
+def build_tool_sandbox_policy(config: AppConfig) -> SandboxPolicy:
+    return SandboxPolicy(
         workspace_root=config.workspace_root,
         allowed_paths=[
             *config.allowed_read_paths,
@@ -259,6 +259,12 @@ def build_runtime_policy_engine(
         credential_scope="external",
         capability_profile=config.sandbox_capability_profile,
     )
+
+
+def build_runtime_policy_engine(
+    config: AppConfig, approvals: ApprovalManager
+) -> RuntimePolicyEngine:
+    sandbox_policy = build_tool_sandbox_policy(config)
     return RuntimePolicyEngine(
         workspace_root=config.workspace_root,
         sandbox_policy=sandbox_policy,
@@ -710,23 +716,7 @@ def _setup_llm_stack(
         observation_window=observation_window,
         autoexec_max_tier=config.tier_autoexec_max,
     )
-    tool_sandbox_policy = SandboxPolicy(
-        workspace_root=config.workspace_root,
-        allowed_paths=[
-            *config.allowed_read_paths,
-            *config.extra_workspace_roots,
-            *config.allowed_paths,
-        ],
-        writable_paths=[
-            config.workspace_root,
-            Path("/private/tmp"),
-            Path.home() / ".claw",
-            *config.extra_workspace_roots,
-        ],
-        network_policy="allow",
-        credential_scope="external",
-        capability_profile=config.sandbox_capability_profile,
-    )
+    tool_sandbox_policy = build_tool_sandbox_policy(config)
     openai_tool_schemas = tool_registry.openai_tool_schemas()
 
     # Paso 4 (HEC-14): wire ApprovalManager into the dispatcher via a gate.
@@ -800,6 +790,7 @@ def _setup_agent_services(
     brain: BrainService,
     runtime_db: RuntimeDb | None = None,
     f2_durability_store: F2DurabilityStore | None = None,
+    tool_registry: ToolRegistry | None = None,
 ) -> tuple[
     AutoResearchAgentService,
     SubAgentService,
@@ -832,6 +823,29 @@ def _setup_agent_services(
     if discovered:
         observe.emit("sub_agents_discovered", payload={"agents": discovered})
     orchestration_store = OrchestrationStore(config.db_path, observe=observe, runtime_db=runtime_db)
+    browser_evidence_collector = (
+        BrowserEvidenceCollector.from_tool_registry(
+            tool_registry,
+            policy=build_tool_sandbox_policy(config),
+            network_enforcer=DomainAllowlistEnforcer(),
+            observe=observe,
+        )
+        if config.browser_evidence_enabled and tool_registry is not None
+        else None
+    )
+    langgraph_checkpoint_adapter = (
+        LangGraphF2CheckpointAdapter(f2_durability_store)
+        if config.langgraph_shadow_enabled and f2_durability_store is not None
+        else None
+    )
+    langgraph_shadow_runner = (
+        LangGraphShadowRunner(
+            observe=observe,
+            checkpoint_adapter=langgraph_checkpoint_adapter,
+        )
+        if config.langgraph_shadow_enabled
+        else None
+    )
     coordinator = CoordinatorService(
         router=router,
         observe=observe,
@@ -847,6 +861,8 @@ def _setup_agent_services(
             "coordinator_implementation"
         ),
         f2_durability_store=f2_durability_store,
+        browser_evidence_collector=browser_evidence_collector,
+        langgraph_shadow_runner=langgraph_shadow_runner,
     )
     task_board = TaskBoard(board_root=config.agent_state_root / "_board")
     registry_path = config.agent_state_root / "AGENTS.md"
@@ -2217,7 +2233,12 @@ def build_runtime(
     )
     task_ledger = TaskLedger(config.db_path, observe=observe, runtime_db=runtime_db)
     task_ledger.reconcile_false_successes()
-    job_service = JobService(config.db_path, observe=observe, runtime_db=runtime_db)
+    job_service = JobService(
+        config.db_path,
+        observe=observe,
+        runtime_db=runtime_db,
+        formal_leases_enabled=config.formal_job_leases_enabled,
+    )
     f2_durability_store = F2DurabilityStore(runtime_db) if config.f2_durability_enabled else None
     model_registry = ModelRegistry.default()
     startup_health = _run_startup_healthchecks(config, observe)
@@ -2312,6 +2333,7 @@ def build_runtime(
             brain=brain,
             runtime_db=runtime_db,
             f2_durability_store=f2_durability_store,
+            tool_registry=tool_registry,
         )
     )
     daemon, bot, pipeline, _, _, _ = _setup_operational_services(
