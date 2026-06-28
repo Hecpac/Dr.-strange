@@ -117,6 +117,11 @@ class JobService:
         self.observe = observe
         self.formal_leases_enabled = bool(formal_leases_enabled)
         self.default_lease_seconds = max(1.0, float(default_lease_seconds))
+        # In-process safe-mode latch, consulted at every claim site ALONGSIDE
+        # the env-based maintenance gate. The daemon's branch-integrity check
+        # sets this (P0-2) when the live checkout is stranded on a wrong branch
+        # so workers stop claiming until a human runs `git checkout main`.
+        self._safe_mode_reason: str | None = None
         if runtime_db is not None:
             # F1.1a1 production path: share the single RuntimeDb connection +
             # lock; RuntimeDb owns the connection lifecycle.
@@ -255,6 +260,17 @@ class JobService:
             return existing, False
         return record, record.job_id == my_id
 
+    def set_safe_mode_reason(self, reason: str | None) -> None:
+        """Set (or clear, with ``None``) the in-process claim-block latch.
+
+        A non-None value blocks every claim path the same way the env-based
+        maintenance gate does, but driven by in-process state the daemon owns
+        (P0-2 branch-integrity safe mode). A plain attribute assignment is
+        sufficient: it is set from the tick thread and read from worker claim
+        threads, and a single str/None write is atomic in CPython.
+        """
+        self._safe_mode_reason = reason
+
     def claim(
         self,
         job_id: str,
@@ -264,7 +280,7 @@ class JobService:
         lease_seconds: float | None = None,
     ) -> JobRecord | None:
         now = time.time() if now is None else now
-        blocked_reason = job_claim_block_reason()
+        blocked_reason = self._safe_mode_reason or job_claim_block_reason()
         if blocked_reason:
             self._emit_claim_blocked(
                 operation="claim",
@@ -334,7 +350,7 @@ class JobService:
         lease_seconds: float | None = None,
     ) -> JobRecord | None:
         current = time.time() if now is None else float(now)
-        blocked_reason = job_claim_block_reason()
+        blocked_reason = self._safe_mode_reason or job_claim_block_reason()
         if blocked_reason:
             self._emit_claim_blocked(
                 operation="acquire_lease",
@@ -364,7 +380,7 @@ class JobService:
         if isinstance(kinds, str):
             kinds = (kinds,)
         kind_list = [kind for kind in (kinds or []) if kind]
-        blocked_reason = job_claim_block_reason()
+        blocked_reason = self._safe_mode_reason or job_claim_block_reason()
         if blocked_reason:
             self._emit_claim_blocked(
                 operation="acquire_next_lease",
@@ -664,7 +680,7 @@ class JobService:
         if isinstance(kinds, str):
             kinds = (kinds,)
         kind_list = [kind for kind in (kinds or []) if kind]
-        blocked_reason = job_claim_block_reason()
+        blocked_reason = self._safe_mode_reason or job_claim_block_reason()
         if blocked_reason:
             self._emit_claim_blocked(
                 operation="claim_next",

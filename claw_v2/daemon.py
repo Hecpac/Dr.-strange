@@ -6,6 +6,7 @@ import os
 import re
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from claw_v2.cron import CronScheduler
@@ -22,6 +23,15 @@ PENDING_VERIFICATION_RECONCILIATION_JOB_KIND = "daemon.pending_verification_reco
 PENDING_VERIFICATION_RECONCILIATION_RESUME_KEY = "daemon:pending_verification_reconciliation"
 PENDING_VERIFICATION_RECONCILIATION_STALE_RUNNING_SECONDS = 120.0
 _ERROR_PREVIEW_LIMIT = 200
+
+# P0-2: claim-block reason the daemon sets on JobService when the live shared
+# checkout is stranded on a branch other than ``expected_branch``. A stable,
+# parseable string; the actual/expected pair travels in the violation event.
+BRANCH_INTEGRITY_CLAIM_BLOCK_REASON = "branch_integrity_violation"
+_HEAD_REF_PREFIX = "ref: refs/heads/"
+# Git operations that legitimately move HEAD off a stable branch ref. Their
+# presence makes the reading non-affirmative -> FAIL OPEN (never trip).
+_GIT_IN_PROGRESS_MARKERS = ("rebase-merge", "rebase-apply", "BISECT_LOG")
 
 
 def _env_flag(name: str) -> bool:
@@ -54,6 +64,10 @@ class ClawDaemon:
         stale_task_seconds: float = 6 * 60 * 60,
         task_reconciliation_interval: float = 5 * 60,
         orphan_job_reconciliation_interval: float = 5 * 60,
+        branch_integrity_check_enabled: bool = False,
+        expected_branch: str | None = None,
+        branch_integrity_interval: float = 5 * 60,
+        repo_root: Path | None = None,
         pending_verification_interval: float = 15 * 60,
         pending_verification_drain_apply: bool | None = None,
         pending_verification_drain_max_apply: int = 10,
@@ -76,6 +90,26 @@ class ClawDaemon:
         self._last_task_reconciliation_at = 0.0
         self.orphan_job_reconciliation_interval = orphan_job_reconciliation_interval
         self._last_orphan_job_reconciliation_at = 0.0
+        # P0-2 branch-integrity detection. Default OFF at the constructor so
+        # synthetic test daemons (built from a feature-branch worktree) never
+        # trip; production opts in explicitly in main.py. expected_branch is
+        # configurable via the CLAW_EXPECTED_BRANCH env or a constructor arg,
+        # defaulting to "main".
+        self.branch_integrity_check_enabled = bool(branch_integrity_check_enabled)
+        resolved_expected = (
+            expected_branch
+            if expected_branch is not None
+            else os.getenv("CLAW_EXPECTED_BRANCH", "main")
+        )
+        self.expected_branch = resolved_expected.strip() or "main"
+        self.branch_integrity_interval = branch_integrity_interval
+        self._last_branch_integrity_check_at = 0.0
+        self._branch_integrity_safe_mode = False
+        # The checkout the daemon's own code runs from. In production this is
+        # the main checkout (``<repo>/claw_v2/daemon.py`` -> ``<repo>``).
+        self.repo_root = (
+            Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[1]
+        )
         self.pending_verification_interval = pending_verification_interval
         self._last_pending_verification_at = 0.0
         # Checkpoint D: live drain of the read-only backlog. Default OFF — the
@@ -117,6 +151,7 @@ class ClawDaemon:
 
     def tick(self, *, now: float | None = None) -> TickResult:
         trace = new_trace_context(artifact_id="daemon_tick")
+        self._check_branch_integrity(now=now)
         reconciled_lost = self._reconcile_stale_tasks(now=now)
         reconciled_orphan_jobs = self._reconcile_orphaned_jobs(now=now)
         pending_reconciliation_job_id = self._enqueue_pending_verification_reconciliation(now=now)
@@ -229,6 +264,102 @@ class ClawDaemon:
             )
         return changed
 
+    def _check_branch_integrity(self, *, now: float | None = None) -> None:
+        """P0-2: detect a wrong-branch strand of the live shared checkout.
+
+        Runs at startup (first tick, ``_last=0.0``) and per-tick, throttled to
+        ``branch_integrity_interval``. On an AFFIRMATIVE wrong-branch reading
+        it enters safe mode (stops claiming jobs) and emits a loud event; on an
+        affirmative on-branch reading it clears safe mode; on anything
+        non-affirmative (detached HEAD, in-progress git op, read error) it
+        FAILS OPEN — proceeds normally and never un-latches a confirmed trip.
+        It NEVER mutates git: recovery is a human ``git checkout main``.
+        """
+        if not self.branch_integrity_check_enabled:
+            return
+        current = time.time() if now is None else now
+        if current - self._last_branch_integrity_check_at < self.branch_integrity_interval:
+            return
+        self._last_branch_integrity_check_at = current
+        branch = self._read_current_branch()
+        if branch is None:
+            # Non-affirmative: fail open. Do not change safe-mode state — in
+            # particular, do not clear a previously confirmed wrong-branch trip.
+            return
+        if branch == self.expected_branch:
+            self._clear_branch_integrity_safe_mode(actual=branch)
+        else:
+            self._enter_branch_integrity_safe_mode(actual=branch)
+
+    def _read_current_branch(self) -> str | None:
+        """Return the branch HEAD points to, or ``None`` when indeterminate.
+
+        Pure file reads only (no subprocess) so it is tick-safe under Core
+        Invariant 1. Returns ``None`` — meaning FAIL OPEN — for a detached HEAD
+        (raw SHA), a rebase/bisect in progress, or any file/IO error. Returns a
+        branch name ONLY on an affirmative ``ref: refs/heads/<branch>`` reading.
+        Handles both a normal ``.git`` directory (main checkout) and a worktree
+        ``.git`` file (``gitdir: <path>``).
+        """
+        try:
+            git_path = self.repo_root / ".git"
+            if git_path.is_file():
+                pointer = git_path.read_text(encoding="utf-8").strip()
+                if not pointer.startswith("gitdir:"):
+                    return None
+                git_dir = Path(pointer[len("gitdir:") :].strip())
+                if not git_dir.is_absolute():
+                    git_dir = (self.repo_root / git_dir).resolve()
+            else:
+                git_dir = git_path
+            for marker in _GIT_IN_PROGRESS_MARKERS:
+                if (git_dir / marker).exists():
+                    return None
+            head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        except Exception:
+            # Safety code: never brick on a malformed/unreadable git layout.
+            logger.debug("branch-integrity HEAD read failed", exc_info=True)
+            return None
+        if head.startswith(_HEAD_REF_PREFIX):
+            return head[len(_HEAD_REF_PREFIX) :].strip() or None
+        return None
+
+    def _enter_branch_integrity_safe_mode(self, *, actual: str) -> None:
+        self._branch_integrity_safe_mode = True
+        if self.job_service is not None:
+            try:
+                self.job_service.set_safe_mode_reason(BRANCH_INTEGRITY_CLAIM_BLOCK_REASON)
+            except Exception:
+                logger.exception("failed to set branch-integrity safe mode on job service")
+        logger.error(
+            "branch integrity violation: daemon stranded on %r, expected %r",
+            actual,
+            self.expected_branch,
+        )
+        if self.observe is not None:
+            # Level-triggered: re-emit on every throttled check while stranded
+            # so the alarm stays visible in recent events (the incident went
+            # undetected for ~9.5h). The 5-min throttle bounds the volume.
+            self.observe.emit(
+                "daemon_branch_integrity_violation",
+                payload={"expected": self.expected_branch, "actual": actual},
+            )
+
+    def _clear_branch_integrity_safe_mode(self, *, actual: str) -> None:
+        if not self._branch_integrity_safe_mode:
+            return
+        self._branch_integrity_safe_mode = False
+        if self.job_service is not None:
+            try:
+                self.job_service.set_safe_mode_reason(None)
+            except Exception:
+                logger.exception("failed to clear branch-integrity safe mode on job service")
+        if self.observe is not None:
+            self.observe.emit(
+                "daemon_branch_integrity_restored",
+                payload={"expected": self.expected_branch, "actual": actual},
+            )
+
     def _enqueue_pending_verification_reconciliation(
         self, *, now: float | None = None
     ) -> str | None:
@@ -295,6 +426,12 @@ class ClawDaemon:
         return str(job.job_id)
 
     async def run_loop(self, shutdown: asyncio.Event, interval: float = 60.0) -> None:
+        # P0-2: run the branch-integrity check ONCE synchronously at startup —
+        # before spawning any claim loop — so a boot-stranded daemon enters safe
+        # mode before a worker claims. Per-tick re-checks (throttled) cover the
+        # post-boot strand that is the actual incident. A pure file read, so it
+        # is safe to run inline here. No-op when the check is disabled.
+        self._check_branch_integrity()
         background_tasks: list[asyncio.Task[None]] = []
         if self.observe is not None:
             background_tasks.append(

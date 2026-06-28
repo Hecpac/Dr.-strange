@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -289,6 +290,28 @@ def _noop_experiment_runner(agent_name: str, experiment_number: int, state: dict
         status="noop",
         cost_usd=0.0,
     )
+
+
+def _branch_integrity_check_enabled(repo_root: Path) -> bool:
+    """Decide whether the production daemon arms P0-2 branch-integrity safe mode.
+
+    ON by default for the production main checkout (a real ``.git`` DIRECTORY).
+    A worktree (``.git`` is a FILE) is a dev/test checkout — the test suite
+    builds the runtime from one — so default OFF there to avoid a self-inflicted
+    trip on the suite's feature branch. This is what keeps every ``build_runtime``
+    daemon in the suite from tripping without per-test edits. P0-2 protects the
+    main shared checkout, so gating on "is a real checkout" is also semantically
+    aligned. ``CLAW_BRANCH_INTEGRITY_CHECK=0`` is an ops kill-switch for the
+    (already narrow) false-positive surface.
+    """
+    if os.getenv("CLAW_BRANCH_INTEGRITY_CHECK", "1").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    return (repo_root / ".git").is_dir()
 
 
 def _is_git_repo(path: str | Path) -> bool:
@@ -1034,6 +1057,13 @@ def _setup_operational_services(
         observe=observe,
         task_ledger=task_ledger,
         job_service=job_service,
+        # P0-2: detect (never auto-heal) a wrong-branch strand of the live
+        # shared checkout and stop claiming jobs until a human `git checkout
+        # main`. Armed for the production main checkout only (see helper);
+        # default-OFF at the constructor keeps synthetic test daemons unaffected.
+        branch_integrity_check_enabled=_branch_integrity_check_enabled(
+            Path(__file__).resolve().parents[1]
+        ),
     )
     browser = DevBrowserService(
         dev_browser_path=config.dev_browser_path,
