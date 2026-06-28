@@ -163,11 +163,16 @@ After any change that moves a symbol named in `INTERNAL_WIRING.md`, update its
 
 Derived from Karpathy's LLM coding observations.
 
+Tradeoff: these rules bias toward caution over speed. For trivial fixes, use
+judgment; the goal is preventing costly mistakes on non-trivial work, not
+slowing down obvious one-liners.
+
 ## 1. Think Before Coding
 
 - State assumptions explicitly. If uncertain, ask.
 - If multiple interpretations exist, present them — don't pick silently.
 - If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name exactly what is confusing before editing.
 
 ## 2. Simplicity First
 
@@ -175,10 +180,13 @@ Derived from Karpathy's LLM coding observations.
 - No abstractions for single-use code.
 - No error handling for impossible scenarios.
 - If 200 lines could be 50, rewrite it.
+- Ask whether a senior engineer would call the solution overcomplicated; if yes,
+  simplify.
 
 ## 3. Surgical Changes
 
 - Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
 - Match existing style, even if you'd do it differently.
 - Remove only imports/variables/functions that YOUR changes made unused.
 - Every changed line should trace directly to the user's request.
@@ -197,6 +205,9 @@ Transform tasks into verifiable goals:
 - "Fix the bug" → "Write a test that reproduces it, then make it pass"
 - "Refactor X" → "Ensure tests pass before and after"
 
+These guidelines are working if diffs get smaller, unrelated edits disappear,
+overbuilt abstractions are rarer, and clarification happens before mistakes.
+
 ## 5. Worktrees
 
 Worktrees ubicados en `.worktrees/` (local al proyecto). No commitear contenido de ese directorio.
@@ -212,3 +223,12 @@ abiertos por ola (§7). Tras un cambio que toque algo descrito ahí, actualizar
 
 Para "ver cómo piensa" sin abrir SQLite: `.venv/bin/python -m
 claw_v2.cli.think tail|trace|spending|circuit|replay|failures`.
+
+## 7. Project gotchas
+
+- Do not treat runtime persona files as instructions for Claude Code.
+- Do not claim production boot/memory changes are live without
+  `agent_startup_context`.
+- Do not run heavy work inline in daemon ticks; enqueue durable jobs.
+- Do not weaken tool policy, approval, redaction, or RuntimeDb invariants without
+  focused tests.
