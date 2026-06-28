@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "Audit fix checkpoints C1-C5: retention prune, Kairos bounded subprocess, Codex redaction, alert dedupe lock, orphan-job reconcile throttle"
-doc_version: 2.42
-last_verified: 2026-06-27
-verification_method: "code cross-read of the C1-C5 audit-fix paths (jobs.py/task_ledger.py/main.py retention prune, kairos.py bounded subprocess calls, adapters/codex.py CLI redaction, operational_alerts.py dedupe lock, daemon.py orphan-job reconcile throttle) against this doc + targeted pytest (test_jobs, test_task_ledger, test_latency_audit_group3, test_kairos, test_kairos_health_check, test_subprocess_runner, test_codex_adapter, test_operational_alerts, test_daemon, test_architecture_invariants, test_runtimedb_wiring, test_sqlite_runtime, test_config, test_task_handler, test_observe_subscribe — all green) + git diff --check clean; full suite intentionally not re-run because it can affect the live daemon"
+describes_commit: "P0-2 daemon branch-integrity safe mode: detect a wrong-branch strand of the live shared checkout (pure .git/HEAD read, fail-open, no auto-heal) and stop claiming jobs via a JobService safe-mode latch"
+doc_version: 2.43
+last_verified: 2026-06-28
+verification_method: "code cross-read of the P0-2 branch-integrity path (daemon.py _read_current_branch/_check_branch_integrity/_enter|_clear_branch_integrity_safe_mode + tick/run_loop wiring, jobs.py set_safe_mode_reason + 4 claim sites, main.py _branch_integrity_check_enabled arming gate) against this doc + new test_daemon_branch_integrity.py (19) + adversarial false-positive panel (deploy-sim/head-edge/config-throttle, all HOLD) + full suite re-run in an ISOLATED worktree (3876 passed, 1 skipped, 0 foreign-kill-guard violations) + test_architecture_invariants green (subprocess-free tick preserved). Predecessor C1-C5 (doc_version 2.42) remains in main"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -919,7 +919,10 @@ invariants:
           (`JobService.claim_next(kinds=("f4b.delegation",))`); no generic /
           unfiltered consumer claims it (AST-proven — see enforced_by). It is
           maintenance-aware (claim_next returns None while `job_claim_block_reason`
-          is set → the job stays queued) and `should_stop`-wired
+          is set → the job stays queued; P0-2 adds a SIBLING in-process latch —
+          `JobService.set_safe_mode_reason(...)`, set by the daemon's
+          branch-integrity check when the live checkout is stranded on a wrong
+          branch — that blocks every claim path the same way) and `should_stop`-wired
           (`shutdown.is_set`) for graceful shutdown. Per claimed job it calls
           `TaskHandler.ensure_autonomous_task_enqueued(...)`, checkpoints
           `{task_id, coordinator_job_id}`, then completes the delivery job.
