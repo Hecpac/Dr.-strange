@@ -6,8 +6,9 @@ import logging
 import os
 import secrets
 import shutil
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait as futures_wait
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -686,6 +687,14 @@ class CoordinatorService:
             )
             return result
 
+    # Bounded wait for in-flight workers to finish after a critical error
+    # cancellation. Workers have per-task timeouts up to 900s; waiting the full
+    # duration would block the coordinator indefinitely. 30s gives active LLM
+    # calls a chance to complete or hit their own timeout, while preventing
+    # unbounded blocking. Orphaned threads will terminate on their own when
+    # their underlying adapter timeout fires.
+    _CRITICAL_ABORT_DRAIN_SECONDS = 30.0
+
     def _dispatch_parallel(
         self,
         tasks: list[WorkerTask],
@@ -699,19 +708,32 @@ class CoordinatorService:
 
         results_by_index: list[WorkerResult | None] = [None] * len(tasks)
         pool = ThreadPoolExecutor(max_workers=min(self.max_workers, len(tasks)))
-        shutdown_early = False
         from claw_v2.verification.local_tool_runner import (
             contract_artifact_scope,
             current_contract_artifact_scope,
         )
 
         worker_contract_scope = current_contract_artifact_scope()
+        # Cooperative cancellation token: workers check this event between
+        # retry attempts and before initiating long-running LLM calls.
+        abort_event = threading.Event()
 
         def _execute_scoped_worker(task: WorkerTask) -> WorkerResult:
+            if abort_event.is_set():
+                return WorkerResult(
+                    task_name=task.name,
+                    content="",
+                    duration_seconds=0.0,
+                    error="cancelled:before_start",
+                )
             if worker_contract_scope:
                 with contract_artifact_scope(worker_contract_scope):
-                    return self._execute_worker(task, trace_context, lane_overrides=lane_overrides)
-            return self._execute_worker(task, trace_context, lane_overrides=lane_overrides)
+                    return self._execute_worker(
+                        task, trace_context, lane_overrides=lane_overrides, abort_event=abort_event
+                    )
+            return self._execute_worker(
+                task, trace_context, lane_overrides=lane_overrides, abort_event=abort_event
+            )
 
         try:
             futures = {
@@ -731,15 +753,49 @@ class CoordinatorService:
                     )
                 results_by_index[index] = worker_result
                 if _has_critical_worker_error(worker_result):
+                    # Signal all in-flight workers to abort at their next
+                    # cancellation checkpoint (between retries, before LLM calls).
+                    abort_event.set()
+                    # Cancel futures that haven't started execution yet.
                     for pending in futures:
                         if pending is not future:
                             pending.cancel()
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    shutdown_early = True
+                    # Drain in-flight workers with a bounded timeout. This
+                    # prevents thread/connection leaks while avoiding unbounded
+                    # blocking on workers stuck in long LLM calls.
+                    in_flight = [f for f in futures if f is not future and not f.done()]
+                    if in_flight:
+                        done, not_done = futures_wait(
+                            in_flight, timeout=self._CRITICAL_ABORT_DRAIN_SECONDS
+                        )
+                        if not_done:
+                            # Some workers didn't finish within the drain window.
+                            # They will terminate on their own when their adapter
+                            # timeout fires; emit an observability event for audit.
+                            orphaned_tasks_names = [
+                                futures[f][1].name for f in not_done if f in futures
+                            ]
+                            self.observe.emit(
+                                "coordinator_critical_abort_orphaned_workers",
+                                trace_id=(trace_context or {}).get("trace_id"),
+                                root_trace_id=(trace_context or {}).get("root_trace_id"),
+                                span_id=(trace_context or {}).get("span_id"),
+                                parent_span_id=(trace_context or {}).get("parent_span_id"),
+                                payload={
+                                    "orphaned_workers": len(not_done),
+                                    "orphaned_task_names": orphaned_task_names,
+                                    "drain_timeout_seconds": self._CRITICAL_ABORT_DRAIN_SECONDS,
+                                },
+                            )
+                    # Shutdown the pool. wait=True ensures the pool's internal
+                    # thread queue is cleaned up; any still-running threads will
+                    # finish naturally and release their resources.
+                    pool.shutdown(wait=True, cancel_futures=True)
                     return [result for result in results_by_index if result is not None]
         finally:
-            if not shutdown_early:
-                pool.shutdown(wait=True)
+            # Ensure pool is always shut down, even on non-critical paths.
+            # shutdown() is idempotent; calling it twice is safe.
+            pool.shutdown(wait=True, cancel_futures=True)
         return [result for result in results_by_index if result is not None]
 
     _RETRY_LANES: frozenset[str] = frozenset({"worker", "worker_heavy"})
@@ -750,9 +806,27 @@ class CoordinatorService:
         trace_context: dict[str, Any] | None = None,
         *,
         lane_overrides: dict[str, dict[str, Any]] | None = None,
+        abort_event: threading.Event | None = None,
     ) -> WorkerResult:
-        """Execute a single worker task via the LLM router."""
+        """Execute a single worker task via the LLM router.
+
+        When ``abort_event`` is provided and set, the worker short-circuits
+        before initiating any LLM call. This is checked at the top of the
+        method and before each retry attempt, so a critical-error abort
+        in a sibling worker prevents this worker from starting wasteful
+        (and potentially expensive) LLM calls.
+        """
         start = time.time()
+        # Cooperative abort: if the coordinator already decided to cancel
+        # (e.g. a sibling worker hit a critical error), skip the LLM call
+        # entirely instead of consuming budget on doomed work.
+        if abort_event is not None and abort_event.is_set():
+            return WorkerResult(
+                task_name=task.name,
+                content="",
+                duration_seconds=time.time() - start,
+                error="cancelled:abort_event",
+            )
         task_trace = child_trace_context(trace_context, artifact_id=task.name)
         kwargs: dict[str, Any] = {
             "lane": task.lane,
@@ -778,6 +852,15 @@ class CoordinatorService:
         attempts = 2 if task.lane in self._RETRY_LANES else 1
         last_exc: Exception | None = None
         for attempt in range(1, attempts + 1):
+            # Check abort before each attempt — prevents retrying a call when
+            # the coordinator has already decided to abort the whole phase.
+            if abort_event is not None and abort_event.is_set():
+                return WorkerResult(
+                    task_name=task.name,
+                    content="",
+                    duration_seconds=time.time() - start,
+                    error=f"cancelled:abort_event_before_attempt_{attempt}",
+                )
             try:
                 response = self.router.ask(task.instruction, **kwargs)
                 return WorkerResult(
@@ -788,6 +871,15 @@ class CoordinatorService:
             except AdapterError as exc:
                 last_exc = exc
                 if attempt < attempts:
+                    # Check abort before retrying — no point retrying if the
+                    # phase is being torn down due to a sibling's critical error.
+                    if abort_event is not None and abort_event.is_set():
+                        return WorkerResult(
+                            task_name=task.name,
+                            content="",
+                            duration_seconds=time.time() - start,
+                            error=f"cancelled:abort_event_before_retry",
+                        )
                     self.observe.emit(
                         "coordinator_worker_retry",
                         trace_id=task_trace["trace_id"],
