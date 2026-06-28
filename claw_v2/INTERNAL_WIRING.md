@@ -922,7 +922,9 @@ invariants:
           is set → the job stays queued; P0-2 adds a SIBLING in-process latch —
           `JobService.set_safe_mode_reason(...)`, set by the daemon's
           branch-integrity check when the live checkout is stranded on a wrong
-          branch — that blocks every claim path the same way) and `should_stop`-wired
+          branch — that blocks every claim path the same way; branch-integrity
+          safe mode gates job claiming, but cron/`scheduler.run_due` is not
+          branch-gated) and `should_stop`-wired
           (`shutdown.is_set`) for graceful shutdown. Per claimed job it calls
           `TaskHandler.ensure_autonomous_task_enqueued(...)`, checkpoints
           `{task_id, coordinator_job_id}`, then completes the delivery job.
