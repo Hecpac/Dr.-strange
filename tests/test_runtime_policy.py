@@ -294,6 +294,93 @@ class RuntimePolicyEngineTests(unittest.TestCase):
             self.assertIn("protected branch", str(ctx.exception))
             self.assertIn("main", str(ctx.exception))
 
+    def test_bash_git_commit_blocks_protected_branch_via_git_dir_and_env(self) -> None:
+        # issue #153 bypass class: --git-dir/--work-tree flags and
+        # GIT_DIR/GIT_WORK_TREE env point the commit at a protected repo while
+        # the workspace cwd is not itself on a protected branch. The branch
+        # check must inspect the repo the commit actually targets.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            repo = workspace / "repo"
+            _init_git_repo(repo, branch="main")
+            gitdir = repo / ".git"
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace,
+                sandbox_policy=SandboxPolicy(workspace_root=workspace),
+            )
+            commands = [
+                f"git --git-dir={gitdir} --work-tree={repo} commit -m x",
+                f"git --git-dir={gitdir} commit -m x",
+                f"git --git-dir {gitdir} commit -m x",
+                f"env GIT_DIR={gitdir} git commit -m x",
+            ]
+            for command in commands:
+                with self.subTest(command=command):
+                    with self.assertRaises(PermissionError) as ctx:
+                        engine.enforce("Bash", {"command": command}, context="operator")
+                    self.assertIn("protected branch", str(ctx.exception))
+                    self.assertIn("main", str(ctx.exception))
+
+    def test_bash_bare_git_dir_env_prefix_commit_is_blocked(self) -> None:
+        # A bare `GIT_DIR=… git commit` prefix is rejected upstream by the
+        # sandbox binary gate (tokens[0] is the assignment, not a known binary),
+        # so it never reaches an unguarded commit. Asserted here so the env
+        # bypass class is provably closed end-to-end (sandbox + branch guard).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            repo = workspace / "repo"
+            _init_git_repo(repo, branch="main")
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace,
+                sandbox_policy=SandboxPolicy(workspace_root=workspace),
+            )
+            for command in (
+                f"GIT_DIR={repo / '.git'} git commit -m x",
+                f"GIT_DIR={repo / '.git'} GIT_WORK_TREE={repo} git commit -m x",
+            ):
+                with self.subTest(command=command):
+                    with self.assertRaises(PermissionError):
+                        engine.enforce("Bash", {"command": command}, context="operator")
+
+    def test_bash_git_commit_blocks_protected_branch_via_attr_source(self) -> None:
+        # issue #153 panel: a value-taking git global option missing from the
+        # parser allowlist (--attr-source, git >=2.40) made the parser bail at
+        # its value token and skip the branch guard while git still committed.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir) / "repo"
+            _init_git_repo(repo, branch="main")
+            engine = RuntimePolicyEngine(
+                workspace_root=repo,
+                sandbox_policy=SandboxPolicy(workspace_root=repo),
+            )
+            for command in (
+                "git --attr-source HEAD commit -m x --allow-empty",
+                "git --attr-source=HEAD commit -m x --allow-empty",
+            ):
+                with self.subTest(command=command):
+                    with self.assertRaises(PermissionError) as ctx:
+                        engine.enforce("Bash", {"command": command}, context="operator")
+                    self.assertIn("protected branch", str(ctx.exception))
+                    self.assertIn("main", str(ctx.exception))
+
+    def test_bash_git_dir_commit_allows_feature_branch_target(self) -> None:
+        # Regression: inspect the TARGET branch, not blanket-block any --git-dir
+        # commit. A --git-dir pointing at a feature-branch repo stays allowed.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            repo = workspace / "repo"
+            _init_git_repo(repo, branch="feat/safe")
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace,
+                sandbox_policy=SandboxPolicy(workspace_root=workspace),
+            )
+            decision = engine.enforce(
+                "Bash",
+                {"command": f"git --git-dir={repo / '.git'} commit -m ok"},
+                context="operator",
+            )
+            self.assertFalse(decision.approval_required)
+
     def test_bash_git_commit_allows_feature_branch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir) / "repo"

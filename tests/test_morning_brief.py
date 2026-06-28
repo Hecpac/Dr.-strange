@@ -515,6 +515,24 @@ class ConversationalBriefTests(unittest.TestCase):
             self.assertNotIn(secret_id, combined)
             self.assertIn("Cerrar la auditoría del agente", combined)
 
+    def test_session_context_does_not_expose_session_id(self) -> None:
+        # issue #153: the session-context section must not leak the internal
+        # session_id into the user-facing brief; an ordinal keeps sessions
+        # distinguishable.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "memory.db")
+            memory.update_session_state(
+                "tg-574707975",
+                current_goal="Cerrar la auditoría del agente",
+                verification_status="pending",
+            )
+            service = self._service(root, memory=memory)
+            section = service._session_context_section()
+            self.assertNotIn("tg-574707975", section)
+            self.assertIn("sesión 1", section)
+            self.assertIn("Cerrar la auditoría del agente", section)
+
     def test_brief_filters_synthetic_brain_tooluse_and_sanitizes_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

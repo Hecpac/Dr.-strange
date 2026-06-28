@@ -16,10 +16,15 @@ from claw_v2.tool_policy import TOOL_POLICIES, ToolPolicy, _decode_path_text, pa
 # Mirrors tools.TIER_REQUIRES_APPROVAL (importing tools here would be circular).
 _TIER_REQUIRES_APPROVAL = 3
 _PROTECTED_GIT_COMMIT_BRANCHES = frozenset({"main", "master", "prod", "production"})
+# git top-level options that consume a SEPARATE-arg value. Any value-taking
+# global option missing here makes the parser skip it as valueless and then bail
+# to None at its value token, letting a `commit` past the protected-branch guard
+# (issue #153 bypass class). Keep in sync with git's option set.
 _GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset(
     {
         "-C",
         "-c",
+        "--attr-source",
         "--config-env",
         "--exec-path",
         "--git-dir",
@@ -29,6 +34,7 @@ _GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset(
     }
 )
 _GIT_GLOBAL_OPTIONS_WITH_ATTACHED_VALUE = (
+    "--attr-source=",
     "--config-env=",
     "--exec-path=",
     "--git-dir=",
@@ -438,26 +444,69 @@ def _tier_for_policy(policy: ToolPolicy) -> int:
     return 2
 
 
+@dataclass(frozen=True)
+class _GitCommitTarget:
+    """The repo a `git commit` will actually write to (not just the cwd)."""
+
+    cwd: Path
+    git_dir: Path | None
+    work_tree: Path | None
+
+
 def _protected_branch_for_git_commit(command: str, workspace_root: Path) -> str | None:
-    worktree = _git_commit_worktree_from_command(command, workspace_root)
-    if worktree is None:
+    target = _git_commit_target_from_command(command, workspace_root)
+    if target is None:
         return None
-    branch = _current_git_branch(worktree)
+    branch = _current_git_branch(target)
     if branch in _PROTECTED_GIT_COMMIT_BRANCHES:
         return branch
     return None
 
 
-def _git_commit_worktree_from_command(command: str, workspace_root: Path) -> Path | None:
+def _git_commit_target_from_command(command: str, workspace_root: Path) -> _GitCommitTarget | None:
     try:
         raw_tokens = shlex.split(command)
     except ValueError:
         return None
     tokens = _unwrap_command_tokens(raw_tokens)
+
+    # Defense-in-depth: a `git commit` can target a DIFFERENT repo/branch than
+    # the workspace via --git-dir/--work-tree flags or GIT_DIR/GIT_WORK_TREE env
+    # assignments. Capture those so the protected-branch check inspects the repo
+    # the commit will actually write to, not just the workspace cwd. Scan both
+    # the raw and unwrapped token streams so the env form is caught whether it is
+    # a bare prefix (`GIT_DIR=… git commit`), an `env GIT_DIR=… git commit`, or
+    # wrapped in `bash -c "…"`. Out of scope by design (real boundary = triple-
+    # AND gating + approvals, not this parser): compound commands (&&/;),
+    # aliases, and shell-expansion forms like `git$IFS`commit.
+    env_git_dir: str | None = None
+    env_work_tree: str | None = None
+    for token in (*raw_tokens, *tokens):
+        if token.startswith("-") or "=" not in token:
+            continue
+        key, _, value = token.partition("=")
+        if not key.isidentifier():
+            continue
+        if key == "GIT_DIR":
+            env_git_dir = value
+        elif key == "GIT_WORK_TREE":
+            env_work_tree = value
+
+    # Drop a leading bare env-assignment prefix so tokens[0] is the program.
+    while (
+        tokens
+        and not tokens[0].startswith("-")
+        and "=" in tokens[0]
+        and tokens[0].partition("=")[0].isidentifier()
+    ):
+        tokens = tokens[1:]
+
     if not tokens or Path(tokens[0]).name != "git":
         return None
 
     cwd = workspace_root
+    flag_git_dir: str | None = None
+    flag_work_tree: str | None = None
     args = tokens[1:]
     index = 0
     while index < len(args):
@@ -472,6 +521,26 @@ def _git_commit_worktree_from_command(command: str, workspace_root: Path) -> Pat
             cwd = _resolve_git_cwd(cwd, arg[2:])
             index += 1
             continue
+        if arg == "--git-dir":
+            if index + 1 >= len(args):
+                return None
+            flag_git_dir = args[index + 1]
+            index += 2
+            continue
+        if arg.startswith("--git-dir="):
+            flag_git_dir = arg[len("--git-dir=") :]
+            index += 1
+            continue
+        if arg == "--work-tree":
+            if index + 1 >= len(args):
+                return None
+            flag_work_tree = args[index + 1]
+            index += 2
+            continue
+        if arg.startswith("--work-tree="):
+            flag_work_tree = arg[len("--work-tree=") :]
+            index += 1
+            continue
         if arg in _GIT_GLOBAL_OPTIONS_WITH_VALUE:
             index += 2
             continue
@@ -481,7 +550,15 @@ def _git_commit_worktree_from_command(command: str, workspace_root: Path) -> Pat
         if arg.startswith("-"):
             index += 1
             continue
-        return cwd if arg == "commit" else None
+        if arg != "commit":
+            return None
+        git_dir = flag_git_dir if flag_git_dir is not None else env_git_dir
+        work_tree = flag_work_tree if flag_work_tree is not None else env_work_tree
+        return _GitCommitTarget(
+            cwd=cwd,
+            git_dir=_resolve_git_cwd(cwd, git_dir) if git_dir else None,
+            work_tree=_resolve_git_cwd(cwd, work_tree) if work_tree else None,
+        )
     return None
 
 
@@ -492,10 +569,19 @@ def _resolve_git_cwd(current: Path, value: str) -> Path:
     return candidate.resolve(strict=False)
 
 
-def _current_git_branch(worktree: Path) -> str | None:
+def _git_target_argv(target: _GitCommitTarget) -> list[str]:
+    argv = ["git", "-C", str(target.cwd)]
+    if target.git_dir is not None:
+        argv += ["--git-dir", str(target.git_dir)]
+    if target.work_tree is not None:
+        argv += ["--work-tree", str(target.work_tree)]
+    return argv
+
+
+def _current_git_branch(target: _GitCommitTarget) -> str | None:
     try:
         completed = subprocess.run(
-            ["git", "-C", str(worktree), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            [*_git_target_argv(target), "symbolic-ref", "--quiet", "--short", "HEAD"],
             capture_output=True,
             text=True,
             timeout=_GIT_BRANCH_CHECK_TIMEOUT_SECONDS,
@@ -506,23 +592,7 @@ def _current_git_branch(worktree: Path) -> str | None:
     if completed.returncode == 0:
         branch = completed.stdout.strip()
         return branch or None
-    if _is_detached_git_worktree(worktree):
-        return None
     return None
-
-
-def _is_detached_git_worktree(worktree: Path) -> bool:
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(worktree), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True,
-            text=True,
-            timeout=_GIT_BRANCH_CHECK_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-        return False
-    return completed.returncode == 0 and completed.stdout.strip() == "true"
 
 
 def _context_candidates(context: str) -> set[str]:

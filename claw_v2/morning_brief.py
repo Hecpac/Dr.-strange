@@ -1131,8 +1131,10 @@ class MorningBriefService:
                 details.append(f"verificacion={verification}")
             if not details:
                 continue
-            session_id = _safe_text(state.get("session_id"), 40) or "session"
-            lines.append(f"en {session_id} queda " + "; ".join(details[:4]))
+            # Do not expose the internal session_id in the user-facing brief;
+            # an ordinal keeps multiple sessions distinguishable without leaking
+            # the identifier (see issue #153 redaction finding).
+            lines.append(f"en la sesión {len(lines) + 1} queda " + "; ".join(details[:4]))
         context_items = len(lines)
         self._brief_counts["context_items"] = context_items
         if context_items == 0:
