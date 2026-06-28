@@ -523,6 +523,7 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertIn("brain", toolsearch.allowed_contexts)
         agent = TOOL_POLICIES["Agent"]
         self.assertEqual(agent.risk_level, "high")
+        self.assertFalse(agent.read_only)
         self.assertEqual(agent.allowed_contexts, frozenset())
 
 

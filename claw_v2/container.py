@@ -90,6 +90,7 @@ def sandboxed_run(
                     "runtime_cdp_command_routed_to_networkless_container",
                     payload={
                         "requested_mode": mode,
+                        "effective_runner": "docker",
                         "network_enabled": False,
                         "reason": "cdp_requires_host_network",
                     },

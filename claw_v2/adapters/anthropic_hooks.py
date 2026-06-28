@@ -80,6 +80,7 @@ _READ_ONLY_SDK_TOOLS = frozenset(
         "TodoWrite",
         "BashOutput",
         "NotebookRead",
+        "ToolSearch",
     }
 )
 

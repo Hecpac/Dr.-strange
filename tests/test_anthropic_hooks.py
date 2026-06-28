@@ -482,17 +482,36 @@ class SdkHarnessToolGatingTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result, {"continue_": True})
 
+    def test_toolsearch_is_read_only_for_mutation_tracking(self) -> None:
+        # Review P2: ToolSearch is read-only by policy and must also be in
+        # _READ_ONLY_SDK_TOOLS, otherwise a provider failure after a successful
+        # ToolSearch would count it as a mutation and suppress retries/fallback.
+        from claw_v2.adapters.anthropic_hooks import _READ_ONLY_SDK_TOOLS
+
+        self.assertIn("ToolSearch", _READ_ONLY_SDK_TOOLS)
+
     async def test_agent_denies_in_brain_with_delegate_task_nudge(self) -> None:
+        from unittest.mock import MagicMock
+
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
+            observe = MagicMock()
             hook = make_pre_tool_use_hook(
-                _request("brain"), runtime_policy=self._engine(workspace), observe=None
+                _request("brain"), runtime_policy=self._engine(workspace), observe=observe
             )
             result = await hook({"tool_name": "Agent", "tool_input": {}}, "tu-1", None)
         decision = result["hookSpecificOutput"]
         self.assertEqual(decision["permissionDecision"], "deny")
         self.assertIn("delegate_task", decision["permissionDecisionReason"])
         self.assertIn("Agent", result["systemMessage"])
+        emitted = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertIn("brain_sdk_agent_dispatch_blocked", emitted)
+        agent_call = next(
+            call
+            for call in observe.emit.call_args_list
+            if call.args[0] == "brain_sdk_agent_dispatch_blocked"
+        )
+        self.assertEqual(agent_call.kwargs["payload"]["tool_name"], "Agent")
 
     async def test_delegate_task_passes_in_brain(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
