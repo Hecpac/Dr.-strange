@@ -394,6 +394,81 @@ class TaskLedgerTests(unittest.TestCase):
             self.assertEqual(len(terminal_events), 1)
             self.assertEqual(terminal_events[0]["payload"]["status"], "lost")
 
+    def test_mark_stale_running_lost_skips_terminal_for_rescued_rows(self) -> None:
+        # Issue #37: a cross-process writer (heartbeat/checkpoint/resume) can
+        # advance a row's updated_at past cutoff between the SELECT and the
+        # conditional UPDATE (self._lock is thread-local, not a DB lock). The
+        # snapshot then includes a row the UPDATE does NOT flip to lost; the fix
+        # re-queries only rows now 'lost' so rescued rows never receive a false
+        # task_ledger_terminal event.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            ledger = TaskLedger(Path(tmpdir) / "claw.db", observe=observe)
+            old = time.time() - 1000
+            for task_id in ("task-keep-1", "task-rescue", "task-keep-2"):
+                ledger.create(
+                    task_id=task_id,
+                    session_id="s1",
+                    objective="long task",
+                    runtime="coordinator",
+                    status="running",
+                )
+            with ledger._lock:
+                ledger._conn.execute(
+                    "UPDATE agent_tasks SET updated_at = ? "
+                    "WHERE task_id IN ('task-keep-1','task-rescue','task-keep-2')",
+                    (old,),
+                )
+                ledger._conn.commit()
+
+            # sqlite3.Connection.execute is a read-only C attribute, so wrap
+            # the connection to inject the rescue right before the lost-UPDATE.
+            class _RacingConnection:
+                def __init__(self, real):
+                    self._real = real
+                    self._rescued = False
+
+                def execute(self, sql, params=()):
+                    if (
+                        not self._rescued
+                        and isinstance(sql, str)
+                        and "SET status = 'lost'" in sql
+                    ):
+                        self._real.execute(
+                            "UPDATE agent_tasks SET updated_at = ? WHERE task_id = ?",
+                            (time.time(), "task-rescue"),
+                        )
+                        self._real.commit()
+                        self._rescued = True
+                    return self._real.execute(sql, params)
+
+                def commit(self):
+                    return self._real.commit()
+
+                def rollback(self):
+                    return self._real.rollback()
+
+                def __getattr__(self, name):
+                    return getattr(self._real, name)
+
+            real_conn = ledger._conn
+            ledger._conn = _RacingConnection(real_conn)
+            try:
+                changed = ledger.mark_stale_running_lost(older_than_seconds=300)
+            finally:
+                ledger._conn = real_conn
+
+            self.assertEqual(changed, 2)
+            self.assertEqual(ledger.get("task-rescue").status, "running")
+            self.assertEqual(ledger.get("task-keep-1").status, "lost")
+            self.assertEqual(ledger.get("task-keep-2").status, "lost")
+            terminal_events = observe.recent_events(
+                limit=20, event_type="task_ledger_terminal"
+            )
+            terminal_ids = {e["payload"].get("task_id") for e in terminal_events}
+            self.assertEqual(terminal_ids, {"task-keep-1", "task-keep-2"})
+            self.assertNotIn("task-rescue", terminal_ids)
+
     def test_reconciles_historical_succeeded_pending_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "observe.db")
