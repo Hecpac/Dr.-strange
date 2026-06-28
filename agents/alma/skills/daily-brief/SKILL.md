@@ -11,7 +11,8 @@ description: >
 
 # Daily Brief
 
-Genera un brief ejecutivo diario que en < 2 minutos de lectura te deja listo para actuar.
+Genera una apertura o cierre operativo en lenguaje natural, con evidencia real y
+sin formato de boletín.
 
 ## Inputs requeridos
 
@@ -32,25 +33,23 @@ Recopila el estado actual revisando (en orden):
 3. Pipeline: ¿Hay propuestas, entregas, o deadlines próximos?
 4. Carry-over: ¿Qué quedó pendiente de ayer?
 
-### 2. Priorización (Regla 3-1-1)
-De todo lo recopilado, selecciona:
-- 3 prioridades del día: Las 3 cosas que, si se completan, hacen que el día sea productivo.
-- 1 bloqueo principal: El obstáculo más grande que puede frenar el progreso.
-- 1 decisión pendiente: La decisión que, si no se toma, bloquea otras cosas.
+### 2. Síntesis operacional
+Convierte los hechos en 2-4 párrafos cortos. Debe sentirse como continuidad de
+un agente que estuvo observando, no como una plantilla.
 
-Criterios para seleccionar las 3 prioridades:
+Selecciona solo lo que tenga evidencia:
+- Qué cambió desde el último corte.
+- Qué sigue abierto.
+- Qué está bloqueado o esperando decisión.
+- Qué movimiento concreto conviene hacer ahora o mañana.
 
-| Prioridad | Criterio |
-|----------|----------|
-| **#1**   | Lo más urgente + importante. Deadline hoy o impacto directo en revenue/cliente. |
-| **#2**   | Lo que desbloquea otras cosas. Si esto se hace, otras tareas avanzan. |
-| **#3**   | Lo que más avanza objetivos de la semana/mes, aunque no sea urgente hoy. |
+### 3. Apertura y cierre
+La primera frase debe situar el momento exacto:
+- Apertura: "Arranque del lunes 27 de abril de 2026..."
+- Cierre: "Corte del lunes 27 de abril de 2026..."
 
-Cada prioridad debe ser accionable en el día (no “avanzar con el proyecto” sino “terminar la sección X del documento Y”).
-
-### 3. Quick-start action
-Define UNA acción que se pueda ejecutar en < 5 minutos y que genere momentum para el día.
-Esto es lo primero que el usuario debería hacer al leer el brief.
+La última frase debe nombrar el siguiente movimiento si hay evidencia. Si no hay
+señal, dilo sin rellenar.
 
 Ejemplos buenos:
 - “Responder el email de [cliente] confirmando la reunión del jueves”
@@ -62,44 +61,29 @@ Ejemplos malos:
 - “Trabajar en el proyecto”
 - “Pensar en la estrategia”
 
-## Output format
+## Output contract
 
-## 📋 Daily Brief — [día, fecha]
+La salida pública es texto plano conversacional:
 
-### Estado general: [🟢 Todo OK / 🟡 Hay alertas / 🔴 Hay problemas]
-[1 línea de contexto operativo. Ej: "Servicios estables. Newsletter enviada ayer con 42% open rate."]
+Arranque del lunes 27 de abril de 2026. Tengo agenda 2 eventos hoy y correo 3
+correos importantes.
 
----
-### 🎯 Top 3 prioridades
-1. **[Prioridad #1]** — [por qué hoy]
-   → Resultado esperado: [qué se ve diferente al final del día si esto se completa]
-2. **[Prioridad #2]** — [qué desbloquea]
-   → Resultado esperado: [outcome concreto]
-3. **[Prioridad #3]** — [conexión con objetivo mayor]
-   → Resultado esperado: [outcome concreto]
+La bitácora cubre la continuación de ayer. Para retomar hoy queda revisar el
+router de Telegram y cerrar la verificación en observe_stream.
 
----
-### 🚧 Bloqueo principal
-**[Descripción del bloqueo]**
-→ Requiere: [qué necesitas para desbloquearlo: respuesta de alguien, decisión, recurso]
-→ Si no se resuelve hoy: [consecuencia concreta]
+El siguiente movimiento es validar el evento agent_startup_context antes de
+decir que el boot quedó resuelto.
 
-### ❓ Decisión pendiente
-**[Descripción de la decisión]**
-→ Opciones: [A] vs [B]
-→ Deadline para decidir: [cuándo]
-
----
-### ⚡ Quick-start (< 5 min)
-**[Acción concreta e inmediata]**
+No uses Markdown, bullets, headers, emojis, tablas, negritas, task IDs crudos,
+approval IDs ni lenguaje de reporte.
 
 ## Variantes
 
 ### Brief de mitad de día
 Si se solicita un check-in de mitad de día:
-- Revisa avance de las 3 prioridades del brief matutino (✅ hecho / 🔄 en progreso / ❌ bloqueado).
+- Revisa avance de lo que quedó abierto en la apertura.
 - Ajusta prioridades si algo cambió.
-- Redefine quick-start para la tarde.
+- Redefine el siguiente movimiento para la tarde.
 
 ### Brief de cierre
 Si se solicita al final del día:
@@ -108,17 +92,16 @@ Si se solicita al final del día:
 - Nota aprendizajes o cambios de contexto relevantes.
 
 ## Done criteria
-- [ ] El brief completo se lee en < 2 minutos (aprox. 200-300 palabras).
-- [ ] Las 3 prioridades son accionables hoy (no genéricas ni multi-día).
-- [ ] Cada prioridad tiene resultado esperado concreto.
-- [ ] Hay exactamente 1 quick-start action ejecutable en < 5 minutos.
+- [ ] El brief completo se lee en < 2 minutos.
+- [ ] La primera frase sitúa fecha y tipo de corte.
+- [ ] Cada pendiente viene de una fuente verificable.
+- [ ] El siguiente movimiento es concreto.
 - [ ] Si hay bloqueos, incluyen qué se necesita para desbloquear y consecuencia de no hacerlo.
-- [ ] El estado general es claro al primer vistazo (emoji + 1 línea).
+- [ ] La salida no contiene Markdown ni IDs internos.
 
 ## Errores comunes a evitar
-- No metas más de 3 prioridades: Si todo es prioridad, nada lo es. El límite de 3 es inviolable.
 - No seas vago: “Trabajar en el proyecto X” no es una prioridad.
   “Completar la migración del endpoint /users a la nueva API” sí lo es.
 - No ignores carry-overs: Si algo se pospuso ayer, debe aparecer hoy con mayor urgencia o con una decisión explícita de descartarlo.
 - No hagas el brief largo: Si pasa de 300 palabras, estás fallando. Corta sin piedad.
-- No olvides el quick-start: El cerebro necesita una victoria temprana. Siempre incluye algo que se pueda hacer YA.
+- No inventes energía o drama. Si no hay señal, dilo seco y propone verificar fuentes.
