@@ -107,6 +107,10 @@ LOCAL_TOOL_SUCCESS_CONDITIONS: dict[str, SuccessCondition] = {
         must_contain_keys=("screenshot_path",),
         must_be_nonempty_str=("screenshot_path",),
         must_match_regex={"screenshot_path": r"\.png$"},
+        # Issue #153: the path must actually exist on disk — without this a
+        # result could pass the contract having only declared a .png path
+        # without writing the file. Mirrors SkillGenerate's existing-path check.
+        must_be_existing_path=("screenshot_path",),
         forbidden_reasons=("screenshot_path_required", "screenshot path escaped browser scratch"),
     ),
     "BrowserClick": SuccessCondition(

@@ -130,7 +130,6 @@ def test_browser_contracts_reject_invalid_minimal_outputs(tool_name, tool_result
 @pytest.mark.parametrize(
     ("tool_name", "tool_result"),
     [
-        ("BrowserScreenshot", {"ok": True, "screenshot_path": "/tmp/shot.png"}),
         ("BrowserClick", {"ok": True, "url": "https://x.test", "snapshot": "updated"}),
         ("BrowserType", {"ok": True, "url": "https://x.test", "snapshot": "updated"}),
     ],
@@ -146,6 +145,29 @@ def test_browser_contracts_accept_minimal_valid_outputs(tool_name, tool_result):
     )
 
     assert errors == []
+
+
+def test_browser_screenshot_contract_accepts_existing_png(tmp_path):
+    # Issue #153: BrowserScreenshot now requires the PNG to exist on disk.
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    condition = get_local_tool_success_condition("BrowserScreenshot")
+    errors = validate_success_condition(
+        tool_result={"ok": True, "screenshot_path": str(png)},
+        condition=condition,
+    )
+    assert errors == []
+
+
+def test_browser_screenshot_contract_rejects_nonexistent_png(tmp_path):
+    # Issue #153: a .png path that does not exist on disk must fail the
+    # contract even though it ends in .png and is non-empty.
+    condition = get_local_tool_success_condition("BrowserScreenshot")
+    errors = validate_success_condition(
+        tool_result={"ok": True, "screenshot_path": str(tmp_path / "missing.png")},
+        condition=condition,
+    )
+    assert "path_file_not_found:screenshot_path" in errors
 
 
 # ---------------------------------------------------------------------------
