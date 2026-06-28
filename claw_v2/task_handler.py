@@ -95,13 +95,10 @@ _TASK_QUEUE_STATUS_ALIASES: dict[str, str] = {
 def _configured_f2_durability_store(coordinator: Any | None) -> Any | None:
     if coordinator is None:
         return None
-    store = getattr(coordinator, "f2_durability_store", None)
-    if store is None:
-        return None
-    store_type = type(store)
-    if store_type.__module__ == "unittest.mock":
-        return None
-    return store
+    # A configured store (real or a test double) drives F2 recovery; production
+    # must not special-case test doubles. Tests that don't want recovery set
+    # `f2_durability_store = None` explicitly (a bare MagicMock auto-vivifies one).
+    return getattr(coordinator, "f2_durability_store", None)
 
 
 def normalize_task_queue_status(value: Any) -> str:

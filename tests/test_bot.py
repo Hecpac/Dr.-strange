@@ -2550,6 +2550,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:123",
                     phase_results={
@@ -2609,6 +2610,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:autonomous",
                     phase_results={
@@ -2747,6 +2749,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="task-1",
                     phase_results={
@@ -2958,6 +2961,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:fixes",
                     phase_results={
@@ -3014,6 +3018,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:fixes",
                     phase_results={
@@ -3125,6 +3130,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:autonomous",
                     phase_results={
@@ -3207,6 +3213,7 @@ class BotTests(unittest.TestCase):
                     metadata={"autonomous": True},
                 )
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:lost-task",
                     phase_results={
@@ -3257,6 +3264,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:autonomous",
                     phase_results={
@@ -3324,6 +3332,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="internal-critical-id",
                     phase_results={
@@ -3419,6 +3428,7 @@ class BotTests(unittest.TestCase):
                     metadata={"autonomous": True},
                 )
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:lost-task",
                     phase_results={
@@ -3516,6 +3526,7 @@ class BotTests(unittest.TestCase):
                 self.assertNotEqual(redirected.verification_status, "passed")
 
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:false-success",
                     phase_results={
@@ -3820,6 +3831,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:push",
                     phase_results={
@@ -3932,6 +3944,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:commit",
                     phase_results={
@@ -3987,6 +4000,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:approved",
                     phase_results={
@@ -7111,6 +7125,7 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.coordinator = MagicMock()
+                runtime.bot.coordinator.f2_durability_store = None
                 runtime.bot.coordinator.run.return_value = CoordinatorResult(
                     task_id="s1:override",
                     phase_results={

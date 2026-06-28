@@ -772,6 +772,7 @@ class ResumeWiringTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             memory = MemoryStore(Path(tmpdir) / "claw.db")
             coordinator = MagicMock()
+            coordinator.f2_durability_store = None
             coordinator.detect_resume_phase.return_value = "verification"
             coordinator.run.return_value = CoordinatorResult(
                 task_id="t-99",
@@ -795,7 +796,9 @@ class ResumeWiringTests(unittest.TestCase):
 
             with patch(
                 "claw_v2.task_handler.plan_f2_recovery",
-                side_effect=AssertionError("mock coordinator must not imply F2 store"),
+                side_effect=AssertionError(
+                    "an unconfigured (None) F2 store must not invoke the planner"
+                ),
             ) as planner:
                 handler._run_coordinated_task(
                     "tg-1",
@@ -809,6 +812,53 @@ class ResumeWiringTests(unittest.TestCase):
             planner.assert_not_called()
             coordinator.detect_resume_phase.assert_called_once_with("t-99")
             self.assertEqual(coordinator.run.call_args.kwargs["start_phase"], "verification")
+
+    def test_resumed_run_with_configured_f2_store_fails_closed_on_planner_error(self) -> None:
+        """A coordinator with a *configured* F2 store (even a test double) must drive
+        the F2 recovery planner on resume; a planner exception fails closed — the
+        blocked no-run result is used and coordinator.run is NOT re-invoked. Guards
+        the a89096e fail-closed path, which production must reach for any configured
+        store rather than special-casing test doubles."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            memory = MemoryStore(Path(tmpdir) / "claw.db")
+            coordinator = MagicMock()
+            coordinator.f2_durability_store = MagicMock()
+            coordinator.detect_resume_phase.return_value = "verification"
+            coordinator.run.return_value = CoordinatorResult(
+                task_id="t-fc",
+                phase_results={
+                    "verification": [
+                        WorkerResult(
+                            task_name="verify_change",
+                            content="Verification Status: passed",
+                            duration_seconds=0.1,
+                        )
+                    ]
+                },
+                synthesis="done",
+            )
+            handler = TaskHandler(
+                coordinator=coordinator,
+                observe=None,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+            )
+
+            with patch(
+                "claw_v2.task_handler.plan_f2_recovery",
+                side_effect=RuntimeError("planner boom"),
+            ) as planner:
+                handler._run_coordinated_task(
+                    "tg-1",
+                    "objetivo",
+                    mode="coding",
+                    forced=False,
+                    task_id="t-fc",
+                    resumed=True,
+                )
+
+            planner.assert_called_once()
+            coordinator.run.assert_not_called()
 
     def test_fresh_run_passes_no_start_phase(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
