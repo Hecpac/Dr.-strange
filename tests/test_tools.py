@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import subprocess
 import tempfile
 import unittest
 import warnings
@@ -23,6 +24,7 @@ from claw_v2.tools import (
     tool_requires_approval,
 )
 from claw_v2.observation_window import ObservationWindowState
+from claw_v2.verification.local_tool_contracts import LOCAL_TOOL_SUCCESS_CONDITIONS
 
 
 class ToolRegistryTests(unittest.TestCase):
@@ -502,6 +504,7 @@ class ObservationWindowToolTests(unittest.TestCase):
                     allowed_agent_classes=("operator",),
                     handler=lambda args: executed.append(args["command"]) or {"ok": True},
                     tier=TIER_LOCAL_MUTATION,
+                    success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Bash"],
                 )
             )
 
@@ -510,6 +513,73 @@ class ObservationWindowToolTests(unittest.TestCase):
                     "Bash", {"command": "git push --force origin main"}, agent_class="operator"
                 )
 
+            self.assertEqual(executed, [])
+
+    def test_runtime_policy_blocks_protected_git_commit_before_bash_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            subprocess.run(
+                ["git", "init"], cwd=workspace, check=True, capture_output=True, text=True
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Test User"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (workspace / "README.md").write_text("base\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "README.md"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "init"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "checkout", "-B", "main"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            executed: list[str] = []
+            registry = ToolRegistry(workspace_root=workspace)
+            registry.register(
+                ToolDefinition(
+                    name="Bash",
+                    description="fake shell",
+                    allowed_agent_classes=("operator",),
+                    handler=lambda args: executed.append(args["command"]) or {"ok": True},
+                    tier=TIER_LOCAL_MUTATION,
+                    success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Bash"],
+                )
+            )
+
+            with self.assertRaises(PermissionError) as ctx:
+                registry.execute(
+                    "Bash",
+                    {"command": "git commit -m blocked"},
+                    agent_class="operator",
+                    policy=SandboxPolicy(workspace_root=workspace),
+                )
+
+            self.assertIn("protected branch", str(ctx.exception))
             self.assertEqual(executed, [])
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,51 @@ from pathlib import Path
 from claw_v2.runtime_policy import RuntimePolicyEngine, sanitize_child_env, _iter_path_values
 from claw_v2.sandbox import SandboxPolicy
 from claw_v2.tools import ToolDefinition, ToolRegistry
+
+
+def _init_git_repo(path: Path, *, branch: str = "main", detached: bool = False) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (path / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=path, check=True, capture_output=True, text=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "-B", branch],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if detached:
+        subprocess.run(
+            ["git", "checkout", "--detach", "HEAD"],
+            cwd=path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
 
 class RuntimePolicyEngineTests(unittest.TestCase):
@@ -206,6 +252,81 @@ class RuntimePolicyEngineTests(unittest.TestCase):
             )
             with self.assertRaises(PermissionError):
                 engine.enforce("Bash", {"command": "cat /etc/passwd"}, context="operator")
+
+    def test_bash_git_commit_blocks_protected_branches(self) -> None:
+        for branch in ("main", "master", "prod", "production"):
+            with self.subTest(branch=branch):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    repo = Path(tmpdir) / "repo"
+                    _init_git_repo(repo, branch=branch)
+                    engine = RuntimePolicyEngine(
+                        workspace_root=repo,
+                        sandbox_policy=SandboxPolicy(workspace_root=repo),
+                    )
+
+                    with self.assertRaises(PermissionError) as ctx:
+                        engine.enforce(
+                            "Bash",
+                            {"command": "git commit -m blocked"},
+                            context="operator",
+                        )
+
+                    self.assertIn("protected branch", str(ctx.exception))
+                    self.assertIn(branch, str(ctx.exception))
+
+    def test_bash_git_dash_c_commit_blocks_protected_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            repo = workspace / "repo"
+            _init_git_repo(repo, branch="main")
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace,
+                sandbox_policy=SandboxPolicy(workspace_root=workspace),
+            )
+
+            with self.assertRaises(PermissionError) as ctx:
+                engine.enforce(
+                    "Bash",
+                    {"command": "git -C repo commit -m blocked"},
+                    context="operator",
+                )
+
+            self.assertIn("protected branch", str(ctx.exception))
+            self.assertIn("main", str(ctx.exception))
+
+    def test_bash_git_commit_allows_feature_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir) / "repo"
+            _init_git_repo(repo, branch="feat/safe")
+            engine = RuntimePolicyEngine(
+                workspace_root=repo,
+                sandbox_policy=SandboxPolicy(workspace_root=repo),
+            )
+
+            decision = engine.enforce(
+                "Bash",
+                {"command": "git commit -m allowed"},
+                context="operator",
+            )
+
+            self.assertFalse(decision.approval_required)
+
+    def test_bash_git_commit_allows_detached_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir) / "repo"
+            _init_git_repo(repo, branch="main", detached=True)
+            engine = RuntimePolicyEngine(
+                workspace_root=repo,
+                sandbox_policy=SandboxPolicy(workspace_root=repo),
+            )
+
+            decision = engine.enforce(
+                "Bash",
+                {"command": "git commit -m detached"},
+                context="operator",
+            )
+
+            self.assertFalse(decision.approval_required)
 
     def test_iter_path_values_recurses_into_lists(self) -> None:
         # 2026-05-29 audit: _iter_path_values skipped lists (asymmetric with

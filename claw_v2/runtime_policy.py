@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shlex
 import fnmatch
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -14,6 +15,28 @@ from claw_v2.tool_policy import TOOL_POLICIES, ToolPolicy, _decode_path_text, pa
 
 # Mirrors tools.TIER_REQUIRES_APPROVAL (importing tools here would be circular).
 _TIER_REQUIRES_APPROVAL = 3
+_PROTECTED_GIT_COMMIT_BRANCHES = frozenset({"main", "master", "prod", "production"})
+_GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset(
+    {
+        "-C",
+        "-c",
+        "--config-env",
+        "--exec-path",
+        "--git-dir",
+        "--namespace",
+        "--super-prefix",
+        "--work-tree",
+    }
+)
+_GIT_GLOBAL_OPTIONS_WITH_ATTACHED_VALUE = (
+    "--config-env=",
+    "--exec-path=",
+    "--git-dir=",
+    "--namespace=",
+    "--super-prefix=",
+    "--work-tree=",
+)
+_GIT_BRANCH_CHECK_TIMEOUT_SECONDS = 5
 
 if TYPE_CHECKING:
     from claw_v2.tools import ToolDefinition
@@ -321,6 +344,12 @@ class RuntimePolicyEngine:
                 raise RuntimePolicyViolation("command references path outside allowed boundaries")
             if path_is_secret(normalized) or path_is_secret(path_token):
                 raise RuntimePolicyViolation("command references a secret path")
+        protected_branch = _protected_branch_for_git_commit(command, self.workspace_root)
+        if protected_branch is not None:
+            raise RuntimePolicyViolation(
+                "git commit on protected branch "
+                f"'{protected_branch}' is not allowed; use a feature branch or detached worktree"
+            )
 
     def _enforce_paths(self, tool_name: str, args: dict, policy: ToolPolicy) -> None:
         for key, raw_path in _iter_path_values(args):
@@ -407,6 +436,93 @@ def _tier_for_policy(policy: ToolPolicy) -> int:
     if policy.read_only:
         return 1
     return 2
+
+
+def _protected_branch_for_git_commit(command: str, workspace_root: Path) -> str | None:
+    worktree = _git_commit_worktree_from_command(command, workspace_root)
+    if worktree is None:
+        return None
+    branch = _current_git_branch(worktree)
+    if branch in _PROTECTED_GIT_COMMIT_BRANCHES:
+        return branch
+    return None
+
+
+def _git_commit_worktree_from_command(command: str, workspace_root: Path) -> Path | None:
+    try:
+        raw_tokens = shlex.split(command)
+    except ValueError:
+        return None
+    tokens = _unwrap_command_tokens(raw_tokens)
+    if not tokens or Path(tokens[0]).name != "git":
+        return None
+
+    cwd = workspace_root
+    args = tokens[1:]
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "-C":
+            if index + 1 >= len(args):
+                return None
+            cwd = _resolve_git_cwd(cwd, args[index + 1])
+            index += 2
+            continue
+        if arg.startswith("-C") and len(arg) > 2:
+            cwd = _resolve_git_cwd(cwd, arg[2:])
+            index += 1
+            continue
+        if arg in _GIT_GLOBAL_OPTIONS_WITH_VALUE:
+            index += 2
+            continue
+        if any(arg.startswith(prefix) for prefix in _GIT_GLOBAL_OPTIONS_WITH_ATTACHED_VALUE):
+            index += 1
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        return cwd if arg == "commit" else None
+    return None
+
+
+def _resolve_git_cwd(current: Path, value: str) -> Path:
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = current / candidate
+    return candidate.resolve(strict=False)
+
+
+def _current_git_branch(worktree: Path) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(worktree), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_BRANCH_CHECK_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimePolicyViolation("unable to verify git branch before commit") from exc
+    if completed.returncode == 0:
+        branch = completed.stdout.strip()
+        return branch or None
+    if _is_detached_git_worktree(worktree):
+        return None
+    return None
+
+
+def _is_detached_git_worktree(worktree: Path) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_BRANCH_CHECK_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0 and completed.stdout.strip() == "true"
 
 
 def _context_candidates(context: str) -> set[str]:
