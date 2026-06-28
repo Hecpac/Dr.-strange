@@ -1531,7 +1531,9 @@ def _strip_public_markdown(value: str) -> str:
     for raw_line in str(value or "").splitlines():
         line = re.sub(r"^\s{0,3}#{1,6}\s+", "", raw_line)
         line = re.sub(r"^\s*[-*+]\s+", "", line)
-        line = re.sub(r"^\s*\d+[.)]\s+", "", line)
+        # Issue #153: restrict to 1-2 digit list markers so a 4-digit year at
+        # line start (e.g. "2026. Revenue was...") is not stripped as a marker.
+        line = re.sub(r"^\s*\d{1,2}[.)]\s+", "", line)
         line = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
         line = re.sub(r"__(.*?)__", r"\1", line)
         line = re.sub(r"`([^`]*)`", r"\1", line)
