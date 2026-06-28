@@ -533,15 +533,33 @@ class TaskLedger:
                 """,
                 (now, now, cutoff),
             )
-            self._conn.commit()
             changed = cur.rowcount
-        reconciled = [self.get(str(row["task_id"])) for row in rows]
+            # Issue #37: the UPDATE is conditional. ``self._lock`` is a
+            # thread-local lock, not a database lock, so a cross-process writer
+            # (heartbeat / checkpoint / manual resume) can advance a row's
+            # ``updated_at`` past cutoff between the SELECT and the UPDATE. The
+            # snapshot ``rows`` may therefore include tasks that were NOT
+            # flipped to lost. Re-query only the rows now 'lost' within the
+            # snapshot set so rescued rows never receive a false
+            # ``task_ledger_terminal`` event.
+            snapshot_ids = [str(row["task_id"]) for row in rows]
+            lost_ids: list[str] = []
+            if snapshot_ids and changed:
+                placeholders = ", ".join("?" for _ in snapshot_ids)
+                lost_rows = self._conn.execute(
+                    f"SELECT task_id FROM agent_tasks "
+                    f"WHERE status = 'lost' AND task_id IN ({placeholders})",
+                    tuple(snapshot_ids),
+                ).fetchall()
+                lost_ids = [str(r["task_id"]) for r in lost_rows]
+            self._conn.commit()
         if changed:
             self._emit(
                 "task_ledger_reconciled_lost",
                 {"count": changed, "older_than_seconds": older_than_seconds},
             )
-            for record in reconciled:
+            for task_id in lost_ids:
+                record = self.get(task_id)
                 if record is not None:
                     self._emit("task_ledger_terminal", record.to_dict())
         return int(changed or 0)

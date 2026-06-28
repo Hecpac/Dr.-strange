@@ -198,11 +198,26 @@ def attach_artifact_to_result(
                     break
         # F3a-ext.1 — pass workspace_root so SkillGenerate (et al.) can pin
         # allowed_path_roots and reject artifacts that escape the workspace.
+        import os
         import tempfile
 
         roots: tuple[str, ...] = ()
         if workspace_root:
             roots = (str(workspace_root), tempfile.gettempdir())
+        # Review #158 (codex): BrowserScreenshot confines outputs to the
+        # browser scratch dir (CLAW_BROWSER_SCRATCH_DIR or ~/.claw/scratch/
+        # browser), which is OUTSIDE (workspace_root, tmp). The
+        # must_be_existing_path check would otherwise reject a legitimate
+        # screenshot as path_outside_allowed_root. Add the scratch dir to the
+        # allowed roots when the artifact path lives there.
+        if tool_name == "BrowserScreenshot":
+            scratch_raw = os.getenv("CLAW_BROWSER_SCRATCH_DIR")
+            scratch = (
+                Path(scratch_raw).expanduser()
+                if scratch_raw
+                else Path.home() / ".claw" / "scratch" / "browser"
+            ).resolve(strict=False)
+            roots = (*roots, str(scratch))
         # F3b.1 — call optional external_check + preflight providers (mocked
         # in tests, empty in production until F3b.2+ wires real fetchers).
         from claw_v2.verification.external_check_runner import (

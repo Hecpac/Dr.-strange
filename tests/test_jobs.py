@@ -702,6 +702,43 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(heartbeat.lease_heartbeat_at, start + 10)
             self.assertEqual(first.get(created.job_id).lease_owner, "worker-1")
 
+    def test_formal_leases_late_complete_fail_on_terminal_returns_terminal_record(self) -> None:
+        # Issue #153: under formal_leases_enabled a terminal job has no lease
+        # (cleared on terminalization), so the lease-match guard used to return
+        # None for a late complete()/fail() retry instead of the terminal record.
+        # The terminal-idempotency check now runs before the lease-match check.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(kind="pipeline.issue", max_attempts=3)
+            start = float(created.next_run_at or time.time())
+            claimed = service.claim_next(worker_id="worker-1", now=start)
+            assert claimed is not None
+            token = {
+                "lease_owner": "worker-1",
+                "lease_generation": claimed.lease_generation,
+            }
+            first_complete = service.complete(created.job_id, result={"done": True}, **token)
+            self.assertEqual(first_complete.status, "completed")
+
+            # Late retry with the SAME (now-stale) lease credentials must return
+            # the terminal record, not None.
+            late_complete = service.complete(
+                created.job_id, result={"done": "again"}, **token
+            )
+            self.assertIsNotNone(late_complete)
+            self.assertEqual(late_complete.status, "completed")
+            self.assertEqual(late_complete.result, {"done": True})
+
+            # A late fail() on the terminal job also returns the terminal record.
+            late_fail = service.fail(created.job_id, error="boom", **token)
+            self.assertIsNotNone(late_fail)
+            self.assertEqual(late_fail.status, "completed")
+            self.assertEqual(late_fail.error, "")
+
     def test_formal_claim_returns_none_when_running_update_loses_cas(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "observe.db")

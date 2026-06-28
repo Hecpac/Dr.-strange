@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from claw_v2.network_proxy import DomainAllowlistEnforcer, NetworkPolicy
 from claw_v2.sandbox import SandboxPolicy, check_command, _unwrap_command_tokens
+from claw_v2.subprocess_runner import run_subprocess_bounded
 from claw_v2.tool_policy import TOOL_POLICIES, ToolPolicy, _decode_path_text, path_is_secret
 
 # Mirrors tools.TIER_REQUIRES_APPROVAL (importing tools here would be circular).
@@ -580,11 +581,12 @@ def _git_target_argv(target: _GitCommitTarget) -> list[str]:
 
 def _current_git_branch(target: _GitCommitTarget) -> str | None:
     try:
-        completed = subprocess.run(
+        # Issue #153: route through run_subprocess_bounded for process-group
+        # killing, bounded output, and consistent telemetry — a raw
+        # subprocess.run could orphan a hung git child on timeout.
+        completed = run_subprocess_bounded(
             [*_git_target_argv(target), "symbolic-ref", "--quiet", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=_GIT_BRANCH_CHECK_TIMEOUT_SECONDS,
+            timeout_s=_GIT_BRANCH_CHECK_TIMEOUT_SECONDS,
             check=False,
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:

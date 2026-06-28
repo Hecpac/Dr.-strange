@@ -376,6 +376,17 @@ class ConversationalBriefTests(unittest.TestCase):
             self.assertEqual(len(router.calls), 1)
             self.assertEqual(router.calls[0]["lane"], "judge")
 
+    def test_strip_public_markdown_preserves_four_digit_years(self) -> None:
+        # Issue #153: the list-marker regex must not strip a 4-digit year at
+        # line start (e.g. "2026. Revenue..."). Only 1-2 digit markers strip.
+        from claw_v2.morning_brief import _strip_public_markdown
+
+        text = "2026. Revenue creció.\n1. Primer item\n42. Otro item\n"
+        out = _strip_public_markdown(text)
+        self.assertIn("2026. Revenue creció.", out)
+        self.assertNotIn("1. Primer item", out)
+        self.assertNotIn("42. Otro item", out)
+
     def test_llm_markdown_is_removed_from_public_brief(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
