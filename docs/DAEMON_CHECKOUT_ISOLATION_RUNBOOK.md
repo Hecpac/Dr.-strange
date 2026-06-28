@@ -35,6 +35,28 @@ is prevention.
    restart → claim OFF, scheduler OFF, drain OFF. Remove + restart to resume.
    (`CLAW_AUTONOMOUS_MAINTENANCE_ENABLED` does **not** gate job claiming.)
 
+## Deploy gotchas (learned 2026-06-28)
+
+1. **Pre-push runs `claude ultrareview` on `main`.** If ultrareview is
+   unavailable (infra), the push aborts with a non-zero exit. Override:
+   `CLAW_SKIP_ULTRAREVIEW=1 git push`.
+2. **`git merge --ff-only` in the daemon clone can abort on untracked files.**
+   Files the incoming commit makes *tracked* (e.g. `memory/*.md`,
+   `docs/audits/*`) may already exist *untracked* in the daemon clone (copied
+   during the P0-1 migration). Confirm identical, then remove the untracked
+   copies before merging:
+   ```
+   git -C ~/srv/claw-daemon show origin/main:<f> | diff - ~/srv/claw-daemon/<f>   # expect no diff
+   rm ~/srv/claw-daemon/<f>
+   git -C ~/srv/claw-daemon merge --ff-only origin/main
+   ```
+3. **The daemon does NOT commit to git in-vivo** (verified: 0 commits in
+   `e2a58a2..HEAD` of the clone after ~1.5h live). The daemon clone therefore
+   stays a clean fast-forward target; any off-main strand on the shared checkout
+   came from an external terminal agent (Warp/Oz), not the daemon (see RCA).
+4. **Doc-only deploys need no restart;** code deploys require
+   `scripts/restart.sh` to reload the process.
+
 ## launchd jobs (gui/501)
 
 Repointed to the clone (daemon-coupled — run `claw_v2` code / read `claw.db`):
