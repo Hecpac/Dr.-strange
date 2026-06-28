@@ -170,6 +170,43 @@ def test_browser_screenshot_contract_rejects_nonexistent_png(tmp_path):
     assert "path_file_not_found:screenshot_path" in errors
 
 
+def test_browser_screenshot_in_default_scratch_passes_promote_gate(tmp_path, monkeypatch):
+    # Review #158 (codex): BrowserScreenshot confines outputs to the browser
+    # scratch dir (~/.claw/scratch/browser by default), which is OUTSIDE the
+    # (workspace, tmp) roots attach_artifact_to_result injects by default.
+    # must_be_existing_path would otherwise reject a legitimate screenshot as
+    # path_outside_allowed_root. Exercise the production path
+    # (attach_artifact_to_result computes roots internally) and assert the
+    # promote gate passes for a screenshot that lives in the scratch dir.
+    from claw_v2.verification.local_tool_runner import attach_artifact_to_result
+
+    scratch = tmp_path / "scratch" / "browser"
+    scratch.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CLAW_BROWSER_SCRATCH_DIR", str(scratch))
+    png = scratch / "shot.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+
+    result = {"ok": True, "screenshot_path": str(png)}
+    result = attach_artifact_to_result(
+        tool_name="BrowserScreenshot",
+        args={"path": "shot.png"},
+        result=result,
+        pre_state={},
+        workspace_root=str(workspace),
+    )
+    artifact = result["_success_condition_artifact"]
+    checkpoint = _checkpoint_with(artifact)
+    terminal, verification, _new_checkpoint, _events = apply_promote_gate_to_checkpoint(
+        raw_terminal_status="succeeded",
+        raw_verification_status="passed",
+        completed_checkpoint=checkpoint,
+    )
+    assert terminal == "succeeded"
+    assert verification == "passed"
+
+
 # ---------------------------------------------------------------------------
 # 3. build_local_tool_artifact: JSON-safe + fs_path personalised from args
 # ---------------------------------------------------------------------------
