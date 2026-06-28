@@ -772,7 +772,7 @@ class CoordinatorService:
                             # Some workers didn't finish within the drain window.
                             # They will terminate on their own when their adapter
                             # timeout fires; emit an observability event for audit.
-                            orphaned_tasks_names = [
+                            orphaned_task_names = [
                                 futures[f][1].name for f in not_done if f in futures
                             ]
                             self.observe.emit(

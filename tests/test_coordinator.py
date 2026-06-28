@@ -1220,5 +1220,135 @@ class ParallelDistillationTests(unittest.TestCase):
         self.assertFalse(results[1].degraded_compaction)
 
 
+class AbortEventTests(unittest.TestCase):
+    """Tests for cooperative cancellation via abort_event in _dispatch_parallel."""
+
+    def test_execute_worker_aborts_when_event_set_before_start(self) -> None:
+        svc, router, *_ = _make_service()
+        router.ask.return_value = MagicMock(content="should not run")
+        abort_event = threading.Event()
+        abort_event.set()
+        task = WorkerTask(name="t1", instruction="do something")
+        result = svc._execute_worker(task, abort_event=abort_event)
+        self.assertEqual(result.content, "")
+        self.assertIn("cancelled", result.error)
+        self.assertEqual(router.ask.call_count, 0)
+
+    def test_execute_worker_aborts_before_retry_when_event_set(self) -> None:
+        from claw_v2.adapters.base import AdapterError
+
+        svc, router, *_ = _make_service()
+        abort_event = threading.Event()
+
+        def fake_ask(prompt, **kwargs):
+            if not abort_event.is_set():
+                abort_event.set()
+            raise AdapterError("first attempt failed")
+
+        router.ask.side_effect = fake_ask
+        task = WorkerTask(name="impl", instruction="build", lane="worker")
+        result = svc._execute_worker(task, abort_event=abort_event)
+        self.assertEqual(result.content, "")
+        self.assertIn("cancelled", result.error)
+        self.assertEqual(router.ask.call_count, 1)
+
+    def test_critical_error_aborts_sibling_workers_via_event(self) -> None:
+        svc, router, *_ = _make_service(max_workers=2)
+        critical_started = threading.Event()
+        sibling_attempted = threading.Event()
+
+        def fake_ask(prompt, **kwargs):
+            evidence = kwargs.get("evidence_pack") or {}
+            task_name = evidence.get("coordinator_task")
+            if task_name == "critical":
+                critical_started.set()
+                return MagicMock(
+                    content="CRITICAL ERROR EN WORKER\nTraceback: broken environment"
+                )
+            if task_name == "sibling":
+                sibling_attempted.set()
+                if critical_started.wait(timeout=2):
+                    return MagicMock(content="sibling should not complete")
+            return MagicMock(content="ok")
+
+        router.ask.side_effect = fake_ask
+        tasks = [
+            WorkerTask(name="critical", instruction="critical", lane="worker"),
+            WorkerTask(name="sibling", instruction="sibling", lane="worker"),
+        ]
+        results = svc._dispatch_parallel(tasks)
+        critical_results = [r for r in results if r.task_name == "critical"]
+        self.assertEqual(len(critical_results), 1)
+        self.assertIn("CRITICAL ERROR EN WORKER", critical_results[0].content)
+        sibling_results = [r for r in results if r.task_name == "sibling"]
+        if sibling_results:
+            if sibling_results[0].content:
+                self.assertNotIn("sibling should not complete", sibling_results[0].content)
+
+    def test_orphaned_workers_event_emitted_when_drain_expires(self) -> None:
+        svc, router, observe, *_ = _make_service(max_workers=2)
+        svc._CRITICAL_ABORT_DRAIN_SECONDS = 0.1
+        slow_worker_started = threading.Event()
+        release_slow_worker = threading.Event()
+
+        def fake_ask(prompt, **kwargs):
+            evidence = kwargs.get("evidence_pack") or {}
+            task_name = evidence.get("coordinator_task")
+            if task_name == "slow":
+                slow_worker_started.set()
+                release_slow_worker.wait(timeout=5)
+                return MagicMock(content="slow result")
+            if task_name == "fast":
+                if not slow_worker_started.wait(timeout=2):
+                    raise RuntimeError("slow worker did not start")
+                return MagicMock(
+                    content="CRITICAL ERROR EN WORKER\nTraceback: broken environment"
+                )
+            return MagicMock(content="ok")
+
+        router.ask.side_effect = fake_ask
+        tasks = [
+            WorkerTask(name="slow", instruction="slow", lane="worker"),
+            WorkerTask(name="fast", instruction="fast", lane="worker"),
+        ]
+        try:
+            results = svc._dispatch_parallel(tasks)
+        finally:
+            release_slow_worker.set()
+        event_names = [call.args[0] for call in observe.emit.call_args_list if call.args]
+        self.assertIn("coordinator_critical_abort_orphaned_workers", event_names)
+        orphaned_event = next(
+            call
+            for call in observe.emit.call_args_list
+            if call.args and call.args[0] == "coordinator_critical_abort_orphaned_workers"
+        )
+        payload = orphaned_event.kwargs.get("payload") or {}
+        self.assertGreaterEqual(payload.get("orphaned_workers", 0), 1)
+        self.assertIn("slow", payload.get("orphaned_task_names", []))
+
+    def test_pool_shutdown_always_waits_for_cleanup(self) -> None:
+        svc, router, *_ = _make_service(max_workers=2)
+
+        def fake_ask(prompt, **kwargs):
+            evidence = kwargs.get("evidence_pack") or {}
+            task_name = evidence.get("coordinator_task")
+            if task_name == "critical":
+                return MagicMock(
+                    content="CRITICAL ERROR EN WORKER\nTraceback: broken environment"
+                )
+            return MagicMock(content="normal result")
+
+        router.ask.side_effect = fake_ask
+        tasks = [
+            WorkerTask(name="critical", instruction="critical", lane="worker"),
+            WorkerTask(name="normal", instruction="normal", lane="worker"),
+        ]
+        results = svc._dispatch_parallel(tasks)
+        self.assertGreaterEqual(len(results), 1)
+        critical_results = [r for r in results if r.task_name == "critical"]
+        self.assertEqual(len(critical_results), 1)
+        self.assertIn("CRITICAL ERROR EN WORKER", critical_results[0].content)
+
+
 if __name__ == "__main__":
     unittest.main()
