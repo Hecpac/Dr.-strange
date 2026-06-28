@@ -513,6 +513,18 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertIn("daemon", policy.allowed_contexts)
         self.assertIn("brain", policy.allowed_contexts)
 
+    def test_sdk_harness_tools_declared(self) -> None:
+        # Fix A: Claude Code SDK harness-internal tools must be declared so
+        # enforce() no longer rejects them with "not declared". Agent has
+        # empty allowed_contexts so it fails with "not allowed in context".
+        toolsearch = TOOL_POLICIES["ToolSearch"]
+        self.assertEqual(toolsearch.risk_level, "low")
+        self.assertTrue(toolsearch.read_only)
+        self.assertIn("brain", toolsearch.allowed_contexts)
+        agent = TOOL_POLICIES["Agent"]
+        self.assertEqual(agent.risk_level, "high")
+        self.assertEqual(agent.allowed_contexts, frozenset())
+
 
 class ConfigValidationTests(unittest.TestCase):
     """Loader fail-fast on malformed config — never silently fall back to

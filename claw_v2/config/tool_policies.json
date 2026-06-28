@@ -162,6 +162,16 @@
       "read_only": true,
       "allowed_contexts": ["telegram", "operator", "deployer"]
     },
+    "ToolSearch": {
+      "risk_level": "low",
+      "read_only": true,
+      "allowed_contexts": ["telegram", "brain", "research", "researcher", "operator", "deployer"]
+    },
+    "Agent": {
+      "risk_level": "high",
+      "read_only": false,
+      "allowed_contexts": []
+    },
 
     "WebSearch": {
       "risk_level": "low",

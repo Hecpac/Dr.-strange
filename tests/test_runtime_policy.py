@@ -145,6 +145,45 @@ class RuntimePolicyEngineTests(unittest.TestCase):
                 engine.enforce("mcp__claw__other", {}, context="brain")
             self.assertIn("not declared", str(ctx.exception))
 
+    def test_delegate_task_worker_denial_is_not_allowed_in_context_not_not_declared(self) -> None:
+        # Proves the reported "not declared" for delegate_task is not a real
+        # gate event: a non-brain context raises "not allowed in context".
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace)
+            )
+            with self.assertRaises(PermissionError) as ctx:
+                engine.enforce("mcp__claw__delegate_task", {"objective": "x"}, context="worker")
+            self.assertIn("not allowed in context", str(ctx.exception))
+            self.assertNotIn("not declared", str(ctx.exception))
+
+    def test_toolsearch_passes_after_declaration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace)
+            )
+            for ctx in ("brain", "telegram", "research", "operator", "deployer"):
+                with self.subTest(context=ctx):
+                    decision = engine.enforce("ToolSearch", {"query": "x"}, context=ctx)
+                    self.assertIsNotNone(decision)
+
+    def test_agent_denies_in_every_context_with_not_allowed_in_context(self) -> None:
+        # Agent has empty allowed_contexts: every context raises "not allowed
+        # in context", never "not declared".
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            engine = RuntimePolicyEngine(
+                workspace_root=workspace, sandbox_policy=SandboxPolicy(workspace_root=workspace)
+            )
+            for ctx in ("brain", "worker", "telegram", "operator"):
+                with self.subTest(context=ctx):
+                    with self.assertRaises(PermissionError) as exc_ctx:
+                        engine.enforce("Agent", {}, context=ctx)
+                    self.assertIn("not allowed in context", str(exc_ctx.exception))
+                    self.assertNotIn("not declared", str(exc_ctx.exception))
+
     def test_secret_paths_are_blocked_for_any_disk_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)

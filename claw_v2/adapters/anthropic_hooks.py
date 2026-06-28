@@ -140,6 +140,20 @@ def _detached_process_reason(tool_name: str, tool_input: dict[str, Any] | None) 
     return None
 
 
+def _sdk_agent_dispatch_reason(tool_name: str) -> str | None:
+    """Return a deny reason if the call invokes the SDK's ``Agent`` subagent
+    dispatcher.
+
+    The durable ``delegate_task`` contract (ledger, monitor, completion
+    notification) is the sanctioned path; the bare SDK ``Agent`` tool bypasses
+    it. Brain-lane only — worker lanes fall through to ``enforce()``, which
+    denies via the empty ``allowed_contexts`` policy entry.
+    """
+    if tool_name == "Agent":
+        return "sdk Agent subagent dispatcher is not the durable delegation path"
+    return None
+
+
 def _safe_runtime_policy_reason(reason: str) -> str:
     text = str(reason or "runtime policy blocked the command")
     text = re.sub(
@@ -238,6 +252,42 @@ def make_pre_tool_use_hook(
                         "permissionDecisionReason": nudge,
                     },
                 }
+            sdk_agent_reason = _sdk_agent_dispatch_reason(
+                str(input_data.get("tool_name", ""))
+            )
+            if sdk_agent_reason:
+                nudge = (
+                    "The Agent tool is the SDK's unmonitored subagent dispatcher and is "
+                    "not allowed here: it has no task ledger, no monitor, and no "
+                    "completion notification. Delegate the work with the delegate_task "
+                    "tool so it runs durable and reports back when it finishes."
+                )
+                if observe is not None:
+                    try:
+                        observe.emit(
+                            "brain_sdk_agent_dispatch_blocked",
+                            lane=request.lane,
+                            provider="anthropic",
+                            model=request.model,
+                            **trace_metadata(request.evidence_pack),
+                            payload={
+                                "tool_name": str(input_data.get("tool_name", "")),
+                                "reason": sdk_agent_reason,
+                            },
+                        )
+                    except Exception:
+                        logger.debug(
+                            "brain_sdk_agent_dispatch_blocked emit failed",
+                            exc_info=True,
+                        )
+                return {
+                    "systemMessage": f"Tool invocation blocked: {nudge}",
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": nudge,
+                    },
+                }
         try:
             runtime_policy.enforce(
                 input_data.get("tool_name", ""),
@@ -256,6 +306,28 @@ def make_pre_tool_use_hook(
             }
         except PermissionError as exc:
             reason = _safe_runtime_policy_reason(str(exc))
+            # Observe the exact tool_name that hit "not declared" so the
+            # post-deploy data/claw.db log resolves whether harness tools
+            # (ToolSearch/Agent) really reach enforce() or are confabulated,
+            # and proves mcp__claw__delegate_task never does.
+            if observe is not None and "not declared" in str(exc):
+                try:
+                    observe.emit(
+                        "runtime_policy_tool_not_declared",
+                        lane=request.lane,
+                        provider="anthropic",
+                        model=request.model,
+                        **trace_metadata(request.evidence_pack),
+                        payload={
+                            "tool_name": str(input_data.get("tool_name", "")),
+                            "reason": reason,
+                        },
+                    )
+                except Exception:
+                    logger.debug(
+                        "runtime_policy_tool_not_declared emit failed",
+                        exc_info=True,
+                    )
             return {
                 "systemMessage": f"Tool invocation blocked: {reason}",
                 "hookSpecificOutput": {

@@ -456,5 +456,105 @@ class RecordToolsExecutedOnFailureTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tools_executed_before_failure(ctx.exception), ["Bash"])
 
 
+class SdkHarnessToolGatingTests(unittest.IsolatedAsyncioTestCase):
+    """Fix A: SDK harness tools (ToolSearch, Agent) and the delegate_task
+    confabulation. ToolSearch is now declared and passes; Agent is denied in
+    the brain lane with a delegate_task nudge; mcp__claw__delegate_task passes
+    in brain and is rejected with 'not allowed in context' (not 'not declared')
+    elsewhere — proving the reported 'not declared' for delegate_task is not a
+    real gate event.
+    """
+
+    def _engine(self, workspace):
+        return RuntimePolicyEngine(
+            workspace_root=workspace,
+            sandbox_policy=SandboxPolicy(workspace_root=workspace),
+        )
+
+    async def test_toolsearch_passes_in_brain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            hook = make_pre_tool_use_hook(
+                _request("brain"), runtime_policy=self._engine(workspace), observe=None
+            )
+            result = await hook(
+                {"tool_name": "ToolSearch", "tool_input": {"query": "x"}}, "tu-1", None
+            )
+        self.assertEqual(result, {"continue_": True})
+
+    async def test_agent_denies_in_brain_with_delegate_task_nudge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            hook = make_pre_tool_use_hook(
+                _request("brain"), runtime_policy=self._engine(workspace), observe=None
+            )
+            result = await hook({"tool_name": "Agent", "tool_input": {}}, "tu-1", None)
+        decision = result["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+        self.assertIn("delegate_task", decision["permissionDecisionReason"])
+        self.assertIn("Agent", result["systemMessage"])
+
+    async def test_delegate_task_passes_in_brain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            hook = make_pre_tool_use_hook(
+                _request("brain"), runtime_policy=self._engine(workspace), observe=None
+            )
+            result = await hook(
+                {
+                    "tool_name": "mcp__claw__delegate_task",
+                    "tool_input": {"objective": "Publica el grid", "mode": "publish"},
+                },
+                "tu-1",
+                None,
+            )
+        self.assertEqual(result, {"continue_": True})
+
+    async def test_delegate_task_worker_denial_is_not_allowed_in_context(self) -> None:
+        # The reported "not declared" for delegate_task is not a real gate
+        # event: in a non-brain context enforce() raises "not allowed in
+        # context", never "not declared".
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            hook = make_pre_tool_use_hook(
+                _request("worker"), runtime_policy=self._engine(workspace), observe=None
+            )
+            result = await hook(
+                {
+                    "tool_name": "mcp__claw__delegate_task",
+                    "tool_input": {"objective": "x"},
+                },
+                "tu-1",
+                None,
+            )
+        decision = result["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+        self.assertIn("not allowed in context", decision["permissionDecisionReason"])
+        self.assertNotIn("not declared", decision["permissionDecisionReason"])
+
+    async def test_not_declared_emits_observe_event(self) -> None:
+        from unittest.mock import MagicMock
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            observe = MagicMock()
+            hook = make_pre_tool_use_hook(
+                _request("brain"), runtime_policy=self._engine(workspace), observe=observe
+            )
+            await hook(
+                {"tool_name": "totally.unknown.tool", "tool_input": {}}, "tu-1", None
+            )
+        emitted = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertIn("runtime_policy_tool_not_declared", emitted)
+        not_declared_call = next(
+            call
+            for call in observe.emit.call_args_list
+            if call.args[0] == "runtime_policy_tool_not_declared"
+        )
+        self.assertEqual(
+            not_declared_call.kwargs["payload"]["tool_name"], "totally.unknown.tool"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
