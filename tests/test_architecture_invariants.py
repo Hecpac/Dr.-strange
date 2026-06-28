@@ -1360,6 +1360,8 @@ class RuntimeDbReadLockDisciplineTests(unittest.TestCase):
             "claw_v2/jobs.py": {
                 "JobService._get_active_by_resume_key_unlocked",  # caller holds lock
                 "JobService._migrate_resume_key_uniqueness",  # one-time migration under __init__ lock
+                "JobService._ensure_lease_columns",  # one-time migration under __init__ lock
+                "JobService._update_row_to_running_with_lease",  # caller holds transaction lock
             },
             "claw_v2/orchestration.py": {
                 "OrchestrationStore._next_version_unlocked",  # caller holds lock
@@ -1408,8 +1410,7 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
         funcs = [
             node
             for node in tree.body
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "ensure_f2_durability_schema"
+            if isinstance(node, ast.FunctionDef) and node.name == "ensure_f2_durability_schema"
         ]
 
         self.assertEqual(len(funcs), 1)
@@ -1571,9 +1572,7 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
                 ):
                     for arg in node.args:
                         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                            bad.extend(
-                                symbol for symbol in f2_symbols if symbol in arg.value
-                            )
+                            bad.extend(symbol for symbol in f2_symbols if symbol in arg.value)
             if bad:
                 offenders[rel_path] = bad
         self.assertEqual(
@@ -1586,16 +1585,16 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
     def test_f2_2_checkpoint_writes_are_flag_gated_without_recovery_or_effects(self) -> None:
         config_source = (REPO_ROOT / "claw_v2" / "config.py").read_text(encoding="utf-8")
         main_source = (REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
-        coordinator_source = (REPO_ROOT / "claw_v2" / "coordinator.py").read_text(
-            encoding="utf-8"
-        )
+        coordinator_source = (REPO_ROOT / "claw_v2" / "coordinator.py").read_text(encoding="utf-8")
         task_handler_source = (REPO_ROOT / "claw_v2" / "task_handler.py").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("f2_durability_enabled: bool = False", config_source)
         self.assertIn("CLAW_F2_DURABILITY_ENABLED", config_source)
-        self.assertIn("F2DurabilityStore(runtime_db) if config.f2_durability_enabled else None", main_source)
+        self.assertIn(
+            "F2DurabilityStore(runtime_db) if config.f2_durability_enabled else None", main_source
+        )
         self.assertIn("f2_durability_store=f2_durability_store", main_source)
         self.assertIn("if self.f2_durability_store is None:", coordinator_source)
         self.assertIn("f2_durability_write_failed", coordinator_source)
@@ -1612,7 +1611,8 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
                 symbol for symbol in forbidden_symbols if symbol in coordinator_source
             ],
             "claw_v2/task_handler.py": [
-                symbol for symbol in ("F2DurabilityStore", *forbidden_symbols)
+                symbol
+                for symbol in ("F2DurabilityStore", *forbidden_symbols)
                 if symbol in task_handler_source
             ],
         }
@@ -1672,10 +1672,7 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
             elif isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name) and node.func.id in forbidden_names:
                     offenders.append(node.func.id)
-                elif (
-                    isinstance(node.func, ast.Attribute)
-                    and node.func.attr in forbidden_names
-                ):
+                elif isinstance(node.func, ast.Attribute) and node.func.attr in forbidden_names:
                     offenders.append(node.func.attr)
                 elif (
                     isinstance(node.func, ast.Attribute)
@@ -1692,14 +1689,17 @@ class F2DurabilityArchitectureInvariantTests(unittest.TestCase):
         task_handler_source = (REPO_ROOT / "claw_v2" / "task_handler.py").read_text(
             encoding="utf-8"
         )
-        coordinator_source = (REPO_ROOT / "claw_v2" / "coordinator.py").read_text(
-            encoding="utf-8"
-        )
+        coordinator_source = (REPO_ROOT / "claw_v2" / "coordinator.py").read_text(encoding="utf-8")
 
         self.assertIn("plan_f2_recovery", task_handler_source)
         self.assertIn("persist_cursor=False", task_handler_source)
-        self.assertIn('("research", "synthesis", "implementation", "verification")', task_handler_source)
-        self.assertIn("PHASE_ORDER = (\"research\", \"synthesis\", \"implementation\", \"verification\")", coordinator_source)
+        self.assertIn(
+            '("research", "synthesis", "implementation", "verification")', task_handler_source
+        )
+        self.assertIn(
+            'PHASE_ORDER = ("research", "synthesis", "implementation", "verification")',
+            coordinator_source,
+        )
         self.assertNotIn("plan_f2_recovery", coordinator_source)
 
         f2_helper_source = "\n".join(

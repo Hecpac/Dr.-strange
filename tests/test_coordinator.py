@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-from claw_v2.coordinator import CoordinatorService, WorkerTask
+from claw_v2.browser_evidence import BrowserEvidenceReport
+from claw_v2.coordinator import CoordinatorResult, CoordinatorService, WorkerResult, WorkerTask
+from claw_v2.langgraph_coordinator import (
+    LANGGRAPH_SHADOW_NODE_SEQUENCE,
+    LangGraphShadowRunner,
+)
 
 
 def _make_service(**overrides):
@@ -239,6 +245,135 @@ class FullRunTests(unittest.TestCase):
         self.assertEqual(result.error, "")
         self.assertEqual(observe.emit.call_count, 2)
 
+    def test_browser_evidence_is_appended_to_research_before_synthesis(self) -> None:
+        class FakeBrowserEvidenceCollector:
+            def __init__(self) -> None:
+                self.research_seen: list[str] = []
+
+            def collect(self, *, task_id, objective, research_results):
+                self.research_seen = [item.task_name for item in research_results]
+                return BrowserEvidenceReport(
+                    content="## Browser Evidence\nurl: https://example.com\nsnapshot: real page",
+                    duration_seconds=0.01,
+                    target_count=1,
+                    status="collected",
+                )
+
+        collector = FakeBrowserEvidenceCollector()
+        svc, router, _observe, _tmpdir = _make_service(browser_evidence_collector=collector)
+        router.ask.side_effect = [MagicMock(content="research data"), MagicMock(content="plan")]
+        tasks = [WorkerTask(name="r1", instruction="research https://example.com")]
+
+        result = svc.run("browser-task", "review https://example.com", tasks)
+
+        research_names = [item.task_name for item in result.phase_results["research"]]
+        self.assertEqual(research_names, ["r1", "browser_evidence"])
+        self.assertEqual(collector.research_seen, ["r1"])
+        synthesis_prompt = router.ask.call_args_list[-1].args[0]
+        self.assertIn("browser_evidence", synthesis_prompt)
+        self.assertIn("real page", synthesis_prompt)
+
+    def test_cutover_flags_off_preserve_legacy_coordinator_path(self) -> None:
+        svc, router, observe, _tmpdir = _make_service(browser_evidence_collector=None)
+        router.ask.side_effect = [
+            MagicMock(content="research data"),
+            MagicMock(content="legacy synthesis"),
+        ]
+        tasks = [WorkerTask(name="r1", instruction="research https://example.com")]
+
+        result = svc.run("legacy-cutover-task", "review https://example.com", tasks)
+
+        research_names = [item.task_name for item in result.phase_results["research"]]
+        self.assertEqual(research_names, ["r1"])
+        self.assertEqual(result.synthesis, "legacy synthesis")
+        synthesis_prompt = router.ask.call_args_list[-1].args[0]
+        self.assertNotIn("browser_evidence", synthesis_prompt)
+        emitted_names = [call.args[0] for call in observe.emit.call_args_list if call.args]
+        self.assertFalse(any(name.startswith("langgraph_") for name in emitted_names))
+
+    def test_langgraph_shadow_runner_emits_deterministic_report_without_router_or_tools(
+        self,
+    ) -> None:
+        observe = MagicMock()
+        runner = LangGraphShadowRunner(observe=observe)
+        legacy_result = CoordinatorResult(
+            task_id="shadow-task",
+            phase_results={
+                "research": [
+                    WorkerResult(
+                        task_name="r1",
+                        content="legacy research",
+                        duration_seconds=0.1,
+                    )
+                ]
+            },
+            synthesis="legacy synthesis",
+        )
+
+        report = runner.run(
+            task_id="shadow-task",
+            objective="review https://example.com",
+            research_tasks=[WorkerTask(name="r1", instruction="research")],
+            implementation_tasks=None,
+            verification_tasks=None,
+            lane_overrides=None,
+            start_phase=None,
+            legacy_result=legacy_result,
+        )
+
+        self.assertEqual(
+            tuple(node.name for node in report.node_reports), LANGGRAPH_SHADOW_NODE_SEQUENCE
+        )
+        self.assertEqual(report.planned_phases, ("research", "synthesis"))
+        self.assertEqual(report.observed_phases, ("research", "synthesis"))
+        self.assertTrue(report.matched_legacy_result)
+        event_names = [call.args[0] for call in observe.emit.call_args_list if call.args]
+        self.assertEqual(event_names, ["langgraph_shadow_started", "langgraph_shadow_completed"])
+
+    def test_langgraph_shadow_runner_does_not_replace_legacy_result(self) -> None:
+        svc, router, observe, _tmpdir = _make_service()
+        svc.langgraph_shadow_runner = LangGraphShadowRunner(observe=observe)
+        router.ask.side_effect = [
+            MagicMock(content="research data"),
+            MagicMock(content="legacy synthesis"),
+        ]
+
+        result = svc.run(
+            "shadow-run-task",
+            "review https://example.com",
+            [WorkerTask(name="r1", instruction="research")],
+        )
+
+        self.assertEqual(result.synthesis, "legacy synthesis")
+        self.assertEqual([item.task_name for item in result.phase_results["research"]], ["r1"])
+        event_names = [call.args[0] for call in observe.emit.call_args_list if call.args]
+        self.assertIn("langgraph_shadow_started", event_names)
+        self.assertIn("langgraph_shadow_completed", event_names)
+        self.assertIn("coordinator_complete", event_names)
+
+    def test_langgraph_shadow_failure_is_observable_and_non_blocking(self) -> None:
+        class BrokenShadowRunner:
+            def run(self, **_kwargs):
+                raise RuntimeError("shadow unavailable")
+
+        svc, router, observe, _tmpdir = _make_service(langgraph_shadow_runner=BrokenShadowRunner())
+        router.ask.side_effect = [
+            MagicMock(content="research data"),
+            MagicMock(content="legacy synthesis"),
+        ]
+
+        result = svc.run(
+            "shadow-fail-task",
+            "review https://example.com",
+            [WorkerTask(name="r1", instruction="research")],
+        )
+
+        self.assertEqual(result.error, "")
+        self.assertEqual(result.synthesis, "legacy synthesis")
+        event_names = [call.args[0] for call in observe.emit.call_args_list if call.args]
+        self.assertIn("langgraph_shadow_failed", event_names)
+        self.assertIn("coordinator_complete", event_names)
+
     def test_full_four_phase_run(self) -> None:
         svc, router, observe, tmpdir = _make_service()
         router.ask.return_value = MagicMock(content="ok")
@@ -315,6 +450,251 @@ class FullRunTests(unittest.TestCase):
         critical_synthesis_prompt = prompts[-1]
         self.assertIn("Self-Healing", critical_synthesis_prompt)
         self.assertIn("CRITICAL ERROR EN WORKER", critical_synthesis_prompt)
+
+
+class F6FanOutFanInContractTests(unittest.TestCase):
+    def _metadata_list(self, report: Any, key: str) -> list[dict[str, Any]]:
+        metadata = report.to_payload()["metadata"]
+        self.assertIn(key, metadata, f"{key} missing from shadow metadata")
+        value = metadata[key]
+        self.assertIsInstance(value, list)
+        return value
+
+    def test_research_fan_in_preserves_input_order_when_workers_finish_out_of_order(
+        self,
+    ) -> None:
+        svc, router, _observe, _tmpdir = _make_service(max_workers=2)
+        slow_started = threading.Event()
+        fast_done = threading.Event()
+
+        def ask(_prompt: str, **kwargs: Any) -> MagicMock:
+            evidence = kwargs.get("evidence_pack") or {}
+            task_name = evidence.get("coordinator_task")
+            if task_name == "slow_unit":
+                slow_started.set()
+                if not fast_done.wait(timeout=5):
+                    raise RuntimeError("fast worker did not complete first")
+                return MagicMock(content="slow evidence")
+            if task_name == "fast_unit":
+                if not slow_started.wait(timeout=5):
+                    raise RuntimeError("slow worker did not start")
+                fast_done.set()
+                return MagicMock(content="fast evidence")
+            return MagicMock(content="synthesis")
+
+        router.ask.side_effect = ask
+
+        result = svc.run(
+            "f6-order",
+            "collect evidence deterministically",
+            [
+                WorkerTask(name="slow_unit", instruction="slow"),
+                WorkerTask(name="fast_unit", instruction="fast"),
+            ],
+        )
+
+        self.assertEqual(
+            [item.task_name for item in result.phase_results["research"]],
+            ["slow_unit", "fast_unit"],
+        )
+
+    def test_research_fan_out_respects_configured_concurrency_limit(self) -> None:
+        svc, router, _observe, _tmpdir = _make_service(max_workers=2)
+        lock = threading.Lock()
+        release_first_wave = threading.Event()
+        active_workers = 0
+        entered_workers = 0
+        max_active_workers = 0
+
+        def ask(_prompt: str, **kwargs: Any) -> MagicMock:
+            nonlocal active_workers, entered_workers, max_active_workers
+            evidence = kwargs.get("evidence_pack") or {}
+            task_name = evidence.get("coordinator_task")
+            if not task_name:
+                return MagicMock(content="synthesis")
+            with lock:
+                active_workers += 1
+                entered_workers += 1
+                max_active_workers = max(max_active_workers, active_workers)
+                if entered_workers == 2:
+                    release_first_wave.set()
+            try:
+                if not release_first_wave.wait(timeout=5):
+                    raise RuntimeError("first worker wave did not fill")
+                return MagicMock(content=f"evidence:{task_name}")
+            finally:
+                with lock:
+                    active_workers -= 1
+
+        router.ask.side_effect = ask
+
+        result = svc.run(
+            "f6-concurrency",
+            "bounded fan-out",
+            [
+                WorkerTask(name="unit_0", instruction="u0"),
+                WorkerTask(name="unit_1", instruction="u1"),
+                WorkerTask(name="unit_2", instruction="u2"),
+                WorkerTask(name="unit_3", instruction="u3"),
+            ],
+        )
+
+        self.assertEqual(len(result.phase_results["research"]), 4)
+        self.assertLessEqual(max_active_workers, 2)
+
+    def test_shadow_report_represents_planner_units_and_reducer_worker_metadata(
+        self,
+    ) -> None:
+        runner = LangGraphShadowRunner(observe=MagicMock())
+        research_tasks = [
+            WorkerTask(name="alpha", instruction="collect alpha facts", lane="research"),
+            WorkerTask(name="beta", instruction="challenge beta claims", lane="research"),
+        ]
+        legacy_result = CoordinatorResult(
+            task_id="f6-shadow",
+            phase_results={
+                "research": [
+                    WorkerResult(
+                        task_name="alpha",
+                        content="alpha evidence with enough detail",
+                        duration_seconds=0.3,
+                    ),
+                    WorkerResult(
+                        task_name="beta",
+                        content="",
+                        duration_seconds=0.1,
+                        error="provider down",
+                    ),
+                ]
+            },
+            synthesis="merged synthesis",
+        )
+
+        report = runner.run(
+            task_id="f6-shadow",
+            objective="research with fan-out",
+            research_tasks=research_tasks,
+            implementation_tasks=None,
+            verification_tasks=[WorkerTask(name="verify", instruction="verify", lane="verifier")],
+            lane_overrides=None,
+            start_phase=None,
+            legacy_result=legacy_result,
+        )
+
+        fan_out = self._metadata_list(report, "fan_out_units")
+        self.assertEqual(
+            [(item["unit_id"], item["input"], item["lane"]) for item in fan_out],
+            [
+                ("research:0:alpha", "collect alpha facts", "research"),
+                ("research:1:beta", "challenge beta claims", "research"),
+            ],
+        )
+
+        fan_in = self._metadata_list(report, "fan_in_results")
+        self.assertEqual(
+            [item["unit_id"] for item in fan_in], ["research:0:alpha", "research:1:beta"]
+        )
+        self.assertEqual(fan_in[0]["status"], "ok")
+        self.assertEqual(fan_in[0]["error"], "")
+        self.assertIn("alpha evidence", fan_in[0]["evidence_summary"])
+        self.assertEqual(fan_in[0]["timing"]["duration_seconds"], 0.3)
+        self.assertEqual(fan_in[1]["status"], "error")
+        self.assertEqual(fan_in[1]["error"], "provider down")
+        self.assertEqual(fan_in[1]["evidence_summary"], "")
+        self.assertEqual(fan_in[1]["input"], "challenge beta claims")
+        self.assertEqual(fan_in[1]["timing"]["duration_seconds"], 0.1)
+
+    def test_shadow_reducer_orders_by_unit_id_not_duration_or_completion_order(self) -> None:
+        runner = LangGraphShadowRunner(observe=MagicMock())
+        research_tasks = [
+            WorkerTask(name="alpha", instruction="first input", lane="research"),
+            WorkerTask(name="beta", instruction="second input", lane="research"),
+        ]
+        legacy_result = CoordinatorResult(
+            task_id="f6-reducer",
+            phase_results={
+                "research": [
+                    WorkerResult(
+                        task_name="beta",
+                        content="finished first",
+                        duration_seconds=0.01,
+                    ),
+                    WorkerResult(
+                        task_name="alpha",
+                        content="finished last",
+                        duration_seconds=9.0,
+                    ),
+                ]
+            },
+            synthesis="merged synthesis",
+        )
+
+        report = runner.run(
+            task_id="f6-reducer",
+            objective="stable reducer",
+            research_tasks=research_tasks,
+            implementation_tasks=None,
+            verification_tasks=None,
+            lane_overrides=None,
+            start_phase=None,
+            legacy_result=legacy_result,
+        )
+
+        fan_in = self._metadata_list(report, "fan_in_results")
+        self.assertEqual(
+            [item["unit_id"] for item in fan_in], ["research:0:alpha", "research:1:beta"]
+        )
+        self.assertEqual([item["timing"]["duration_seconds"] for item in fan_in], [9.0, 0.01])
+
+    def test_shadow_worker_error_remains_traceable_without_dropping_other_units(self) -> None:
+        runner = LangGraphShadowRunner(observe=MagicMock())
+        research_tasks = [
+            WorkerTask(name="ok_before", instruction="first input", lane="research"),
+            WorkerTask(name="failed", instruction="failing input", lane="research"),
+            WorkerTask(name="ok_after", instruction="third input", lane="research"),
+        ]
+        legacy_result = CoordinatorResult(
+            task_id="f6-errors",
+            phase_results={
+                "research": [
+                    WorkerResult(
+                        task_name="ok_after", content="third evidence", duration_seconds=0.2
+                    ),
+                    WorkerResult(
+                        task_name="failed",
+                        content="",
+                        duration_seconds=0.4,
+                        error="adapter unavailable",
+                    ),
+                    WorkerResult(
+                        task_name="ok_before", content="first evidence", duration_seconds=0.6
+                    ),
+                ]
+            },
+            synthesis="merged synthesis",
+        )
+
+        report = runner.run(
+            task_id="f6-errors",
+            objective="preserve failed units",
+            research_tasks=research_tasks,
+            implementation_tasks=None,
+            verification_tasks=None,
+            lane_overrides=None,
+            start_phase=None,
+            legacy_result=legacy_result,
+        )
+
+        fan_in = self._metadata_list(report, "fan_in_results")
+        self.assertEqual(
+            [item["unit_id"] for item in fan_in],
+            ["research:0:ok_before", "research:1:failed", "research:2:ok_after"],
+        )
+        self.assertEqual([item["status"] for item in fan_in], ["ok", "error", "ok"])
+        self.assertEqual(fan_in[1]["input"], "failing input")
+        self.assertEqual(fan_in[1]["error"], "adapter unavailable")
+        self.assertEqual(fan_in[1]["evidence_summary"], "")
+        self.assertEqual(fan_in[1]["timing"]["duration_seconds"], 0.4)
 
 
 class WorkerTaskTests(unittest.TestCase):

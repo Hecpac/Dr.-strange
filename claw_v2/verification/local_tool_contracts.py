@@ -28,7 +28,9 @@ import json
 from typing import Any, Mapping
 
 from claw_v2.verification.success_contract import (
+    ExternalCheckSpec,
     FileIntegrityCheck,
+    PreflightSpec,
     StateDeltaSpec,
     SuccessCondition,
 )
@@ -101,6 +103,49 @@ LOCAL_TOOL_SUCCESS_CONDITIONS: dict[str, SuccessCondition] = {
         must_be_nonempty_str=("description", "model_used"),
         forbidden_reasons=("invalid_image", "timeout", "not_configured"),
     ),
+    "BrowserScreenshot": SuccessCondition(
+        must_contain_keys=("screenshot_path",),
+        must_be_nonempty_str=("screenshot_path",),
+        must_match_regex={"screenshot_path": r"\.png$"},
+        forbidden_reasons=("screenshot_path_required", "screenshot path escaped browser scratch"),
+    ),
+    "BrowserClick": SuccessCondition(
+        must_contain_keys=("url", "snapshot"),
+        must_be_nonempty_str=("url", "snapshot"),
+        external_check=ExternalCheckSpec(
+            kind="cdp_phrase",
+            target="browser_snapshot_after_click",
+        ),
+        forbidden_reasons=("stale_ref", "login_or_challenge"),
+    ),
+    "BrowserType": SuccessCondition(
+        must_contain_keys=("url", "snapshot"),
+        must_be_nonempty_str=("url", "snapshot"),
+        external_check=ExternalCheckSpec(
+            kind="cdp_phrase",
+            target="browser_snapshot_after_type",
+        ),
+        forbidden_reasons=("stale_ref", "login_or_challenge"),
+    ),
+}
+
+
+LOCAL_TOOL_PREFLIGHTS: dict[str, PreflightSpec] = {
+    "BrowserClick": PreflightSpec(
+        probe_kind="dom_selector_present",
+        target="browser_ref",
+        fail_message="BrowserClick requires the element ref to resolve in the current snapshot.",
+    ),
+    "BrowserType": PreflightSpec(
+        probe_kind="dom_selector_present",
+        target="browser_ref",
+        fail_message="BrowserType requires the element ref to resolve in the current snapshot.",
+    ),
+}
+
+LOCAL_TOOL_CONTRACT_TIERS: dict[str, int] = {
+    "BrowserClick": 3,
+    "BrowserType": 3,
 }
 
 
@@ -378,6 +423,8 @@ def build_local_tool_artifact(
 
     # Determine tier: 2 for local, 3 for external. The promote gate enforces
     # additional invariants when tier==3 (preflight + external_check + evidence).
+    local_preflight_spec = LOCAL_TOOL_PREFLIGHTS.get(tool_name)
+    local_tier = LOCAL_TOOL_CONTRACT_TIERS.get(tool_name, 2)
     is_external = False
     try:
         from claw_v2.verification.external_tool_contracts import (
@@ -403,6 +450,14 @@ def build_local_tool_artifact(
                 "must_match": dict(spec.must_match),
                 "fail_message": spec.fail_message,
             }
+    elif local_preflight_spec is not None:
+        preflight_spec = {
+            "probe_kind": local_preflight_spec.probe_kind,
+            "target": local_preflight_spec.target,
+            "selectors": list(local_preflight_spec.selectors),
+            "must_match": dict(local_preflight_spec.must_match),
+            "fail_message": local_preflight_spec.fail_message,
+        }
 
     artifact = {
         "tool_name": tool_name,
@@ -416,7 +471,7 @@ def build_local_tool_artifact(
         "evidence_uri": evidence_uri,
         "preflight": preflight_spec,
         "preflight_passed": bool(preflight_passed) if preflight_passed is not None else False,
-        "tier": 3 if is_external else 2,
+        "tier": 3 if is_external else local_tier,
     }
     # Defensive: ensure the artifact survives a json round-trip (audit log)
     json.dumps(artifact)

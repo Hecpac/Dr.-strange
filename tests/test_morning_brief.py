@@ -108,10 +108,10 @@ class MorningBriefTests(unittest.TestCase):
             self.assertIsNotNone(message)
             self.assertIsNone(duplicate)
             self.assertEqual(len(sent), 1)
-            self.assertIn("Hoy es lunes 27 de abril de 2026", sent[0])
-            self.assertIn("Clima: Dallas, TX: 72F despejado", sent[0])
-            self.assertIn("Agenda: 2 eventos hoy", sent[0])
-            self.assertIn("Correo: 3 correos importantes", sent[0])
+            self.assertIn("Arranque del lunes 27 de abril de 2026", sent[0])
+            self.assertIn("clima Dallas, TX: 72F despejado", sent[0])
+            self.assertIn("agenda 2 eventos hoy", sent[0])
+            self.assertIn("correo 3 correos importantes", sent[0])
             self.assertIn("Cerrar auditoria del agente", sent[0])
             self.assertNotIn("task-1", sent[0])
             self.assertIn("notebooklm.research", sent[0])
@@ -119,7 +119,7 @@ class MorningBriefTests(unittest.TestCase):
             self.assertIn("Revisar propuesta", sent[0])
             self.assertIn("feat/hec-1", sent[0])
             self.assertNotIn("HEC-1: awaiting_approval", sent[0])
-            self.assertIn("perf-optimizer: pausado", sent[0])
+            self.assertIn("perf-optimizer está pausado", sent[0])
             self.assertEqual((root / "morning.txt").read_text(encoding="utf-8"), "2026-04-27")
             self.assertEqual(observe.recent_events(limit=1)[0]["event_type"], "morning_brief_sent")
 
@@ -175,17 +175,17 @@ class MorningBriefTests(unittest.TestCase):
 
             message = service.build_message(datetime(2026, 5, 16, 5, 0))
 
-            self.assertIn("Aprobaciones:", message)
+            self.assertIn("Hay 1 aprobación pendiente", message)
             self.assertIn("Publicar post de HealthSherpa", message)
-            self.assertIn("Quedaron sin cerrar", message)
+            self.assertIn("Quedó sin cerrar", message)
             self.assertIn("Revisar correo de Tatiana sobre HealthSherpa", message)
             self.assertNotIn("task-failed", message)
-            self.assertIn("Cerradas recientes:", message)
+            self.assertIn("Se cerró recientemente", message)
             self.assertIn("Cerrar auditoria de Telegram router", message)
             self.assertNotIn("task-done", message)
-            self.assertIn("Contexto activo:", message)
+            self.assertIn("En el contexto activo", message)
             self.assertIn("Arreglar briefs matutinos", message)
-            self.assertIn("Alertas recientes:", message)
+            self.assertIn("alertas recientes con", message)
             self.assertIn("ejecucion con herramientas", message)
             self.assertNotIn("brain_tooluse_ledger_failed", message)
             self.assertIn("telegram_actionable_no_match", message)
@@ -206,11 +206,11 @@ class MorningBriefTests(unittest.TestCase):
 
             message = service.build_message(datetime(2026, 5, 16, 5, 0))
 
-            self.assertIn("Fuentes:", message)
-            self.assertIn("clima=ok", message)
-            self.assertIn("agenda=empty", message)
-            self.assertIn("correo=empty", message)
-            self.assertIn("baja senal", message)
+            self.assertIn("Consulté", message)
+            self.assertIn("clima ok", message)
+            self.assertIn("agenda empty", message)
+            self.assertIn("correo empty", message)
+            self.assertIn("No encontré tareas activas", message)
             self.assertEqual(
                 observe.recent_events(limit=1)[0]["event_type"], "morning_brief_low_signal"
             )
@@ -233,8 +233,8 @@ class MorningBriefTests(unittest.TestCase):
             self.assertNotIn("Agenda:", message)
             self.assertNotIn("Correo:", message)
             self.assertNotIn("no disponible (RuntimeError)", message)
-            self.assertIn("agenda=unavailable", message)
-            self.assertIn("correo=unavailable", message)
+            self.assertIn("agenda unavailable", message)
+            self.assertIn("correo unavailable", message)
 
     def test_calendar_and_email_collectors_are_automatic_when_no_command_is_configured(
         self,
@@ -250,8 +250,8 @@ class MorningBriefTests(unittest.TestCase):
 
             message = service.build_message(datetime(2026, 4, 27, 8, 0))
 
-            self.assertIn("Agenda: 9:00 AM - Revision diaria", message)
-            self.assertIn("Correo: 4 sin leer", message)
+            self.assertIn("agenda 9:00 AM - Revision diaria", message)
+            self.assertIn("correo 4 sin leer", message)
 
     def test_evening_report_uses_independent_stamp_and_event_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -278,7 +278,7 @@ class MorningBriefTests(unittest.TestCase):
 
             self.assertIsNotNone(message)
             self.assertIsNone(duplicate)
-            self.assertIn("Cierre del dia, Hector.", sent[0])
+            self.assertIn("Corte del lunes 27 de abril de 2026", sent[0])
             self.assertEqual((root / "evening.txt").read_text(encoding="utf-8"), "2026-04-27")
             self.assertEqual(observe.recent_events(limit=1)[0]["event_type"], "evening_brief_sent")
 
@@ -376,6 +376,25 @@ class ConversationalBriefTests(unittest.TestCase):
             self.assertEqual(len(router.calls), 1)
             self.assertEqual(router.calls[0]["lane"], "judge")
 
+    def test_llm_markdown_is_removed_from_public_brief(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            router = self._stub_router(
+                "# Cierre\n"
+                "- **Pendiente:** revisar Telegram\n"
+                "1. `Siguiente`: validar observe_stream"
+            )
+            service = self._service(root, llm_router=router)
+
+            message = service.build_message(datetime(2026, 5, 16, 21, 0))
+
+            self.assertIn("Cierre", message)
+            self.assertIn("Pendiente: revisar Telegram", message)
+            self.assertIn("Siguiente: validar telemetria local", message)
+            self.assertNotRegex(message, r"(?m)^\s*[-*#]")
+            self.assertNotIn("**", message)
+            self.assertNotIn("`", message)
+
     def test_morning_prompt_continues_previous_day_with_exact_dates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -420,9 +439,10 @@ class ConversationalBriefTests(unittest.TestCase):
             self.assertIn("continuación de ayer", prompt_text)
             self.assertIn("Auditar los briefs recientes", prompt_text)
             self.assertTrue(message.startswith("Apertura narrativa."))
-            self.assertIn("Bitácora verificada:", message)
-            self.assertIn("Para retomar hoy (1):", message)
+            self.assertIn("La bitácora cubre continuación de ayer", message)
+            self.assertIn("Para retomar hoy queda 1", message)
             self.assertIn("Auditar los briefs recientes", message)
+            self.assertNotRegex(message, r"(?m)^\s*[-*#]")
 
     def test_evening_prompt_is_day_cut_and_not_morning_continuation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -469,8 +489,8 @@ class ConversationalBriefTests(unittest.TestCase):
 
             service = self._service(root, llm_router=_RaisingRouter(), observe=observe)
             message = service.build_message(datetime(2026, 5, 16, 21, 0))
-            self.assertIn("Cierre del dia, Hector.", message)
-            self.assertIn("Clima: auto: 85F sol", message)
+            self.assertIn("Corte del sabado 16 de mayo de 2026", message)
+            self.assertIn("Consulté clima ok", message)
             kinds = [ev["event_type"] for ev in observe.recent_events(limit=10)]
             self.assertIn("evening_brief_llm_failed", kinds)
 
@@ -529,8 +549,9 @@ class ConversationalBriefTests(unittest.TestCase):
             root = Path(tmpdir)
             service = self._service(root, llm_router=None)
             message = service.build_message(datetime(2026, 5, 16, 21, 0))
-            self.assertIn("Cierre del dia, Hector.", message)
-            self.assertIn("Clima: auto: 85F sol", message)
+            self.assertIn("Corte del sabado 16 de mayo de 2026", message)
+            self.assertIn("Consulté clima ok", message)
+            self.assertNotRegex(message, r"(?m)^\s*[-*#]")
 
 
 if __name__ == "__main__":

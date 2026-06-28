@@ -551,6 +551,10 @@ class AppConfig:
     ]
     maintenance_mode_enabled: bool = False
     no_job_claim_enabled: bool = False
+    langgraph_shadow_enabled: bool = False
+    langgraph_coordinator_enabled: bool = False
+    browser_evidence_enabled: bool = False
+    formal_job_leases_enabled: bool = False
     f2_durability_enabled: bool = False
     notebooklm_research_durable: bool = False
 
@@ -827,6 +831,22 @@ class AppConfig:
             ),
             maintenance_mode_enabled=maintenance_mode_enabled(),
             no_job_claim_enabled=no_job_claim_enabled(),
+            langgraph_shadow_enabled=_env_bool(
+                "CLAW_LANGGRAPH_SHADOW_ENABLED",
+                _env_bool("LANGGRAPH_SHADOW_ENABLED", False),
+            ),
+            langgraph_coordinator_enabled=_env_bool(
+                "CLAW_LANGGRAPH_COORDINATOR_ENABLED",
+                _env_bool("LANGGRAPH_COORDINATOR_ENABLED", False),
+            ),
+            browser_evidence_enabled=_env_bool(
+                "CLAW_BROWSER_EVIDENCE_ENABLED",
+                _env_bool("BROWSER_EVIDENCE_ENABLED", False),
+            ),
+            formal_job_leases_enabled=_env_bool(
+                "CLAW_FORMAL_JOB_LEASES_ENABLED",
+                _env_bool("FORMAL_JOB_LEASES_ENABLED", False),
+            ),
             f2_durability_enabled=_env_bool(
                 "CLAW_F2_DURABILITY_ENABLED",
                 _env_bool("F2_DURABILITY_ENABLED", False),

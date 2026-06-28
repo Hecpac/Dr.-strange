@@ -205,16 +205,17 @@ class MorningBriefService:
 
     def _build_template_message(self, now: datetime) -> str:
         self._reset_brief_capture()
-        date_line = format_spanish_date(now)
         weather_line = self._weather_line()
         calendar_line = self._calendar_line()
         email_line = self._email_line()
         journal = self._build_agent_journal(now)
         sections = [
-            f"{self.settings.greeting}\nHoy es {date_line}.",
-            f"Clima: {weather_line}" if weather_line else "",
-            f"Agenda: {calendar_line}" if calendar_line else "",
-            f"Correo: {email_line}" if email_line else "",
+            self._opening_paragraph(
+                now,
+                weather_line=weather_line,
+                calendar_line=calendar_line,
+                email_line=email_line,
+            ),
             self._journal_section(journal),
             self._work_section(now=now),
             self._approval_section(now),
@@ -229,12 +230,44 @@ class MorningBriefService:
         if diagnostics["low_signal"]:
             message = (
                 f"{message}\n\n"
-                "Diagnostico: brief de baja senal. No encontre tareas activas, "
-                "aprobaciones, contexto de sesion ni alertas recientes; revisa "
-                "conectores si esperabas agenda/correo con contenido."
+                "No encontré tareas activas, aprobaciones, contexto de sesión ni "
+                "alertas recientes. Si esperabas agenda o correo con contenido, "
+                "revisaría conectores antes de confiar en este corte."
             )
             self._emit(f"{self.settings.report_name}_low_signal", diagnostics)
         return message
+
+    def _opening_paragraph(
+        self,
+        now: datetime,
+        *,
+        weather_line: str,
+        calendar_line: str,
+        email_line: str,
+    ) -> str:
+        date_line = format_spanish_date(now)
+        if self._report_kind() == "evening":
+            first = f"Corte del {date_line}."
+            if calendar_line or email_line:
+                details = []
+                if calendar_line:
+                    details.append(f"la agenda cerró con {calendar_line}")
+                if email_line:
+                    details.append(f"el correo quedó en {email_line}")
+                return f"{first} " + "; ".join(details) + "."
+            return first
+
+        first = f"Arranque del {date_line}."
+        details = []
+        if weather_line:
+            details.append(f"clima {weather_line}")
+        if calendar_line:
+            details.append(f"agenda {calendar_line}")
+        if email_line:
+            details.append(f"correo {email_line}")
+        if not details:
+            return first
+        return f"{first} Tengo " + "; ".join(details) + "."
 
     def _render_via_llm(self, now: datetime) -> str:
         facts = self._extract_brief_facts(now)
@@ -418,6 +451,9 @@ class MorningBriefService:
             "'tamaño grande' ni 'algunos archivos'. Concreto, no abstracto.\n"
             "- Si hay tareas en la sección DIARIO OPERACIONAL VERIFICADO, no "
             "las omitas. Puedes agrupar solo si mantienes conteo y nombres.\n"
+            "- La primera frase debe sonar a estado operativo situado, no a "
+            "saludo genérico. El cierre debe nombrar el siguiente movimiento si "
+            "hay evidencia para uno.\n"
             "\n"
             "PROHIBIDO:\n"
             "- Frases de reporte: 'te escribo', 'este brief', 'hoy tuvimos', "
@@ -734,10 +770,8 @@ class MorningBriefService:
             return ""
         if hard_evidence and not self._journal_has_signal(journal):
             return ""
-        title = "Bitácora verificada" if hard_evidence else "Diario operacional del agente"
-        lines = [
-            f"{title}:",
-            (f"- Fecha: {journal.get('today_date', '')}. Ventana: {journal.get('label', '')}."),
+        sentences = [
+            (f"La bitácora cubre {journal.get('label', '')} del {journal.get('today_date', '')}.")
         ]
         touched = list(journal.get("tasks_touched") or [])
         carryover = list(journal.get("carryover_tasks") or [])
@@ -749,7 +783,7 @@ class MorningBriefService:
             extra = touched_total - min(len(preview), 4) if preview else touched_total
             suffix = f" y {extra} más" if extra > 0 else ""
             preview_text = ("; ".join(preview) + suffix) if preview else f"{touched_total} en total"
-            lines.append(f"- Ejecutadas en la ventana ({touched_total}): {preview_text}.")
+            sentences.append(f"Se tocaron {touched_total} tareas en la ventana: {preview_text}.")
         if carryover_total:
             preview = self._summarize_task_objectives(carryover, limit=4)
             extra = carryover_total - min(len(preview), 4) if preview else carryover_total
@@ -758,14 +792,16 @@ class MorningBriefService:
                 ("; ".join(preview) + suffix) if preview else f"{carryover_total} en total"
             )
             label = journal.get("continuation_label", "continuar")
-            lines.append(f"- Para {label} ({carryover_total}): {preview_text}.")
+            sentences.append(f"Para {label} queda {carryover_total}: {preview_text}.")
         if sessions:
             session_goals = [s.get("goal", "") for s in sessions if s.get("goal")]
             if session_goals:
-                lines.append("- Hilos abiertos: " + "; ".join(session_goals[:3]) + ".")
-        if len(lines) <= 2:
+                sentences.append(
+                    "Siguen abiertos estos hilos: " + "; ".join(session_goals[:3]) + "."
+                )
+        if len(sentences) <= 1:
             return ""
-        return "\n".join(lines)
+        return " ".join(sentences)
 
     @staticmethod
     def _summarize_task_objectives(entries: list[dict[str, str]], *, limit: int) -> list[str]:
@@ -964,15 +1000,15 @@ class MorningBriefService:
             attention_descriptions = attention_descriptions[:5]
             done_descriptions = done_descriptions[:5]
         if active_descriptions:
-            lines.append("Corriendo ahora: " + "; ".join(active_descriptions) + ".")
+            lines.append("Ahora mismo sigue corriendo " + "; ".join(active_descriptions) + ".")
             work_items += len(active_descriptions)
         if attention_descriptions:
             lines.append(
-                "Quedaron sin cerrar en las últimas 48h: " + "; ".join(attention_descriptions) + "."
+                "Quedó sin cerrar en las últimas 48h " + "; ".join(attention_descriptions) + "."
             )
             work_items += len(attention_descriptions)
         if done_descriptions:
-            lines.append("Cerradas recientes: " + "; ".join(done_descriptions) + ".")
+            lines.append("Se cerró recientemente " + "; ".join(done_descriptions) + ".")
             work_items += len(done_descriptions)
         if self.job_service is not None:
             try:
@@ -985,7 +1021,7 @@ class MorningBriefService:
                 if _safe_text(getattr(job, "kind", "job"), 90)
             ]
             if job_descriptions:
-                lines.append("Jobs en curso: " + "; ".join(job_descriptions) + ".")
+                lines.append("También hay jobs en curso: " + "; ".join(job_descriptions) + ".")
                 work_items += len(job_descriptions)
         if self.task_board is not None:
             try:
@@ -998,7 +1034,7 @@ class MorningBriefService:
                 if _safe_text(getattr(task, "title", ""), 90)
             ]
             if board_descriptions:
-                lines.append("En board: " + "; ".join(board_descriptions) + ".")
+                lines.append("En el board queda " + "; ".join(board_descriptions) + ".")
                 work_items += len(board_descriptions)
         if self.pipeline is not None:
             try:
@@ -1011,7 +1047,7 @@ class MorningBriefService:
                 if _safe_text(getattr(run, "branch_name", "") or getattr(run, "issue_id", ""), 90)
             ]
             if pipeline_descriptions:
-                lines.append("Pipelines activos: " + "; ".join(pipeline_descriptions) + ".")
+                lines.append("Pipeline activo: " + "; ".join(pipeline_descriptions) + ".")
                 work_items += len(pipeline_descriptions)
         self._brief_counts["work_items"] = max(
             int(self._brief_counts.get("work_items", 0)),
@@ -1019,7 +1055,7 @@ class MorningBriefService:
         )
         if not lines:
             return ""
-        return "Trabajo:\n" + "\n".join(lines)
+        return " ".join(lines)
 
     def _approval_section(self, now: datetime) -> str:
         if self.approvals is None:
@@ -1028,15 +1064,15 @@ class MorningBriefService:
             approvals = self.approvals.list_pending()
         except Exception as exc:
             logger.warning("morning brief approvals unavailable: %s", exc)
-            return f"Aprobaciones: no disponible ({type(exc).__name__})."
+            return f"No pude leer aprobaciones ({type(exc).__name__})."
         self._brief_counts["approval_items"] = len(approvals)
         if not approvals:
-            return "Aprobaciones: 0 pendientes."
+            return ""
         audit = self._classify_pending_approvals(approvals, now=now)
+        noun = "aprobación pendiente" if len(approvals) == 1 else "aprobaciones pendientes"
         lines = [
             (
-                "Aprobaciones: "
-                f"{len(approvals)} pendientes; "
+                f"Hay {len(approvals)} {noun}: "
                 f"{audit['still_needed']} activas; "
                 f"{audit['stale']} stale; "
                 f"{audit['expired']} expiradas; "
@@ -1053,9 +1089,9 @@ class MorningBriefService:
             related = self._approval_related_context(item)
             suffix = f"; {related}" if related else ""
             lines.append(
-                f"- {classification}: {summary} (edad ~{age_hours:.1f}h{suffix}). No auto-apruebo."
+                f"{classification}: {summary} lleva ~{age_hours:.1f}h{suffix}. No la autoapruebo."
             )
-        return "\n".join(lines)
+        return " ".join(lines)
 
     def _session_context_section(self) -> str:
         if self.memory is None:
@@ -1064,8 +1100,8 @@ class MorningBriefService:
             states = self.memory.list_session_states(limit=5)
         except Exception as exc:
             logger.warning("morning brief session context unavailable: %s", exc)
-            return f"Contexto activo: no disponible ({type(exc).__name__})."
-        lines = ["Contexto activo:"]
+            return f"No pude leer el contexto activo ({type(exc).__name__})."
+        lines = []
         for state in states:
             details: list[str] = []
             current_goal = _safe_text(state.get("current_goal"), 120)
@@ -1096,17 +1132,17 @@ class MorningBriefService:
             if not details:
                 continue
             session_id = _safe_text(state.get("session_id"), 40) or "session"
-            lines.append(f"- {session_id}: " + "; ".join(details[:4]))
-        context_items = len(lines) - 1
+            lines.append(f"en {session_id} queda " + "; ".join(details[:4]))
+        context_items = len(lines)
         self._brief_counts["context_items"] = context_items
         if context_items == 0:
-            lines.append("- Sin objetivo, pendiente o mision activa en session_state reciente.")
-        return "\n".join(lines)
+            return ""
+        return "En el contexto activo, " + ". ".join(lines) + "."
 
     def _agent_section(self) -> str:
         if self.auto_research is None:
             return ""
-        lines = ["Agentes:"]
+        lines = []
         try:
             names = self.auto_research.list_agents()
         except Exception:
@@ -1120,10 +1156,10 @@ class MorningBriefService:
             if state.get("paused"):
                 paused += 1
                 reason = state.get("pause_reason") or state.get("last_action") or "paused"
-                lines.append(f"- {name}: pausado ({_trim(str(reason), 80)})")
-        if len(lines) == 1:
-            lines.append(f"- {len(names)} activos, {paused} pausados.")
-        return "\n".join(lines)
+                lines.append(f"{name} está pausado ({_trim(str(reason), 80)})")
+        if not lines:
+            return ""
+        return "En agentes: " + "; ".join(lines) + "."
 
     def _system_section(self) -> str:
         parts: list[str] = []
@@ -1146,12 +1182,12 @@ class MorningBriefService:
                 shown = ", ".join(
                     f"{name}={count}" for name, count in list(alert_counts.items())[:5]
                 )
-                parts.append(f"Alertas recientes: {shown}")
+                parts.append(f"alertas recientes con {shown}")
             else:
-                parts.append("0 alertas recientes")
+                parts.append("sin alertas recientes")
         if not parts:
             return ""
-        return "Sistema: " + "; ".join(parts) + "."
+        return "En sistema veo " + "; ".join(parts) + "."
 
     def _source_section(self) -> str:
         if not self._source_records:
@@ -1161,8 +1197,8 @@ class MorningBriefService:
             detail = str(item.get("detail") or "").strip()
             source = str(item.get("source") or "unknown").strip()
             suffix = f" ({_trim(detail, 80)})" if detail else ""
-            parts.append(f"{item['name']}={item['status']}:{source}{suffix}")
-        return "Fuentes: " + "; ".join(parts) + "."
+            parts.append(f"{item['name']} {item['status']} desde {source}{suffix}")
+        return "Consulté " + "; ".join(parts) + "."
 
     def _brief_diagnostics(self) -> dict[str, Any]:
         source_statuses = {item["name"]: item["status"] for item in self._source_records}
@@ -1485,7 +1521,21 @@ def _sanitize_public_brief_text(value: Any) -> str:
     )
     for pattern, replacement in replacements:
         text = pattern.sub(replacement, text)
-    return text.strip()
+    return _strip_public_markdown(text).strip()
+
+
+def _strip_public_markdown(value: str) -> str:
+    lines: list[str] = []
+    for raw_line in str(value or "").splitlines():
+        line = re.sub(r"^\s{0,3}#{1,6}\s+", "", raw_line)
+        line = re.sub(r"^\s*[-*+]\s+", "", line)
+        line = re.sub(r"^\s*\d+[.)]\s+", "", line)
+        line = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
+        line = re.sub(r"__(.*?)__", r"\1", line)
+        line = re.sub(r"`([^`]*)`", r"\1", line)
+        line = line.replace("### ", "").replace("## ", "").replace("# ", "")
+        lines.append(line.rstrip())
+    return "\n".join(lines)
 
 
 def _trim(value: str, limit: int) -> str:

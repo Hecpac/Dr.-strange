@@ -82,6 +82,36 @@ class AppConfigDefaultsTests(unittest.TestCase):
             self.assertTrue(configured.maintenance_mode_enabled)
             self.assertTrue(configured.no_job_claim_enabled)
 
+    def test_langgraph_cutover_flags_default_off_and_read_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = str(Path(tmpdir) / "home")
+            with patch.dict(os.environ, {"HOME": home}, clear=True):
+                default_config = AppConfig.from_env()
+            self.assertFalse(default_config.langgraph_shadow_enabled)
+            self.assertFalse(default_config.langgraph_coordinator_enabled)
+            self.assertFalse(default_config.browser_evidence_enabled)
+            self.assertFalse(default_config.formal_job_leases_enabled)
+            self.assertFalse(default_config.f2_durability_enabled)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "HOME": home,
+                    "CLAW_LANGGRAPH_SHADOW_ENABLED": "1",
+                    "CLAW_LANGGRAPH_COORDINATOR_ENABLED": "true",
+                    "CLAW_BROWSER_EVIDENCE_ENABLED": "yes",
+                    "CLAW_FORMAL_JOB_LEASES_ENABLED": "1",
+                    "CLAW_F2_DURABILITY_ENABLED": "on",
+                },
+                clear=True,
+            ):
+                configured = AppConfig.from_env()
+            self.assertTrue(configured.langgraph_shadow_enabled)
+            self.assertTrue(configured.langgraph_coordinator_enabled)
+            self.assertTrue(configured.browser_evidence_enabled)
+            self.assertTrue(configured.formal_job_leases_enabled)
+            self.assertTrue(configured.f2_durability_enabled)
+
     def test_default_allowed_read_paths_scoped_to_claw_not_home(self) -> None:
         # 2026-05-31 audit (H2): the default read-root is ~/.claw (+ /private/tmp),
         # NOT all of $HOME. Agent state under ~/.claw and the workspace stay

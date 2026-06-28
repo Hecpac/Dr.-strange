@@ -424,9 +424,7 @@ class BrowserToolService:
                 )
             else:
                 try:
-                    page = self._act_backend(
-                        sess, target.selector, action, text, clear=clear
-                    )
+                    page = self._act_backend(sess, target.selector, action, text, clear=clear)
                 except Exception as exc:
                     fail = (
                         BrowserToolResult(

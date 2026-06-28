@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -138,6 +139,69 @@ class ObservePruneSchedulerJobTests(unittest.TestCase):
             self.assertEqual(remaining, 0)
             recent = [e["event_type"] for e in runtime.observe.recent_events(limit=10)]
             self.assertIn("observe_stream_pruned", recent)
+
+    def test_durable_retention_prune_job_is_registered_and_runs(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        from claw_v2.adapters.base import LLMRequest
+        from claw_v2.main import build_runtime
+        from claw_v2.types import LLMResponse
+
+        def fake_anthropic(request: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                content="<response>ok</response>", lane=request.lane, provider="anthropic"
+            )
+
+        root = Path(tempfile.mkdtemp())
+        env = {
+            "DB_PATH": str(root / "data" / "claw.db"),
+            "WORKSPACE_ROOT": str(root / "workspace"),
+            "AGENT_STATE_ROOT": str(root / "agents"),
+            "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+            "APPROVALS_ROOT": str(root / "approvals"),
+            "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+            "DURABLE_RETENTION_DAYS": "30",
+            "DURABLE_RETENTION_PRUNE_MAX_ROWS": "10",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            runtime = build_runtime(anthropic_executor=fake_anthropic)
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+            self.assertIn("durable_retention_prune", jobs)
+
+            job = runtime.job_service.enqueue(kind="retention.old")
+            runtime.job_service.complete(job.job_id)
+            runtime.task_ledger.create(
+                task_id="task-retention-old",
+                session_id="s1",
+                objective="old terminal task",
+                runtime="coordinator",
+                status="failed",
+            )
+            old = time.time() - (31 * 86400)
+            with runtime.job_service._lock:
+                runtime.job_service._conn.execute(
+                    "UPDATE agent_jobs SET completed_at = ?, updated_at = ? WHERE job_id = ?",
+                    (old, old, job.job_id),
+                )
+                runtime.job_service._conn.execute(
+                    "UPDATE agent_tasks SET completed_at = ?, updated_at = ? WHERE task_id = ?",
+                    (old, old, "task-retention-old"),
+                )
+                runtime.job_service._conn.commit()
+
+            jobs["durable_retention_prune"].handler()
+
+            self.assertIsNone(runtime.job_service.get(job.job_id))
+            self.assertIsNone(runtime.task_ledger.get("task-retention-old"))
+            events = [
+                e
+                for e in runtime.observe.recent_events(limit=20)
+                if e["event_type"] == "durable_retention_pruned"
+            ]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["payload"]["agent_jobs_deleted"], 1)
+            self.assertEqual(events[0]["payload"]["agent_tasks_deleted"], 1)
 
 
 class InterruptCommandMatcherTests(unittest.TestCase):

@@ -13,6 +13,7 @@ Covers the contracts that AH1/AH3 hardened:
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,6 +34,8 @@ from claw_v2.adapters.base import (
     tools_executed_before_failure,
 )
 from claw_v2.approval_gate import ApprovalPending
+from claw_v2.runtime_policy import RuntimePolicyEngine
+from claw_v2.sandbox import SandboxPolicy
 
 from tests.helpers import make_config
 
@@ -81,6 +84,43 @@ def _request(lane: str) -> SimpleNamespace:
 def _approval_pending() -> ApprovalPending:
     return ApprovalPending(
         approval_id="ap-1", token="tok", tool="Bash", summary="git push needs approval"
+    )
+
+
+def _init_git_repo(path: Path, *, branch: str = "main") -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (path / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=path, check=True, capture_output=True, text=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "-B", branch],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -181,6 +221,24 @@ class CanUseToolDenyTests(unittest.IsolatedAsyncioTestCase):
         result = await can_use("Bash", {"command": "brew install x"}, None)
         self.assertEqual(result.kind, "deny")
         self.assertNotIn("whitelist", result.message)
+        self.assertTrue(result.interrupt)
+
+    async def test_git_commit_on_protected_branch_denies_before_sdk_tool_use(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir) / "repo"
+            _init_git_repo(repo, branch="main")
+            runtime_policy = RuntimePolicyEngine(
+                workspace_root=repo,
+                sandbox_policy=SandboxPolicy(workspace_root=repo),
+            )
+            can_use = build_can_use_tool(
+                self._sdk_types(), _request("operator"), runtime_policy=runtime_policy
+            )
+
+            result = await can_use("Bash", {"command": "git commit -m blocked"}, None)
+
+        self.assertEqual(result.kind, "deny")
+        self.assertIn("protected branch", result.message)
         self.assertTrue(result.interrupt)
 
     async def test_allowlisted_tools_only(self) -> None:

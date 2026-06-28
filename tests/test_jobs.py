@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from claw_v2.jobs import JOB_TERMINAL_STATUSES, JobService
 from claw_v2.observe import ObserveStream
+from claw_v2.sqlite_runtime import RuntimeDb
 
 
 class _ClosedOnceConn:
@@ -29,6 +30,83 @@ class _ClosedOnceConn:
 
 
 class JobServiceTests(unittest.TestCase):
+    def test_prune_terminal_deletes_only_old_terminal_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            service = JobService(Path(tmpdir) / "claw.db", observe=observe)
+            now = 1_000_000.0
+            old = now - (31 * 86400)
+            recent = now - (10 * 86400)
+
+            completed = service.enqueue(kind="retention.completed")
+            failed = service.enqueue(kind="retention.failed")
+            cancelled = service.enqueue(kind="retention.cancelled")
+            recent_completed = service.enqueue(kind="retention.recent")
+            queued = service.enqueue(kind="retention.queued")
+            running = service.enqueue(kind="retention.running")
+            waiting = service.enqueue(kind="retention.waiting")
+            retrying = service.enqueue(kind="retention.retrying")
+
+            service.complete(completed.job_id)
+            service.fail(failed.job_id, error="old failure", retry=False)
+            service.cancel(cancelled.job_id)
+            service.complete(recent_completed.job_id)
+            service.claim(running.job_id, worker_id="worker-1", now=old)
+            service.wait_for_approval(waiting.job_id)
+            service.fail(retrying.job_id, error="retry later", retry=True)
+
+            old_terminal_ids = (completed.job_id, failed.job_id, cancelled.job_id)
+            active_ids = (queued.job_id, running.job_id, waiting.job_id, retrying.job_id)
+            with service._lock:
+                service._conn.execute(
+                    "UPDATE agent_jobs SET completed_at = ?, updated_at = ? "
+                    f"WHERE job_id IN ({', '.join('?' for _ in old_terminal_ids)})",
+                    (old, old, *old_terminal_ids),
+                )
+                service._conn.execute(
+                    "UPDATE agent_jobs SET updated_at = ? "
+                    f"WHERE job_id IN ({', '.join('?' for _ in active_ids)})",
+                    (old, *active_ids),
+                )
+                service._conn.execute(
+                    "UPDATE agent_jobs SET completed_at = ?, updated_at = ? WHERE job_id = ?",
+                    (recent, recent, recent_completed.job_id),
+                )
+                service._conn.commit()
+
+            deleted = service.prune_terminal(retention_days=30, max_rows=10, now=now)
+
+            self.assertEqual(deleted, 3)
+            for job_id in old_terminal_ids:
+                self.assertIsNone(service.get(job_id))
+            for job_id in (*active_ids, recent_completed.job_id):
+                self.assertIsNotNone(service.get(job_id))
+            events = [event["event_type"] for event in observe.recent_events(limit=10)]
+            self.assertIn("agent_jobs_pruned", events)
+
+    def test_prune_terminal_is_bounded_per_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db")
+            now = 1_000_000.0
+            old = now - (31 * 86400)
+            job_ids: list[str] = []
+            for index in range(3):
+                record = service.enqueue(kind=f"retention.completed.{index}")
+                service.complete(record.job_id)
+                job_ids.append(record.job_id)
+            with service._lock:
+                service._conn.execute(
+                    "UPDATE agent_jobs SET completed_at = ?, updated_at = ? "
+                    f"WHERE job_id IN ({', '.join('?' for _ in job_ids)})",
+                    (old, old, *job_ids),
+                )
+                service._conn.commit()
+
+            self.assertEqual(service.prune_terminal(retention_days=30, max_rows=2, now=now), 2)
+            self.assertEqual(service.summary(), {"completed": 1})
+            self.assertEqual(service.prune_terminal(retention_days=30, max_rows=2, now=now), 1)
+            self.assertEqual(service.summary(), {})
+
     def test_enqueue_is_idempotent_for_active_resume_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service = JobService(Path(tmpdir) / "claw.db")
@@ -100,6 +178,8 @@ class JobServiceTests(unittest.TestCase):
 
             self.assertNotEqual(second.job_id, "job:old")
             self.assertEqual(second.status, "queued")
+            self.assertEqual(second.lease_generation, 0)
+            self.assertIsNone(second.lease_owner)
             self.assertEqual(service.summary(), {"completed": 1, "queued": 1})
 
     def test_claim_specific_job_marks_it_running_once(self) -> None:
@@ -117,6 +197,564 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(claimed.worker_id, "worker-1")
             self.assertIsNone(claimed_again)
             self.assertEqual(service.get(created.job_id).worker_id, "worker-1")
+
+    def test_formal_claim_next_acquires_exclusive_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            seed = JobService(
+                db_path,
+                observe=observe,
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = seed.enqueue(kind="pipeline.issue")
+            first = JobService(
+                db_path,
+                observe=observe,
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            second = JobService(
+                db_path,
+                observe=observe,
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            start = float(created.next_run_at or time.time())
+
+            claimed = first.claim_next(worker_id="worker-1", now=start)
+            claimed_again = second.claim_next(worker_id="worker-2", now=start + 1)
+
+            self.assertIsNotNone(claimed)
+            self.assertIsNone(claimed_again)
+            persisted = seed.get(created.job_id)
+            self.assertEqual(persisted.status, "running")
+            self.assertEqual(persisted.worker_id, "worker-1")
+            self.assertEqual(persisted.lease_owner, "worker-1")
+            self.assertEqual(persisted.lease_heartbeat_at, start)
+            self.assertEqual(persisted.lease_expires_at, start + 30)
+            self.assertEqual(persisted.lease_generation, 1)
+            events = [event["event_type"] for event in observe.job_events(created.job_id)]
+            self.assertIn("job_lease_acquired", events)
+            self.assertIn("job_claimed", events)
+
+    def test_formal_lease_heartbeat_extends_only_current_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(kind="pipeline.issue")
+            start = float(created.next_run_at or time.time())
+            claimed = service.claim_next(worker_id="worker-1", now=start)
+            assert claimed is not None
+
+            wrong_owner = service.heartbeat_lease(
+                created.job_id,
+                worker_id="worker-2",
+                lease_generation=claimed.lease_generation,
+                now=start + 10,
+            )
+            missing_generation = service.heartbeat_lease(
+                created.job_id,
+                worker_id="worker-1",
+                now=start + 10,
+            )
+            extended = service.heartbeat_lease(
+                created.job_id,
+                worker_id="worker-1",
+                lease_generation=claimed.lease_generation,
+                now=start + 20,
+            )
+            expired = service.heartbeat_lease(
+                created.job_id,
+                worker_id="worker-1",
+                lease_generation=claimed.lease_generation,
+                now=start + 51,
+            )
+
+            self.assertIsNone(wrong_owner)
+            self.assertIsNone(missing_generation)
+            self.assertIsNotNone(extended)
+            self.assertEqual(extended.lease_heartbeat_at, start + 20)
+            self.assertEqual(extended.lease_expires_at, start + 50)
+            self.assertIsNone(expired)
+
+    def test_release_lease_returns_job_to_retrying_for_another_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(kind="pipeline.issue")
+            start = float(created.next_run_at or time.time())
+            claimed = service.claim_next(worker_id="worker-1", now=start)
+            assert claimed is not None
+
+            released = service.release_lease(
+                created.job_id,
+                worker_id="worker-1",
+                lease_generation=claimed.lease_generation,
+                now=start + 10,
+            )
+            reclaimed = service.claim_next(worker_id="worker-2", now=start + 11)
+
+            self.assertEqual(released.status, "retrying")
+            self.assertIsNone(released.lease_owner)
+            self.assertIsNone(released.lease_expires_at)
+            self.assertEqual(reclaimed.job_id, created.job_id)
+            self.assertEqual(reclaimed.lease_owner, "worker-2")
+            self.assertEqual(reclaimed.lease_generation, 2)
+
+    def test_reclaim_expired_leases_waits_until_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                observe=observe,
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(kind="coordinator.autonomous_task", max_attempts=3)
+            start = float(created.next_run_at or time.time())
+            service.claim_next(worker_id="coordinator", now=start)
+
+            early = service.recover_stale_running(
+                kinds=("coordinator.autonomous_task",),
+                stale_after_seconds=1,
+                now=start + 20,
+            )
+            expired = service.recover_stale_running(
+                kinds=("coordinator.autonomous_task",),
+                stale_after_seconds=1,
+                now=start + 31,
+            )
+
+            self.assertEqual(early, [])
+            self.assertEqual(len(expired), 1)
+            job = service.get(created.job_id)
+            self.assertEqual(job.status, "retrying")
+            self.assertIsNone(job.lease_owner)
+            self.assertIsNone(job.lease_expires_at)
+            self.assertEqual(job.checkpoint["lease_reclaim"]["lease_owner"], "coordinator")
+            self.assertGreaterEqual(
+                job.checkpoint["lease_reclaim"]["lease_expired_by_seconds"], 1.0
+            )
+            events = [event["event_type"] for event in observe.job_events(created.job_id)]
+            self.assertIn("job_retrying", events)
+            self.assertIn("stale_running_job_recovered", events)
+
+    def test_late_heartbeat_after_reclaim_and_new_claim_does_not_extend_new_lease(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(kind="pipeline.issue", max_attempts=3)
+            start = float(created.next_run_at or time.time())
+            first = service.claim_next(worker_id="worker-1", now=start)
+            assert first is not None
+            service.reclaim_expired_leases(now=start + 31)
+            second = service.claim_next(worker_id="worker-2", now=start + 32)
+            assert second is not None
+
+            stale = service.heartbeat_lease(
+                created.job_id,
+                worker_id="worker-1",
+                lease_generation=first.lease_generation,
+                now=start + 40,
+            )
+
+            self.assertIsNone(stale)
+            persisted = service.get(created.job_id)
+            self.assertEqual(persisted.status, "running")
+            self.assertEqual(persisted.lease_owner, "worker-2")
+            self.assertEqual(persisted.lease_generation, second.lease_generation)
+            self.assertEqual(persisted.lease_heartbeat_at, start + 32)
+            self.assertEqual(persisted.lease_expires_at, start + 62)
+
+    def test_late_release_after_reclaim_and_new_claim_does_not_free_new_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(kind="pipeline.issue", max_attempts=3)
+            start = float(created.next_run_at or time.time())
+            first = service.claim_next(worker_id="worker-1", now=start)
+            assert first is not None
+            service.reclaim_expired_leases(now=start + 31)
+            second = service.claim_next(worker_id="worker-2", now=start + 32)
+            assert second is not None
+
+            stale = service.release_lease(
+                created.job_id,
+                worker_id="worker-1",
+                lease_generation=first.lease_generation,
+                now=start + 40,
+            )
+
+            self.assertIsNone(stale)
+            persisted = service.get(created.job_id)
+            self.assertEqual(persisted.status, "running")
+            self.assertEqual(persisted.lease_owner, "worker-2")
+            self.assertEqual(persisted.lease_generation, second.lease_generation)
+
+    def test_late_complete_after_reclaim_and_new_claim_does_not_terminalize_new_lease(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(kind="pipeline.issue", max_attempts=3)
+            start = float(created.next_run_at or time.time())
+            first = service.claim_next(worker_id="worker-1", now=start)
+            assert first is not None
+            service.reclaim_expired_leases(now=start + 31)
+            second = service.claim_next(worker_id="worker-2", now=start + 32)
+            assert second is not None
+
+            stale = service.complete(
+                created.job_id,
+                result={"late": True},
+                lease_owner="worker-1",
+                lease_generation=first.lease_generation,
+            )
+
+            self.assertIsNone(stale)
+            persisted = service.get(created.job_id)
+            self.assertEqual(persisted.status, "running")
+            self.assertEqual(persisted.lease_owner, "worker-2")
+            self.assertEqual(persisted.lease_generation, second.lease_generation)
+
+    def test_reused_worker_id_requires_current_lease_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(kind="pipeline.issue", max_attempts=3)
+            start = float(created.next_run_at or time.time())
+            first = service.claim_next(worker_id="worker", now=start)
+            assert first is not None
+            service.reclaim_expired_leases(now=start + 31)
+            second = service.claim_next(worker_id="worker", now=start + 32)
+            assert second is not None
+
+            stale_heartbeat = service.heartbeat_lease(
+                created.job_id,
+                worker_id="worker",
+                lease_generation=first.lease_generation,
+                now=start + 33,
+            )
+            stale_release = service.release_lease(
+                created.job_id,
+                worker_id="worker",
+                lease_generation=first.lease_generation,
+                now=start + 34,
+            )
+            current_heartbeat = service.heartbeat_lease(
+                created.job_id,
+                worker_id="worker",
+                lease_generation=second.lease_generation,
+                now=start + 35,
+            )
+            current_release = service.release_lease(
+                created.job_id,
+                worker_id="worker",
+                lease_generation=second.lease_generation,
+                now=start + 36,
+            )
+
+            self.assertIsNone(stale_heartbeat)
+            self.assertIsNone(stale_release)
+            self.assertIsNotNone(current_heartbeat)
+            self.assertEqual(current_heartbeat.lease_expires_at, start + 65)
+            self.assertIsNotNone(current_release)
+            self.assertEqual(current_release.status, "retrying")
+            self.assertIsNone(current_release.lease_owner)
+
+    def test_formal_lifecycle_mutations_without_lease_generation_do_not_mutate(
+        self,
+    ) -> None:
+        for operation in ("checkpoint", "wait", "complete", "fail", "reschedule"):
+            with self.subTest(operation=operation):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    service = JobService(
+                        Path(tmpdir) / "claw.db",
+                        formal_leases_enabled=True,
+                        default_lease_seconds=30,
+                    )
+                    created = service.enqueue(kind="pipeline.issue", max_attempts=3)
+                    start = float(created.next_run_at or time.time())
+                    claimed = service.claim_next(worker_id="worker-1", now=start)
+                    assert claimed is not None
+
+                    if operation == "checkpoint":
+                        result = service.checkpoint(
+                            created.job_id,
+                            {"phase": "bad"},
+                            lease_owner="worker-1",
+                        )
+                    elif operation == "wait":
+                        result = service.wait_for_approval(
+                            created.job_id,
+                            checkpoint={"approval": "bad"},
+                            lease_owner="worker-1",
+                        )
+                    elif operation == "complete":
+                        result = service.complete(
+                            created.job_id,
+                            result={"done": True},
+                            lease_owner="worker-1",
+                        )
+                    elif operation == "fail":
+                        result = service.fail(
+                            created.job_id,
+                            error="boom",
+                            lease_owner="worker-1",
+                        )
+                    else:
+                        result = service.reschedule(
+                            created.job_id,
+                            checkpoint={"stage": "bad"},
+                            lease_owner="worker-1",
+                        )
+
+                    self.assertIsNone(result)
+                    persisted = service.get(created.job_id)
+                    self.assertEqual(persisted.status, "running")
+                    self.assertEqual(persisted.lease_owner, "worker-1")
+                    self.assertEqual(persisted.lease_generation, claimed.lease_generation)
+                    self.assertEqual(persisted.checkpoint, {})
+                    self.assertEqual(persisted.result, {})
+                    self.assertEqual(persisted.error, "")
+
+    def test_formal_lifecycle_mutations_with_wrong_generation_do_not_mutate(
+        self,
+    ) -> None:
+        for operation in ("checkpoint", "wait", "complete", "fail", "reschedule"):
+            with self.subTest(operation=operation):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    service = JobService(
+                        Path(tmpdir) / "claw.db",
+                        formal_leases_enabled=True,
+                        default_lease_seconds=30,
+                    )
+                    created = service.enqueue(kind="pipeline.issue", max_attempts=3)
+                    start = float(created.next_run_at or time.time())
+                    claimed = service.claim_next(worker_id="worker-1", now=start)
+                    assert claimed is not None
+                    wrong_generation = claimed.lease_generation + 1
+
+                    if operation == "checkpoint":
+                        result = service.checkpoint(
+                            created.job_id,
+                            {"phase": "bad"},
+                            lease_owner="worker-1",
+                            lease_generation=wrong_generation,
+                        )
+                    elif operation == "wait":
+                        result = service.wait_for_approval(
+                            created.job_id,
+                            checkpoint={"approval": "bad"},
+                            lease_owner="worker-1",
+                            lease_generation=wrong_generation,
+                        )
+                    elif operation == "complete":
+                        result = service.complete(
+                            created.job_id,
+                            result={"done": True},
+                            lease_owner="worker-1",
+                            lease_generation=wrong_generation,
+                        )
+                    elif operation == "fail":
+                        result = service.fail(
+                            created.job_id,
+                            error="boom",
+                            lease_owner="worker-1",
+                            lease_generation=wrong_generation,
+                        )
+                    else:
+                        result = service.reschedule(
+                            created.job_id,
+                            checkpoint={"stage": "bad"},
+                            lease_owner="worker-1",
+                            lease_generation=wrong_generation,
+                        )
+
+                    self.assertIsNone(result)
+                    persisted = service.get(created.job_id)
+                    self.assertEqual(persisted.status, "running")
+                    self.assertEqual(persisted.lease_owner, "worker-1")
+                    self.assertEqual(persisted.lease_generation, claimed.lease_generation)
+                    self.assertEqual(persisted.checkpoint, {})
+                    self.assertEqual(persisted.result, {})
+                    self.assertEqual(persisted.error, "")
+
+    def test_formal_lifecycle_mutations_with_current_generation_mutate(self) -> None:
+        for operation in ("checkpoint", "wait", "complete", "fail", "reschedule"):
+            with self.subTest(operation=operation):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    service = JobService(
+                        Path(tmpdir) / "claw.db",
+                        formal_leases_enabled=True,
+                        default_lease_seconds=30,
+                    )
+                    created = service.enqueue(kind="pipeline.issue", max_attempts=3)
+                    start = float(created.next_run_at or time.time())
+                    claimed = service.claim_next(worker_id="worker-1", now=start)
+                    assert claimed is not None
+                    token = {
+                        "lease_owner": "worker-1",
+                        "lease_generation": claimed.lease_generation,
+                    }
+
+                    if operation == "checkpoint":
+                        result = service.checkpoint(
+                            created.job_id,
+                            {"phase": "ok"},
+                            **token,
+                        )
+                        self.assertEqual(result.status, "running")
+                        self.assertEqual(result.checkpoint, {"phase": "ok"})
+                        self.assertEqual(result.lease_owner, "worker-1")
+                    elif operation == "wait":
+                        result = service.wait_for_approval(
+                            created.job_id,
+                            checkpoint={"approval": "pending"},
+                            **token,
+                        )
+                        self.assertEqual(result.status, "waiting_approval")
+                        self.assertIsNone(result.lease_owner)
+                    elif operation == "complete":
+                        result = service.complete(
+                            created.job_id,
+                            result={"done": True},
+                            **token,
+                        )
+                        self.assertEqual(result.status, "completed")
+                        self.assertEqual(result.result, {"done": True})
+                        self.assertIsNone(result.lease_owner)
+                    elif operation == "fail":
+                        result = service.fail(
+                            created.job_id,
+                            error="boom",
+                            **token,
+                        )
+                        self.assertEqual(result.status, "retrying")
+                        self.assertEqual(result.error, "boom")
+                        self.assertIsNone(result.lease_owner)
+                    else:
+                        result = service.reschedule(
+                            created.job_id,
+                            checkpoint={"stage": "pending"},
+                            result={"last_status": "pending"},
+                            **token,
+                        )
+                        self.assertEqual(result.status, "retrying")
+                        self.assertEqual(result.checkpoint, {"stage": "pending"})
+                        self.assertEqual(result.result, {"last_status": "pending"})
+                        self.assertIsNone(result.lease_owner)
+
+    def test_formal_leases_work_with_shared_runtime_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = RuntimeDb(Path(tmpdir) / "claw.db")
+            self.addCleanup(db.close)
+            first = JobService(
+                db.db_path,
+                runtime_db=db,
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            second = JobService(
+                db.db_path,
+                runtime_db=db,
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = first.enqueue(kind="pipeline.issue")
+            start = float(created.next_run_at or time.time())
+
+            claimed = first.claim_next(worker_id="worker-1", now=start)
+            claimed_again = second.claim_next(worker_id="worker-2", now=start + 1)
+            assert claimed is not None
+            heartbeat = second.heartbeat_lease(
+                created.job_id,
+                worker_id="worker-1",
+                lease_generation=claimed.lease_generation,
+                now=start + 10,
+            )
+
+            self.assertIsNone(claimed_again)
+            self.assertIsNotNone(heartbeat)
+            self.assertEqual(heartbeat.lease_heartbeat_at, start + 10)
+            self.assertEqual(first.get(created.job_id).lease_owner, "worker-1")
+
+    def test_formal_claim_returns_none_when_running_update_loses_cas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                observe=observe,
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(kind="pipeline.issue")
+            start = float(created.next_run_at or time.time())
+            original = service._update_row_to_running_with_lease
+
+            def lose_cas(row, *, worker_id, now, lease_seconds):
+                service._conn.execute(
+                    """
+                    UPDATE agent_jobs
+                    SET status = 'running',
+                        worker_id = 'other-worker',
+                        lease_owner = 'other-worker',
+                        lease_expires_at = ?,
+                        lease_heartbeat_at = ?,
+                        lease_generation = COALESCE(lease_generation, 0) + 1,
+                        attempts = COALESCE(attempts, 0) + 1,
+                        updated_at = ?
+                    WHERE job_id = ?
+                    """,
+                    (now + 30, now, now, row["job_id"]),
+                )
+                return original(
+                    row,
+                    worker_id=worker_id,
+                    now=now,
+                    lease_seconds=lease_seconds,
+                )
+
+            service._update_row_to_running_with_lease = lose_cas  # type: ignore[method-assign]
+
+            claimed = service.claim(
+                created.job_id,
+                worker_id="worker-1",
+                now=start,
+                lease_seconds=30,
+            )
+
+            self.assertIsNone(claimed)
+            persisted = service.get(created.job_id)
+            self.assertEqual(persisted.status, "running")
+            self.assertEqual(persisted.lease_owner, "other-worker")
+            self.assertEqual(persisted.lease_generation, 1)
+            events = [event["event_type"] for event in observe.job_events(created.job_id)]
+            self.assertNotIn("job_lease_acquired", events)
+            self.assertNotIn("job_claimed", events)
 
     def test_claims_allowed_when_maintenance_flags_absent(self) -> None:
         with patch.dict(

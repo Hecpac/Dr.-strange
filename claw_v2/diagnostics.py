@@ -166,7 +166,9 @@ def collect_f2_recovery_report(
     finally:
         conn.close()
 
-    effects = report.get("external_effects") if isinstance(report.get("external_effects"), dict) else {}
+    effects = (
+        report.get("external_effects") if isinstance(report.get("external_effects"), dict) else {}
+    )
     report["readiness"] = _f2_readiness(
         report["status"],
         report["tables_present"],
@@ -399,9 +401,7 @@ def _f2_diagnostic_limit(limit: int) -> int:
 
 
 def _utc_iso_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _f2_counts(
@@ -536,8 +536,7 @@ def _f2_recent_records(
     ).fetchall()
     return {
         "phase_checkpoints": [
-            _f2_checkpoint_summary(row, include_payload=include_payload)
-            for row in checkpoints
+            _f2_checkpoint_summary(row, include_payload=include_payload) for row in checkpoints
         ],
         "phase_checkpoint_writes": [
             _f2_write_summary(row, include_payload=include_payload) for row in writes
@@ -745,11 +744,7 @@ def _f2_external_effect_diagnostics(
         """,
         [*params, *manual_statuses, limit],
     ).fetchall()
-    absent_where = (
-        f"{where} AND e.status = ?"
-        if where
-        else " WHERE e.status = ?"
-    )
+    absent_where = f"{where} AND e.status = ?" if where else " WHERE e.status = ?"
     verified_absent = conn.execute(
         f"""
         SELECT e.external_effect_id, e.idempotency_key, e.task_id, e.run_id, e.phase,
@@ -763,13 +758,9 @@ def _f2_external_effect_diagnostics(
         [*params, F2_VERIFIED_ABSENT_STATUS, limit],
     ).fetchall()
     return {
-        "orphaned": [
-            _f2_effect_issue(row, reason="orphaned_external_effect")
-            for row in orphaned
-        ],
+        "orphaned": [_f2_effect_issue(row, reason="orphaned_external_effect") for row in orphaned],
         "manual_review_required": [
-            _f2_effect_issue(row, reason="unsafe_external_effect_status")
-            for row in manual
+            _f2_effect_issue(row, reason="unsafe_external_effect_status") for row in manual
         ],
         "verified_absent_requires_future_execution": [
             _f2_effect_issue(
@@ -1777,9 +1768,7 @@ def _checks(
             autonomy.get("autonomous_maintenance_disabled_skips_24h") or 0
         ),
         "stale_running_jobs": int(autonomy.get("stale_running_jobs_count") or 0),
-        "completed_unverified_backlog": int(
-            autonomy.get("completed_unverified_backlog") or 0
-        ),
+        "completed_unverified_backlog": int(autonomy.get("completed_unverified_backlog") or 0),
         "completed_unverified_overdue": int(autonomy.get("completed_unverified_overdue") or 0),
         "lost_tasks": int(autonomy.get("lost_tasks") or 0),
         "failed_tasks": int(autonomy.get("failed_tasks") or 0),

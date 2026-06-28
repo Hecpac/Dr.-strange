@@ -39,7 +39,7 @@ class DaemonHealthCheckHandlerTests(unittest.TestCase):
                 args=["pgrep"], returncode=0, stdout="12345 python claw_v2\n", stderr=""
             )
             with (
-                patch("claw_v2.kairos.subprocess.run", return_value=fake_pgrep),
+                patch("claw_v2.kairos.run_subprocess_bounded", return_value=fake_pgrep),
                 patch("claw_v2.kairos.Path") as mock_path,
             ):
                 mock_path.return_value = log_path
@@ -64,7 +64,7 @@ class DaemonHealthCheckHandlerTests(unittest.TestCase):
                 args=["pgrep"], returncode=0, stdout="42 python claw_v2\n", stderr=""
             )
             with (
-                patch("claw_v2.kairos.subprocess.run", return_value=fake_pgrep),
+                patch("claw_v2.kairos.run_subprocess_bounded", return_value=fake_pgrep),
                 patch("claw_v2.kairos.Path") as mock_path,
             ):
                 mock_path.return_value = log_path
@@ -78,7 +78,7 @@ class DaemonHealthCheckHandlerTests(unittest.TestCase):
     def test_pgrep_failure_is_fail_safe(self) -> None:
         svc, observe = _make_service()
         with patch(
-            "claw_v2.kairos.subprocess.run",
+            "claw_v2.kairos.run_subprocess_bounded",
             side_effect=FileNotFoundError("pgrep not found"),
         ):
             svc._handle_daemon_health_check(TickDecision(action="daemon_health_check"), None)
@@ -98,7 +98,7 @@ class DaemonHealthCheckHandlerTests(unittest.TestCase):
         if missing.exists():
             missing.unlink()
         with (
-            patch("claw_v2.kairos.subprocess.run", return_value=fake_pgrep),
+            patch("claw_v2.kairos.run_subprocess_bounded", return_value=fake_pgrep),
             patch("claw_v2.kairos.Path") as mock_path,
         ):
             mock_path.return_value = missing
@@ -112,7 +112,7 @@ class DaemonHealthCheckHandlerTests(unittest.TestCase):
     def test_payload_contains_auto_approved_reason(self) -> None:
         svc, observe = _make_service()
         with patch(
-            "claw_v2.kairos.subprocess.run",
+            "claw_v2.kairos.run_subprocess_bounded",
             side_effect=RuntimeError("boom"),
         ):
             svc._handle_daemon_health_check(TickDecision(action="daemon_health_check"), None)
@@ -123,7 +123,7 @@ class DaemonHealthCheckHandlerTests(unittest.TestCase):
         svc, observe = _make_service()
         observe.emit.side_effect = RuntimeError("db locked")
         with patch(
-            "claw_v2.kairos.subprocess.run",
+            "claw_v2.kairos.run_subprocess_bounded",
             return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
         ):
             svc._handle_daemon_health_check(TickDecision(action="daemon_health_check"), None)

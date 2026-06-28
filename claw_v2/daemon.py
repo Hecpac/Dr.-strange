@@ -53,6 +53,7 @@ class ClawDaemon:
         task_handler: Any | None = None,
         stale_task_seconds: float = 6 * 60 * 60,
         task_reconciliation_interval: float = 5 * 60,
+        orphan_job_reconciliation_interval: float = 5 * 60,
         pending_verification_interval: float = 15 * 60,
         pending_verification_drain_apply: bool | None = None,
         pending_verification_drain_max_apply: int = 10,
@@ -73,6 +74,8 @@ class ClawDaemon:
         self.stale_task_seconds = stale_task_seconds
         self.task_reconciliation_interval = task_reconciliation_interval
         self._last_task_reconciliation_at = 0.0
+        self.orphan_job_reconciliation_interval = orphan_job_reconciliation_interval
+        self._last_orphan_job_reconciliation_at = 0.0
         self.pending_verification_interval = pending_verification_interval
         self._last_pending_verification_at = 0.0
         # Checkpoint D: live drain of the read-only backlog. Default OFF — the
@@ -115,7 +118,7 @@ class ClawDaemon:
     def tick(self, *, now: float | None = None) -> TickResult:
         trace = new_trace_context(artifact_id="daemon_tick")
         reconciled_lost = self._reconcile_stale_tasks(now=now)
-        reconciled_orphan_jobs = self._reconcile_orphaned_jobs()
+        reconciled_orphan_jobs = self._reconcile_orphaned_jobs(now=now)
         pending_reconciliation_job_id = self._enqueue_pending_verification_reconciliation(now=now)
         executed_jobs = self.scheduler.run_due(now=now)
         snapshot = self._heartbeat_snapshot(now=now)
@@ -183,9 +186,16 @@ class ClawDaemon:
             )
         return changed
 
-    def _reconcile_orphaned_jobs(self) -> int:
+    def _reconcile_orphaned_jobs(self, *, now: float | None = None) -> int:
         if self.task_ledger is None or self.job_service is None:
             return 0
+        current = time.time() if now is None else now
+        if (
+            current - self._last_orphan_job_reconciliation_at
+            < self.orphan_job_reconciliation_interval
+        ):
+            return 0
+        self._last_orphan_job_reconciliation_at = current
         changed = 0
         active_statuses = ("queued", "running", "waiting_approval", "retrying")
         jobs = self.job_service.list(

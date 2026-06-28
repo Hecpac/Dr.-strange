@@ -150,15 +150,11 @@ class F2DiagnosticsTests(unittest.TestCase):
             self.assertTrue(report["enabled"])
             self.assertEqual(report["counts"]["phase_checkpoints"]["by_status"]["started"], 1)
             self.assertEqual(
-                report["counts"]["phase_checkpoint_writes"]["by_write_kind"][
-                    "phase_started"
-                ],
+                report["counts"]["phase_checkpoint_writes"]["by_write_kind"]["phase_started"],
                 1,
             )
             self.assertEqual(
-                report["counts"]["external_effect_records"]["by_status"][
-                    "verified_applied"
-                ],
+                report["counts"]["external_effect_records"]["by_status"]["verified_applied"],
                 1,
             )
             self.assertEqual(

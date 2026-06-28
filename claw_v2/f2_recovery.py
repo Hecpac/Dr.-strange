@@ -120,9 +120,7 @@ def plan_f2_recovery(
         for phase in phase_tuple
     )
     external_effect_blockers = tuple(
-        blocker
-        for decision in phase_decisions
-        for blocker in decision.external_effect_blockers
+        blocker for decision in phase_decisions for blocker in decision.external_effect_blockers
     )
     future_effects = tuple(
         effect_id
@@ -301,7 +299,9 @@ def _linked_external_effect_writes(writes: Sequence[Any]) -> dict[str, tuple[str
 def _overall_status(
     phase_decisions: Sequence[F2PhaseRecoveryDecision],
 ) -> F2RecoveryStatus:
-    if any(decision.status is F2RecoveryStatus.MANUAL_REVIEW_REQUIRED for decision in phase_decisions):
+    if any(
+        decision.status is F2RecoveryStatus.MANUAL_REVIEW_REQUIRED for decision in phase_decisions
+    ):
         return F2RecoveryStatus.MANUAL_REVIEW_REQUIRED
     if any(decision.status is F2RecoveryStatus.BLOCKED for decision in phase_decisions):
         return F2RecoveryStatus.BLOCKED
