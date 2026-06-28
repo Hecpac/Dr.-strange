@@ -108,6 +108,47 @@ class DockerRunTests(unittest.TestCase):
         emitted = [call.args[0] for call in observe.emit.call_args_list]
         self.assertIn("runtime_isolation_degraded", emitted)
 
+    @patch("claw_v2.container.docker_available", return_value=True)
+    @patch("claw_v2.container._docker_run")
+    def test_cdp_command_in_networkless_container_emits_guard(self, mock_docker, _avail) -> None:
+        # Fix B: a CDP-shaped command routed through docker_ephemeral with
+        # network disabled cannot reach the host's Chrome on :9250; emit an
+        # observe event so the latent failure is visible instead of a bare
+        # connection-refused.
+        mock_docker.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        observe = MagicMock()
+        policy = ContainerPolicy(
+            isolation_mode="docker_ephemeral",
+            network_enabled=False,
+            docker_image="python:3.12-slim",
+        )
+        sandboxed_run(
+            "curl -s http://localhost:9250/json/list",
+            cwd="/tmp",
+            policy=policy,
+            observe=observe,
+        )
+        emitted = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertIn("runtime_cdp_command_routed_to_networkless_container", emitted)
+
+    @patch("claw_v2.container.docker_available", return_value=True)
+    @patch("claw_v2.container._docker_run")
+    def test_non_cdp_command_does_not_emit_guard(self, mock_docker, _avail) -> None:
+        mock_docker.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        observe = MagicMock()
+        policy = ContainerPolicy(
+            isolation_mode="docker_ephemeral",
+            network_enabled=False,
+            docker_image="python:3.12-slim",
+        )
+        sandboxed_run("pytest -x", cwd="/tmp", policy=policy, observe=observe)
+        emitted = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertNotIn("runtime_cdp_command_routed_to_networkless_container", emitted)
+
 
 class DockerAvailableTests(unittest.TestCase):
     @patch("claw_v2.container.subprocess.run")

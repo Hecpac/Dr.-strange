@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import resource
 import shlex
 import shutil
@@ -23,6 +24,24 @@ class ContainerPolicy:
     network_enabled: bool = False
     docker_image: str | None = None
     isolation_mode: str = "host_sanitized"
+
+
+_CDP_COMMAND_RE = re.compile(
+    r"(:9250\b|:9222\b|webSocketDebuggerUrl|/json/(?:list|version)\b)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_cdp_command(command: str | list[str]) -> bool:
+    """True when a command drives Chrome DevTools Protocol (CDP) on the host.
+
+    Browser/CDP work must run in the SDK worker lane, not ``sandboxed_run``:
+    a ``docker_ephemeral`` container runs ``--network=none`` by default and
+    its ``localhost`` is not the host's loopback, so a CDP connection from
+    inside the container cannot reach the host's Chrome on :9250/:9222.
+    """
+    text = command if isinstance(command, str) else " ".join(str(c) for c in command)
+    return bool(_CDP_COMMAND_RE.search(text))
 
 
 def sandboxed_run(
@@ -58,6 +77,26 @@ def sandboxed_run(
                 logger.debug("runtime isolation degrade observe emit failed", exc_info=True)
         use_docker = False
         mode = "host_sanitized"
+    # Browser/CDP work (Chrome DevTools on :9250/:9222, webSocketDebuggerUrl)
+    # must run in the SDK worker lane, not sandboxed_run: a docker_ephemeral
+    # container runs --network=none by default and its localhost is not the
+    # host's loopback, so CDP connections silently fail. Emit an observe event
+    # when a CDP-shaped command is routed here so the latent failure is visible
+    # instead of a bare connection-refused.
+    if use_docker and not policy.network_enabled and _looks_like_cdp_command(command):
+        if observe is not None:
+            try:
+                observe.emit(
+                    "runtime_cdp_command_routed_to_networkless_container",
+                    payload={
+                        "requested_mode": mode,
+                        "effective_runner": "docker",
+                        "network_enabled": False,
+                        "reason": "cdp_requires_host_network",
+                    },
+                )
+            except Exception:
+                logger.debug("cdp networkless container observe emit failed", exc_info=True)
     if use_docker:
         result = _docker_run(command, cwd=cwd, policy=policy, shell=shell, env_result=env_result)
     else:
