@@ -534,7 +534,7 @@ def _f6_shadow_metadata(*, research_tasks: tuple[Any, ...], legacy_result: Any) 
             "input_index": index,
             "phase": "research",
             "name": _task_name(task, index),
-            "input": _task_instruction(task),
+            "input": redact_text(_task_instruction(task), limit=0),
             "lane": _task_lane(task),
         }
         for index, task in enumerate(research_tasks)
