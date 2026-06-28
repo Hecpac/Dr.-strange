@@ -617,6 +617,23 @@ class DaemonTickTests(unittest.TestCase):
                 payload={"cancelled_orphan_jobs": 1},
             )
 
+    def test_tick_rate_limits_orphan_job_reconciliation_scan(self) -> None:
+        ledger = MagicMock()
+        ledger.mark_stale_running_lost.return_value = 0
+        jobs = MagicMock()
+        jobs.list.return_value = []
+        daemon, _, _ = self._make_daemon()
+        daemon.task_ledger = ledger
+        daemon.job_service = jobs
+        daemon.task_reconciliation_interval = 0
+        daemon.orphan_job_reconciliation_interval = 300
+
+        daemon.tick(now=1000)
+        daemon.tick(now=1050)
+        daemon.tick(now=1300)
+
+        self.assertEqual(jobs.list.call_count, 2)
+
 
 class RecoveryJobDrainRunnerTests(unittest.TestCase):
     """C1 (2026-06-10 audit): recovery_jobs accumulated forever because

@@ -11,6 +11,90 @@ from claw_v2.task_ledger import TaskLedger
 
 
 class TaskLedgerTests(unittest.TestCase):
+    def test_prune_terminal_deletes_only_old_terminal_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            ledger = TaskLedger(Path(tmpdir) / "claw.db", observe=observe)
+            now = 1_000_000.0
+            old = now - (31 * 86400)
+            recent = now - (10 * 86400)
+
+            for task_id, status in (
+                ("task-succeeded-old", "succeeded"),
+                ("task-failed-old", "failed"),
+                ("task-cancelled-old", "cancelled"),
+                ("task-recent", "succeeded"),
+                ("task-queued-old", "queued"),
+                ("task-running-old", "running"),
+            ):
+                ledger.create(
+                    task_id=task_id,
+                    session_id="s1",
+                    objective=f"retention {task_id}",
+                    runtime="coordinator",
+                    status=status,
+                )
+
+            old_terminal_ids = (
+                "task-succeeded-old",
+                "task-failed-old",
+                "task-cancelled-old",
+            )
+            active_ids = ("task-queued-old", "task-running-old")
+            with ledger._lock:
+                ledger._conn.execute(
+                    "UPDATE agent_tasks SET completed_at = ?, updated_at = ? "
+                    f"WHERE task_id IN ({', '.join('?' for _ in old_terminal_ids)})",
+                    (old, old, *old_terminal_ids),
+                )
+                ledger._conn.execute(
+                    "UPDATE agent_tasks SET updated_at = ? "
+                    f"WHERE task_id IN ({', '.join('?' for _ in active_ids)})",
+                    (old, *active_ids),
+                )
+                ledger._conn.execute(
+                    "UPDATE agent_tasks SET completed_at = ?, updated_at = ? WHERE task_id = ?",
+                    (recent, recent, "task-recent"),
+                )
+                ledger._conn.commit()
+
+            deleted = ledger.prune_terminal(retention_days=30, max_rows=10, now=now)
+
+            self.assertEqual(deleted, 3)
+            for task_id in old_terminal_ids:
+                self.assertIsNone(ledger.get(task_id))
+            for task_id in (*active_ids, "task-recent"):
+                self.assertIsNotNone(ledger.get(task_id))
+            events = [event["event_type"] for event in observe.recent_events(limit=10)]
+            self.assertIn("agent_tasks_pruned", events)
+
+    def test_prune_terminal_is_bounded_per_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = TaskLedger(Path(tmpdir) / "claw.db")
+            now = 1_000_000.0
+            old = now - (31 * 86400)
+            task_ids = [f"task-old-{index}" for index in range(3)]
+            for task_id in task_ids:
+                ledger.create(
+                    task_id=task_id,
+                    session_id="s1",
+                    objective="retention",
+                    runtime="coordinator",
+                    status="failed",
+                )
+            with ledger._lock:
+                ledger._conn.execute(
+                    "UPDATE agent_tasks SET completed_at = ?, updated_at = ? "
+                    f"WHERE task_id IN ({', '.join('?' for _ in task_ids)})",
+                    (old, old, *task_ids),
+                )
+                ledger._conn.commit()
+
+            self.assertEqual(ledger.prune_terminal(retention_days=30, max_rows=2, now=now), 2)
+            self.assertEqual(ledger.summary(), {"failed": 1})
+            self.assertEqual(ledger.prune_terminal(retention_days=30, max_rows=2, now=now), 1)
+            self.assertEqual(ledger.summary(), {})
+
     def test_create_list_and_mark_terminal_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             ledger = TaskLedger(Path(tmpdir) / "claw.db")

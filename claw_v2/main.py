@@ -64,7 +64,7 @@ from claw_v2.f2_durability_store import F2DurabilityStore
 from claw_v2.github import GitHubPullRequestService
 from claw_v2.heartbeat import HeartbeatService
 from claw_v2.hooks import make_anti_distillation_hook, make_daily_cost_gate, make_decision_logger
-from claw_v2.jobs import JobService
+from claw_v2.jobs import JOB_TERMINAL_PRUNE_MAX_ROWS, JOB_TERMINAL_RETENTION_DAYS, JobService
 from claw_v2.kairos import KairosService
 from claw_v2.langgraph_coordinator import LangGraphF2CheckpointAdapter, LangGraphShadowRunner
 from claw_v2.learning import LearningLoop
@@ -91,7 +91,11 @@ from claw_v2.subprocess_runner import run_subprocess_bounded
 from claw_v2.runtime_policy import RuntimePolicyEngine
 from claw_v2.sqlite_runtime import RuntimeDb, check_runtime_sqlite_health
 from claw_v2.task_board import TaskBoard
-from claw_v2.task_ledger import TaskLedger
+from claw_v2.task_ledger import (
+    TASK_TERMINAL_PRUNE_MAX_ROWS,
+    TASK_TERMINAL_RETENTION_DAYS,
+    TaskLedger,
+)
 from claw_v2.terminal_bridge import TerminalBridgeService
 from claw_v2.types import LLMResponse
 from claw_v2.workspace import AgentWorkspace
@@ -1822,6 +1826,58 @@ def _setup_scheduler(
     # Bounded local DELETE (no provider/subprocess work): safe to run inline.
     scheduler.register(
         ScheduledJob(name="observe_prune", interval_seconds=3600, handler=_observe_prune_handler)
+    )
+
+    def _durable_retention_prune_handler() -> None:
+        import os
+
+        def _env_int(name: str, default: int) -> int:
+            try:
+                return int(os.environ.get(name, str(default)))
+            except ValueError:
+                return default
+
+        retention_days = max(
+            0,
+            _env_int(
+                "DURABLE_RETENTION_DAYS",
+                min(JOB_TERMINAL_RETENTION_DAYS, TASK_TERMINAL_RETENTION_DAYS),
+            ),
+        )
+        max_rows = max(
+            0,
+            _env_int(
+                "DURABLE_RETENTION_PRUNE_MAX_ROWS",
+                min(JOB_TERMINAL_PRUNE_MAX_ROWS, TASK_TERMINAL_PRUNE_MAX_ROWS),
+            ),
+        )
+        job_deleted = 0
+        if job_service is not None:
+            job_deleted = job_service.prune_terminal(
+                retention_days=retention_days,
+                max_rows=max_rows,
+            )
+        task_deleted = task_ledger.prune_terminal(
+            retention_days=retention_days,
+            max_rows=max_rows,
+        )
+        if job_deleted or task_deleted:
+            observe.emit(
+                "durable_retention_pruned",
+                payload={
+                    "agent_jobs_deleted": job_deleted,
+                    "agent_tasks_deleted": task_deleted,
+                    "retention_days": retention_days,
+                    "max_rows": max_rows,
+                },
+            )
+
+    scheduler.register(
+        ScheduledJob(
+            name="durable_retention_prune",
+            interval_seconds=3600,
+            handler=_durable_retention_prune_handler,
+        )
     )
 
     dream = AutoDreamService(memory=memory, observe=observe, router=router)

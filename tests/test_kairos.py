@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import datetime
 import json
 import os
@@ -19,6 +20,25 @@ from claw_v2.kairos import KairosService, TickDecision, _classify_decide_error
 class _Site:
     name: str
     url: str
+
+
+class KairosSubprocessPolicyTests(unittest.TestCase):
+    def test_kairos_uses_bounded_subprocess_runner_instead_of_raw_run(self) -> None:
+        tree = ast.parse(Path("claw_v2/kairos.py").read_text(encoding="utf-8"))
+        offenders: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr == "run"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "subprocess"
+            ):
+                offenders.append(f"claw_v2/kairos.py:{node.lineno}")
+
+        self.assertEqual(offenders, [])
 
 
 def _make_service(**overrides):
@@ -863,7 +883,7 @@ class AutoActionApprovalTests(unittest.TestCase):
             MagicMock(returncode=0, stdout="deploy_sha\n"),
             MagicMock(returncode=0, stdout="local_sha\n"),
         ]
-        with patch("subprocess.run", side_effect=run_results) as runner:
+        with patch("claw_v2.kairos.run_subprocess_bounded", side_effect=run_results) as runner:
             svc._handle_auto_deploy(decision)
         self.assertEqual(runner.call_count, 2)
         approvals.create.assert_called_once()
@@ -884,7 +904,7 @@ class AutoActionApprovalTests(unittest.TestCase):
         ]
         with (
             patch.dict(os.environ, {"KAIROS_AUTO_DEPLOY": "1"}),
-            patch("subprocess.run", side_effect=run_results) as runner,
+            patch("claw_v2.kairos.run_subprocess_bounded", side_effect=run_results) as runner,
         ):
             svc._handle_auto_deploy(decision)
         self.assertEqual(runner.call_count, 3)
@@ -902,7 +922,7 @@ class AutoActionApprovalTests(unittest.TestCase):
             MagicMock(returncode=0, stdout="same_sha\n"),
             MagicMock(returncode=0, stdout="same_sha\n"),
         ]
-        with patch("subprocess.run", side_effect=run_results):
+        with patch("claw_v2.kairos.run_subprocess_bounded", side_effect=run_results):
             svc._handle_auto_deploy(decision)
         approvals.create.assert_not_called()
 
@@ -913,7 +933,7 @@ class AutoActionApprovalTests(unittest.TestCase):
             MagicMock(returncode=0, stdout="deploy_sha\n"),
             MagicMock(returncode=0, stdout="local_sha\n"),
         ]
-        with patch("subprocess.run", side_effect=run_results) as runner:
+        with patch("claw_v2.kairos.run_subprocess_bounded", side_effect=run_results) as runner:
             with self.assertRaises(RuntimeError):
                 svc._handle_auto_deploy(decision)
         self.assertEqual(runner.call_count, 2)

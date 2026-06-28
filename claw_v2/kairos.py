@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,7 @@ if TYPE_CHECKING:
 
 from claw_v2.approval_gate import system_approval_mode
 from claw_v2.provider_roles import router_timeout_for_role
+from claw_v2.subprocess_runner import run_subprocess_bounded
 from claw_v2.tool_policy import daemon_can_auto_approve
 from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
 
@@ -1129,18 +1129,16 @@ class KairosService:
         """Trigger Vercel deploy via git push. Default: pending human approval.
         Opt-in autonomous push via env KAIROS_AUTO_DEPLOY=1.
         """
-        result = subprocess.run(
+        result = run_subprocess_bounded(
             ["gh", "api", "repos/Hecpac/PHD-Web/deployments", "--jq", ".[0].sha"],
-            capture_output=True,
-            text=True,
-            timeout=15,
+            timeout_s=15,
+            observe=self.observe,
         )
         latest_deploy_sha = result.stdout.strip() if result.returncode == 0 else ""
-        result2 = subprocess.run(
+        result2 = run_subprocess_bounded(
             ["git", "-C", str(Path.home() / "Projects" / "phd"), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
+            timeout_s=10,
+            observe=self.observe,
         )
         local_head = result2.stdout.strip() if result2.returncode == 0 else ""
         if not latest_deploy_sha or not local_head:
@@ -1183,11 +1181,10 @@ class KairosService:
             logger.info("KAIROS auto_deploy: pending approval=%s", pending.approval_id)
             return
 
-        push = subprocess.run(
+        push = run_subprocess_bounded(
             ["git", "-C", str(Path.home() / "Projects" / "phd"), "push", "origin", "main"],
-            capture_output=True,
-            text=True,
-            timeout=30,
+            timeout_s=30,
+            observe=self.observe,
         )
         success = push.returncode == 0
         logger.info("KAIROS auto_deploy: pushed=%s", success)
@@ -1323,11 +1320,19 @@ class KairosService:
         )
 
         # 2. Get HeyGen API key from Keychain
-        key_result = subprocess.run(
-            ["security", "find-generic-password", "-a", "heygen", "-s", "HEYGEN_API_KEY", "-w"],
-            capture_output=True,
-            text=True,
-            timeout=5,
+        key_result = run_subprocess_bounded(
+            [
+                "security",
+                "find-generic-password",
+                "-a",
+                "heygen",
+                "-s",
+                "HEYGEN_API_KEY",
+                "-w",
+            ],
+            timeout_s=5,
+            max_output_chars=2048,
+            observe=self.observe,
         )
         api_key = key_result.stdout.strip()
         if not api_key:
@@ -1465,11 +1470,10 @@ class KairosService:
         anomaly_tokens = ("ERROR", "Traceback", "CRITICAL", "FATAL")
         try:
             try:
-                proc = subprocess.run(
+                proc = run_subprocess_bounded(
                     ["pgrep", "-fl", "claw_v2"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
+                    timeout_s=5,
+                    observe=self.observe,
                 )
                 pids = [
                     line.split()[0] for line in proc.stdout.strip().splitlines() if line.strip()

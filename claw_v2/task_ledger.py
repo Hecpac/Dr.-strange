@@ -32,6 +32,8 @@ TERMINAL_STATUSES = frozenset(
     {"succeeded", "failed", "timed_out", "cancelled", "lost", "completed_unverified"}
 )
 VALID_STATUSES = frozenset({"queued", "running", *TERMINAL_STATUSES})
+TASK_TERMINAL_RETENTION_DAYS = 30
+TASK_TERMINAL_PRUNE_MAX_ROWS = 20_000
 
 _TERMINAL_WRITE_LOCKED_ATTEMPTS = 4
 _TERMINAL_WRITE_LOCKED_BACKOFF_SECONDS = 0.2
@@ -1060,6 +1062,52 @@ class TaskLedger:
                 params,
             ).fetchall()
         return {str(row["status"]): int(row["count"]) for row in rows}
+
+    def prune_terminal(
+        self,
+        *,
+        retention_days: int = TASK_TERMINAL_RETENTION_DAYS,
+        max_rows: int = TASK_TERMINAL_PRUNE_MAX_ROWS,
+        now: float | None = None,
+    ) -> int:
+        """Delete old terminal task rows, bounded per call."""
+        limit = max(0, int(max_rows))
+        if limit <= 0:
+            return 0
+        retention = max(0, int(retention_days))
+        current = time.time() if now is None else float(now)
+        cutoff = current - (retention * 86400.0)
+        terminal_statuses = tuple(sorted(TERMINAL_STATUSES))
+        placeholders = ", ".join("?" for _ in terminal_statuses)
+        with self._lock:
+            cursor = self._conn.execute(
+                f"""
+                DELETE FROM agent_tasks
+                WHERE task_id IN (
+                    SELECT task_id
+                    FROM agent_tasks
+                    WHERE status IN ({placeholders})
+                      AND COALESCE(completed_at, updated_at, created_at) < ?
+                    ORDER BY COALESCE(completed_at, updated_at, created_at) ASC,
+                             updated_at ASC,
+                             task_id ASC
+                    LIMIT ?
+                )
+                """,
+                (*terminal_statuses, cutoff, limit),
+            )
+            deleted = int(cursor.rowcount or 0)
+            self._conn.commit()
+        if deleted:
+            self._emit(
+                "agent_tasks_pruned",
+                {
+                    "deleted_rows": deleted,
+                    "retention_days": retention,
+                    "max_rows": limit,
+                },
+            )
+        return deleted
 
     def _update_status(self, task_id: str, status: str, **fields: Any) -> TaskRecord | None:
         self._validate_status(status)

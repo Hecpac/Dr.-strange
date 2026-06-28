@@ -16,6 +16,7 @@ from claw_v2.adapters.base import (
     build_effective_input,
     build_effective_system_prompt,
 )
+from claw_v2.redaction import redact_sensitive
 from claw_v2.types import LLMResponse
 
 
@@ -131,7 +132,7 @@ class CodexAdapter(ProviderAdapter):
             confidence=_codex_confidence(content),
             cost_estimate=0.0,
             artifacts={
-                "stderr": result.stderr.strip()[:200],
+                "stderr": str(redact_sensitive(result.stderr.strip(), limit=200)),
                 "codex_version": preflight.version,
                 "auth_status": preflight.auth_status[:200],
                 "codex_sandbox": sandbox,
@@ -276,11 +277,11 @@ def _is_auth_failure_text(text: str) -> bool:
 
 
 def _format_cli_detail(result: subprocess.CompletedProcess[str]) -> str:
-    stderr = (result.stderr or "").strip()
-    stdout = (result.stdout or "").strip()
+    stderr = str(redact_sensitive((result.stderr or "").strip(), limit=350))
+    stdout = str(redact_sensitive((result.stdout or "").strip(), limit=150))
     detail = stderr or stdout or "(no output)"
     if stderr and stdout:
-        detail = f"{stderr[:350]} | stdout: {stdout[:150]}"
+        detail = f"{stderr} | stdout: {stdout}"
     return detail[:500]
 
 

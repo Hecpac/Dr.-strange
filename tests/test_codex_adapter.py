@@ -74,6 +74,38 @@ class CodexAdapterTests(unittest.TestCase):
                 with self.assertRaises(AdapterError):
                     adapter.complete(_make_request())
 
+    def test_cli_failure_detail_redacts_stdout_and_stderr(self) -> None:
+        adapter = CodexAdapter(cli_path="codex")
+        secret = "sk-proj-abcdefghijklmnopqrstuvwx"
+        fake_result = _proc(
+            returncode=1,
+            stdout=f"stdout leaked {secret}",
+            stderr=f"stderr leaked {secret}",
+        )
+        with patch(
+            "claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), fake_result]
+        ):
+            with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
+                with self.assertRaises(AdapterError) as raised:
+                    adapter.complete(_make_request())
+
+        message = str(raised.exception)
+        self.assertNotIn(secret, message)
+        self.assertIn("[REDACTED]", message)
+
+    def test_success_artifact_stderr_is_redacted(self) -> None:
+        adapter = CodexAdapter(cli_path="codex")
+        secret = "sk-proj-abcdefghijklmnopqrstuvwx"
+        fake_result = _proc(returncode=0, stdout="done", stderr=f"debug token={secret}")
+        with patch(
+            "claw_v2.adapters.codex.subprocess.run", side_effect=[*_preflight_ok(), fake_result]
+        ):
+            with patch("claw_v2.adapters.codex.shutil.which", return_value="/usr/local/bin/codex"):
+                result = adapter.complete(_make_request())
+
+        self.assertNotIn(secret, result.artifacts["stderr"])
+        self.assertIn("[REDACTED]", result.artifacts["stderr"])
+
     def test_successful_completion_returns_stdout(self) -> None:
         adapter = CodexAdapter(cli_path="codex")
         fake_result = MagicMock(

@@ -30,6 +30,83 @@ class _ClosedOnceConn:
 
 
 class JobServiceTests(unittest.TestCase):
+    def test_prune_terminal_deletes_only_old_terminal_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            service = JobService(Path(tmpdir) / "claw.db", observe=observe)
+            now = 1_000_000.0
+            old = now - (31 * 86400)
+            recent = now - (10 * 86400)
+
+            completed = service.enqueue(kind="retention.completed")
+            failed = service.enqueue(kind="retention.failed")
+            cancelled = service.enqueue(kind="retention.cancelled")
+            recent_completed = service.enqueue(kind="retention.recent")
+            queued = service.enqueue(kind="retention.queued")
+            running = service.enqueue(kind="retention.running")
+            waiting = service.enqueue(kind="retention.waiting")
+            retrying = service.enqueue(kind="retention.retrying")
+
+            service.complete(completed.job_id)
+            service.fail(failed.job_id, error="old failure", retry=False)
+            service.cancel(cancelled.job_id)
+            service.complete(recent_completed.job_id)
+            service.claim(running.job_id, worker_id="worker-1", now=old)
+            service.wait_for_approval(waiting.job_id)
+            service.fail(retrying.job_id, error="retry later", retry=True)
+
+            old_terminal_ids = (completed.job_id, failed.job_id, cancelled.job_id)
+            active_ids = (queued.job_id, running.job_id, waiting.job_id, retrying.job_id)
+            with service._lock:
+                service._conn.execute(
+                    "UPDATE agent_jobs SET completed_at = ?, updated_at = ? "
+                    f"WHERE job_id IN ({', '.join('?' for _ in old_terminal_ids)})",
+                    (old, old, *old_terminal_ids),
+                )
+                service._conn.execute(
+                    "UPDATE agent_jobs SET updated_at = ? "
+                    f"WHERE job_id IN ({', '.join('?' for _ in active_ids)})",
+                    (old, *active_ids),
+                )
+                service._conn.execute(
+                    "UPDATE agent_jobs SET completed_at = ?, updated_at = ? WHERE job_id = ?",
+                    (recent, recent, recent_completed.job_id),
+                )
+                service._conn.commit()
+
+            deleted = service.prune_terminal(retention_days=30, max_rows=10, now=now)
+
+            self.assertEqual(deleted, 3)
+            for job_id in old_terminal_ids:
+                self.assertIsNone(service.get(job_id))
+            for job_id in (*active_ids, recent_completed.job_id):
+                self.assertIsNotNone(service.get(job_id))
+            events = [event["event_type"] for event in observe.recent_events(limit=10)]
+            self.assertIn("agent_jobs_pruned", events)
+
+    def test_prune_terminal_is_bounded_per_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db")
+            now = 1_000_000.0
+            old = now - (31 * 86400)
+            job_ids: list[str] = []
+            for index in range(3):
+                record = service.enqueue(kind=f"retention.completed.{index}")
+                service.complete(record.job_id)
+                job_ids.append(record.job_id)
+            with service._lock:
+                service._conn.execute(
+                    "UPDATE agent_jobs SET completed_at = ?, updated_at = ? "
+                    f"WHERE job_id IN ({', '.join('?' for _ in job_ids)})",
+                    (old, old, *job_ids),
+                )
+                service._conn.commit()
+
+            self.assertEqual(service.prune_terminal(retention_days=30, max_rows=2, now=now), 2)
+            self.assertEqual(service.summary(), {"completed": 1})
+            self.assertEqual(service.prune_terminal(retention_days=30, max_rows=2, now=now), 1)
+            self.assertEqual(service.summary(), {})
+
     def test_enqueue_is_idempotent_for_active_resume_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             service = JobService(Path(tmpdir) / "claw.db")

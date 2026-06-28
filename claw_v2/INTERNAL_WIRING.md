@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "F4-B1 recoverable delivery state machine"
-doc_version: 2.41
-last_verified: 2026-06-26
-verification_method: "code cross-read of the F4-B1 delivery path (bot.py gate, f4_delegation.py runner, task_handler.py ensure_autonomous_task_enqueued, daemon.py/main.py registration) against this doc + targeted pytest (test_f4_delegation, test_f4b_deterministic_delegation, test_telegram, test_task_handler, test_jobs, test_config, test_brain_tooluse_ledger, test_brain_tooluse_verify, test_architecture_invariants, test_daemon, test_lifecycle — all green) + uvx ruff check / ruff format --check on branch-changed py files + git diff --check, all clean + 2026-06-26 classifier precision follow-up: `_X_PLATFORM` now anchors X to a review verb/noun or feed word (rejects '<object-noun> de X'); ClassifierTests extended (test_x_object_noun_placeholder_non_matches); full ClassifierTests + test_jobs green; reserve() docstring corrected to scope dedup to the active-only window"
+describes_commit: "Audit fix checkpoints C1-C5: retention prune, Kairos bounded subprocess, Codex redaction, alert dedupe lock, orphan-job reconcile throttle"
+doc_version: 2.42
+last_verified: 2026-06-27
+verification_method: "code cross-read of the C1-C5 audit-fix paths (jobs.py/task_ledger.py/main.py retention prune, kairos.py bounded subprocess calls, adapters/codex.py CLI redaction, operational_alerts.py dedupe lock, daemon.py orphan-job reconcile throttle) against this doc + targeted pytest (test_jobs, test_task_ledger, test_latency_audit_group3, test_kairos, test_kairos_health_check, test_subprocess_runner, test_codex_adapter, test_operational_alerts, test_daemon, test_architecture_invariants, test_runtimedb_wiring, test_sqlite_runtime, test_config, test_task_handler, test_observe_subscribe — all green) + git diff --check clean; full suite intentionally not re-run because it can affect the live daemon"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -260,6 +260,12 @@ invariants:
       - learning_consolidate -> scheduler.learning_consolidate  # final leg, enqueue + ScheduledBackgroundJobRunner, added _maintenance_skip kill-switch (was router.ask(lane=judge) inline, no skip gate)
       - learning_soul_suggestions -> scheduler.learning_soul_suggestions  # final leg, enqueue + ScheduledBackgroundJobRunner (was router.ask(lane=judge) inline)
     pending_migration: []  # CORE INVARIANT 1 CLOSED — no heavy scheduler handler runs inline in daemon.tick
+    inline_bounded_local_maintenance:
+      - durable_retention_prune -> two bounded local SQLite DELETE paths
+        (`JobService.prune_terminal`, `TaskLedger.prune_terminal`) plus env
+        parsing only; no provider, subprocess, LLM, VACUUM, or unbounded scan.
+        This is the same allowed class as observe_prune, not a slow autonomous
+        scheduler job.
     enforced_by: tests/test_architecture_invariants.py::test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick
                  (deny-by-default sweep at production default; _PENDING_INLINE_MIGRATION is now empty and may only stay empty)
     why: CronScheduler.run_due() invokes handlers synchronously. Any provider
@@ -930,9 +936,12 @@ invariants:
     start_latency: Execution is LEDGER-DRIVEN, not job-claimed. Nothing
           claim-executes the `coordinator.autonomous_task` job — it is a
           tracking / lease handle; `_reconcile_orphaned_jobs` cancels it for a
-          terminal task. `resume_interrupted_autonomous_tasks` (startup + the 300s
-          `task_lifecycle_watchdog`) resumes the `running` ledger row, so the start
-          latency is ≤300s by design.
+          terminal task. The orphan-job scan is rate-limited by
+          `ClawDaemon.orphan_job_reconciliation_interval` (default 300s), so
+          `daemon.tick()` does not repeat the N+1 lookup path every control-loop
+          iteration. `resume_interrupted_autonomous_tasks` (startup + the 300s
+          `task_lifecycle_watchdog`) resumes the `running` ledger row, so the
+          start latency is ≤300s by design.
     crash_recovery: Crash-recoverable at every transition (verified by a 25×
           looped crash matrix). The JobService claim lease + `recover_stale_running`
           (`f4b.delegation` ∈ `AUTONOMY_STALE_RUNNING_JOB_KINDS`, `main.py`) + the

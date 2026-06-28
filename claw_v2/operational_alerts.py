@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -87,6 +88,7 @@ class OperationalAlertRouter:
         self.rules = dict(rules or DEFAULT_ALERT_RULES)
         self.clock = clock or time.time
         self._last_sent: dict[str, float] = {}
+        self._last_sent_lock = threading.Lock()
 
     def install(self) -> None:
         for event_type in self.rules:
@@ -117,15 +119,26 @@ class OperationalAlertRouter:
             return False
         dedupe_key = _dedupe_key(event_type, event_payload)
         now = self.clock()
-        last_sent = self._last_sent.get(dedupe_key)
-        if last_sent is not None and now - last_sent < rule.cooldown_seconds:
+        with self._last_sent_lock:
+            last_sent = self._last_sent.get(dedupe_key)
+            if last_sent is not None and now - last_sent < rule.cooldown_seconds:
+                suppressed_by_cooldown = True
+            else:
+                suppressed_by_cooldown = False
+                self._last_sent[dedupe_key] = now
+        if suppressed_by_cooldown:
             self._emit_status(
                 "operational_alert_suppressed", event_type, event_payload, reason="cooldown"
             )
             return False
         message = _format_alert(event_type, rule, event_payload)
-        self.notify(message)
-        self._last_sent[dedupe_key] = now
+        try:
+            self.notify(message)
+        except Exception:
+            with self._last_sent_lock:
+                if self._last_sent.get(dedupe_key) == now:
+                    self._last_sent.pop(dedupe_key, None)
+            raise
         self._emit_status("operational_alert_sent", event_type, event_payload, reason="")
         return True
 

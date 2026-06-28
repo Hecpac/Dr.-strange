@@ -25,6 +25,8 @@ JOB_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 JOB_ACTIVE_STATUSES = frozenset({"queued", "running", "waiting_approval", "retrying"})
 JOB_VALID_STATUSES = frozenset({*JOB_ACTIVE_STATUSES, *JOB_TERMINAL_STATUSES})
 DEFAULT_JOB_LEASE_SECONDS = 15 * 60
+JOB_TERMINAL_RETENTION_DAYS = 30
+JOB_TERMINAL_PRUNE_MAX_ROWS = 20_000
 
 
 JOBS_TABLE_SCHEMA = """
@@ -1067,6 +1069,58 @@ class JobService:
 
         rows = self._retry_after_disk_io("JobService.summary", summary_once)
         return {str(row["status"]): int(row["count"]) for row in rows}
+
+    def prune_terminal(
+        self,
+        *,
+        retention_days: int = JOB_TERMINAL_RETENTION_DAYS,
+        max_rows: int = JOB_TERMINAL_PRUNE_MAX_ROWS,
+        now: float | None = None,
+    ) -> int:
+        """Delete old terminal job rows, bounded per call."""
+        limit = max(0, int(max_rows))
+        if limit <= 0:
+            return 0
+        retention = max(0, int(retention_days))
+        current = time.time() if now is None else float(now)
+        cutoff = current - (retention * 86400.0)
+        terminal_statuses = tuple(sorted(JOB_TERMINAL_STATUSES))
+        placeholders = ", ".join("?" for _ in terminal_statuses)
+
+        def prune_once() -> int:
+            with self._lock:
+                cursor = self._conn.execute(
+                    f"""
+                    DELETE FROM agent_jobs
+                    WHERE job_id IN (
+                        SELECT job_id
+                        FROM agent_jobs
+                        WHERE status IN ({placeholders})
+                          AND COALESCE(completed_at, updated_at, created_at) < ?
+                        ORDER BY COALESCE(completed_at, updated_at, created_at) ASC,
+                                 updated_at ASC,
+                                 job_id ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (*terminal_statuses, cutoff, limit),
+                )
+                deleted = int(cursor.rowcount or 0)
+                self._conn.commit()
+                return deleted
+
+        deleted = self._retry_after_disk_io("JobService.prune_terminal", prune_once)
+        if deleted and self.observe is not None:
+            self.observe.emit(
+                "agent_jobs_pruned",
+                lane="job_service",
+                payload={
+                    "deleted_rows": deleted,
+                    "retention_days": retention,
+                    "max_rows": limit,
+                },
+            )
+        return deleted
 
     def resume_candidates(self, *, limit: int = 20) -> list[JobRecord]:
         return self.list(

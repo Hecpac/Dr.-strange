@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -85,6 +87,50 @@ class OperationalAlertRouterTests(unittest.TestCase):
 
         self.assertEqual(len(notifications), 1)
         events = self.observe.recent_events(limit=3)
+        self.assertTrue(
+            any(event["event_type"] == "operational_alert_suppressed" for event in events)
+        )
+
+    def test_dedupes_concurrent_repeated_alerts_within_cooldown(self) -> None:
+        notifications: list[str] = []
+        notify_started = threading.Event()
+        notify_release = threading.Event()
+
+        def notify(message: str) -> None:
+            notifications.append(message)
+            notify_started.set()
+            notify_release.wait(timeout=2.0)
+
+        router = OperationalAlertRouter(
+            observe=self.observe,
+            notify=notify,
+            clock=lambda: 100.0,
+        )
+        payload = {"job": "wiki_research", "error": "boom"}
+        threads = [
+            threading.Thread(
+                target=router.handle,
+                args=("scheduled_job_error", payload),
+            )
+            for _ in range(2)
+        ]
+
+        threads[0].start()
+        self.assertTrue(notify_started.wait(timeout=1.0))
+        threads[1].start()
+        deadline = time.monotonic() + 1.0
+        while len(notifications) < 2 and threads[1].is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        try:
+            self.assertLessEqual(len(notifications), 1)
+        finally:
+            notify_release.set()
+        for thread in threads:
+            thread.join(timeout=2.0)
+            self.assertFalse(thread.is_alive())
+
+        self.assertEqual(len(notifications), 1)
+        events = self.observe.recent_events(limit=5)
         self.assertTrue(
             any(event["event_type"] == "operational_alert_suppressed" for event in events)
         )
