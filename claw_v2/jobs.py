@@ -890,6 +890,16 @@ class JobService:
                     if row is None:
                         self._conn.commit()
                         return None
+                    if row["status"] in JOB_TERMINAL_STATUSES:
+                        # Idempotent: a job already terminal must not be moved back to
+                        # failed/retrying, regardless of lease guard. A terminal job
+                        # has no lease (cleared on terminalization), so the lease-match
+                        # check below would otherwise return None for a late fail() retry
+                        # instead of the terminal record (#153). Return the row we just
+                        # read (NOT self.get(), which would re-acquire the non-reentrant
+                        # lock).
+                        self._conn.commit()
+                        return self._row_to_record(row)
                     if lease_guard_enabled:
                         if not self._current_lease_matches(
                             row,
@@ -899,12 +909,6 @@ class JobService:
                         ):
                             self._conn.commit()
                             return None
-                    if row["status"] in JOB_TERMINAL_STATUSES:
-                        # Idempotent: a job already terminal must not be moved back to
-                        # failed/retrying. Return the row we just read (NOT self.get(),
-                        # which would re-acquire the non-reentrant lock).
-                        self._conn.commit()
-                        return self._row_to_record(row)
                     should_retry = retry and int(row["attempts"] or 0) < int(
                         row["max_attempts"] or 1
                     )
@@ -1521,6 +1525,17 @@ class JobService:
                     if current is None:
                         self._conn.commit()
                         return None
+                    if current["status"] in JOB_TERMINAL_STATUSES:
+                        # Idempotent: never resurrect a terminal job, regardless of
+                        # lease guard. A terminal job has no lease (cleared on
+                        # terminalization), so the lease-match check below would
+                        # otherwise return None for a late complete()/fail() retry
+                        # instead of the terminal record (#153). BEGIN IMMEDIATE
+                        # holds the write lock across this read so a sibling cannot
+                        # flip the row between them. Return the row we just read
+                        # (NOT self.get(), which would re-acquire the non-reentrant lock).
+                        self._conn.commit()
+                        return self._row_to_record(current)
                     if lease_guard_enabled:
                         if not self._current_lease_matches(
                             current,
@@ -1530,14 +1545,6 @@ class JobService:
                         ):
                             self._conn.commit()
                             return None
-                    elif current["status"] in JOB_TERMINAL_STATUSES:
-                        # Idempotent: never resurrect a terminal job. BEGIN IMMEDIATE
-                        # holds the write lock across this read+UPDATE so a sibling
-                        # connection cannot flip the row terminal between them. Return
-                        # the row we just read (NOT self.get(), which would re-acquire
-                        # the non-reentrant lock).
-                        self._conn.commit()
-                        return self._row_to_record(current)
                     cursor = self._conn.execute(
                         f"UPDATE agent_jobs SET {', '.join(assignments)} WHERE {where_clause}",
                         [*params, *where_params],
