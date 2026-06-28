@@ -1232,6 +1232,7 @@ class ToolRegistry:
         )
         # F3a (2026-05-26) — local Tier-2 tools declare success conditions.
         from claw_v2.verification.local_tool_contracts import (
+            LOCAL_TOOL_PREFLIGHTS,
             LOCAL_TOOL_SUCCESS_CONDITIONS,
         )  # local import to avoid cycle
 
@@ -2320,6 +2321,7 @@ class ToolRegistry:
                     },
                     "required": [],
                 },
+                success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["BrowserScreenshot"],
             )
         )
         registry.register(
@@ -2344,6 +2346,8 @@ class ToolRegistry:
                     },
                     "required": ["ref"],
                 },
+                success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["BrowserClick"],
+                preflight=LOCAL_TOOL_PREFLIGHTS["BrowserClick"],
             )
         )
         registry.register(
@@ -2374,6 +2378,8 @@ class ToolRegistry:
                     },
                     "required": ["ref", "text"],
                 },
+                success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["BrowserType"],
+                preflight=LOCAL_TOOL_PREFLIGHTS["BrowserType"],
             )
         )
 

@@ -21,12 +21,14 @@ import json
 import pytest
 
 from claw_v2.verification.local_tool_contracts import (
+    LOCAL_TOOL_PREFLIGHTS,
     build_local_tool_artifact,
     get_local_tool_success_condition,
 )
 from claw_v2.verification.promote_gate import apply_promote_gate_to_checkpoint
 from claw_v2.verification.success_contract import (
     SuccessCondition,
+    validate_success_condition,
 )
 
 
@@ -48,7 +50,10 @@ def _no_network(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("tool_name", ["Write", "Edit", "Bash", "WikiLint"])
+@pytest.mark.parametrize(
+    "tool_name",
+    ["Write", "Edit", "Bash", "WikiLint", "BrowserScreenshot", "BrowserClick", "BrowserType"],
+)
 def test_local_tool_has_success_condition(tool_name):
     sc = get_local_tool_success_condition(tool_name)
     assert sc is not None, f"{tool_name} missing SuccessCondition"
@@ -80,6 +85,67 @@ def test_tools_py_attaches_local_contracts():
     assert 'success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Edit"]' in src
     assert 'success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["Bash"]' in src
     assert 'success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["WikiLint"]' in src
+    assert 'success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["BrowserScreenshot"]' in src
+    assert 'success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["BrowserClick"]' in src
+    assert 'success_condition=LOCAL_TOOL_SUCCESS_CONDITIONS["BrowserType"]' in src
+    assert 'preflight=LOCAL_TOOL_PREFLIGHTS["BrowserClick"]' in src
+    assert 'preflight=LOCAL_TOOL_PREFLIGHTS["BrowserType"]' in src
+
+
+def test_browser_click_and_type_have_local_preflights():
+    assert LOCAL_TOOL_PREFLIGHTS["BrowserClick"].probe_kind == "dom_selector_present"
+    assert LOCAL_TOOL_PREFLIGHTS["BrowserType"].probe_kind == "dom_selector_present"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_result", "expected_error"),
+    [
+        (
+            "BrowserScreenshot",
+            {"ok": True, "screenshot_path": ""},
+            "must_be_nonempty_str_violated:screenshot_path",
+        ),
+        (
+            "BrowserScreenshot",
+            {"ok": True, "screenshot_path": "/tmp/shot.jpg"},
+            "regex_mismatch:screenshot_path",
+        ),
+        (
+            "BrowserClick",
+            {"ok": True, "url": "https://x.test", "snapshot": ""},
+            "must_be_nonempty_str_violated:snapshot",
+        ),
+        ("BrowserType", {"ok": True, "snapshot": "updated"}, "missing_key:url"),
+    ],
+)
+def test_browser_contracts_reject_invalid_minimal_outputs(tool_name, tool_result, expected_error):
+    condition = get_local_tool_success_condition(tool_name)
+    assert condition is not None
+
+    errors = validate_success_condition(tool_result=tool_result, condition=condition)
+
+    assert expected_error in errors
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_result"),
+    [
+        ("BrowserScreenshot", {"ok": True, "screenshot_path": "/tmp/shot.png"}),
+        ("BrowserClick", {"ok": True, "url": "https://x.test", "snapshot": "updated"}),
+        ("BrowserType", {"ok": True, "url": "https://x.test", "snapshot": "updated"}),
+    ],
+)
+def test_browser_contracts_accept_minimal_valid_outputs(tool_name, tool_result):
+    condition = get_local_tool_success_condition(tool_name)
+    assert condition is not None
+
+    errors = validate_success_condition(
+        tool_result=tool_result,
+        condition=condition,
+        external_observation={"body_text": "updated"},
+    )
+
+    assert errors == []
 
 
 # ---------------------------------------------------------------------------

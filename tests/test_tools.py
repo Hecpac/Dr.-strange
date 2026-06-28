@@ -4,6 +4,7 @@ import asyncio
 import io
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from urllib.error import HTTPError
 from unittest.mock import patch
@@ -529,6 +530,39 @@ class BrowserReadToolsTests(unittest.TestCase):
         self.assertIn("BrowserSnapshot", names)
         self.assertIn("BrowserScreenshot", names)
 
+    def test_browser_mutating_tools_register_without_contract_warnings(self) -> None:
+        from claw_v2.verification import ToolContractWarning
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ToolContractWarning)
+                ToolRegistry.default(workspace_root=workspace)
+
+        browser_warnings = [
+            str(item.message)
+            for item in caught
+            if issubclass(item.category, ToolContractWarning)
+            and any(
+                name in str(item.message)
+                for name in ("BrowserScreenshot", "BrowserClick", "BrowserType")
+            )
+        ]
+        self.assertEqual(browser_warnings, [])
+
+    def test_browser_mutating_tools_have_success_contracts_and_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+        self.assertIsNotNone(registry.get("BrowserScreenshot").success_condition)
+        for name in ("BrowserClick", "BrowserType"):
+            definition = registry.get(name)
+            self.assertIsNotNone(definition.success_condition)
+            self.assertIsNotNone(definition.preflight)
+
     def test_researcher_cannot_use_browser_click(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
@@ -905,7 +939,9 @@ class BrowserReadToolsTests(unittest.TestCase):
             svc.observe = _Obs(stale_events)
             tools_mod._browser_svc = svc
             try:
-                registry = ToolRegistry.default(workspace_root=workspace, observe=_Obs(fresh_events))
+                registry = ToolRegistry.default(
+                    workspace_root=workspace, observe=_Obs(fresh_events)
+                )
                 registry.execute(
                     "BrowserNavigate",
                     {"url": "https://example.com"},

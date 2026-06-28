@@ -102,7 +102,9 @@ def _page(url: str, *elements: RawElement, text: str = "body text", login: bool 
 class _ConcurrentNavigateBackend:
     name = "fake"
 
-    def __init__(self, *, block_first: bool = False, block_all: bool = False, fail_first: bool = False) -> None:
+    def __init__(
+        self, *, block_first: bool = False, block_all: bool = False, fail_first: bool = False
+    ) -> None:
         self.block_first = block_first
         self.block_all = block_all
         self.fail_first = fail_first
@@ -133,7 +135,9 @@ class _ConcurrentNavigateBackend:
             if self.fail_first and index == 0:
                 raise RuntimeError("net::ERR loading https://x.test/p?token=secret")
             slug = url.removeprefix("https://").split(".", 1)[0]
-            return _page(url, RawElement(f"#{slug}", "button", slug.upper(), slug.upper(), None, None))
+            return _page(
+                url, RawElement(f"#{slug}", "button", slug.upper(), slug.upper(), None, None)
+            )
         finally:
             with self._lock:
                 self._active -= 1
@@ -664,7 +668,9 @@ class ChromeCdpConnectionCleanupTests(unittest.TestCase):
 
         fake_browser = _FakeBrowser()
         with (
-            patch("claw_v2.browser._require_sync_playwright", return_value=_FakePlaywrightManager()),
+            patch(
+                "claw_v2.browser._require_sync_playwright", return_value=_FakePlaywrightManager()
+            ),
             patch("claw_v2.browser._cdp_connect", side_effect=_connect),
         ):
             backend = ChromeCdpBrowserBackend(cdp_endpoint="http://127.0.0.1:0")
