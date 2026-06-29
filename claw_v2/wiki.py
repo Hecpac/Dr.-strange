@@ -1186,7 +1186,8 @@ class WikiService:
             str(payload.get("index_entry") or "").strip()
             or f"- [[{target.stem}]] - {topic or target.stem}"
         )
-        self._update_index(output_category, index_entry)
+        with self._lock:
+            self._update_index(output_category, index_entry)
         self._append_log("compile_research", slug, 1)
         self._update_research_candidate(
             slug,
