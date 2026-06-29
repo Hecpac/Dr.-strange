@@ -522,6 +522,24 @@ class AutoResearchTests(unittest.TestCase):
         self.assertEqual(queued[0]["reason"], "Updated reason.")
         self.assertEqual(queued[0]["seen_count"], 2)
 
+    def test_research_candidate_updates_preserve_queue_and_save_atomically(self) -> None:
+        svc, router, tmp = _make_wiki()
+        svc._save_research_candidates(
+            [
+                {"slug": "first", "topic": "First", "status": "new"},
+                {"slug": "second", "topic": "Second", "status": "new"},
+            ]
+        )
+
+        with patch("os.replace", wraps=__import__("os").replace) as replace:
+            svc._update_research_candidate("first", {"status": "blocked"})
+
+        queued = json.loads((tmp / "research_candidates.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(queued), 2)
+        self.assertEqual(queued[0]["status"], "blocked")
+        self.assertEqual(queued[1]["status"], "new")
+        replace.assert_called()
+
     def test_auto_research_tolerates_null_source_queries(self) -> None:
         svc, router, tmp = _make_wiki()
         _write_page(svc.wiki_dir, "existing", "Existing", "Content.")

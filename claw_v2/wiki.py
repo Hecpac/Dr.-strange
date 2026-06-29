@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import textwrap
 import threading
@@ -777,7 +778,8 @@ class WikiService:
 
     def research_candidates(self, *, limit: int = 10, status: str | None = None) -> list[dict]:
         """Return recent persisted research candidates for operator inspection."""
-        candidates = self._load_research_candidates()
+        with self._lock:
+            candidates = self._load_research_candidates()
         if status:
             candidates = [item for item in candidates if item.get("status") == status]
         candidates.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
@@ -813,42 +815,45 @@ class WikiService:
         if not candidates:
             return []
         now = _now_iso()
-        existing = self._load_research_candidates()
-        by_slug = {str(item.get("slug") or ""): item for item in existing if item.get("slug")}
-        persisted: list[dict] = []
-        for candidate in candidates:
-            slug = str(candidate.get("slug") or "").strip()
-            topic = str(candidate.get("topic") or "").strip()
-            if not slug or not topic:
-                continue
-            queued = dict(by_slug.get(slug) or {})
-            raw_source_queries = candidate.get("source_queries")
-            source_queries = raw_source_queries if isinstance(raw_source_queries, list) else []
-            queued.update(
-                {
-                    "topic": topic,
-                    "slug": slug,
-                    "category": self._normalize_category(str(candidate.get("category") or "")),
-                    "reason": str(candidate.get("reason") or "").strip(),
-                    "source_queries": [
-                        str(query).strip()
-                        for query in source_queries
-                        if str(query).strip()
-                    ][:5],
-                    "status": str(queued.get("status") or "new"),
-                    "source": str(queued.get("source") or "auto_research"),
-                    "updated_at": now,
-                    "seen_count": int(queued.get("seen_count") or 0) + 1,
-                }
-            )
-            queued.setdefault("created_at", now)
-            by_slug[slug] = queued
-            persisted.append(dict(queued))
+        with self._lock:
+            existing = self._load_research_candidates()
+            by_slug = {str(item.get("slug") or ""): item for item in existing if item.get("slug")}
+            persisted: list[dict] = []
+            for candidate in candidates:
+                slug = str(candidate.get("slug") or "").strip()
+                topic = str(candidate.get("topic") or "").strip()
+                if not slug or not topic:
+                    continue
+                queued = dict(by_slug.get(slug) or {})
+                raw_source_queries = candidate.get("source_queries")
+                source_queries = raw_source_queries if isinstance(raw_source_queries, list) else []
+                queued.update(
+                    {
+                        "topic": topic,
+                        "slug": slug,
+                        "category": self._normalize_category(
+                            str(candidate.get("category") or "")
+                        ),
+                        "reason": str(candidate.get("reason") or "").strip(),
+                        "source_queries": [
+                            str(query).strip()
+                            for query in source_queries
+                            if str(query).strip()
+                        ][:5],
+                        "status": str(queued.get("status") or "new"),
+                        "source": str(queued.get("source") or "auto_research"),
+                        "updated_at": now,
+                        "seen_count": int(queued.get("seen_count") or 0) + 1,
+                    }
+                )
+                queued.setdefault("created_at", now)
+                by_slug[slug] = queued
+                persisted.append(dict(queued))
 
-        ordered = list(by_slug.values())
-        ordered.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-        self._save_research_candidates(ordered[:_MAX_RESEARCH_CANDIDATES])
-        return persisted
+            ordered = list(by_slug.values())
+            ordered.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+            self._save_research_candidates(ordered[:_MAX_RESEARCH_CANDIDATES])
+            return persisted
 
     def _load_research_candidates(self) -> list[dict]:
         if not self._research_candidates_path.exists():
@@ -863,10 +868,11 @@ class WikiService:
         return [item for item in data if isinstance(item, dict)]
 
     def _save_research_candidates(self, candidates: list[dict]) -> None:
-        self._research_candidates_path.write_text(
-            json.dumps(candidates, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        payload = json.dumps(candidates, ensure_ascii=False, indent=2, sort_keys=True)
+        tmp_path = self._research_candidates_path.with_suffix(".tmp")
+        with self._lock:
+            tmp_path.write_text(payload, encoding="utf-8")
+            os.replace(tmp_path, self._research_candidates_path)
 
     def _research_candidate(self, candidate: dict) -> dict:
         slug = str(candidate.get("slug") or "").strip()
@@ -977,12 +983,13 @@ class WikiService:
         }
 
     def _update_research_candidate(self, slug: str, updates: dict) -> None:
-        candidates = self._load_research_candidates()
-        for candidate in candidates:
-            if candidate.get("slug") == slug:
-                candidate.update(updates)
-                break
-        self._save_research_candidates(candidates)
+        with self._lock:
+            candidates = self._load_research_candidates()
+            for candidate in candidates:
+                if candidate.get("slug") == slug:
+                    candidate.update(updates)
+                    break
+            self._save_research_candidates(candidates)
 
     def _valid_research_sources(self, value: object) -> list[dict]:
         if not isinstance(value, list):
