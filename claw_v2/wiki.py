@@ -786,6 +786,8 @@ class WikiService:
             if not slug or not topic:
                 continue
             queued = dict(by_slug.get(slug) or {})
+            raw_source_queries = candidate.get("source_queries")
+            source_queries = raw_source_queries if isinstance(raw_source_queries, list) else []
             queued.update(
                 {
                     "topic": topic,
@@ -794,7 +796,7 @@ class WikiService:
                     "reason": str(candidate.get("reason") or "").strip(),
                     "source_queries": [
                         str(query).strip()
-                        for query in candidate.get("source_queries", [])
+                        for query in source_queries
                         if str(query).strip()
                     ][:5],
                     "status": str(queued.get("status") or "new"),
@@ -1000,6 +1002,15 @@ class WikiService:
                 items = self._parse_json_array(resp.content)
                 source_result["items_extracted"] = len(items)
                 for item in items[:3]:
+                    if not isinstance(item, dict):
+                        record_skip("invalid_item")
+                        record_item(
+                            title="",
+                            slug="",
+                            status="skipped",
+                            reason="invalid_item",
+                        )
+                        continue
                     title = str(item.get("title", "")).strip()
                     body = str(item.get("content", "")).strip()
                     if not title:

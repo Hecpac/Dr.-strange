@@ -522,6 +522,27 @@ class AutoResearchTests(unittest.TestCase):
         self.assertEqual(queued[0]["reason"], "Updated reason.")
         self.assertEqual(queued[0]["seen_count"], 2)
 
+    def test_auto_research_tolerates_null_source_queries(self) -> None:
+        svc, router, tmp = _make_wiki()
+        _write_page(svc.wiki_dir, "existing", "Existing", "Content.")
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                [
+                    {
+                        "topic": "Null Query Topic",
+                        "category": "Research",
+                        "reason": "LLM returned null source queries.",
+                        "source_queries": None,
+                    }
+                ]
+            )
+        )
+
+        result = svc.auto_research(max_topics=1)
+
+        self.assertEqual(result["topics_researched"], 1)
+        self.assertEqual(result["candidates"][0]["source_queries"], [])
+
 
 class EvidenceTests(unittest.TestCase):
     def test_raw_source_detection(self) -> None:
@@ -663,6 +684,32 @@ class AutoScrapeTests(unittest.TestCase):
         self.assertEqual(result["source_results"][0]["skip_reasons"]["body_too_short"], 1)
         reasons = [item["reason"] for item in result["item_results"]]
         self.assertEqual(reasons, ["missing_title", "body_too_short"])
+
+    def test_auto_scrape_skips_non_mapping_llm_items(self) -> None:
+        svc, router, tmp = _make_wiki()
+        svc.WATCH_SOURCES = [("Test Source", "https://example.com/source")]
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                [
+                    "raw string item",
+                    {
+                        "title": "Valid Topic",
+                        "content": "Specific sourced fact with enough detail for ingestion.",
+                        "category": "Research",
+                    },
+                ]
+            )
+        )
+        proc = MagicMock(returncode=0, stdout="source page content", stderr="")
+
+        with patch("subprocess.run", return_value=proc), patch.object(
+            svc, "ingest", return_value={"pages_written": 0, "skipped": True}
+        ):
+            result = svc.auto_scrape_sources()
+
+        self.assertEqual(result["source_results"][0]["items_extracted"], 2)
+        self.assertEqual(result["source_results"][0]["skip_reasons"]["invalid_item"], 1)
+        self.assertEqual(result["item_results"][0]["reason"], "invalid_item")
 
 
 if __name__ == "__main__":
