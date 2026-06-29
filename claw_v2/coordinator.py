@@ -268,6 +268,15 @@ class CoordinatorService:
                     # A kill between _write_scratch and the self-healing path
                     # can persist a critical artifact: re-check loaded results
                     # so a resume never proceeds past a critical worker error.
+                    if _phase_all_workers_failed(research_results):
+                        return self._complete_worker_phase_failed_run(
+                            result=result,
+                            phase="research",
+                            phase_results=research_results,
+                            orchestration_run_id=orchestration_run_id,
+                            trace_context=trace,
+                            start_time=start,
+                        )
                     critical = _critical_worker_result(research_results)
                     if critical is not None:
                         return self._complete_critical_worker_run(
@@ -310,10 +319,14 @@ class CoordinatorService:
                 self._orchestration_require_ack(
                     research_artifact_id, consumer_role="coordinator_synthesis"
                 )
+                research_failed = _phase_all_workers_failed(research_results)
+                research_reason = (
+                    "research_phase_failed" if research_failed else "research_phase_completed"
+                )
                 self._orchestration_checkpoint(
                     orchestration_run_id,
                     phase="research",
-                    reason="research_phase_completed",
+                    reason=research_reason,
                     artifact_ids=[research_artifact_id] if research_artifact_id else [],
                 )
                 self._orchestration_finish_phase(
@@ -322,6 +335,15 @@ class CoordinatorService:
                     trace,
                     results=research_results,
                 )
+                if research_failed:
+                    return self._complete_worker_phase_failed_run(
+                        result=result,
+                        phase="research",
+                        phase_results=research_results,
+                        orchestration_run_id=orchestration_run_id,
+                        trace_context=trace,
+                        start_time=start,
+                    )
                 _mark_f2_phase_completed("research", results=research_results)
                 critical = _critical_worker_result(research_results)
                 if critical is not None:
@@ -444,6 +466,15 @@ class CoordinatorService:
                             trace, task_id, "implementation", len(impl_results)
                         )
                         critical = _critical_worker_result(impl_results)
+                        if _phase_all_workers_failed(impl_results):
+                            return self._complete_worker_phase_failed_run(
+                                result=result,
+                                phase="implementation",
+                                phase_results=impl_results,
+                                orchestration_run_id=orchestration_run_id,
+                                trace_context=trace,
+                                start_time=start,
+                            )
                         if critical is not None:
                             return self._complete_critical_worker_run(
                                 result=result,
@@ -528,10 +559,13 @@ class CoordinatorService:
                 self._orchestration_require_ack(
                     impl_artifact_id, consumer_role="verification_workers"
                 )
+                implementation_failed = _phase_all_workers_failed(impl_results)
                 self._orchestration_checkpoint(
                     orchestration_run_id,
                     phase="implementation",
-                    reason="implementation_phase_completed",
+                    reason="implementation_phase_failed"
+                    if implementation_failed
+                    else "implementation_phase_completed",
                     artifact_ids=[impl_artifact_id] if impl_artifact_id else [],
                 )
                 self._orchestration_finish_phase(
@@ -540,6 +574,15 @@ class CoordinatorService:
                     trace,
                     results=impl_results,
                 )
+                if implementation_failed:
+                    return self._complete_worker_phase_failed_run(
+                        result=result,
+                        phase="implementation",
+                        phase_results=impl_results,
+                        orchestration_run_id=orchestration_run_id,
+                        trace_context=trace,
+                        start_time=start,
+                    )
                 _mark_f2_phase_completed("implementation", results=impl_results)
                 critical = _critical_worker_result(impl_results)
                 if critical is not None:
@@ -611,10 +654,13 @@ class CoordinatorService:
                 self._orchestration_require_ack(
                     verification_artifact_id, consumer_role="coordinator_result"
                 )
+                verification_failed = _phase_all_workers_failed(verify_results)
                 self._orchestration_checkpoint(
                     orchestration_run_id,
                     phase="verification",
-                    reason="verification_phase_completed",
+                    reason="verification_phase_failed"
+                    if verification_failed
+                    else "verification_phase_completed",
                     artifact_ids=[verification_artifact_id] if verification_artifact_id else [],
                 )
                 self._orchestration_finish_phase(
@@ -623,6 +669,15 @@ class CoordinatorService:
                     trace,
                     results=verify_results,
                 )
+                if verification_failed:
+                    return self._complete_worker_phase_failed_run(
+                        result=result,
+                        phase="verification",
+                        phase_results=verify_results,
+                        orchestration_run_id=orchestration_run_id,
+                        trace_context=trace,
+                        start_time=start,
+                    )
                 _mark_f2_phase_completed("verification", results=verify_results)
                 critical = _critical_worker_result(verify_results)
                 if critical is not None:
@@ -718,6 +773,18 @@ class CoordinatorService:
         # retry attempts and before initiating long-running LLM calls.
         abort_event = threading.Event()
 
+        def _cancel_non_critical_results_after_critical() -> None:
+            for idx, existing in enumerate(results_by_index):
+                if existing is None or _has_critical_worker_error(existing):
+                    continue
+                results_by_index[idx] = WorkerResult(
+                    task_name=existing.task_name,
+                    content="",
+                    duration_seconds=existing.duration_seconds,
+                    error=existing.error or "cancelled:critical_worker_error",
+                    degraded_compaction=existing.degraded_compaction,
+                )
+
         def _execute_scoped_worker(task: WorkerTask) -> WorkerResult:
             if abort_event.is_set():
                 return WorkerResult(
@@ -756,6 +823,7 @@ class CoordinatorService:
                     # Signal all in-flight workers to abort at their next
                     # cancellation checkpoint (between retries, before LLM calls).
                     abort_event.set()
+                    _cancel_non_critical_results_after_critical()
                     # Cancel futures that haven't started execution yet.
                     for pending in futures:
                         if pending is not future:
@@ -1407,6 +1475,53 @@ class CoordinatorService:
         )
         return result
 
+    def _complete_worker_phase_failed_run(
+        self,
+        *,
+        result: CoordinatorResult,
+        phase: str,
+        phase_results: list[WorkerResult],
+        orchestration_run_id: str,
+        trace_context: dict[str, Any],
+        start_time: float,
+    ) -> CoordinatorResult:
+        result.error = _phase_worker_failure_error(phase, phase_results)
+        result.duration_seconds = time.time() - start_time
+        self._f2_record_phase_failed(
+            task_id=result.task_id,
+            run_id=orchestration_run_id,
+            phase=phase,
+            error=result.error,
+        )
+        self._f2_record_task_terminal(
+            task_id=result.task_id,
+            run_id=orchestration_run_id,
+            status="failed",
+            result=result,
+        )
+        self._orchestration_complete_run(
+            orchestration_run_id,
+            status="failed",
+            reason=result.error,
+            trace_context=trace_context,
+        )
+        self.observe.emit(
+            "coordinator_phase_failed",
+            trace_id=trace_context["trace_id"],
+            root_trace_id=trace_context["root_trace_id"],
+            span_id=trace_context["span_id"],
+            parent_span_id=trace_context["parent_span_id"],
+            job_id=trace_context["job_id"],
+            artifact_id=trace_context["artifact_id"],
+            payload={
+                "task_id": result.task_id,
+                "phase": phase,
+                "error": result.error,
+                **_phase_counts(phase_results),
+            },
+        )
+        return result
+
     def _ensure_scratch(self, task_id: str) -> Path:
         """Create and return the scratch directory for a task."""
         scratch = self.scratch_root / task_id
@@ -1771,10 +1886,15 @@ class CoordinatorService:
         phase_payload = dict(payload or {})
         if results is not None:
             phase_payload.update(_phase_counts(results))
+        status = (
+            "failed"
+            if results is not None and _phase_all_workers_failed(results)
+            else "succeeded"
+        )
         self.orchestration_store.finish_phase(
             run_id,
             phase,
-            status="succeeded",
+            status=status,
             trace_context=trace_context,
             payload=phase_payload,
         )
@@ -2085,6 +2205,19 @@ def _phase_counts(results: list[WorkerResult]) -> dict[str, Any]:
         "error_count": error_count,
         "ok_count": len(results) - error_count,
     }
+
+
+def _phase_all_workers_failed(results: list[WorkerResult]) -> bool:
+    return bool(results) and all(bool(item.error) for item in results)
+
+
+def _phase_worker_failure_error(phase: str, results: list[WorkerResult]) -> str:
+    details = "; ".join(
+        f"{item.task_name}: {item.error}" for item in results if item.error
+    ).strip()
+    if not details:
+        details = "all workers failed without error details"
+    return f"{phase}_phase_failed: {redact_text(details, limit=500)}"
 
 
 def _f2_compact_payload(value: Any) -> Any:

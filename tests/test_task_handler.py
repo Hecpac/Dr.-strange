@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from claw_v2.coordinator import CoordinatorResult, WorkerResult
+from claw_v2.cli_maintenance import CliMaintenanceResult
 from claw_v2.bot_helpers import (
     _evaluate_autonomy_policy,
     _infer_session_mode,
@@ -1638,6 +1639,155 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
                 "tg-1", "repaso por X", mode="browse", forced=False, task_id="t-4"
             )
             self.assertTrue(recorded["coordinator_ran"])
+
+    def test_autonomous_cli_maintenance_uses_cli_runner_not_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            recorded: dict = {}
+
+            class _RecordingCoordinator:
+                def run(self, task_id, objective, research_tasks, **kwargs):
+                    recorded["coordinator_ran"] = True
+                    return CoordinatorResult(task_id=task_id, phase_results={}, synthesis="coord")
+
+            def cli_runner(**kwargs):
+                recorded["cli_runner"] = kwargs
+                return CliMaintenanceResult(
+                    verification_status="passed",
+                    summary="Codex CLI updated to 0.142.4; Claude Code already current.",
+                    tool_versions={
+                        "codex": {
+                            "installed": "0.142.3",
+                            "latest": "0.142.4",
+                            "verified": "0.142.4",
+                            "action": "updated",
+                        },
+                        "claude": {
+                            "installed": "2.1.195",
+                            "latest": "2.1.195",
+                            "verified": "2.1.195",
+                            "action": "already_current",
+                        },
+                    },
+                    commands_run=(
+                        ("codex", "--version"),
+                        ("npm", "view", "@openai/codex", "version"),
+                    ),
+                    installed_packages=("@openai/codex@0.142.4",),
+                )
+
+            handler = TaskHandler(
+                coordinator=_RecordingCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                cli_maintenance_runner=cli_runner,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                workspace_root=root,
+            )
+            memory.update_session_state("tg-1", autonomy_mode="autonomous", step_budget=8)
+
+            reply = handler.start_autonomous_task(
+                "tg-1",
+                "Actualiza los cli de Claude code y codex",
+                mode="ops",
+                task_kind="maintenance_update_tools",
+            )
+
+            self.assertIn("Tarea autónoma iniciada", reply)
+            task_id = reply.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=2))
+            self.assertIn("cli_runner", recorded)
+            self.assertEqual(recorded["cli_runner"]["cwd"], root)
+            self.assertNotIn("coordinator_ran", recorded)
+            record = ledger.get(task_id)
+            self.assertIsNotNone(record)
+            self.assertEqual(record.status, "succeeded")
+            self.assertEqual(record.verification_status, "passed")
+            checkpoint = memory.get_session_state("tg-1").get("last_checkpoint") or {}
+            self.assertEqual(checkpoint.get("operation"), "maintenance_update_tools")
+            self.assertEqual(checkpoint.get("verification_status"), "passed")
+
+    def test_autonomous_job_claim_blocked_fails_closed_without_running_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            recorded: dict = {}
+
+            class _RecordingCoordinator:
+                def run(self, task_id, objective, research_tasks, **kwargs):
+                    recorded["coordinator_ran"] = True
+                    return CoordinatorResult(task_id=task_id, phase_results={}, synthesis="coord")
+
+            task_id = "tg-1:t-claim-blocked"
+            objective = "Actualiza los cli de Claude code y codex"
+            job = jobs.enqueue(
+                kind="coordinator.autonomous_task",
+                payload={
+                    "task_id": task_id,
+                    "session_id": "tg-1",
+                    "objective": objective,
+                    "mode": "ops",
+                },
+                resume_key=TaskHandler._resume_key_for_task(task_id),
+            )
+            ledger.create(
+                task_id=task_id,
+                session_id="tg-1",
+                objective=objective,
+                mode="ops",
+                runtime="coordinator",
+                provider="codex",
+                model="gpt",
+                status="running",
+            )
+            memory.update_session_state(
+                "tg-1",
+                active_object={
+                    "active_task": {
+                        "task_id": task_id,
+                        "objective": objective,
+                        "mode": "ops",
+                        "status": "running",
+                    }
+                },
+            )
+            jobs.set_safe_mode_reason("branch_integrity_violation")
+
+            handler = TaskHandler(
+                coordinator=_RecordingCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+            )
+
+            handler._run_autonomous_task("tg-1", task_id, objective, "ops", job_id=job.job_id)
+
+            self.assertNotIn("coordinator_ran", recorded)
+            record = ledger.get(task_id)
+            self.assertIsNotNone(record)
+            self.assertEqual(record.status, "failed")
+            self.assertEqual(record.verification_status, "blocked")
+            failed_job = jobs.get(job.job_id)
+            self.assertIsNotNone(failed_job)
+            self.assertEqual(failed_job.status, "failed")
+            self.assertIn("job_claim_blocked", failed_job.error)
+            checkpoint = memory.get_session_state("tg-1").get("last_checkpoint") or {}
+            self.assertEqual(checkpoint.get("verification_status"), "blocked")
+            self.assertEqual(checkpoint.get("reason"), "job_claim_blocked")
+            events = [event["event_type"] for event in observe.recent_events(limit=50)]
+            self.assertIn("job_claim_blocked", events)
+            self.assertIn("autonomous_task_failed", events)
 
     def _autonomous_handler(self, root: Path, *, browser_executor):
         memory = MemoryStore(root / "claw.db")
