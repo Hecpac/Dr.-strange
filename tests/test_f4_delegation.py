@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from claw_v2.coordinator import CoordinatorResult
 from claw_v2.f4_delegation import (
     F4_DELEGATION_JOB_KIND,
     F4DelegationJobRunner,
@@ -522,6 +523,46 @@ class F4DelegationRunnerTests(unittest.TestCase):
         self.assertEqual(after.status, "queued")
         self.assertIsNone(self.ledger.get(task_id))
         self.assertEqual(self._coordinator_jobs(), [])
+
+    def test_authenticated_browse_resume_runs_browser_executor_not_coordinator(self) -> None:
+        task_id = "f4bdeliv:tg-1:browser"
+        recorded: dict = {}
+
+        class _RecordingCoordinator:
+            def run(self, task_id, objective, research_tasks, **kwargs):
+                recorded["coordinator"] = (task_id, objective)
+                return CoordinatorResult(task_id=task_id, phase_results={}, synthesis="coord")
+
+        def browser_executor(objective, *, task_id, mode):
+            recorded["browser_executor"] = (objective, task_id, mode)
+            return "Capturé 32 posts del timeline de X con enlaces destacados."
+
+        handler = TaskHandler(
+            coordinator=_RecordingCoordinator(),
+            observe=self.observe,
+            task_ledger=self.ledger,
+            job_service=self.jobs,
+            browser_executor=browser_executor,
+            get_session_state=self.memory.get_session_state,
+            update_session_state=self.memory.update_session_state,
+            workspace_root=self.root,
+        )
+        handler.ensure_autonomous_task_enqueued(**self._payload(task_id=task_id))
+
+        resumed = handler.resume_interrupted_autonomous_tasks()
+
+        self.assertEqual(resumed, 1)
+        self.assertTrue(handler.wait_for_task(task_id, timeout=2))
+        self.assertEqual(
+            recorded.get("browser_executor"),
+            ("Revisa el feed de X", task_id, "browse"),
+        )
+        self.assertNotIn("coordinator", recorded)
+        record = self.ledger.get(task_id)
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.mode, "chat")
+        self.assertEqual(record.status, "succeeded")
 
 
 # ---------------------------------------------------------------------------
