@@ -1316,9 +1316,9 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
             config=config,
             browser_capability=capability,
         )
-        out = handler.run_delegated_browser_task("repaso por X", task_id="t-1", mode="browse")
+        out = handler.run_delegated_browser_task("abre la web", task_id="t-1", mode="browse")
         self.assertEqual(out, "feed capturado: 30 posts")
-        self.assertEqual(fake.calls[0][0], "repaso por X")
+        self.assertEqual(fake.calls[0][0], "abre la web")
         # Long browser/CDP budget (1200s), NOT the 180s interactive default.
         self.assertEqual(fake.calls[0][1], 1200)
         self.assertEqual(capability.calls, [(9250, "~/.claw/chrome-profile")])
@@ -1389,6 +1389,124 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
             fake_dev_browser.calls,
             [("navigate", "https://www.instagram.com/"), ("screenshot", "instagram-open.png")],
         )
+
+    def test_x_feed_review_pre_navigates_home_before_browser_use(self) -> None:
+        import types
+        from unittest.mock import patch
+
+        from claw_v2.browser import BrowseResult
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def run_task(self, task, **kwargs):
+                self.calls.append(task)
+                return "feed capturado: 30 posts"
+
+        class FakeDevBrowserService:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, str | None]] = []
+
+            def chrome_navigate(self, url, *, cdp_url, page_url_pattern=None):
+                self.calls.append(("navigate", url, page_url_pattern))
+                return BrowseResult(
+                    url="https://x.com/home",
+                    title="Home / X",
+                    content="For you\nTimeline\nPost your reply",
+                )
+
+            def chrome_screenshot(self, *, cdp_url, page_url_pattern=None, name="chrome.png"):
+                self.calls.append(("screenshot", name, page_url_pattern))
+                return BrowseResult(
+                    url="https://x.com/home",
+                    title="Home / X",
+                    content="For you\nTimeline\nPost your reply",
+                    screenshot_path="/tmp/claw-x-home.png",
+                )
+
+        fake_browser_use = FakeBrowserUse()
+        fake_dev_browser = FakeDevBrowserService()
+        handler = ComputerHandler(
+            browser_use=fake_browser_use,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        with (
+            patch.object(handler, "_browser_profile_gate", return_value=None),
+            patch("claw_v2.computer_handler.DevBrowserService", return_value=fake_dev_browser),
+        ):
+            out = handler.run_delegated_browser_task("Haz un repaso por X", task_id="t-x", mode="browse")
+
+        self.assertEqual(out, "feed capturado: 30 posts")
+        self.assertEqual(
+            fake_dev_browser.calls,
+            [("navigate", "https://x.com/home", "x.com"), ("screenshot", "x-home.png", "x.com")],
+        )
+        self.assertEqual(len(fake_browser_use.calls), 1)
+        self.assertIn("X ya esta abierto por CDP", fake_browser_use.calls[0])
+        self.assertIn("URL inicial: https://x.com/home", fake_browser_use.calls[0])
+        self.assertIn("Captura inicial: /tmp/claw-x-home.png", fake_browser_use.calls[0])
+
+    def test_x_prelude_evidence_survives_browser_use_no_result(self) -> None:
+        import types
+        from unittest.mock import patch
+
+        from claw_v2.browser import BrowseResult
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                return "(no result)"
+
+        class FakeDevBrowserService:
+            def chrome_navigate(self, url, *, cdp_url, page_url_pattern=None):
+                return BrowseResult(
+                    url="https://x.com/home",
+                    title="Home / X",
+                    content="For you\nTimeline\nPost your reply",
+                )
+
+            def chrome_screenshot(self, *, cdp_url, page_url_pattern=None, name="chrome.png"):
+                return BrowseResult(
+                    url="https://x.com/home",
+                    title="Home / X",
+                    content="For you\nTimeline\nPost your reply",
+                    screenshot_path="/tmp/claw-x-home.png",
+                )
+
+        handler = ComputerHandler(
+            browser_use=FakeBrowserUse(),
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        with (
+            patch.object(handler, "_browser_profile_gate", return_value=None),
+            patch("claw_v2.computer_handler.DevBrowserService", return_value=FakeDevBrowserService()),
+        ):
+            out = handler.run_delegated_browser_task("Haz un repaso por X", task_id="t-x", mode="browse")
+
+        self.assertTrue(out.startswith("(no result)"))
+        self.assertIn("Evidencia inicial deterministica", out)
+        self.assertIn("URL inicial: https://x.com/home", out)
+        self.assertIn("Captura inicial: /tmp/claw-x-home.png", out)
 
     def test_unavailable_browser_use_returns_clear_message(self) -> None:
         from claw_v2.computer_handler import ComputerHandler
