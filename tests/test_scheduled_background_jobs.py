@@ -223,43 +223,52 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
             self.assertIn("wiki_research_job_completed", event_names)
 
     def test_wiki_scrape_result_summary_keeps_bounded_source_diagnostics(self) -> None:
+        source_results = [
+            {
+                "source": f"Source {idx}",
+                "url": f"https://example.com/{idx}",
+                "status": "scraped",
+                "items_extracted": idx,
+                "items_ingested": 0,
+                "items_skipped": 2,
+                "skip_reasons": {"duplicate": 1, "body_too_short": 1},
+                "raw_body": "must not persist",
+            }
+            for idx in range(12)
+        ]
+        source_results[0]["source"] = "Source A"
+        item_results = [
+            {
+                "source": "Source A",
+                "title": "Duplicate Topic " + ("x" * 200),
+                "slug": f"duplicate-topic-{idx}",
+                "status": "skipped",
+                "reason": "duplicate",
+                "body": "must not persist",
+            }
+            for idx in range(25)
+        ]
         result = wiki_scrape_result_summary(
             {
                 "sources_scraped": 8,
                 "pages_ingested": 0,
                 "sources_skipped": 0,
-                "source_results": [
-                    {
-                        "source": "Source A",
-                        "url": "https://example.com/a",
-                        "status": "scraped",
-                        "items_extracted": 2,
-                        "items_ingested": 0,
-                        "items_skipped": 2,
-                        "skip_reasons": {"duplicate": 1, "body_too_short": 1},
-                        "raw_body": "must not persist",
-                    }
-                ],
-                "item_results": [
-                    {
-                        "source": "Source A",
-                        "title": "Duplicate Topic",
-                        "slug": "duplicate-topic",
-                        "status": "skipped",
-                        "reason": "duplicate",
-                        "body": "must not persist",
-                    }
-                ],
+                "source_results": source_results,
+                "item_results": item_results,
             }
         )
 
         self.assertEqual(result["sources_scraped"], 8)
         self.assertEqual(result["pages_ingested"], 0)
         self.assertEqual(result["sources_skipped"], 0)
+        self.assertEqual(len(result["source_results"]), 10)
+        self.assertEqual(len(result["item_results"]), 20)
         self.assertEqual(result["source_results"][0]["source"], "Source A")
         self.assertEqual(result["source_results"][0]["skip_reasons"]["duplicate"], 1)
         self.assertNotIn("raw_body", result["source_results"][0])
         self.assertEqual(result["item_results"][0]["reason"], "duplicate")
+        self.assertLessEqual(len(result["item_results"][0]["title"]), 123)
+        self.assertTrue(result["item_results"][0]["title"].endswith("..."))
         self.assertNotIn("body", result["item_results"][0])
 
     def test_safe_non_negative_int_defaults_none_and_invalid_values(self) -> None:

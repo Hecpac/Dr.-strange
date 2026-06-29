@@ -613,15 +613,119 @@ class ComputerUseService:
 # the OAuth bearer; any other (e.g. gpt-*) falls back to the metered OPENAI key.
 DEFAULT_BROWSER_USE_MODEL = "claude-sonnet-4-6"
 # Secondary model wired as browser_use's fallback_llm when the primary is a
-# Claude model — same OAuth/subscription path, so a primary-model hiccup
-# (overload/availability) doesn't kill the whole browser task.
-BROWSER_USE_OAUTH_FALLBACK_MODEL = "claude-haiku-4-5"
+# Claude model. Set to None: claude-haiku-4-5 (the previous fallback) returns
+# AgentOutput that fails browser_use's schema (missing 'action'), so a primary
+# 429 cascaded into 6 retries on the broken fallback and a (no result) task
+# failure. With fallback disabled, a sustained primary rate-limit surfaces
+# cleanly (the primary's RetryChatAnthropic backoff already absorbs transient
+# 429s on the SAME model). Re-enable only with a model whose output reliably
+# satisfies browser_use's AgentOutput schema.
+BROWSER_USE_OAUTH_FALLBACK_MODEL = None
 # Beta header the Anthropic API requires when authenticating /v1/messages with
 # a Claude Code (Max subscription) OAuth bearer token instead of an API key.
 _ANTHROPIC_OAUTH_BETA_HEADER = "oauth-2025-04-20"
 # Upper bound for the best-effort post-task screenshot so a hung capture can
 # never delay or fail an otherwise-completed browser task.
 _BROWSER_USE_CAPTURE_TIMEOUT_SECONDS = 30
+# Exponential-backoff retry tuning for the browser_use Anthropic client. The
+# Max subscription rate-limits under bursty browser agent loops; browser_use
+# falls back to the secondary model whose output often fails the AgentOutput
+# schema, so a 429 on the primary cascades into a task failure. These retries
+# absorb the rate-limit window on the SAME primary before browser_use's own
+# fallback triggers. Bounded wall-clock so a sustained limit still surfaces.
+_BROWSER_USE_RETRY_MAX_ATTEMPTS = 4
+_BROWSER_USE_RETRY_BASE_DELAY_SECONDS = 2.0
+_BROWSER_USE_RETRY_MAX_DELAY_SECONDS = 30.0
+_BROWSER_USE_RETRY_JITTER_SECONDS = 1.0
+
+
+class RetryChatAnthropic:
+    """Wrapper that adds exponential-backoff retries on rate-limit to a
+    browser_use ``ChatAnthropic``.
+
+    browser_use v0.11.13's ``ChatAnthropic.ainvoke`` rethrows
+    ``RateLimitError`` as ``ModelRateLimitError``; browser_use then switches to
+    ``fallback_llm``. The previous fallback (claude-haiku-4-5) returned output
+    that failed the ``AgentOutput`` schema (missing ``action``), cascading a
+    transient 429 into a (no result) task failure. ``BROWSER_USE_OAUTH_FALLBACK_MODEL``
+    is now None, so browser_use has no fallback to degrade to — this wrapper's
+    bounded exponential backoff absorbs the Max-subscription rate-limit window
+    on the SAME primary instead, so a transient 429 does not surface as a task
+    failure.
+
+    Only retries ``ModelRateLimitError`` (rate limits). Other errors
+    (``ModelProviderError``, validation, connection) propagate immediately so
+    a non-rate-limit failure surfaces honestly rather than being masked.
+    """
+
+    def __init__(self, inner: Any, *, observe: Any | None = None) -> None:
+        self._inner = inner
+        self._observe = observe
+
+    # --- passthrough of the attributes browser_use / our code reads ---
+    @property
+    def name(self) -> str:
+        return getattr(self._inner, "name", str(self._inner))
+
+    @property
+    def provider(self) -> str:
+        return getattr(self._inner, "provider", "anthropic")
+
+    @property
+    def model_name(self) -> str:
+        return getattr(self._inner, "model_name", self.name)
+
+    def __getattr__(self, item: str) -> Any:
+        # Forward anything else (api_key, auth_token, default_headers, ...) to
+        # the inner client so browser_use internals that read attributes keep
+        # working.
+        return getattr(self._inner, item)
+
+    async def ainvoke(self, messages: list[Any], output_format: Any = None, **kwargs: Any) -> Any:
+        import random
+
+        delay = _BROWSER_USE_RETRY_BASE_DELAY_SECONDS
+        last_exc: Exception | None = None
+        for attempt in range(1, _BROWSER_USE_RETRY_MAX_ATTEMPTS + 1):
+            try:
+                return await self._inner.ainvoke(messages, output_format, **kwargs)
+            except Exception as exc:
+                # Only retry rate-limit errors. Provider/validation errors
+                # propagate so browser_use can take its own fallback path.
+                name = type(exc).__name__
+                if name != "ModelRateLimitError":
+                    raise
+                last_exc = exc
+                if attempt >= _BROWSER_USE_RETRY_MAX_ATTEMPTS:
+                    break
+                jitter = random.uniform(0.0, _BROWSER_USE_RETRY_JITTER_SECONDS)
+                wait = min(delay, _BROWSER_USE_RETRY_MAX_DELAY_SECONDS) + jitter
+                logger.warning(
+                    "browser_use primary LLM rate-limited (attempt %d/%d); "
+                    "backing off %.1fs before retry",
+                    attempt,
+                    _BROWSER_USE_RETRY_MAX_ATTEMPTS,
+                    wait,
+                )
+                if self._observe is not None:
+                    try:
+                        self._observe.emit(
+                            "browser_use_primary_rate_limit_retry",
+                            payload={
+                                "model": self.name,
+                                "attempt": attempt,
+                                "max_attempts": _BROWSER_USE_RETRY_MAX_ATTEMPTS,
+                                "delay_seconds": round(wait, 2),
+                            },
+                        )
+                    except Exception:
+                        logger.debug("browser_use retry observe emit failed", exc_info=True)
+                await asyncio.sleep(wait)
+                delay *= 2
+        # Exhausted retries: re-raise the last rate-limit error so browser_use
+        # takes its own fallback path (preserves existing behavior).
+        assert last_exc is not None
+        raise last_exc
 
 
 class BrowserUseService:
@@ -636,9 +740,11 @@ class BrowserUseService:
         *,
         cdp_url: str | None = "http://localhost:9250",
         headless: bool = True,
+        observe: Any | None = None,
     ) -> None:
         self.cdp_url = cdp_url
         self.headless = headless
+        self._observe = observe
         # Path of the screenshot captured at the end of the most recent
         # run_task, so the caller can surface a fresh artifact (e.g. the
         # generated image) instead of a stale one. Thread-local because
@@ -660,9 +766,12 @@ class BrowserUseService:
 
         ``claude*`` models ride Hector's Max subscription: authenticate with the
         keychain OAuth bearer + the ``oauth-2025-04-20`` beta header (NO metered
-        ANTHROPIC_API_KEY), and wire a secondary Claude model as ``fallback_llm``
-        so a primary overload doesn't kill the task. Any other model (gpt-*) uses
-        the metered OpenAI key. Raises if a Claude model is requested but no
+        ANTHROPIC_API_KEY). The fallback_llm is disabled (BROWSER_USE_OAUTH_FALLBACK_MODEL = None):
+        the previous haiku fallback produced AgentOutput that failed browser_use's
+        schema, so a primary 429 cascaded into (no result). The primary is wrapped
+        in RetryChatAnthropic (bounded backoff on rate-limit) so transient 429s
+        are absorbed on the same model. Any non-Claude model (gpt-*) uses the
+        metered OpenAI key. Raises if a Claude model is requested but no
         subscription token is available — fail loud, never silently no-op.
         """
         with _preserve_browser_use_import_env():
@@ -685,6 +794,10 @@ class BrowserUseService:
                     auth_token=token,
                     default_headers=headers,
                 )
+            # Wrap the primary with bounded exponential backoff on rate-limit so
+            # a transient Max-subscription 429 is absorbed on the same model
+            # before browser_use falls back to the (schema-fragile) secondary.
+            primary = RetryChatAnthropic(primary, observe=self._observe)
             return primary, fallback
         return ChatOpenAI(model=model, api_key=os.environ.get("OPENAI_API_KEY")), None
 

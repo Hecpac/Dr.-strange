@@ -6,7 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from claw_v2.computer import ComputerUseService, ComputerSession
 from claw_v2.computer_gate import ActionGate
@@ -339,7 +339,10 @@ class BrowserUseServiceTests(unittest.TestCase):
         module = types.SimpleNamespace(ChatAnthropic=MagicMock(), ChatOpenAI=MagicMock())
         return module
 
-    def test_build_llm_claude_uses_max_oauth_token_and_fallback(self) -> None:
+    def test_build_llm_claude_uses_max_oauth_token_no_fallback(self) -> None:
+        # Fix A: BROWSER_USE_OAUTH_FALLBACK_MODEL is None — the haiku fallback
+        # produced AgentOutput that failed browser_use's schema, so a primary
+        # 429 cascaded into (no result). Only the primary ChatAnthropic is built.
         import sys
         from claw_v2.computer import BrowserUseService
 
@@ -351,13 +354,13 @@ class BrowserUseServiceTests(unittest.TestCase):
         ):
             primary, fallback = svc._build_browser_llm("claude-sonnet-4-6")
         module.ChatOpenAI.assert_not_called()
-        self.assertEqual(module.ChatAnthropic.call_count, 2)  # primary + fallback
+        self.assertEqual(module.ChatAnthropic.call_count, 1)  # primary only
         first = module.ChatAnthropic.call_args_list[0].kwargs
         self.assertEqual(first["model"], "claude-sonnet-4-6")
         self.assertEqual(first["auth_token"], "tok123")
         self.assertEqual(first["default_headers"], {"anthropic-beta": "oauth-2025-04-20"})
-        self.assertEqual(module.ChatAnthropic.call_args_list[1].kwargs["model"], "claude-haiku-4-5")
-        self.assertIsNotNone(fallback)
+        # fallback disabled — no second ChatAnthropic, fallback is None
+        self.assertIsNone(fallback)
 
     def test_build_llm_claude_without_token_raises(self) -> None:
         import sys
@@ -395,6 +398,122 @@ class BrowserUseServiceTests(unittest.TestCase):
             # inactive: leave the env untouched
             with _suppress_anthropic_api_key(False):
                 self.assertEqual(os.environ.get("ANTHROPIC_API_KEY"), "sk-ant-api03-x")
+
+    def test_build_llm_claude_wraps_primary_with_retry(self) -> None:
+        import sys
+        from claw_v2.computer import BrowserUseService, RetryChatAnthropic
+
+        svc = BrowserUseService()
+        module = self._fake_browser_use_llm_module()
+        with (
+            patch.dict(sys.modules, {"browser_use": module}),
+            patch("claw_v2.computer._resolve_claude_oauth_token", return_value="tok123"),
+        ):
+            primary, fallback = svc._build_browser_llm("claude-sonnet-4-6")
+        # primary is wrapped in RetryChatAnthropic; fallback is None (Fix A)
+        self.assertIsInstance(primary, RetryChatAnthropic)
+        self.assertIsNone(fallback)
+        # the wrapper delegates to the inner ChatAnthropic instance
+        self.assertIs(primary._inner, module.ChatAnthropic.return_value)
+
+    def test_fallback_model_constant_is_none(self) -> None:
+        # Fix A: pin that the broken haiku fallback stays disabled until a
+        # schema-compatible model is chosen. Re-enabling silently reintroduces
+        # the (no result) cascade.
+        from claw_v2.computer import BROWSER_USE_OAUTH_FALLBACK_MODEL
+
+        self.assertIsNone(BROWSER_USE_OAUTH_FALLBACK_MODEL)
+
+
+class RetryChatAnthropicTests(unittest.IsolatedAsyncioTestCase):
+    """Exponential-backoff retry wrapper for the browser_use Anthropic client."""
+
+    class ModelRateLimitError(Exception):
+        # Matches browser_use.llm.exceptions.ModelRateLimitError by class name;
+        # the retry wrapper dispatches on type(exc).__name__.
+        pass
+
+    class ModelProviderError(Exception):
+        pass
+
+    def _fake_inner(self, *, side_effects):
+        """Build a fake ChatAnthropic whose ainvoke pops side_effects per call."""
+        calls = []
+
+        class _Inner:
+            name = "claude-sonnet-4-6"
+            provider = "anthropic"
+            model_name = "claude-sonnet-4-6"
+
+            async def ainvoke(self, messages, output_format=None, **kwargs):
+                calls.append(len(calls) + 1)
+                effect = side_effects.pop(0)
+                if isinstance(effect, Exception):
+                    raise effect
+                return effect
+
+        return _Inner(), calls
+
+    async def test_retries_on_rate_limit_then_succeeds(self) -> None:
+        from claw_v2.computer import RetryChatAnthropic
+
+        inner, calls = self._fake_inner(
+            side_effects=[
+                self.ModelRateLimitError("429"),
+                self.ModelRateLimitError("429"),
+                "ok-result",
+            ]
+        )
+        wrapper = RetryChatAnthropic(inner)
+        with patch("claw_v2.computer.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+            result = await wrapper.ainvoke(["msg"])
+        self.assertEqual(result, "ok-result")
+        self.assertEqual(calls, [1, 2, 3])  # 3 attempts total
+        # exponential backoff: 2 sleeps before the 2nd and 3rd attempts
+        self.assertEqual(mock_sleep.call_count, 2)
+        first_delay = mock_sleep.call_args_list[0].args[0]
+        second_delay = mock_sleep.call_args_list[1].args[0]
+        self.assertGreaterEqual(first_delay, 2.0)
+        self.assertGreaterEqual(second_delay, 4.0)  # doubled
+
+    async def test_non_rate_limit_error_propagates_immediately(self) -> None:
+        from claw_v2.computer import RetryChatAnthropic
+
+        inner, calls = self._fake_inner(
+            side_effects=[self.ModelProviderError("validation boom")]
+        )
+        wrapper = RetryChatAnthropic(inner)
+        with patch("claw_v2.computer.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+            with self.assertRaises(self.ModelProviderError):
+                await wrapper.ainvoke(["msg"])
+        self.assertEqual(calls, [1])  # no retry
+        mock_sleep.assert_not_called()
+
+    async def test_exhausted_retries_reraises_rate_limit_error(self) -> None:
+        from claw_v2.computer import RetryChatAnthropic
+
+        inner, calls = self._fake_inner(
+            side_effects=[self.ModelRateLimitError("429")] * 4
+        )
+        wrapper = RetryChatAnthropic(inner)
+        with patch("claw_v2.computer.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaises(self.ModelRateLimitError):
+                await wrapper.ainvoke(["msg"])
+        # 4 attempts = max attempts, no more
+        self.assertEqual(calls, [1, 2, 3, 4])
+
+    async def test_observe_emits_retry_event(self) -> None:
+        from claw_v2.computer import RetryChatAnthropic
+
+        inner, _ = self._fake_inner(
+            side_effects=[self.ModelRateLimitError("429"), "ok"]
+        )
+        observe = MagicMock()
+        wrapper = RetryChatAnthropic(inner, observe=observe)
+        with patch("claw_v2.computer.asyncio.sleep", new=AsyncMock()):
+            await wrapper.ainvoke(["msg"])
+        emitted = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertIn("browser_use_primary_rate_limit_retry", emitted)
 
 
 class CodexComputerBackendTests(unittest.TestCase):
@@ -1208,9 +1327,9 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
             config=config,
             browser_capability=capability,
         )
-        out = handler.run_delegated_browser_task("repaso por X", task_id="t-1", mode="browse")
+        out = handler.run_delegated_browser_task("abre la web", task_id="t-1", mode="browse")
         self.assertEqual(out, "feed capturado: 30 posts")
-        self.assertEqual(fake.calls[0][0], "repaso por X")
+        self.assertEqual(fake.calls[0][0], "abre la web")
         # Long browser/CDP budget (1200s), NOT the 180s interactive default.
         self.assertEqual(fake.calls[0][1], 1200)
         self.assertEqual(capability.calls, [(9250, "~/.claw/chrome-profile")])
@@ -1281,6 +1400,124 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
             fake_dev_browser.calls,
             [("navigate", "https://www.instagram.com/"), ("screenshot", "instagram-open.png")],
         )
+
+    def test_x_feed_review_pre_navigates_home_before_browser_use(self) -> None:
+        import types
+        from unittest.mock import patch
+
+        from claw_v2.browser import BrowseResult
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def run_task(self, task, **kwargs):
+                self.calls.append(task)
+                return "feed capturado: 30 posts"
+
+        class FakeDevBrowserService:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, str | None]] = []
+
+            def chrome_navigate(self, url, *, cdp_url, page_url_pattern=None):
+                self.calls.append(("navigate", url, page_url_pattern))
+                return BrowseResult(
+                    url="https://x.com/home",
+                    title="Home / X",
+                    content="For you\nTimeline\nPost your reply",
+                )
+
+            def chrome_screenshot(self, *, cdp_url, page_url_pattern=None, name="chrome.png"):
+                self.calls.append(("screenshot", name, page_url_pattern))
+                return BrowseResult(
+                    url="https://x.com/home",
+                    title="Home / X",
+                    content="For you\nTimeline\nPost your reply",
+                    screenshot_path="/tmp/claw-x-home.png",
+                )
+
+        fake_browser_use = FakeBrowserUse()
+        fake_dev_browser = FakeDevBrowserService()
+        handler = ComputerHandler(
+            browser_use=fake_browser_use,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        with (
+            patch.object(handler, "_browser_profile_gate", return_value=None),
+            patch("claw_v2.computer_handler.DevBrowserService", return_value=fake_dev_browser),
+        ):
+            out = handler.run_delegated_browser_task("Haz un repaso por X", task_id="t-x", mode="browse")
+
+        self.assertEqual(out, "feed capturado: 30 posts")
+        self.assertEqual(
+            fake_dev_browser.calls,
+            [("navigate", "https://x.com/home", "x.com"), ("screenshot", "x-home.png", "x.com")],
+        )
+        self.assertEqual(len(fake_browser_use.calls), 1)
+        self.assertIn("X ya esta abierto por CDP", fake_browser_use.calls[0])
+        self.assertIn("URL inicial: https://x.com/home", fake_browser_use.calls[0])
+        self.assertIn("Captura inicial: /tmp/claw-x-home.png", fake_browser_use.calls[0])
+
+    def test_x_prelude_evidence_survives_browser_use_no_result(self) -> None:
+        import types
+        from unittest.mock import patch
+
+        from claw_v2.browser import BrowseResult
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                return "(no result)"
+
+        class FakeDevBrowserService:
+            def chrome_navigate(self, url, *, cdp_url, page_url_pattern=None):
+                return BrowseResult(
+                    url="https://x.com/home",
+                    title="Home / X",
+                    content="For you\nTimeline\nPost your reply",
+                )
+
+            def chrome_screenshot(self, *, cdp_url, page_url_pattern=None, name="chrome.png"):
+                return BrowseResult(
+                    url="https://x.com/home",
+                    title="Home / X",
+                    content="For you\nTimeline\nPost your reply",
+                    screenshot_path="/tmp/claw-x-home.png",
+                )
+
+        handler = ComputerHandler(
+            browser_use=FakeBrowserUse(),
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        with (
+            patch.object(handler, "_browser_profile_gate", return_value=None),
+            patch("claw_v2.computer_handler.DevBrowserService", return_value=FakeDevBrowserService()),
+        ):
+            out = handler.run_delegated_browser_task("Haz un repaso por X", task_id="t-x", mode="browse")
+
+        self.assertTrue(out.startswith("(no result)"))
+        self.assertIn("Evidencia inicial deterministica", out)
+        self.assertIn("URL inicial: https://x.com/home", out)
+        self.assertIn("Captura inicial: /tmp/claw-x-home.png", out)
 
     def test_unavailable_browser_use_returns_clear_message(self) -> None:
         from claw_v2.computer_handler import ComputerHandler

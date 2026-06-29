@@ -1090,7 +1090,10 @@ def _setup_operational_services(
             display_height=config.computer_display_height,
             codex_backend=codex_computer_backend,
         )
-    browser_use = BrowserUseService(cdp_url=f"http://localhost:{config.claw_chrome_port}")
+    browser_use = BrowserUseService(
+        cdp_url=f"http://localhost:{config.claw_chrome_port}",
+        observe=observe,
+    )
     from claw_v2.stop_notifier import build_stop_notifier
 
     stop_notifier = build_stop_notifier(config=config)

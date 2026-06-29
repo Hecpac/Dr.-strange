@@ -538,7 +538,10 @@ class AutoResearchTests(unittest.TestCase):
         self.assertEqual(len(queued), 2)
         self.assertEqual(queued[0]["status"], "blocked")
         self.assertEqual(queued[1]["status"], "new")
-        replace.assert_called()
+        replace.assert_called_once()
+        src, dst = replace.call_args.args
+        self.assertEqual(Path(src).suffix, ".tmp")
+        self.assertEqual(Path(dst), tmp / "research_candidates.json")
 
     def test_auto_research_tolerates_null_source_queries(self) -> None:
         svc, router, tmp = _make_wiki()
@@ -560,6 +563,8 @@ class AutoResearchTests(unittest.TestCase):
 
         self.assertEqual(result["topics_researched"], 1)
         self.assertEqual(result["candidates"][0]["source_queries"], [])
+        candidate = svc.research_candidates(limit=1)[0]
+        self.assertEqual(candidate["source_queries"], [])
 
     def test_auto_research_worker_writes_raw_evidence_without_wiki_page(self) -> None:
         svc, router, tmp = _make_wiki()
@@ -612,8 +617,10 @@ class AutoResearchTests(unittest.TestCase):
         self.assertEqual(candidate["status"], "researched")
         self.assertEqual(candidate["raw_source_slug"], "research-computer-use-runbooks")
         self.assertEqual(candidate["sources_count"], 1)
-        self.assertEqual(router.ask.call_args_list[1].kwargs["lane"], "worker")
-        self.assertIn("WebSearch", router.ask.call_args_list[1].kwargs["allowed_tools"])
+        worker_call = next(
+            call for call in router.ask.call_args_list if call.kwargs.get("lane") == "worker"
+        )
+        self.assertIn("WebSearch", worker_call.kwargs["allowed_tools"])
 
     def test_auto_research_worker_blocks_candidate_without_sources(self) -> None:
         svc, router, tmp = _make_wiki()
@@ -920,7 +927,7 @@ class AutoScrapeTests(unittest.TestCase):
         ]
         proc = MagicMock(returncode=0, stdout="source page content", stderr="")
 
-        with patch("subprocess.run", return_value=proc):
+        with patch("claw_v2.wiki.run_subprocess_bounded", return_value=proc):
             result = svc.auto_scrape_sources()
 
         self.assertGreaterEqual(result["pages_ingested"], 1)
@@ -934,7 +941,7 @@ class AutoScrapeTests(unittest.TestCase):
         svc.WATCH_SOURCES = [("Test Source", "https://example.com/source")]
         proc = MagicMock(returncode=1, stdout="", stderr="Payment required: insufficient credits")
 
-        with patch("subprocess.run", return_value=proc):
+        with patch("claw_v2.wiki.run_subprocess_bounded", return_value=proc):
             result = svc.auto_scrape_sources()
 
         self.assertEqual(result["sources_scraped"], 0)
@@ -982,7 +989,7 @@ class AutoScrapeTests(unittest.TestCase):
         )
         proc = MagicMock(returncode=0, stdout="source page content", stderr="")
 
-        with patch("subprocess.run", return_value=proc):
+        with patch("claw_v2.wiki.run_subprocess_bounded", return_value=proc):
             result = svc.auto_scrape_sources()
 
         self.assertEqual(result["pages_ingested"], 0)
@@ -1010,7 +1017,7 @@ class AutoScrapeTests(unittest.TestCase):
         )
         proc = MagicMock(returncode=0, stdout="source page content", stderr="")
 
-        with patch("subprocess.run", return_value=proc), patch.object(
+        with patch("claw_v2.wiki.run_subprocess_bounded", return_value=proc), patch.object(
             svc, "ingest", return_value={"pages_written": 0, "skipped": True}
         ):
             result = svc.auto_scrape_sources()

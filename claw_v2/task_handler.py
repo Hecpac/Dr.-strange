@@ -139,12 +139,22 @@ _BROWSER_FAILURE_MARKERS = (
 )
 
 
+_AUTHENTICATED_BROWSE_TASK_KIND = "authenticated_browse"
+
+
 def _browser_output_indicates_failure(output: str) -> bool:
     """True when a browser-executor result is empty or a known failure sentinel."""
     text = _normalize_command_text(output or "")
     if not text:
         return True
     return any(_normalize_command_text(marker) in text for marker in _BROWSER_FAILURE_MARKERS)
+
+
+def _execution_mode_for_autonomous_task(mode: str, metadata: dict[str, Any]) -> str:
+    task_kind = str(metadata.get("task_kind") or "").strip()
+    if task_kind == _AUTHENTICATED_BROWSE_TASK_KIND:
+        return "browse"
+    return mode
 
 
 def _failure_response_text(
@@ -535,7 +545,8 @@ class TaskHandler:
         mode: str,
         task_kind: str,
         source_text: str,
-        delegation_metadata: dict[str, Any] | None,
+        route: dict[str, Any] | None = None,
+        delegation_metadata: dict[str, Any] | None = None,
     ) -> AutonomousTaskBootstrapResult:
         """Idempotently materialise one autonomous task for a deterministic id.
 
@@ -617,7 +628,7 @@ class TaskHandler:
                 session_id=session_id,
                 objective=objective,
                 mode=mode,
-                route={},
+                route=dict(route or {}),
                 goal_id=None,
                 task_contract=task_contract,
                 verify=None,
@@ -2075,6 +2086,9 @@ class TaskHandler:
         false_success = self._is_false_success_record(record)
         metadata = dict(record.metadata or {})
         metadata["autonomous"] = True
+        execution_mode = _execution_mode_for_autonomous_task(mode, metadata)
+        if execution_mode != mode:
+            metadata["execution_mode"] = execution_mode
         metadata["resume_reason"] = reason
         metadata["resume_count"] = int(metadata.get("resume_count") or 0) + 1
         metadata["last_resumed_at"] = time.time()
@@ -2141,6 +2155,8 @@ class TaskHandler:
             "resumed_at": metadata["last_resumed_at"],
             "resume_reason": reason,
         }
+        if execution_mode != mode:
+            active_object["active_task"]["execution_mode"] = execution_mode
         if goal_id:
             active_object["active_task"]["goal_id"] = goal_id
         self._update_session_state(
@@ -2193,7 +2209,7 @@ class TaskHandler:
             task_id=record.task_id,
             session_id=record.session_id,
             objective=record.objective,
-            mode=mode,
+            mode=execution_mode,
             route=record.route,
             reason=reason,
             reclaim_running=True,
@@ -2202,7 +2218,7 @@ class TaskHandler:
             session_id=record.session_id,
             task_id=record.task_id,
             objective=record.objective,
-            mode=mode,
+            mode=execution_mode,
             job_id=job_id,
             resumed=True,
             name=f"autonomous-resume-{record.task_id[-8:]}",
