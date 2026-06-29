@@ -841,6 +841,7 @@ class WikiService:
         )
         compiled = 0
         blocked = 0
+        failed = 0
         pages_written = 0
         results: list[dict] = []
         for candidate in candidates[:limit]:
@@ -851,9 +852,12 @@ class WikiService:
                 pages_written += int(outcome.get("pages_written") or 0)
             elif outcome.get("status") == "compile_blocked":
                 blocked += 1
+            elif outcome.get("status") == "compile_failed":
+                failed += 1
         return {
             "candidates_compiled": compiled,
             "compile_blocked": blocked,
+            "compile_failed": failed,
             "pages_written": pages_written,
             "compile_results": results,
         }
@@ -1125,15 +1129,7 @@ class WikiService:
         except Exception as exc:
             logger.exception("Wiki compile candidate failed for %s", slug)
             reason = f"compile_failed:{exc.__class__.__name__}"
-            self._update_research_candidate(
-                slug,
-                {
-                    "status": "compile_blocked",
-                    "compile_blocked_reason": reason,
-                    "updated_at": _now_iso(),
-                },
-            )
-            return {"slug": slug, "status": "compile_blocked", "reason": reason}
+            return {"slug": slug, "status": "compile_failed", "reason": reason}
 
         summary = payload.get("summary_page")
         if not isinstance(summary, dict):
@@ -1177,7 +1173,6 @@ class WikiService:
             return {"slug": slug, "status": "compile_blocked", "reason": reason}
 
         target.write_text(content.strip() + "\n", encoding="utf-8")
-        self._ensure_raw_source(target, raw_slug)
         confidence = self._compute_confidence(target.stem)
         self._set_frontmatter_field(target, "confidence", str(confidence))
         final_content = target.read_text(encoding="utf-8")
@@ -2446,18 +2441,19 @@ class WikiService:
     def _update_index(self, category: str, entry: str) -> None:
         if not entry.strip():
             return
-        category = self._normalize_category(category)
-        text = self.index_path.read_text(encoding="utf-8") if self.index_path.exists() else ""
-        # Check if entry already exists
-        if entry.strip() in text:
-            return
-        # Find category section and append
-        marker = f"## {category}"
-        if marker in text:
-            text = text.replace(marker, f"{marker}\n{entry.strip()}", 1)
-        else:
-            text += f"\n## {category}\n{entry.strip()}\n"
-        self.index_path.write_text(text, encoding="utf-8")
+        with self._lock:
+            category = self._normalize_category(category)
+            text = self.index_path.read_text(encoding="utf-8") if self.index_path.exists() else ""
+            # Check if entry already exists
+            if entry.strip() in text:
+                return
+            # Find category section and append
+            marker = f"## {category}"
+            if marker in text:
+                text = text.replace(marker, f"{marker}\n{entry.strip()}", 1)
+            else:
+                text += f"\n## {category}\n{entry.strip()}\n"
+            self.index_path.write_text(text, encoding="utf-8")
 
     # ------------------------------------------------------------------
     # Dedup, category normalization, graph rebuild, raw backfill

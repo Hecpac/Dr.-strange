@@ -166,6 +166,7 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
                     "candidates_blocked": 0,
                     "candidates_compiled": 1,
                     "compile_blocked": 0,
+                    "compile_failed": 0,
                     "candidates": [{"topic": "large raw candidate"}],
                 }
             )
@@ -203,6 +204,7 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
                     "candidates_blocked": 0,
                     "candidates_compiled": 1,
                     "compile_blocked": 0,
+                    "compile_failed": 0,
                     "candidate_count": 1,
                     "candidate_previews": [
                         {

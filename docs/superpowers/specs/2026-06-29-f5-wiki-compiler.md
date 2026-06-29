@@ -14,7 +14,8 @@
 - Acceptance criteria:
   - `WikiService.compile_researched_candidates()` writes wiki pages only from existing raw evidence.
   - Compiled pages must pass a local quality gate before write: safe filename, frontmatter, and `sources` includes the raw source slug.
-  - Candidates move from `researched` to `compiled`, or to `compile_blocked` with a reason.
+  - Candidates move from `researched` to `compiled`, or to `compile_blocked` with a reason for deterministic gate failures.
+  - Transient compile failures are reported as `compile_failed` without changing the candidate's persisted `researched` status, so later runs can retry.
   - Scheduled `wiki_research` can process one research candidate and one compile candidate per off-tick run.
 
 ## Verification

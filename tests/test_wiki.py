@@ -701,6 +701,7 @@ class AutoResearchTests(unittest.TestCase):
 
         self.assertEqual(result["candidates_compiled"], 1)
         self.assertEqual(result["compile_blocked"], 0)
+        self.assertEqual(result["compile_failed"], 0)
         self.assertEqual(result["pages_written"], 1)
         page = svc.wiki_dir / "computer-use-runbooks.md"
         self.assertTrue(page.exists())
@@ -761,6 +762,7 @@ class AutoResearchTests(unittest.TestCase):
 
         self.assertEqual(result["topics_researched"], 0)
         self.assertEqual(result["candidates_compiled"], 1)
+        self.assertEqual(result["compile_failed"], 0)
         self.assertEqual(result["pages_written"], 1)
         self.assertTrue((svc.wiki_dir / "existing-candidate.md").exists())
 
@@ -781,6 +783,7 @@ class AutoResearchTests(unittest.TestCase):
 
         self.assertEqual(result["candidates_compiled"], 0)
         self.assertEqual(result["compile_blocked"], 1)
+        self.assertEqual(result["compile_failed"], 0)
         candidate = svc.research_candidates(limit=1)[0]
         self.assertEqual(candidate["status"], "compile_blocked")
         self.assertEqual(candidate["compile_blocked_reason"], "raw_source_missing")
@@ -819,6 +822,34 @@ class AutoResearchTests(unittest.TestCase):
         candidate = svc.research_candidates(limit=1)[0]
         self.assertEqual(candidate["status"], "compile_blocked")
         self.assertEqual(candidate["compile_blocked_reason"], "quality_gate_failed")
+
+    def test_compile_researched_candidate_keeps_research_status_on_transient_failure(
+        self,
+    ) -> None:
+        svc, router, tmp = _make_wiki()
+        raw_slug = "research-transient-failure"
+        (svc.raw_dir / f"{raw_slug}.md").write_text("raw evidence", encoding="utf-8")
+        svc._save_research_candidates(
+            [
+                {
+                    "slug": "transient-failure",
+                    "topic": "Transient Failure",
+                    "status": "researched",
+                    "raw_source_slug": raw_slug,
+                }
+            ]
+        )
+        router.ask.side_effect = TimeoutError("temporary")
+
+        result = svc.compile_researched_candidates(max_candidates=1)
+
+        self.assertEqual(result["candidates_compiled"], 0)
+        self.assertEqual(result["compile_blocked"], 0)
+        self.assertEqual(result["compile_failed"], 1)
+        self.assertFalse((svc.wiki_dir / "transient-failure.md").exists())
+        candidate = svc.research_candidates(limit=1)[0]
+        self.assertEqual(candidate["status"], "researched")
+        self.assertNotIn("compile_blocked_reason", candidate)
 
 
 class EvidenceTests(unittest.TestCase):
