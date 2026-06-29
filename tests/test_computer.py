@@ -6,7 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from claw_v2.computer import ComputerUseService, ComputerSession
 from claw_v2.computer_gate import ActionGate
@@ -395,6 +395,114 @@ class BrowserUseServiceTests(unittest.TestCase):
             # inactive: leave the env untouched
             with _suppress_anthropic_api_key(False):
                 self.assertEqual(os.environ.get("ANTHROPIC_API_KEY"), "sk-ant-api03-x")
+
+    def test_build_llm_claude_wraps_primary_with_retry(self) -> None:
+        import sys
+        from claw_v2.computer import BrowserUseService, RetryChatAnthropic
+
+        svc = BrowserUseService()
+        module = self._fake_browser_use_llm_module()
+        with (
+            patch.dict(sys.modules, {"browser_use": module}),
+            patch("claw_v2.computer._resolve_claude_oauth_token", return_value="tok123"),
+        ):
+            primary, fallback = svc._build_browser_llm("claude-sonnet-4-6")
+        # primary is wrapped in RetryChatAnthropic; fallback stays a raw ChatAnthropic
+        self.assertIsInstance(primary, RetryChatAnthropic)
+        self.assertIsNotNone(fallback)
+        # the wrapper delegates to the inner ChatAnthropic instance
+        self.assertIs(primary._inner, module.ChatAnthropic.return_value)
+
+
+class RetryChatAnthropicTests(unittest.IsolatedAsyncioTestCase):
+    """Exponential-backoff retry wrapper for the browser_use Anthropic client."""
+
+    class ModelRateLimitError(Exception):
+        # Matches browser_use.llm.exceptions.ModelRateLimitError by class name;
+        # the retry wrapper dispatches on type(exc).__name__.
+        pass
+
+    class ModelProviderError(Exception):
+        pass
+
+    def _fake_inner(self, *, side_effects):
+        """Build a fake ChatAnthropic whose ainvoke pops side_effects per call."""
+        calls = []
+
+        class _Inner:
+            name = "claude-sonnet-4-6"
+            provider = "anthropic"
+            model_name = "claude-sonnet-4-6"
+
+            async def ainvoke(self, messages, output_format=None, **kwargs):
+                calls.append(len(calls) + 1)
+                effect = side_effects.pop(0)
+                if isinstance(effect, Exception):
+                    raise effect
+                return effect
+
+        return _Inner(), calls
+
+    async def test_retries_on_rate_limit_then_succeeds(self) -> None:
+        from claw_v2.computer import RetryChatAnthropic
+
+        inner, calls = self._fake_inner(
+            side_effects=[
+                self.ModelRateLimitError("429"),
+                self.ModelRateLimitError("429"),
+                "ok-result",
+            ]
+        )
+        wrapper = RetryChatAnthropic(inner)
+        with patch("claw_v2.computer.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+            result = await wrapper.ainvoke(["msg"])
+        self.assertEqual(result, "ok-result")
+        self.assertEqual(calls, [1, 2, 3])  # 3 attempts total
+        # exponential backoff: 2 sleeps before the 2nd and 3rd attempts
+        self.assertEqual(mock_sleep.call_count, 2)
+        first_delay = mock_sleep.call_args_list[0].args[0]
+        second_delay = mock_sleep.call_args_list[1].args[0]
+        self.assertGreaterEqual(first_delay, 2.0)
+        self.assertGreaterEqual(second_delay, 4.0)  # doubled
+
+    async def test_non_rate_limit_error_propagates_immediately(self) -> None:
+        from claw_v2.computer import RetryChatAnthropic
+
+        inner, calls = self._fake_inner(
+            side_effects=[self.ModelProviderError("validation boom")]
+        )
+        wrapper = RetryChatAnthropic(inner)
+        with patch("claw_v2.computer.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+            with self.assertRaises(self.ModelProviderError):
+                await wrapper.ainvoke(["msg"])
+        self.assertEqual(calls, [1])  # no retry
+        mock_sleep.assert_not_called()
+
+    async def test_exhausted_retries_reraises_rate_limit_error(self) -> None:
+        from claw_v2.computer import RetryChatAnthropic
+
+        inner, calls = self._fake_inner(
+            side_effects=[self.ModelRateLimitError("429")] * 4
+        )
+        wrapper = RetryChatAnthropic(inner)
+        with patch("claw_v2.computer.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaises(self.ModelRateLimitError):
+                await wrapper.ainvoke(["msg"])
+        # 4 attempts = max attempts, no more
+        self.assertEqual(calls, [1, 2, 3, 4])
+
+    async def test_observe_emits_retry_event(self) -> None:
+        from claw_v2.computer import RetryChatAnthropic
+
+        inner, _ = self._fake_inner(
+            side_effects=[self.ModelRateLimitError("429"), "ok"]
+        )
+        observe = MagicMock()
+        wrapper = RetryChatAnthropic(inner, observe=observe)
+        with patch("claw_v2.computer.asyncio.sleep", new=AsyncMock()):
+            await wrapper.ainvoke(["msg"])
+        emitted = [call.args[0] for call in observe.emit.call_args_list]
+        self.assertIn("browser_use_primary_rate_limit_retry", emitted)
 
 
 class CodexComputerBackendTests(unittest.TestCase):
