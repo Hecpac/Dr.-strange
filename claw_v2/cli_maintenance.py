@@ -10,7 +10,8 @@ from typing import Any
 from claw_v2.subprocess_runner import run_subprocess_bounded
 
 
-_VERSION_RE = re.compile(r"\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b")
+_VERSION_RE = re.compile(r"\bv?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b")
+_MISSING_CLI_RETURNCODE = 127
 _NPM_FETCH_TIMEOUT_MS = "300000"
 _VERSION_TIMEOUT_SECONDS = 20.0
 _NPM_VIEW_TIMEOUT_SECONDS = 60.0
@@ -77,13 +78,16 @@ def run_cli_maintenance_update(
             run_command, spec.version_command, tool_name=spec.name
         )
         if installed_result[0] is None:
-            return _failed_result(
-                commands_run,
-                tool_versions,
-                f"{spec.name} version check failed: {installed_result[1]}",
-                installed_packages=install_packages,
-            )
-        installed_version = installed_result[0]
+            if not installed_result[2]:
+                return _failed_result(
+                    commands_run,
+                    tool_versions,
+                    f"{spec.name} version check failed: {installed_result[1]}",
+                    installed_packages=install_packages,
+                )
+            installed_version = ""
+        else:
+            installed_version = installed_result[0]
         latest_result = _run_latest_version_command(run_command, spec.package, tool_name=spec.name)
         if latest_result[0] is None:
             return _failed_result(
@@ -153,24 +157,25 @@ def run_cli_maintenance_update(
 
 
 def _run_version_command(
-    runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]],
+    runner: CliMaintenanceRunner,
     args: Sequence[str],
     *,
     tool_name: str,
-) -> tuple[str | None, str]:
+) -> tuple[str | None, str, bool]:
     result = _run_command_capture(runner, args, timeout_s=_VERSION_TIMEOUT_SECONDS)
     if result.returncode != 0:
+        missing = result.returncode == _MISSING_CLI_RETURNCODE
         return None, _compact_output(
             result.stderr or result.stdout or f"{tool_name} exited non-zero"
-        )
+        ), missing
     version = _extract_version(result.stdout or result.stderr)
     if version is None:
-        return None, _compact_output(result.stdout or result.stderr or "version not found")
-    return version, ""
+        return None, _compact_output(result.stdout or result.stderr or "version not found"), False
+    return version, "", False
 
 
 def _run_latest_version_command(
-    runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]],
+    runner: CliMaintenanceRunner,
     package: str,
     *,
     tool_name: str,
@@ -191,7 +196,7 @@ def _run_latest_version_command(
 
 
 def _run_command_capture(
-    runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]],
+    runner: CliMaintenanceRunner,
     args: Sequence[str],
     *,
     timeout_s: float,

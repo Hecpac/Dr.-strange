@@ -1691,10 +1691,11 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
                 workspace_root=root,
             )
             memory.update_session_state("tg-1", autonomy_mode="autonomous", step_budget=8)
+            objective = "Actualiza los cli de Claude code y codex"
 
             reply = handler.start_autonomous_task(
                 "tg-1",
-                "Actualiza los cli de Claude code y codex",
+                objective,
                 mode="ops",
                 task_kind="maintenance_update_tools",
             )
@@ -1712,6 +1713,9 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             checkpoint = memory.get_session_state("tg-1").get("last_checkpoint") or {}
             self.assertEqual(checkpoint.get("operation"), "maintenance_update_tools")
             self.assertEqual(checkpoint.get("verification_status"), "passed")
+            queue = memory.get_session_state("tg-1").get("task_queue") or []
+            queue_item = next(item for item in queue if item["summary"] == objective)
+            self.assertEqual(queue_item["status"], "done")
 
     def test_autonomous_job_claim_blocked_fails_closed_without_running_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1759,6 +1763,14 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
                         "status": "running",
                     }
                 },
+                task_queue=TaskHandler.upsert_task_queue_entry(
+                    [],
+                    summary=objective,
+                    mode="ops",
+                    status="in_progress",
+                    source="coordinator",
+                    priority=0,
+                ),
             )
             jobs.set_safe_mode_reason("branch_integrity_violation")
 
@@ -1785,6 +1797,9 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             checkpoint = memory.get_session_state("tg-1").get("last_checkpoint") or {}
             self.assertEqual(checkpoint.get("verification_status"), "blocked")
             self.assertEqual(checkpoint.get("reason"), "job_claim_blocked")
+            queue = memory.get_session_state("tg-1").get("task_queue") or []
+            queue_item = next(item for item in queue if item["summary"] == objective)
+            self.assertEqual(queue_item["status"], "blocked")
             events = [event["event_type"] for event in observe.recent_events(limit=50)]
             self.assertIn("job_claim_blocked", events)
             self.assertIn("autonomous_task_failed", events)

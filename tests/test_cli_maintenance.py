@@ -93,6 +93,49 @@ class CliMaintenanceTests(unittest.TestCase):
         self.assertIn("@openai/codex@0.142.4", result.installed_packages)
         self.assertIn("@anthropic-ai/claude-code@2.1.195", result.installed_packages)
 
+    def test_missing_cli_is_installed_instead_of_failed_early(self) -> None:
+        codex_checks = 0
+        calls: list[tuple[str, ...]] = []
+
+        def runner(
+            args: list[str], *, timeout_s: float, check: bool = False, **_kwargs
+        ) -> subprocess.CompletedProcess[str]:
+            nonlocal codex_checks
+            calls.append(tuple(args))
+            match tuple(args):
+                case ("codex", "--version"):
+                    codex_checks += 1
+                    if codex_checks == 1:
+                        raise FileNotFoundError("codex")
+                    return _completed(args, "codex-cli v0.142.4\n")
+                case ("claude", "--version"):
+                    return _completed(args, "v2.1.195 (Claude Code)\n")
+                case ("npm", "view", "@openai/codex", "version"):
+                    return _completed(args, "0.142.4\n")
+                case ("npm", "view", "@anthropic-ai/claude-code", "version"):
+                    return _completed(args, "2.1.195\n")
+                case ("npm", "install", "-g", "--fetch-timeout=300000", "@openai/codex@0.142.4"):
+                    return _completed(args, "added 1 package\n")
+            raise AssertionError(f"unexpected command: {args!r}")
+
+        result = run_cli_maintenance_update(runner=runner)
+
+        self.assertEqual(result.verification_status, "passed")
+        self.assertEqual(result.installed_packages, ("@openai/codex@0.142.4",))
+        self.assertEqual(result.tool_versions["codex"]["installed"], "")
+        self.assertEqual(result.tool_versions["codex"]["verified"], "0.142.4")
+        self.assertEqual(result.tool_versions["claude"]["verified"], "2.1.195")
+        self.assertIn(
+            (
+                "npm",
+                "install",
+                "-g",
+                "--fetch-timeout=300000",
+                "@openai/codex@0.142.4",
+            ),
+            calls,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

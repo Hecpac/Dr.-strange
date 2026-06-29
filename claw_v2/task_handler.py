@@ -1026,7 +1026,7 @@ class TaskHandler:
         if self.task_ledger is not None:
             record = self.task_ledger.get(task_id)
             if record is not None:
-                task_kind = record.metadata.get("task_kind")
+                task_kind = (record.metadata or {}).get("task_kind")
                 if task_kind:
                     return str(task_kind)
         state = self._get_session_state(session_id)
@@ -1303,6 +1303,12 @@ class TaskHandler:
             mode=mode,
             verification_status=verification_status,
             pending_action="",
+            task_queue=self._terminal_task_queue(
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                status=verification_status,
+            ),
             last_checkpoint=checkpoint,
         )
         self._emit(
@@ -1325,6 +1331,26 @@ class TaskHandler:
             f"No pude cerrar bien la tarea `{task_id}`.\n"
             f"{result.summary}\n"
             f"Error: {checkpoint.get('error', 'cli maintenance failed')}"
+        )
+
+    def _terminal_task_queue(
+        self,
+        *,
+        session_id: str,
+        objective: str,
+        mode: str,
+        status: str,
+    ) -> list[dict[str, Any]]:
+        state = self._get_session_state(session_id)
+        current_queue = state.get("task_queue") or []
+        return self.upsert_task_queue_entry(
+            current_queue,
+            summary=objective,
+            mode=mode,
+            status=status,
+            source="coordinator",
+            priority=0,
+            depends_on=self.derive_task_dependencies(current_queue, summary=objective),
         )
 
     def _run_autonomous_task(
@@ -2421,6 +2447,12 @@ class TaskHandler:
             active_object,
             verification_status="blocked",
             pending_action="",
+            task_queue=self._terminal_task_queue(
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                status="blocked",
+            ),
             last_checkpoint=checkpoint,
         )
         self._fail_autonomous_job(
