@@ -661,7 +661,7 @@ class AutoResearchTests(unittest.TestCase):
         self.assertFalse((svc.raw_dir / "research-unverifiable-topic.md").exists())
 
     def test_compile_researched_candidate_writes_wiki_page_after_quality_gate(self) -> None:
-        svc, router, tmp = _make_wiki()
+        svc, router, _tmp = _make_wiki()
         raw_slug = "research-computer-use-runbooks"
         (svc.raw_dir / f"{raw_slug}.md").write_text(
             "---\ntitle: Computer Use Runbooks\ntype: auto-research\n---\n\n"
@@ -721,7 +721,7 @@ class AutoResearchTests(unittest.TestCase):
         self.assertIn("[[computer-use-runbooks]]", svc.index_path.read_text(encoding="utf-8"))
 
     def test_auto_research_compile_limit_promotes_existing_researched_candidate(self) -> None:
-        svc, router, tmp = _make_wiki()
+        svc, router, _tmp = _make_wiki()
         _write_page(svc.wiki_dir, "existing", "Existing", "Content.")
         raw_slug = "research-existing-candidate"
         (svc.raw_dir / f"{raw_slug}.md").write_text(
@@ -773,8 +773,72 @@ class AutoResearchTests(unittest.TestCase):
         self.assertEqual(result["pages_written"], 1)
         self.assertTrue((svc.wiki_dir / "existing-candidate.md").exists())
 
+    def test_auto_research_refreshes_candidates_after_same_run_compile(self) -> None:
+        svc, router, _tmp = _make_wiki()
+        _write_page(svc.wiki_dir, "existing", "Existing", "Content.")
+        raw_slug = "research-same-run"
+        router.ask.side_effect = [
+            MagicMock(
+                content=json.dumps(
+                    [
+                        {
+                            "topic": "Same Run",
+                            "category": "Research",
+                            "reason": "Needs source research.",
+                            "source_queries": ["same run source"],
+                        }
+                    ]
+                )
+            ),
+            MagicMock(
+                content=json.dumps(
+                    {
+                        "summary": "Same-run evidence summary.",
+                        "confidence": "medium",
+                        "sources": [
+                            {
+                                "title": "Same Run Source",
+                                "url": "https://example.com/same-run",
+                                "source_kind": "primary",
+                                "published_at": "2026-06-29",
+                                "evidence": "Specific evidence for same-run compilation.",
+                            }
+                        ],
+                    }
+                )
+            ),
+            MagicMock(
+                content=json.dumps(
+                    {
+                        "summary_page": {
+                            "filename": "same-run.md",
+                            "content": (
+                                "---\n"
+                                "title: Same Run\n"
+                                "tags: [research]\n"
+                                "category: Research\n"
+                                f"sources: [{raw_slug}]\n"
+                                "created: 2026-06-29T00:00:00+00:00\n"
+                                "updated: 2026-06-29T00:00:00+00:00\n"
+                                "---\n\n"
+                                "# Same Run\n\nCompiled from raw evidence."
+                            ),
+                        },
+                        "index_entry": "- [[same-run]] - Same Run",
+                        "category": "Research",
+                    }
+                )
+            ),
+        ]
+
+        result = svc.auto_research(max_topics=1, research_limit=1, compile_limit=1)
+
+        self.assertEqual(result["candidates_compiled"], 1)
+        self.assertEqual(result["candidates"][0]["status"], "compiled")
+        self.assertEqual(result["candidates"][0]["compiled_page_slug"], "same-run")
+
     def test_compile_researched_candidate_blocks_when_raw_source_missing(self) -> None:
-        svc, router, tmp = _make_wiki()
+        svc, router, _tmp = _make_wiki()
         svc._save_research_candidates(
             [
                 {
@@ -796,8 +860,30 @@ class AutoResearchTests(unittest.TestCase):
         self.assertEqual(candidate["compile_blocked_reason"], "raw_source_missing")
         router.ask.assert_not_called()
 
+    def test_compile_researched_candidate_blocks_unsafe_raw_slug_before_read(self) -> None:
+        svc, router, _tmp = _make_wiki()
+        svc._save_research_candidates(
+            [
+                {
+                    "slug": "unsafe-raw",
+                    "topic": "Unsafe Raw",
+                    "status": "researched",
+                    "raw_source_slug": "../secret",
+                }
+            ]
+        )
+
+        result = svc.compile_researched_candidates(max_candidates=1)
+
+        self.assertEqual(result["candidates_compiled"], 0)
+        self.assertEqual(result["compile_blocked"], 1)
+        candidate = svc.research_candidates(limit=1)[0]
+        self.assertEqual(candidate["status"], "compile_blocked")
+        self.assertEqual(candidate["compile_blocked_reason"], "invalid_candidate")
+        router.ask.assert_not_called()
+
     def test_compile_researched_candidate_blocks_when_quality_gate_fails(self) -> None:
-        svc, router, tmp = _make_wiki()
+        svc, router, _tmp = _make_wiki()
         raw_slug = "research-low-quality"
         (svc.raw_dir / f"{raw_slug}.md").write_text("raw evidence", encoding="utf-8")
         svc._save_research_candidates(
@@ -830,10 +916,46 @@ class AutoResearchTests(unittest.TestCase):
         self.assertEqual(candidate["status"], "compile_blocked")
         self.assertEqual(candidate["compile_blocked_reason"], "quality_gate_failed")
 
+    def test_compile_researched_candidate_blocks_when_frontmatter_fields_missing(self) -> None:
+        svc, router, _tmp = _make_wiki()
+        raw_slug = "research-missing-fields"
+        (svc.raw_dir / f"{raw_slug}.md").write_text("raw evidence", encoding="utf-8")
+        svc._save_research_candidates(
+            [
+                {
+                    "slug": "missing-fields",
+                    "topic": "Missing Fields",
+                    "status": "researched",
+                    "raw_source_slug": raw_slug,
+                }
+            ]
+        )
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                {
+                    "summary_page": {
+                        "filename": "missing-fields.md",
+                        "content": f"---\nsources: [{raw_slug}]\n---\n\n# Missing Fields",
+                    }
+                }
+            )
+        )
+
+        result = svc.compile_researched_candidates(max_candidates=1)
+
+        self.assertEqual(result["candidates_compiled"], 0)
+        self.assertEqual(result["compile_blocked"], 1)
+        self.assertFalse((svc.wiki_dir / "missing-fields.md").exists())
+        candidate = svc.research_candidates(limit=1)[0]
+        self.assertEqual(candidate["compile_blocked_reason"], "quality_gate_failed")
+        self.assertTrue(
+            str(candidate["quality_gate_reason"]).startswith("missing_frontmatter_fields:")
+        )
+
     def test_compile_researched_candidate_keeps_research_status_on_transient_failure(
         self,
     ) -> None:
-        svc, router, tmp = _make_wiki()
+        svc, router, _tmp = _make_wiki()
         raw_slug = "research-transient-failure"
         (svc.raw_dir / f"{raw_slug}.md").write_text("raw evidence", encoding="utf-8")
         svc._save_research_candidates(
@@ -857,6 +979,65 @@ class AutoResearchTests(unittest.TestCase):
         candidate = svc.research_candidates(limit=1)[0]
         self.assertEqual(candidate["status"], "researched")
         self.assertNotIn("compile_blocked_reason", candidate)
+        self.assertEqual(candidate["compile_failures"], 1)
+        self.assertIn("last_compile_failed_at", candidate)
+
+    def test_compile_researched_candidates_rotates_after_transient_failure(self) -> None:
+        svc, router, _tmp = _make_wiki()
+        first_raw = "research-first-failure"
+        second_raw = "research-second-success"
+        (svc.raw_dir / f"{first_raw}.md").write_text("raw evidence", encoding="utf-8")
+        (svc.raw_dir / f"{second_raw}.md").write_text("raw evidence", encoding="utf-8")
+        svc._save_research_candidates(
+            [
+                {
+                    "slug": "first-failure",
+                    "topic": "First Failure",
+                    "status": "researched",
+                    "raw_source_slug": first_raw,
+                    "researched_at": "2026-06-29T00:00:00+00:00",
+                },
+                {
+                    "slug": "second-success",
+                    "topic": "Second Success",
+                    "status": "researched",
+                    "raw_source_slug": second_raw,
+                    "researched_at": "2026-06-29T00:01:00+00:00",
+                },
+            ]
+        )
+        router.ask.side_effect = [
+            TimeoutError("temporary"),
+            MagicMock(
+                content=json.dumps(
+                    {
+                        "summary_page": {
+                            "filename": "second-success.md",
+                            "content": (
+                                "---\n"
+                                "title: Second Success\n"
+                                "tags: [research]\n"
+                                "category: Research\n"
+                                f"sources: [{second_raw}]\n"
+                                "created: 2026-06-29T00:00:00+00:00\n"
+                                "updated: 2026-06-29T00:00:00+00:00\n"
+                                "---\n\n"
+                                "# Second Success\n\nCompiled from raw evidence."
+                            ),
+                        },
+                        "index_entry": "- [[second-success]] - Second Success",
+                        "category": "Research",
+                    }
+                )
+            ),
+        ]
+
+        first_result = svc.compile_researched_candidates(max_candidates=1)
+        second_result = svc.compile_researched_candidates(max_candidates=1)
+
+        self.assertEqual(first_result["compile_failed"], 1)
+        self.assertEqual(second_result["candidates_compiled"], 1)
+        self.assertTrue((svc.wiki_dir / "second-success.md").exists())
 
 
 class EvidenceTests(unittest.TestCase):

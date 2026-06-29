@@ -789,7 +789,16 @@ class WikiService:
             ]
             result.update(research_result)
         if compile_limit > 0:
-            result.update(self.compile_researched_candidates(max_candidates=compile_limit))
+            compile_result = self.compile_researched_candidates(max_candidates=compile_limit)
+            result.update(compile_result)
+            if persisted_candidates:
+                current_by_slug = {
+                    str(item.get("slug") or ""): item for item in self._load_research_candidates()
+                }
+                result["candidates"] = [
+                    current_by_slug.get(str(candidate.get("slug") or ""), candidate)
+                    for candidate in persisted_candidates
+                ]
         return result
 
     def research_candidates(self, *, limit: int = 10, status: str | None = None) -> list[dict]:
@@ -836,11 +845,7 @@ class WikiService:
         candidates = [
             item for item in self._load_research_candidates() if item.get("status") == "researched"
         ]
-        candidates.sort(
-            key=lambda item: str(
-                item.get("researched_at") or item.get("updated_at") or item.get("created_at") or ""
-            )
-        )
+        candidates.sort(key=self._compile_candidate_sort_key)
         compiled = 0
         blocked = 0
         failed = 0
@@ -1039,7 +1044,7 @@ class WikiService:
         slug = str(candidate.get("slug") or "").strip()
         topic = str(candidate.get("topic") or slug).strip()
         raw_slug = str(candidate.get("raw_source_slug") or "").strip()
-        if not slug or not raw_slug:
+        if not slug or not raw_slug or slug != _slugify(slug) or raw_slug != _slugify(raw_slug):
             reason = "invalid_candidate"
             if slug:
                 self._update_research_candidate(
@@ -1131,6 +1136,16 @@ class WikiService:
         except Exception as exc:
             logger.exception("Wiki compile candidate failed for %s", slug)
             reason = f"compile_failed:{exc.__class__.__name__}"
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "researched",
+                    "last_compile_failed_at": _now_iso(),
+                    "last_compile_failed_reason": reason,
+                    "compile_failures": int(candidate.get("compile_failures") or 0) + 1,
+                    "updated_at": _now_iso(),
+                },
+            )
             return {"slug": slug, "status": "compile_failed", "reason": reason}
 
         summary = payload.get("summary_page")
@@ -1217,12 +1232,37 @@ class WikiService:
         page_slug = Path(filename).stem
         if page_slug != expected_slug:
             return "unexpected_filename"
-        if not content.strip() or not _FRONTMATTER_RE.match(content.strip()):
+        stripped_content = content.strip()
+        frontmatter_match = _FRONTMATTER_RE.match(stripped_content)
+        if not stripped_content or not frontmatter_match:
             return "missing_frontmatter"
-        sources = self._extract_sources(content.strip())
+        fields = {
+            line.split(":", 1)[0].strip().lower()
+            for line in frontmatter_match.group(1).splitlines()
+            if ":" in line and not line[:1].isspace()
+        }
+        missing_fields = {"title", "tags", "category", "sources", "created", "updated"} - fields
+        if missing_fields:
+            return "missing_frontmatter_fields:" + ",".join(sorted(missing_fields))
+        sources = self._extract_sources(stripped_content)
         if raw_slug not in sources:
             return "missing_raw_source"
         return ""
+
+    @staticmethod
+    def _compile_candidate_sort_key(candidate: dict) -> tuple[int, str]:
+        failed_at = str(candidate.get("last_compile_failed_at") or "")
+        if failed_at:
+            return (1, failed_at)
+        return (
+            0,
+            str(
+                candidate.get("researched_at")
+                or candidate.get("updated_at")
+                or candidate.get("created_at")
+                or ""
+            ),
+        )
 
     def _update_research_candidate(self, slug: str, updates: dict) -> None:
         with self._lock:
