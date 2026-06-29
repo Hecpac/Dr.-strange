@@ -33,6 +33,8 @@ _TOKEN_RE = re.compile(r"[\w][\w-]*", re.IGNORECASE)
 _MIN_CONTEXT_CHARS = 200
 _DEFAULT_CHUNK_CHARS = 2400
 _CHUNK_OVERLAP_CHARS = 160
+_MAX_RESEARCH_CANDIDATES = 200
+_MAX_SCRAPE_ITEM_RESULTS = 30
 
 VALID_CATEGORIES = [
     "AI & Herramientas",
@@ -151,6 +153,7 @@ class WikiService:
         self._embeddings_path = self.root / "embeddings.json"
         self._graph_path = self.root / "graph.json"
         self._firecrawl_state_path = self.root / "firecrawl_state.json"
+        self._research_candidates_path = self.root / "research_candidates.json"
         self.lane = lane
         # Ensure dirs exist
         self.raw_dir.mkdir(parents=True, exist_ok=True)
@@ -754,7 +757,78 @@ class WikiService:
         self._append_log(
             "auto_research", f"topics={len(candidates)} candidates={len(candidates)} written=0", 0
         )
-        return {"topics_researched": len(candidates), "pages_written": 0, "candidates": candidates}
+        persisted_candidates = self._persist_research_candidates(candidates)
+        return {
+            "topics_researched": len(persisted_candidates),
+            "pages_written": 0,
+            "candidates": persisted_candidates,
+        }
+
+    def research_candidates(self, *, limit: int = 10, status: str | None = None) -> list[dict]:
+        """Return recent persisted research candidates for operator inspection."""
+        candidates = self._load_research_candidates()
+        if status:
+            candidates = [item for item in candidates if item.get("status") == status]
+        candidates.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        safe_limit = max(0, int(limit))
+        return candidates[:safe_limit]
+
+    def _persist_research_candidates(self, candidates: list[dict]) -> list[dict]:
+        if not candidates:
+            return []
+        now = _now_iso()
+        existing = self._load_research_candidates()
+        by_slug = {str(item.get("slug") or ""): item for item in existing if item.get("slug")}
+        persisted: list[dict] = []
+        for candidate in candidates:
+            slug = str(candidate.get("slug") or "").strip()
+            topic = str(candidate.get("topic") or "").strip()
+            if not slug or not topic:
+                continue
+            queued = dict(by_slug.get(slug) or {})
+            queued.update(
+                {
+                    "topic": topic,
+                    "slug": slug,
+                    "category": self._normalize_category(str(candidate.get("category") or "")),
+                    "reason": str(candidate.get("reason") or "").strip(),
+                    "source_queries": [
+                        str(query).strip()
+                        for query in candidate.get("source_queries", [])
+                        if str(query).strip()
+                    ][:5],
+                    "status": str(queued.get("status") or "new"),
+                    "source": str(queued.get("source") or "auto_research"),
+                    "updated_at": now,
+                    "seen_count": int(queued.get("seen_count") or 0) + 1,
+                }
+            )
+            queued.setdefault("created_at", now)
+            by_slug[slug] = queued
+            persisted.append(dict(queued))
+
+        ordered = list(by_slug.values())
+        ordered.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        self._save_research_candidates(ordered[:_MAX_RESEARCH_CANDIDATES])
+        return persisted
+
+    def _load_research_candidates(self) -> list[dict]:
+        if not self._research_candidates_path.exists():
+            return []
+        try:
+            data = json.loads(self._research_candidates_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.debug("Failed to load wiki research candidates", exc_info=True)
+            return []
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
+
+    def _save_research_candidates(self, candidates: list[dict]) -> None:
+        self._research_candidates_path.write_text(
+            json.dumps(candidates, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
     # ------------------------------------------------------------------
     # Auto-Scrape Sources
@@ -820,7 +894,49 @@ class WikiService:
         scraped = 0
         ingested = 0
         skipped = 0
+        source_results: list[dict] = []
+        item_results: list[dict] = []
         for name, url in self.WATCH_SOURCES:
+            source_result = {
+                "source": name,
+                "url": url,
+                "status": "pending",
+                "items_extracted": 0,
+                "items_ingested": 0,
+                "items_skipped": 0,
+                "skip_reasons": {},
+            }
+
+            def record_skip(reason: str) -> None:
+                source_result["items_skipped"] += 1
+                reasons = source_result["skip_reasons"]
+                reasons[reason] = int(reasons.get(reason, 0)) + 1
+
+            def record_item(
+                *,
+                title: str,
+                slug: str,
+                status: str,
+                reason: str = "",
+                duplicate_of: str = "",
+                pages_written: int = 0,
+            ) -> None:
+                if len(item_results) >= _MAX_SCRAPE_ITEM_RESULTS:
+                    return
+                item: dict[str, object] = {
+                    "source": name,
+                    "title": title,
+                    "slug": slug,
+                    "status": status,
+                }
+                if reason:
+                    item["reason"] = reason
+                if duplicate_of:
+                    item["duplicate_of"] = duplicate_of
+                if pages_written:
+                    item["pages_written"] = pages_written
+                item_results.append(item)
+
             try:
                 result = subprocess.run(
                     ["firecrawl", "scrape", url],
@@ -833,15 +949,30 @@ class WikiService:
                     if failure == "insufficient_credits":
                         self._pause_firecrawl("insufficient_credits")
                         skipped += 1
+                        source_result.update(
+                            {"status": "skipped", "reason": "insufficient_credits"}
+                        )
+                        source_results.append(source_result)
                         break
                     if failure == "rate_limited":
                         self._pause_firecrawl("rate_limited", seconds=60 * 60)
                         skipped += 1
+                        source_result.update({"status": "skipped", "reason": "rate_limited"})
+                        source_results.append(source_result)
                         break
                     logger.warning("Wiki scrape failed for %s: %s", name, result.stderr[:200])
                     skipped += 1
+                    source_result.update(
+                        {
+                            "status": "skipped",
+                            "reason": "scrape_failed",
+                            "error_preview": (result.stderr or result.stdout)[:200],
+                        }
+                    )
+                    source_results.append(source_result)
                     continue
                 scraped += 1
+                source_result["status"] = "scraped"
                 content = result.stdout[:8000]
                 # Use LLM to extract distinct news items
                 prompt = textwrap.dedent(f"""\
@@ -867,24 +998,86 @@ class WikiService:
                     evidence_pack={"operation": "auto_scrape", "source": name},
                 )
                 items = self._parse_json_array(resp.content)
+                source_result["items_extracted"] = len(items)
                 for item in items[:3]:
-                    title = item.get("title", "")
-                    body = item.get("content", "")
-                    if not title or len(body) < 50:
+                    title = str(item.get("title", "")).strip()
+                    body = str(item.get("content", "")).strip()
+                    if not title:
+                        record_skip("missing_title")
+                        record_item(title=title, slug="", status="skipped", reason="missing_title")
                         continue
                     slug = _slugify(title)
-                    if (self.wiki_dir / f"{slug}.md").exists():
+                    if len(body) < 50:
+                        record_skip("body_too_short")
+                        record_item(
+                            title=title,
+                            slug=slug,
+                            status="skipped",
+                            reason="body_too_short",
+                        )
                         continue
-                    if self._find_duplicate(body):
+                    if (self.wiki_dir / f"{slug}.md").exists():
+                        record_skip("existing_page")
+                        record_item(
+                            title=title,
+                            slug=slug,
+                            status="skipped",
+                            reason="existing_page",
+                        )
+                        continue
+                    duplicate = self._find_duplicate(body)
+                    if duplicate:
+                        record_skip("duplicate")
+                        record_item(
+                            title=title,
+                            slug=slug,
+                            status="skipped",
+                            reason="duplicate",
+                            duplicate_of=duplicate,
+                        )
                         continue
                     source_content = f"Source: {name}\nURL: {url}\n\n{body}"
                     ingest_result = self.ingest(title, source_content, source_type="auto-scrape")
-                    ingested += int(ingest_result.get("pages_written", 0))
+                    pages_written = int(ingest_result.get("pages_written", 0))
+                    ingested += pages_written
+                    if pages_written:
+                        source_result["items_ingested"] += 1
+                        record_item(
+                            title=title,
+                            slug=slug,
+                            status="ingested",
+                            pages_written=pages_written,
+                        )
+                    else:
+                        reason = (
+                            "duplicate"
+                            if ingest_result.get("duplicate_of")
+                            else "ingest_skipped"
+                            if ingest_result.get("skipped")
+                            else "ingest_no_pages"
+                        )
+                        record_skip(reason)
+                        record_item(
+                            title=title,
+                            slug=slug,
+                            status="skipped",
+                            reason=reason,
+                            duplicate_of=str(ingest_result.get("duplicate_of") or ""),
+                        )
+                source_results.append(source_result)
             except Exception:
                 logger.exception("Wiki scrape error for %s", name)
                 skipped += 1
+                source_result.update({"status": "error", "reason": "exception"})
+                source_results.append(source_result)
         self._append_log("auto_scrape", f"scraped={scraped} ingested={ingested}", ingested)
-        return {"sources_scraped": scraped, "pages_ingested": ingested, "sources_skipped": skipped}
+        return {
+            "sources_scraped": scraped,
+            "pages_ingested": ingested,
+            "sources_skipped": skipped,
+            "source_results": source_results,
+            "item_results": item_results,
+        }
 
     def _pause_firecrawl(self, reason: str, *, seconds: int = 24 * 60 * 60) -> None:
         self._firecrawl_pause_reason = reason

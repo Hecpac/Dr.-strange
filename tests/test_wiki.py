@@ -455,6 +455,73 @@ class AutoResearchTests(unittest.TestCase):
         self.assertFalse((svc.wiki_dir / "new-topic.md").exists())
         self.assertEqual(result["candidates"][0]["slug"], "new-topic")
 
+    def test_auto_research_persists_candidates_as_inspectable_queue(self) -> None:
+        svc, router, tmp = _make_wiki()
+        _write_page(svc.wiki_dir, "existing", "Existing", "Content.")
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                [
+                    {
+                        "topic": "Computer Use Runbooks",
+                        "category": "Operaciones Dr. Strange",
+                        "reason": "Recurring browser/computer-use failures need durable guidance.",
+                        "source_queries": ["OpenAI computer use best practices"],
+                    }
+                ]
+            )
+        )
+
+        result = svc.auto_research(max_topics=1)
+
+        queue_path = tmp / "research_candidates.json"
+        self.assertTrue(queue_path.exists())
+        queued = json.loads(queue_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["slug"], "computer-use-runbooks")
+        self.assertEqual(queued[0]["status"], "new")
+        self.assertEqual(queued[0]["source"], "auto_research")
+        self.assertIn("created_at", queued[0])
+        self.assertIn("updated_at", queued[0])
+        self.assertEqual(result["candidates"][0]["status"], "new")
+        self.assertEqual(svc.research_candidates(limit=1)[0]["slug"], "computer-use-runbooks")
+
+    def test_auto_research_updates_existing_candidate_without_duplicate_queue_rows(self) -> None:
+        svc, router, tmp = _make_wiki()
+        _write_page(svc.wiki_dir, "existing", "Existing", "Content.")
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                [
+                    {
+                        "topic": "Agent Knowledge Loop",
+                        "category": "Research",
+                        "reason": "First reason.",
+                        "source_queries": ["query one"],
+                    }
+                ]
+            )
+        )
+
+        svc.auto_research(max_topics=1)
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                [
+                    {
+                        "topic": "Agent Knowledge Loop",
+                        "category": "AI & Herramientas",
+                        "reason": "Updated reason.",
+                        "source_queries": ["query two"],
+                    }
+                ]
+            )
+        )
+
+        svc.auto_research(max_topics=1)
+
+        queued = json.loads((tmp / "research_candidates.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["reason"], "Updated reason.")
+        self.assertEqual(queued[0]["seen_count"], 2)
+
 
 class EvidenceTests(unittest.TestCase):
     def test_raw_source_detection(self) -> None:
@@ -564,6 +631,38 @@ class AutoScrapeTests(unittest.TestCase):
 
         self.assertTrue(result["skipped"])
         self.assertEqual(result["reason"], "firecrawl_paused")
+
+    def test_auto_scrape_reports_item_skip_reasons(self) -> None:
+        svc, router, tmp = _make_wiki()
+        svc.WATCH_SOURCES = [("Test Source", "https://example.com/source")]
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                [
+                    {
+                        "title": "",
+                        "content": "Specific sourced fact with enough detail for ingestion.",
+                        "category": "Research",
+                    },
+                    {
+                        "title": "Too Short",
+                        "content": "tiny",
+                        "category": "Research",
+                    },
+                ]
+            )
+        )
+        proc = MagicMock(returncode=0, stdout="source page content", stderr="")
+
+        with patch("subprocess.run", return_value=proc):
+            result = svc.auto_scrape_sources()
+
+        self.assertEqual(result["pages_ingested"], 0)
+        self.assertEqual(result["source_results"][0]["items_extracted"], 2)
+        self.assertEqual(result["source_results"][0]["items_skipped"], 2)
+        self.assertEqual(result["source_results"][0]["skip_reasons"]["missing_title"], 1)
+        self.assertEqual(result["source_results"][0]["skip_reasons"]["body_too_short"], 1)
+        reasons = [item["reason"] for item in result["item_results"]]
+        self.assertEqual(reasons, ["missing_title", "body_too_short"])
 
 
 if __name__ == "__main__":

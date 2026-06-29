@@ -136,6 +136,7 @@ from claw_v2.scheduled_background_jobs import (
     kairos_tick_result_summary,
     safe_non_negative_int,
     wiki_research_result_summary,
+    wiki_scrape_result_summary,
 )
 from claw_v2.skill_expand_jobs import SkillExpandJobRunner, enqueue_skill_expand_job
 
@@ -2055,6 +2056,7 @@ def _setup_scheduler(
             handler=lambda _payload: wiki.auto_scrape_sources(),
             observe=observe,
             worker_id="wiki-scrape-runner",
+            result_summary=wiki_scrape_result_summary,
         )
         daemon.register_background_job_runner(
             name="wiki_scrape",

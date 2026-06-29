@@ -29,6 +29,7 @@ from claw_v2.scheduled_background_jobs import (
     kairos_tick_result_summary,
     safe_non_negative_int,
     wiki_research_result_summary,
+    wiki_scrape_result_summary,
 )
 
 
@@ -193,12 +194,61 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
                     "topics_researched": 2,
                     "pages_written": 1,
                     "candidate_count": 1,
+                    "candidate_previews": [
+                        {
+                            "slug": "",
+                            "topic": "large raw candidate",
+                            "category": "",
+                            "status": "",
+                            "source_query_count": 0,
+                        }
+                    ],
                 },
             )
             self.assertNotIn("candidates", job.result)
             event_names = [call.args[0] for call in observe.emit.call_args_list]
             self.assertIn("wiki_research_job_started", event_names)
             self.assertIn("wiki_research_job_completed", event_names)
+
+    def test_wiki_scrape_result_summary_keeps_bounded_source_diagnostics(self) -> None:
+        result = wiki_scrape_result_summary(
+            {
+                "sources_scraped": 8,
+                "pages_ingested": 0,
+                "sources_skipped": 0,
+                "source_results": [
+                    {
+                        "source": "Source A",
+                        "url": "https://example.com/a",
+                        "status": "scraped",
+                        "items_extracted": 2,
+                        "items_ingested": 0,
+                        "items_skipped": 2,
+                        "skip_reasons": {"duplicate": 1, "body_too_short": 1},
+                        "raw_body": "must not persist",
+                    }
+                ],
+                "item_results": [
+                    {
+                        "source": "Source A",
+                        "title": "Duplicate Topic",
+                        "slug": "duplicate-topic",
+                        "status": "skipped",
+                        "reason": "duplicate",
+                        "body": "must not persist",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result["sources_scraped"], 8)
+        self.assertEqual(result["pages_ingested"], 0)
+        self.assertEqual(result["sources_skipped"], 0)
+        self.assertEqual(result["source_results"][0]["source"], "Source A")
+        self.assertEqual(result["source_results"][0]["skip_reasons"]["duplicate"], 1)
+        self.assertNotIn("raw_body", result["source_results"][0])
+        self.assertEqual(result["item_results"][0]["reason"], "duplicate")
+        self.assertNotIn("body", result["item_results"][0])
 
     def test_safe_non_negative_int_defaults_none_and_invalid_values(self) -> None:
         self.assertEqual(safe_non_negative_int(None, default=3), 3)

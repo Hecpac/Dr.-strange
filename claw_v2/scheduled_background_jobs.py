@@ -275,10 +275,41 @@ class ScheduledBackgroundJobRunner:
 def wiki_research_result_summary(result: object) -> dict[str, Any]:
     data = result if isinstance(result, dict) else {}
     candidates = data.get("candidates")
+    candidate_previews: list[dict[str, Any]] = []
+    if isinstance(candidates, list):
+        for candidate in candidates[:5]:
+            if not isinstance(candidate, dict):
+                continue
+            source_queries = candidate.get("source_queries")
+            candidate_previews.append(
+                {
+                    "slug": _safe_text_preview(str(candidate.get("slug") or ""), limit=80),
+                    "topic": _safe_text_preview(str(candidate.get("topic") or ""), limit=120),
+                    "category": _safe_text_preview(str(candidate.get("category") or ""), limit=80),
+                    "status": _safe_text_preview(str(candidate.get("status") or ""), limit=40),
+                    "source_query_count": len(source_queries)
+                    if isinstance(source_queries, list)
+                    else 0,
+                }
+            )
     return {
         "topics_researched": _safe_int(data.get("topics_researched")),
         "pages_written": _safe_int(data.get("pages_written")),
         "candidate_count": len(candidates) if isinstance(candidates, list) else 0,
+        "candidate_previews": candidate_previews,
+    }
+
+
+def wiki_scrape_result_summary(result: object) -> dict[str, Any]:
+    data = result if isinstance(result, dict) else {}
+    source_results = data.get("source_results")
+    item_results = data.get("item_results")
+    return {
+        "sources_scraped": _safe_int(data.get("sources_scraped")),
+        "pages_ingested": _safe_int(data.get("pages_ingested")),
+        "sources_skipped": _safe_int(data.get("sources_skipped")),
+        "source_results": _source_result_previews(source_results),
+        "item_results": _item_result_previews(item_results),
     }
 
 
@@ -325,6 +356,57 @@ def _safe_int(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _source_result_previews(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    previews: list[dict[str, Any]] = []
+    for item in value[:10]:
+        if not isinstance(item, dict):
+            continue
+        raw_reasons = item.get("skip_reasons")
+        skip_reasons = {
+            _safe_text_preview(str(reason), limit=60): _safe_int(count)
+            for reason, count in raw_reasons.items()
+        } if isinstance(raw_reasons, dict) else {}
+        previews.append(
+            {
+                "source": _safe_text_preview(str(item.get("source") or ""), limit=80),
+                "url": _safe_text_preview(str(item.get("url") or ""), limit=160),
+                "status": _safe_text_preview(str(item.get("status") or ""), limit=40),
+                "reason": _safe_text_preview(str(item.get("reason") or ""), limit=80),
+                "items_extracted": _safe_int(item.get("items_extracted")),
+                "items_ingested": _safe_int(item.get("items_ingested")),
+                "items_skipped": _safe_int(item.get("items_skipped")),
+                "skip_reasons": skip_reasons,
+            }
+        )
+    return previews
+
+
+def _item_result_previews(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    previews: list[dict[str, Any]] = []
+    for item in value[:20]:
+        if not isinstance(item, dict):
+            continue
+        preview: dict[str, Any] = {
+            "source": _safe_text_preview(str(item.get("source") or ""), limit=80),
+            "title": _safe_text_preview(str(item.get("title") or ""), limit=120),
+            "slug": _safe_text_preview(str(item.get("slug") or ""), limit=80),
+            "status": _safe_text_preview(str(item.get("status") or ""), limit=40),
+            "reason": _safe_text_preview(str(item.get("reason") or ""), limit=80),
+        }
+        duplicate_of = _safe_text_preview(str(item.get("duplicate_of") or ""), limit=80)
+        if duplicate_of:
+            preview["duplicate_of"] = duplicate_of
+        pages_written = _safe_int(item.get("pages_written"))
+        if pages_written:
+            preview["pages_written"] = pages_written
+        previews.append(preview)
+    return previews
 
 
 def _safe_float(value: object) -> float:
