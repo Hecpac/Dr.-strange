@@ -2041,6 +2041,7 @@ def _setup_scheduler(
             handler=lambda payload: wiki.auto_research(
                 max_topics=safe_non_negative_int(payload.get("max_topics"), default=3),
                 research_limit=safe_non_negative_int(payload.get("research_limit"), default=1),
+                compile_limit=safe_non_negative_int(payload.get("compile_limit"), default=1),
             ),
             observe=observe,
             worker_id="wiki-research-runner",
@@ -2112,7 +2113,7 @@ def _setup_scheduler(
                     resume_key=WIKI_RESEARCH_RESUME_KEY,
                     job_service=job_service,
                     observe=observe,
-                    payload={"max_topics": 3, "research_limit": 1},
+                    payload={"max_topics": 3, "research_limit": 1, "compile_limit": 1},
                 ),
                 skip_if=_maintenance_skip,
             ),

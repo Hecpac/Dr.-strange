@@ -653,6 +653,173 @@ class AutoResearchTests(unittest.TestCase):
         self.assertEqual(candidate["blocked_reason"], "No primary sources found.")
         self.assertFalse((svc.raw_dir / "research-unverifiable-topic.md").exists())
 
+    def test_compile_researched_candidate_writes_wiki_page_after_quality_gate(self) -> None:
+        svc, router, tmp = _make_wiki()
+        raw_slug = "research-computer-use-runbooks"
+        (svc.raw_dir / f"{raw_slug}.md").write_text(
+            "---\ntitle: Computer Use Runbooks\ntype: auto-research\n---\n\n"
+            "# Computer Use Runbooks\n\nRaw evidence with sources.",
+            encoding="utf-8",
+        )
+        svc._save_research_candidates(
+            [
+                {
+                    "slug": "computer-use-runbooks",
+                    "topic": "Computer Use Runbooks",
+                    "category": "Operaciones Dr. Strange",
+                    "status": "researched",
+                    "raw_source_slug": raw_slug,
+                    "sources_count": 1,
+                }
+            ]
+        )
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                {
+                    "summary_page": {
+                        "filename": "computer-use-runbooks.md",
+                        "content": (
+                            "---\n"
+                            "title: Computer Use Runbooks\n"
+                            "tags: [computer-use, runbook]\n"
+                            "category: Operaciones Dr. Strange\n"
+                            f"sources: [{raw_slug}]\n"
+                            "created: 2026-06-29T00:00:00+00:00\n"
+                            "updated: 2026-06-29T00:00:00+00:00\n"
+                            "---\n\n"
+                            "# Computer Use Runbooks\n\n"
+                            "Operational guidance compiled from raw evidence."
+                        ),
+                    },
+                    "index_entry": "- [[computer-use-runbooks]] - Computer Use Runbooks",
+                    "category": "Operaciones Dr. Strange",
+                }
+            )
+        )
+
+        result = svc.compile_researched_candidates(max_candidates=1)
+
+        self.assertEqual(result["candidates_compiled"], 1)
+        self.assertEqual(result["compile_blocked"], 0)
+        self.assertEqual(result["pages_written"], 1)
+        page = svc.wiki_dir / "computer-use-runbooks.md"
+        self.assertTrue(page.exists())
+        text = page.read_text(encoding="utf-8")
+        self.assertIn(f"sources: [{raw_slug}]", text)
+        self.assertIn("confidence:", text)
+        candidate = svc.research_candidates(limit=1)[0]
+        self.assertEqual(candidate["status"], "compiled")
+        self.assertEqual(candidate["compiled_page_slug"], "computer-use-runbooks")
+        self.assertIn("[[computer-use-runbooks]]", svc.index_path.read_text(encoding="utf-8"))
+
+    def test_auto_research_compile_limit_promotes_existing_researched_candidate(self) -> None:
+        svc, router, tmp = _make_wiki()
+        _write_page(svc.wiki_dir, "existing", "Existing", "Content.")
+        raw_slug = "research-existing-candidate"
+        (svc.raw_dir / f"{raw_slug}.md").write_text(
+            "---\ntitle: Existing Candidate\ntype: auto-research\n---\n\nRaw evidence.",
+            encoding="utf-8",
+        )
+        svc._save_research_candidates(
+            [
+                {
+                    "slug": "existing-candidate",
+                    "topic": "Existing Candidate",
+                    "category": "Research",
+                    "status": "researched",
+                    "raw_source_slug": raw_slug,
+                }
+            ]
+        )
+        router.ask.side_effect = [
+            MagicMock(content="[]"),
+            MagicMock(
+                content=json.dumps(
+                    {
+                        "summary_page": {
+                            "filename": "existing-candidate.md",
+                            "content": (
+                                "---\n"
+                                "title: Existing Candidate\n"
+                                "tags: [research]\n"
+                                "category: Research\n"
+                                f"sources: [{raw_slug}]\n"
+                                "created: 2026-06-29T00:00:00+00:00\n"
+                                "updated: 2026-06-29T00:00:00+00:00\n"
+                                "---\n\n"
+                                "# Existing Candidate\n\nCompiled from raw evidence."
+                            ),
+                        },
+                        "index_entry": "- [[existing-candidate]] - Existing Candidate",
+                        "category": "Research",
+                    }
+                )
+            ),
+        ]
+
+        result = svc.auto_research(max_topics=1, compile_limit=1)
+
+        self.assertEqual(result["topics_researched"], 0)
+        self.assertEqual(result["candidates_compiled"], 1)
+        self.assertEqual(result["pages_written"], 1)
+        self.assertTrue((svc.wiki_dir / "existing-candidate.md").exists())
+
+    def test_compile_researched_candidate_blocks_when_raw_source_missing(self) -> None:
+        svc, router, tmp = _make_wiki()
+        svc._save_research_candidates(
+            [
+                {
+                    "slug": "missing-raw",
+                    "topic": "Missing Raw",
+                    "status": "researched",
+                    "raw_source_slug": "research-missing-raw",
+                }
+            ]
+        )
+
+        result = svc.compile_researched_candidates(max_candidates=1)
+
+        self.assertEqual(result["candidates_compiled"], 0)
+        self.assertEqual(result["compile_blocked"], 1)
+        candidate = svc.research_candidates(limit=1)[0]
+        self.assertEqual(candidate["status"], "compile_blocked")
+        self.assertEqual(candidate["compile_blocked_reason"], "raw_source_missing")
+        router.ask.assert_not_called()
+
+    def test_compile_researched_candidate_blocks_when_quality_gate_fails(self) -> None:
+        svc, router, tmp = _make_wiki()
+        raw_slug = "research-low-quality"
+        (svc.raw_dir / f"{raw_slug}.md").write_text("raw evidence", encoding="utf-8")
+        svc._save_research_candidates(
+            [
+                {
+                    "slug": "low-quality",
+                    "topic": "Low Quality",
+                    "status": "researched",
+                    "raw_source_slug": raw_slug,
+                }
+            ]
+        )
+        router.ask.return_value = MagicMock(
+            content=json.dumps(
+                {
+                    "summary_page": {
+                        "filename": "low-quality.md",
+                        "content": "# Low Quality\n\nMissing frontmatter and sources.",
+                    }
+                }
+            )
+        )
+
+        result = svc.compile_researched_candidates(max_candidates=1)
+
+        self.assertEqual(result["candidates_compiled"], 0)
+        self.assertEqual(result["compile_blocked"], 1)
+        self.assertFalse((svc.wiki_dir / "low-quality.md").exists())
+        candidate = svc.research_candidates(limit=1)[0]
+        self.assertEqual(candidate["status"], "compile_blocked")
+        self.assertEqual(candidate["compile_blocked_reason"], "quality_gate_failed")
+
 
 class EvidenceTests(unittest.TestCase):
     def test_raw_source_detection(self) -> None:

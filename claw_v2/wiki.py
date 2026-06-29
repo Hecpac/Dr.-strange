@@ -687,83 +687,95 @@ class WikiService:
     # Auto-Research (periodic knowledge acquisition)
     # ------------------------------------------------------------------
 
-    def auto_research(self, *, max_topics: int = 3, research_limit: int = 0) -> dict:
+    def auto_research(
+        self, *, max_topics: int = 3, research_limit: int = 0, compile_limit: int = 0
+    ) -> dict:
         """Identify knowledge gaps that need raw source research.
 
         Designed to run as a scheduled job (e.g. every 12 hours).
-        This does not write wiki pages from LLM synthesis; candidates must be
-        grounded through raw sources before they can become wiki truth.
+        Candidate discovery does not write wiki pages. Candidates must be grounded
+        through raw sources before the compiler can promote them to wiki truth.
         """
         pages = self._list_wiki_pages()
-        if not pages:
-            return {"topics_researched": 0, "pages_written": 0}
-
-        existing = "\n".join(f"- [[{p.stem}]]: {self._extract_title(p)}" for p in pages[:30])
-
-        prompt = textwrap.dedent(f"""\
-            You are a knowledge curator for an AI/tech wiki. Analyze the existing pages
-            and suggest {max_topics} topics that are MISSING and would be valuable.
-
-            Focus on: AI developments, frontier models, AI agents, AI safety,
-            developer tools, and industry trends from 2026.
-
-            Existing wiki pages:
-            {existing}
-
-            Respond with ONLY a JSON array of objects:
-            [
-              {{"topic": "short title", "category": "AI & Herramientas", "reason": "why this deserves research", "source_queries": ["specific source query"]}}
-            ]
-
-            Rules:
-            - Only suggest topics NOT already covered by existing pages.
-            - Do not write synthesized factual summaries.
-            - Suggest concrete source queries that can produce raw evidence.
-            - Write in Spanish.
-            - ONLY valid JSON array.
-        """)
-
-        try:
-            resp = self.router.ask(
-                prompt,
-                lane=self.lane,
-                max_budget=0.40,
-                timeout=120.0,
-                evidence_pack={"operation": "auto_research"},
-            )
-            topics = self._parse_json_array(resp.content)
-        except Exception:
-            logger.exception("Wiki auto_research failed")
-            return {"topics_researched": 0, "pages_written": 0}
-
-        candidates: list[dict] = []
-        for topic in topics[:max_topics]:
-            title = topic.get("topic", "")
-            category = topic.get("category", "Research")
-            if not title:
-                continue
-            slug = _slugify(title)
-            if (self.wiki_dir / f"{slug}.md").exists():
-                continue
-            candidates.append(
-                {
-                    "topic": title,
-                    "slug": slug,
-                    "category": self._normalize_category(category),
-                    "reason": topic.get("reason", ""),
-                    "source_queries": topic.get("source_queries", []),
-                }
-            )
-
-        self._append_log(
-            "auto_research", f"topics={len(candidates)} candidates={len(candidates)} written=0", 0
-        )
-        persisted_candidates = self._persist_research_candidates(candidates)
+        persisted_candidates: list[dict] = []
         result = {
-            "topics_researched": len(persisted_candidates),
+            "topics_researched": 0,
             "pages_written": 0,
             "candidates": persisted_candidates,
         }
+
+        if pages:
+            existing = "\n".join(f"- [[{p.stem}]]: {self._extract_title(p)}" for p in pages[:30])
+
+            prompt = textwrap.dedent(f"""\
+                You are a knowledge curator for an AI/tech wiki. Analyze the existing pages
+                and suggest {max_topics} topics that are MISSING and would be valuable.
+
+                Focus on: AI developments, frontier models, AI agents, AI safety,
+                developer tools, and industry trends from 2026.
+
+                Existing wiki pages:
+                {existing}
+
+                Respond with ONLY a JSON array of objects:
+                [
+                  {{"topic": "short title", "category": "AI & Herramientas", "reason": "why this deserves research", "source_queries": ["specific source query"]}}
+                ]
+
+                Rules:
+                - Only suggest topics NOT already covered by existing pages.
+                - Do not write synthesized factual summaries.
+                - Suggest concrete source queries that can produce raw evidence.
+                - Write in Spanish.
+                - ONLY valid JSON array.
+            """)
+
+            try:
+                resp = self.router.ask(
+                    prompt,
+                    lane=self.lane,
+                    max_budget=0.40,
+                    timeout=120.0,
+                    evidence_pack={"operation": "auto_research"},
+                )
+                topics = self._parse_json_array(resp.content)
+            except Exception:
+                logger.exception("Wiki auto_research failed")
+                topics = []
+
+            candidates: list[dict] = []
+            for topic in topics[:max_topics]:
+                if not isinstance(topic, dict):
+                    continue
+                title = topic.get("topic", "")
+                category = topic.get("category", "Research")
+                if not title:
+                    continue
+                slug = _slugify(title)
+                if (self.wiki_dir / f"{slug}.md").exists():
+                    continue
+                candidates.append(
+                    {
+                        "topic": title,
+                        "slug": slug,
+                        "category": self._normalize_category(category),
+                        "reason": topic.get("reason", ""),
+                        "source_queries": topic.get("source_queries", []),
+                    }
+                )
+
+            self._append_log(
+                "auto_research",
+                f"topics={len(candidates)} candidates={len(candidates)} written=0",
+                0,
+            )
+            persisted_candidates = self._persist_research_candidates(candidates)
+            result.update(
+                {
+                    "topics_researched": len(persisted_candidates),
+                    "candidates": persisted_candidates,
+                }
+            )
         if research_limit > 0:
             research_result = self.research_queued_candidates(max_candidates=research_limit)
             current_by_slug = {
@@ -774,6 +786,8 @@ class WikiService:
                 for candidate in persisted_candidates
             ]
             result.update(research_result)
+        if compile_limit > 0:
+            result.update(self.compile_researched_candidates(max_candidates=compile_limit))
         return result
 
     def research_candidates(self, *, limit: int = 10, status: str | None = None) -> list[dict]:
@@ -809,6 +823,39 @@ class WikiService:
             "raw_sources_written": raw_written,
             "candidates_blocked": blocked,
             "research_results": results,
+        }
+
+    def compile_researched_candidates(self, *, max_candidates: int = 1) -> dict:
+        """Compile researched raw evidence into wiki pages after a quality gate."""
+        try:
+            limit = max(0, int(max_candidates))
+        except (TypeError, ValueError):
+            limit = 0
+        candidates = [
+            item for item in self._load_research_candidates() if item.get("status") == "researched"
+        ]
+        candidates.sort(
+            key=lambda item: str(
+                item.get("researched_at") or item.get("updated_at") or item.get("created_at") or ""
+            )
+        )
+        compiled = 0
+        blocked = 0
+        pages_written = 0
+        results: list[dict] = []
+        for candidate in candidates[:limit]:
+            outcome = self._compile_research_candidate(candidate)
+            results.append(outcome)
+            if outcome.get("status") == "compiled":
+                compiled += 1
+                pages_written += int(outcome.get("pages_written") or 0)
+            elif outcome.get("status") == "compile_blocked":
+                blocked += 1
+        return {
+            "candidates_compiled": compiled,
+            "compile_blocked": blocked,
+            "pages_written": pages_written,
+            "compile_results": results,
         }
 
     def _persist_research_candidates(self, candidates: list[dict]) -> list[dict]:
@@ -981,6 +1028,203 @@ class WikiService:
             "raw_source_slug": raw_slug,
             "sources_count": len(sources),
         }
+
+    def _compile_research_candidate(self, candidate: dict) -> dict:
+        slug = str(candidate.get("slug") or "").strip()
+        topic = str(candidate.get("topic") or slug).strip()
+        raw_slug = str(candidate.get("raw_source_slug") or "").strip()
+        if not slug or not raw_slug:
+            reason = "invalid_candidate"
+            if slug:
+                self._update_research_candidate(
+                    slug,
+                    {
+                        "status": "compile_blocked",
+                        "compile_blocked_reason": reason,
+                        "updated_at": _now_iso(),
+                    },
+                )
+            return {"slug": slug, "status": "compile_blocked", "reason": reason}
+
+        raw_path = self.raw_dir / f"{raw_slug}.md"
+        if not raw_path.exists():
+            reason = "raw_source_missing"
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "compile_blocked",
+                    "compile_blocked_reason": reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {"slug": slug, "status": "compile_blocked", "reason": reason}
+
+        try:
+            raw_text = raw_path.read_text(encoding="utf-8")
+        except Exception:
+            logger.exception("Wiki compile failed to read raw source %s", raw_slug)
+            reason = "raw_source_unreadable"
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "compile_blocked",
+                    "compile_blocked_reason": reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {"slug": slug, "status": "compile_blocked", "reason": reason}
+
+        now = _now_iso()
+        category = self._normalize_category(str(candidate.get("category") or "Research"))
+        prompt = textwrap.dedent(f"""\
+            Compile this researched raw evidence into one durable wiki page.
+
+            Candidate topic: {topic}
+            Candidate slug: {slug}
+            Category: {category}
+            Required raw source slug: {raw_slug}
+            Current time: {now}
+
+            Raw evidence:
+            {raw_text[:9000]}
+
+            Respond with ONLY a JSON object:
+            {{
+              "summary_page": {{
+                "filename": "{slug}.md",
+                "content": "full markdown with YAML frontmatter"
+              }},
+              "category": "{category}",
+              "index_entry": "- [[{slug}]] - short description"
+            }}
+
+            Required frontmatter fields in content:
+            title, tags, category, sources, created, updated.
+
+            Rules:
+            - Use only the raw evidence above.
+            - The filename must be exactly "{slug}.md".
+            - The sources frontmatter must include "{raw_slug}".
+            - Write the page body in Spanish unless the evidence is code or an exact title.
+            - Do not include claims that are not supported by the raw evidence.
+            - ONLY valid JSON.
+        """)
+        try:
+            resp = self.router.ask(
+                prompt,
+                lane=self.lane,
+                max_budget=0.35,
+                timeout=120.0,
+                evidence_pack={
+                    "operation": "wiki_compile_research_candidate",
+                    "candidate_slug": slug,
+                    "raw_source_slug": raw_slug,
+                },
+            )
+            payload = self._parse_json(resp.content)
+        except Exception as exc:
+            logger.exception("Wiki compile candidate failed for %s", slug)
+            reason = f"compile_failed:{exc.__class__.__name__}"
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "compile_blocked",
+                    "compile_blocked_reason": reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {"slug": slug, "status": "compile_blocked", "reason": reason}
+
+        summary = payload.get("summary_page")
+        if not isinstance(summary, dict):
+            summary = {}
+        filename = summary.get("filename") if isinstance(summary.get("filename"), str) else ""
+        content = summary.get("content") if isinstance(summary.get("content"), str) else ""
+        quality_reason = self._compiled_page_quality_reason(
+            filename=filename,
+            content=content,
+            expected_slug=slug,
+            raw_slug=raw_slug,
+        )
+        if quality_reason:
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "compile_blocked",
+                    "compile_blocked_reason": "quality_gate_failed",
+                    "quality_gate_reason": quality_reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {
+                "slug": slug,
+                "status": "compile_blocked",
+                "reason": "quality_gate_failed",
+                "quality_gate_reason": quality_reason,
+            }
+
+        target = self.wiki_dir / filename
+        if target.exists():
+            reason = "page_already_exists"
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "compile_blocked",
+                    "compile_blocked_reason": reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {"slug": slug, "status": "compile_blocked", "reason": reason}
+
+        target.write_text(content.strip() + "\n", encoding="utf-8")
+        self._ensure_raw_source(target, raw_slug)
+        confidence = self._compute_confidence(target.stem)
+        self._set_frontmatter_field(target, "confidence", str(confidence))
+        final_content = target.read_text(encoding="utf-8")
+        self._index_page_embedding(target.stem, final_content)
+        self._save_embeddings()
+
+        output_category = self._normalize_category(
+            str(payload.get("category") or candidate.get("category") or category)
+        )
+        index_entry = (
+            str(payload.get("index_entry") or "").strip()
+            or f"- [[{target.stem}]] - {topic or target.stem}"
+        )
+        self._update_index(output_category, index_entry)
+        self._append_log("compile_research", slug, 1)
+        self._update_research_candidate(
+            slug,
+            {
+                "status": "compiled",
+                "compiled_page_slug": target.stem,
+                "compiled_at": now,
+                "updated_at": now,
+            },
+        )
+        return {
+            "slug": slug,
+            "status": "compiled",
+            "compiled_page_slug": target.stem,
+            "raw_source_slug": raw_slug,
+            "pages_written": 1,
+        }
+
+    def _compiled_page_quality_reason(
+        self, *, filename: str, content: str, expected_slug: str, raw_slug: str
+    ) -> str:
+        filename = filename.strip()
+        if not filename or Path(filename).name != filename or not filename.endswith(".md"):
+            return "unsafe_filename"
+        page_slug = Path(filename).stem
+        if page_slug != expected_slug:
+            return "unexpected_filename"
+        if not content.strip() or not _FRONTMATTER_RE.match(content.strip()):
+            return "missing_frontmatter"
+        sources = self._extract_sources(content.strip())
+        if raw_slug not in sources:
+            return "missing_raw_source"
+        return ""
 
     def _update_research_candidate(self, slug: str, updates: dict) -> None:
         with self._lock:
