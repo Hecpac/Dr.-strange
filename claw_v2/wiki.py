@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from claw_v2.subprocess_runner import run_subprocess_bounded
+
 if TYPE_CHECKING:
     from claw_v2.llm import LLMRouter
     from claw_v2.observe import ObserveStream
@@ -1095,8 +1097,6 @@ class WikiService:
 
     def auto_scrape_sources(self) -> dict:
         """Scrape watched sources via firecrawl, extract key items, ingest new ones."""
-        import subprocess
-
         now = time.time()
         if self._firecrawl_paused_until > now:
             remaining = int(self._firecrawl_paused_until - now)
@@ -1162,11 +1162,10 @@ class WikiService:
                 item_results.append(item)
 
             try:
-                result = subprocess.run(
+                result = run_subprocess_bounded(
                     ["firecrawl", "scrape", url],
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
+                    timeout_s=60,
+                    observe=self.observe,
                 )
                 if result.returncode != 0 or not result.stdout.strip():
                     failure = classify_firecrawl_failure(result.stderr or result.stdout)

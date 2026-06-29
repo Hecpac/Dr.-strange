@@ -56,6 +56,26 @@ class WikiHandlerTests(unittest.TestCase):
         self.assertIn("computer-use-runbook", reply)
         self.assertIn("OpenAI computer use best practices", reply)
 
+    def test_research_command_passes_status_filter(self) -> None:
+        wiki = MagicMock()
+        wiki.research_candidates.return_value = [
+            {
+                "slug": "blocked-runbook",
+                "topic": "Blocked Runbook",
+                "status": "blocked",
+                "category": "Research",
+                "source_queries": ["blocked query"],
+            }
+        ]
+        handler = WikiHandler(wiki=wiki)
+
+        reply = handler.handle_command(_ctx("/wiki research blocked"))
+
+        wiki.research_candidates.assert_called_once_with(limit=5, status="blocked")
+        self.assertIn("Research queue", reply)
+        self.assertIn("blocked-runbook", reply)
+        self.assertIn("blocked query", reply)
+
     def test_research_command_handles_empty_queue(self) -> None:
         wiki = MagicMock()
         wiki.research_candidates.return_value = []

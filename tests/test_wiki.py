@@ -722,7 +722,7 @@ class AutoScrapeTests(unittest.TestCase):
         ]
         proc = MagicMock(returncode=0, stdout="source page content", stderr="")
 
-        with patch("subprocess.run", return_value=proc):
+        with patch("claw_v2.wiki.run_subprocess_bounded", return_value=proc):
             result = svc.auto_scrape_sources()
 
         self.assertGreaterEqual(result["pages_ingested"], 1)
@@ -736,7 +736,7 @@ class AutoScrapeTests(unittest.TestCase):
         svc.WATCH_SOURCES = [("Test Source", "https://example.com/source")]
         proc = MagicMock(returncode=1, stdout="", stderr="Payment required: insufficient credits")
 
-        with patch("subprocess.run", return_value=proc):
+        with patch("claw_v2.wiki.run_subprocess_bounded", return_value=proc):
             result = svc.auto_scrape_sources()
 
         self.assertEqual(result["sources_scraped"], 0)
@@ -784,7 +784,7 @@ class AutoScrapeTests(unittest.TestCase):
         )
         proc = MagicMock(returncode=0, stdout="source page content", stderr="")
 
-        with patch("subprocess.run", return_value=proc):
+        with patch("claw_v2.wiki.run_subprocess_bounded", return_value=proc):
             result = svc.auto_scrape_sources()
 
         self.assertEqual(result["pages_ingested"], 0)
@@ -812,7 +812,7 @@ class AutoScrapeTests(unittest.TestCase):
         )
         proc = MagicMock(returncode=0, stdout="source page content", stderr="")
 
-        with patch("subprocess.run", return_value=proc), patch.object(
+        with patch("claw_v2.wiki.run_subprocess_bounded", return_value=proc), patch.object(
             svc, "ingest", return_value={"pages_written": 0, "skipped": True}
         ):
             result = svc.auto_scrape_sources()
