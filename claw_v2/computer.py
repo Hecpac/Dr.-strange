@@ -613,9 +613,14 @@ class ComputerUseService:
 # the OAuth bearer; any other (e.g. gpt-*) falls back to the metered OPENAI key.
 DEFAULT_BROWSER_USE_MODEL = "claude-sonnet-4-6"
 # Secondary model wired as browser_use's fallback_llm when the primary is a
-# Claude model — same OAuth/subscription path, so a primary-model hiccup
-# (overload/availability) doesn't kill the whole browser task.
-BROWSER_USE_OAUTH_FALLBACK_MODEL = "claude-haiku-4-5"
+# Claude model. Set to None: claude-haiku-4-5 (the previous fallback) returns
+# AgentOutput that fails browser_use's schema (missing 'action'), so a primary
+# 429 cascaded into 6 retries on the broken fallback and a (no result) task
+# failure. With fallback disabled, a sustained primary rate-limit surfaces
+# cleanly (the primary's RetryChatAnthropic backoff already absorbs transient
+# 429s on the SAME model). Re-enable only with a model whose output reliably
+# satisfies browser_use's AgentOutput schema.
+BROWSER_USE_OAUTH_FALLBACK_MODEL = None
 # Beta header the Anthropic API requires when authenticating /v1/messages with
 # a Claude Code (Max subscription) OAuth bearer token instead of an API key.
 _ANTHROPIC_OAUTH_BETA_HEADER = "oauth-2025-04-20"
@@ -640,15 +645,17 @@ class RetryChatAnthropic:
 
     browser_use v0.11.13's ``ChatAnthropic.ainvoke`` rethrows
     ``RateLimitError`` as ``ModelRateLimitError``; browser_use then switches to
-    ``fallback_llm`` (claude-haiku-4-5), whose output frequently fails the
-    ``AgentOutput`` schema (missing ``action``). Wrapping the primary with a
+    ``fallback_llm``. The previous fallback (claude-haiku-4-5) returned output
+    that failed the ``AgentOutput`` schema (missing ``action``), cascading a
+    transient 429 into a (no result) task failure. ``BROWSER_USE_OAUTH_FALLBACK_MODEL``
+    is now None, so browser_use has no fallback to degrade to — this wrapper's
     bounded exponential backoff absorbs the Max-subscription rate-limit window
-    on the same model before browser_use's own fallback fires, so a transient
-    429 does not cascade into a task failure via the malformed-output fallback.
+    on the SAME primary instead, so a transient 429 does not surface as a task
+    failure.
 
     Only retries ``ModelRateLimitError`` (rate limits). Other errors
     (``ModelProviderError``, validation, connection) propagate immediately so
-    browser_use's fallback semantics are preserved for non-rate-limit failures.
+    a non-rate-limit failure surfaces honestly rather than being masked.
     """
 
     def __init__(self, inner: Any, *, observe: Any | None = None) -> None:
@@ -759,9 +766,12 @@ class BrowserUseService:
 
         ``claude*`` models ride Hector's Max subscription: authenticate with the
         keychain OAuth bearer + the ``oauth-2025-04-20`` beta header (NO metered
-        ANTHROPIC_API_KEY), and wire a secondary Claude model as ``fallback_llm``
-        so a primary overload doesn't kill the task. Any other model (gpt-*) uses
-        the metered OpenAI key. Raises if a Claude model is requested but no
+        ANTHROPIC_API_KEY). The fallback_llm is disabled (BROWSER_USE_OAUTH_FALLBACK_MODEL = None):
+        the previous haiku fallback produced AgentOutput that failed browser_use's
+        schema, so a primary 429 cascaded into (no result). The primary is wrapped
+        in RetryChatAnthropic (bounded backoff on rate-limit) so transient 429s
+        are absorbed on the same model. Any non-Claude model (gpt-*) uses the
+        metered OpenAI key. Raises if a Claude model is requested but no
         subscription token is available — fail loud, never silently no-op.
         """
         with _preserve_browser_use_import_env():

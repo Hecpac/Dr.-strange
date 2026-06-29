@@ -339,7 +339,10 @@ class BrowserUseServiceTests(unittest.TestCase):
         module = types.SimpleNamespace(ChatAnthropic=MagicMock(), ChatOpenAI=MagicMock())
         return module
 
-    def test_build_llm_claude_uses_max_oauth_token_and_fallback(self) -> None:
+    def test_build_llm_claude_uses_max_oauth_token_no_fallback(self) -> None:
+        # Fix A: BROWSER_USE_OAUTH_FALLBACK_MODEL is None — the haiku fallback
+        # produced AgentOutput that failed browser_use's schema, so a primary
+        # 429 cascaded into (no result). Only the primary ChatAnthropic is built.
         import sys
         from claw_v2.computer import BrowserUseService
 
@@ -351,13 +354,13 @@ class BrowserUseServiceTests(unittest.TestCase):
         ):
             primary, fallback = svc._build_browser_llm("claude-sonnet-4-6")
         module.ChatOpenAI.assert_not_called()
-        self.assertEqual(module.ChatAnthropic.call_count, 2)  # primary + fallback
+        self.assertEqual(module.ChatAnthropic.call_count, 1)  # primary only
         first = module.ChatAnthropic.call_args_list[0].kwargs
         self.assertEqual(first["model"], "claude-sonnet-4-6")
         self.assertEqual(first["auth_token"], "tok123")
         self.assertEqual(first["default_headers"], {"anthropic-beta": "oauth-2025-04-20"})
-        self.assertEqual(module.ChatAnthropic.call_args_list[1].kwargs["model"], "claude-haiku-4-5")
-        self.assertIsNotNone(fallback)
+        # fallback disabled — no second ChatAnthropic, fallback is None
+        self.assertIsNone(fallback)
 
     def test_build_llm_claude_without_token_raises(self) -> None:
         import sys
@@ -407,11 +410,19 @@ class BrowserUseServiceTests(unittest.TestCase):
             patch("claw_v2.computer._resolve_claude_oauth_token", return_value="tok123"),
         ):
             primary, fallback = svc._build_browser_llm("claude-sonnet-4-6")
-        # primary is wrapped in RetryChatAnthropic; fallback stays a raw ChatAnthropic
+        # primary is wrapped in RetryChatAnthropic; fallback is None (Fix A)
         self.assertIsInstance(primary, RetryChatAnthropic)
-        self.assertIsNotNone(fallback)
+        self.assertIsNone(fallback)
         # the wrapper delegates to the inner ChatAnthropic instance
         self.assertIs(primary._inner, module.ChatAnthropic.return_value)
+
+    def test_fallback_model_constant_is_none(self) -> None:
+        # Fix A: pin that the broken haiku fallback stays disabled until a
+        # schema-compatible model is chosen. Re-enabling silently reintroduces
+        # the (no result) cascade.
+        from claw_v2.computer import BROWSER_USE_OAUTH_FALLBACK_MODEL
+
+        self.assertIsNone(BROWSER_USE_OAUTH_FALLBACK_MODEL)
 
 
 class RetryChatAnthropicTests(unittest.IsolatedAsyncioTestCase):
