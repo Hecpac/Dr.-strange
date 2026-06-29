@@ -9,6 +9,7 @@ import re
 import threading
 import time
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -43,6 +44,28 @@ _SIMPLE_SOCIAL_BROWSER_ACTION_RE = re.compile(
     r"\b(?:abre|abrir|open|revisa|review|check|navega|navegar|entra|entrar|perfil|feed)\b",
     re.IGNORECASE,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _BrowserPrelude:
+    objective: str
+    final_url: str
+    title: str
+    screenshot_path: str
+    content_preview: str
+
+    def evidence_lines(self) -> list[str]:
+        lines = [
+            "X ya esta abierto por CDP.",
+            f"URL inicial: {self.final_url}",
+        ]
+        if self.title:
+            lines.append(f"Titulo inicial: {self.title}")
+        if self.screenshot_path:
+            lines.append(f"Captura inicial: {self.screenshot_path}")
+        if self.content_preview:
+            lines.append(f"Texto visible inicial: {self.content_preview}")
+        return lines
 
 
 def _error_message(exc: BaseException) -> str:
@@ -922,6 +945,15 @@ class ComputerHandler:
             gate = self._browser_profile_gate(objective, cdp_endpoint, task_id=task_id)
             if gate is not None:
                 return gate
+            prelude = self._run_x_browser_prelude(
+                objective,
+                cdp_endpoint=cdp_endpoint,
+                task_id=task_id,
+                mode=mode,
+            )
+            if isinstance(prelude, str):
+                return prelude
+            objective_for_agent = prelude.objective if prelude is not None else objective
             deterministic = self._run_deterministic_social_browser_task(
                 objective,
                 cdp_endpoint=cdp_endpoint,
@@ -943,12 +975,175 @@ class ComputerHandler:
                     "delegated_browser_task_started",
                     {"task_id": task_id, "mode": mode, "objective": objective[:200]},
                 )
-                session = _types.SimpleNamespace(task=objective, screenshot_path=None)
-                return self._run_browser_use_task(
+                session = _types.SimpleNamespace(
+                    task=objective_for_agent,
+                    screenshot_path=prelude.screenshot_path if prelude is not None else None,
+                )
+                output = self._run_browser_use_task(
                     session, timeout_seconds=_LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
                 )
+                if prelude is not None and _is_unverifiable_browser_result(output):
+                    evidence = "\n".join(f"- {line}" for line in prelude.evidence_lines())
+                    return f"{output}\n\nEvidencia inicial deterministica:\n{evidence}"
+                return output
         finally:
             lock.release()
+
+    def _run_x_browser_prelude(
+        self,
+        objective: str,
+        *,
+        cdp_endpoint: str,
+        task_id: str | None,
+        mode: str | None,
+    ) -> _BrowserPrelude | str | None:
+        from claw_v2.browser_profiles import (
+            BrowserProfileHealth,
+            classify_health,
+            human_message,
+            resolve_profile_for_objective,
+        )
+
+        profile = resolve_profile_for_objective(objective)
+        if profile is None or profile.name != "x":
+            return None
+        self._emit(
+            "x_browser_prelude_started",
+            {"task_id": task_id, "mode": mode, "target_url": profile.home_url},
+        )
+        try:
+            browser = DevBrowserService()
+            result = browser.chrome_navigate(
+                profile.home_url,
+                cdp_url=cdp_endpoint,
+                page_url_pattern="x.com",
+            )
+            result_url = str(getattr(result, "url", "") or "")
+            screenshot_pattern = "twitter.com" if "twitter.com" in result_url else "x.com"
+            screenshot = browser.chrome_screenshot(
+                cdp_url=cdp_endpoint,
+                page_url_pattern=screenshot_pattern,
+                name="x-home.png",
+            )
+        except Exception as exc:
+            message = _error_message(exc)
+            self._emit(
+                "x_browser_prelude_failed",
+                {"task_id": task_id, "mode": mode, "target_url": profile.home_url, "error": message},
+            )
+            return f"No pude completar la tarea de navegador deterministica: {message}"
+
+        final_url = str(getattr(result, "url", "") or getattr(screenshot, "url", "") or "").strip()
+        title = str(getattr(result, "title", "") or getattr(screenshot, "title", "") or "").strip()
+        screenshot_path = str(getattr(screenshot, "screenshot_path", "") or "").strip()
+        content = str(
+            getattr(result, "content", "") or getattr(screenshot, "content", "") or ""
+        ).strip()
+        host = _host_from_url(final_url)
+        allowed_domain = bool(
+            host and any(host == domain or host.endswith(f".{domain}") for domain in profile.allowed_domains)
+        )
+        if not allowed_domain:
+            message = f"navegacion inicial quedo fuera de X: {final_url or '(url vacia)'}"
+            self._emit(
+                "x_browser_prelude_unverifiable_result",
+                {
+                    "task_id": task_id,
+                    "mode": mode,
+                    "target_url": profile.home_url,
+                    "final_url": final_url,
+                    "title": title,
+                    "screenshot_path": screenshot_path,
+                    "reason": "unexpected_domain",
+                },
+            )
+            return f"No pude completar la tarea de navegador deterministica: {message}"
+
+        health = classify_health(final_url=final_url, title=title, body_text=content, profile=profile)
+        if health is BrowserProfileHealth.NEEDS_LOGIN:
+            self._emit(
+                "x_browser_prelude_needs_login",
+                {
+                    "task_id": task_id,
+                    "mode": mode,
+                    "final_url": final_url,
+                    "screenshot_path": screenshot_path,
+                },
+            )
+            return f"No pude completar la tarea de navegador deterministica: {human_message(profile, health)}"
+        if health is BrowserProfileHealth.BLOCKED_BY_CHALLENGE:
+            self._emit(
+                "x_browser_prelude_blocked_by_challenge",
+                {
+                    "task_id": task_id,
+                    "mode": mode,
+                    "final_url": final_url,
+                    "screenshot_path": screenshot_path,
+                },
+            )
+            return f"No pude completar la tarea de navegador deterministica: {human_message(profile, health)}"
+
+        compact_content = " ".join(content.split())[:500]
+        prelude = _BrowserPrelude(
+            objective=self._objective_with_browser_prelude(
+                objective,
+                final_url=final_url,
+                title=title,
+                screenshot_path=screenshot_path,
+                content_preview=compact_content,
+            ),
+            final_url=final_url,
+            title=title,
+            screenshot_path=screenshot_path,
+            content_preview=compact_content,
+        )
+        self._emit(
+            "x_browser_prelude_completed",
+            {
+                "task_id": task_id,
+                "mode": mode,
+                "target_url": profile.home_url,
+                "final_url": final_url,
+                "title": title,
+                "screenshot_path": screenshot_path,
+            },
+        )
+        return prelude
+
+    @staticmethod
+    def _objective_with_browser_prelude(
+        objective: str,
+        *,
+        final_url: str,
+        title: str,
+        screenshot_path: str,
+        content_preview: str,
+    ) -> str:
+        lines = [
+            str(objective or "").strip(),
+            "",
+            "Contexto deterministico previo:",
+            "- X ya esta abierto por CDP.",
+            f"- URL inicial: {final_url}",
+        ]
+        if title:
+            lines.append(f"- Titulo inicial: {title}")
+        if screenshot_path:
+            lines.append(f"- Captura inicial: {screenshot_path}")
+        if content_preview:
+            lines.append(f"- Texto visible inicial: {content_preview}")
+        lines.extend(
+            [
+                "",
+                (
+                    "Usa la pestana ya abierta en X. No empieces desde Google ni repitas "
+                    "la navegacion inicial; revisa el feed visible y reporta solo contenido "
+                    "verificable. Si no puedes leer publicaciones/cuentas/enlaces, dilo "
+                    "con la evidencia anterior."
+                ),
+            ]
+        )
+        return "\n".join(line for line in lines if line is not None)
 
     def _run_deterministic_social_browser_task(
         self,

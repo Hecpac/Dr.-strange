@@ -136,6 +136,7 @@ class F4DelegationJobRunner:
                 mode=payload.get("mode", "chat"),
                 task_kind=payload.get("task_kind", ""),
                 source_text=payload.get("source_text", ""),
+                route=payload.get("route") if isinstance(payload.get("route"), dict) else None,
                 delegation_metadata=payload.get("delegation_metadata"),
             )
             if result.status == "started":

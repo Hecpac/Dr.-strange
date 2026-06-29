@@ -3614,6 +3614,15 @@ class BotService:
             return None
         delivery_key = f"f4b-delegation:{session_id}:{message_id}"
         task_id = f4b_delivery_task_id(delivery_key)
+        route = {
+            "channel": (inbound or {}).get("channel") or "telegram",
+            "external_session_id": session_id.removeprefix("tg-"),
+            "external_user_id": str(
+                (inbound or {}).get("external_user_id")
+                or (inbound or {}).get("user_id")
+                or session_id.removeprefix("tg-")
+            ),
+        }
         try:
             # After-terminalize dedup: ``idx_agent_jobs_active_resume_key`` is
             # ACTIVE-ONLY, so once the delivery job terminalizes it stops deduping
@@ -3645,6 +3654,7 @@ class BotService:
                     "task_id": task_id,
                     "session_id": session_id,
                     "message_id": message_id,
+                    "route": route,
                     "objective": intent.objective,
                     "mode": "chat",
                     "task_kind": intent.kind,
