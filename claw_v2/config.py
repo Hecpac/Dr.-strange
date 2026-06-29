@@ -756,7 +756,7 @@ class AppConfig:
                 if u.strip()
             ],
             codex_cli_path=os.getenv("CODEX_CLI_PATH") or shutil.which("codex") or "codex",
-            codex_model=os.getenv("CODEX_MODEL", "codex-mini-latest"),
+            codex_model=os.getenv("CODEX_MODEL", "gpt-5.5"),
             computer_use_backend=os.getenv("COMPUTER_USE_BACKEND", "openai"),
             computer_browser_use_model=os.getenv("CLAW_BROWSER_USE_MODEL", "claude-sonnet-4-6"),
             morning_brief_enabled=_env_bool("MORNING_BRIEF_ENABLED", True),

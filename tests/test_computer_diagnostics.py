@@ -172,6 +172,32 @@ class ComputerDiagnosticsTests(unittest.TestCase):
                 any(event["payload"]["name"] == "openai_api_key" for event in degraded_events)
             )
 
+    def test_startup_health_emits_model_role_summary_without_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_config(root)
+            config.computer_use_enabled = False
+            config.computer_use_backend = "codex"
+            config.codex_model = "gpt-5.5"
+            config.computer_browser_use_model = "claude-sonnet-4-6"
+            observe = ObserveStream(config.db_path)
+
+            report = _run_startup_healthchecks(config, observe)
+
+            model_roles = next(item for item in report.ok if item.name == "model_roles")
+            self.assertIn("computer_use_primary=codex:gpt-5.5", model_roles.detail)
+            self.assertIn("computer_use_fast=codex:gpt-5.4-mini", model_roles.detail)
+            self.assertIn("browser_agent_primary=anthropic:claude-sonnet-4-6", model_roles.detail)
+            self.assertIn("browser_agent_fallback=disabled", model_roles.detail)
+            self.assertNotIn("KEY", model_roles.detail)
+            events = observe.recent_events(limit=50)
+            ok_events = [
+                event for event in events if event["event_type"] == "startup_healthcheck_ok"
+            ]
+            self.assertTrue(
+                any(event["payload"]["name"] == "model_roles" for event in ok_events)
+            )
+
     def test_runtime_diagnostics_include_structured_computer_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "claw.db"

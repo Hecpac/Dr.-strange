@@ -340,10 +340,12 @@ class _StubBrowserUse:
     def __init__(self) -> None:
         self.called = False
         self.instruction = ""
+        self.kwargs: dict = {}
 
     async def run_task(self, instruction: str, **kwargs) -> str:
         self.called = True
         self.instruction = instruction
+        self.kwargs = dict(kwargs)
         return "browser task done"
 
 
@@ -374,6 +376,12 @@ class ComputerHandlerBrowserAutoApproveTests(unittest.TestCase):
         self.assertTrue(stub.called)
         self.assertEqual(session.status, "done")
         self.assertEqual(result, "browser task done")
+        self.assertEqual(stub.kwargs["allowed_domains"], ["chatgpt.com"])
+        self.assertTrue(stub.kwargs["allow_high_risk_actions"])
+        self.assertEqual(
+            stub.kwargs["allowed_high_risk_actions"],
+            ["evaluate", "save_as_pdf"],
+        )
 
     def test_sensitive_task_still_requires_approval_when_enabled(self) -> None:
         stub = _StubBrowserUse()

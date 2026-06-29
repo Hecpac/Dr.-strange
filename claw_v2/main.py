@@ -442,6 +442,8 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
     else:
         report.add_ok("runtime_config", "using built-in runtime scheduling defaults")
 
+    report.add_ok("model_roles", _startup_model_role_summary(config))
+
     needs_git = config.eval_on_self_improve or _is_git_repo(str(config.workspace_root))
     if needs_git:
         git_path = shutil.which("git")
@@ -604,6 +606,30 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
             )
         raise RuntimeError(f"startup healthchecks failed: {report.failed_summary()}")
     return report
+
+
+def _startup_model_role_summary(config: AppConfig) -> str:
+    registry = ModelRegistry.default()
+    pairs = {role.role: role.key for role in registry.list_model_roles()}
+    try:
+        from claw_v2.computer import BROWSER_USE_OAUTH_FALLBACK_MODEL
+    except Exception:
+        BROWSER_USE_OAUTH_FALLBACK_MODEL = None
+    if not BROWSER_USE_OAUTH_FALLBACK_MODEL:
+        pairs["browser_agent_fallback"] = "disabled"
+    computer_provider = (
+        "codex" if config.computer_use_backend == "codex" else config.computer_use_backend
+    )
+    pairs["computer_use_configured"] = f"{computer_provider}:{config.codex_model}"
+    browser_provider = (
+        "anthropic"
+        if str(config.computer_browser_use_model).lower().startswith("claude")
+        else "openai"
+    )
+    pairs["browser_agent_configured"] = (
+        f"{browser_provider}:{config.computer_browser_use_model}"
+    )
+    return "; ".join(f"{key}={value}" for key, value in sorted(pairs.items()))
 
 
 def _wrap_job_handler(

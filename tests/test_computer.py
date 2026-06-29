@@ -1013,6 +1013,34 @@ class BrowserUseArtifactTests(unittest.TestCase):
 
 
 class BrowserUseGuardTests(unittest.TestCase):
+    def test_high_risk_allowlist_allows_evaluate_on_approved_domain(self) -> None:
+        from claw_v2.computer import _browser_use_high_risk_allowed
+
+        self.assertTrue(
+            _browser_use_high_risk_allowed(
+                action_name="evaluate",
+                url="https://x.com/home",
+                params={},
+                approved_domains=["x.com"],
+                allow_high_risk_actions=True,
+                allowed_high_risk_actions=["evaluate", "save_as_pdf"],
+            )
+        )
+
+    def test_high_risk_allowlist_blocks_upload_on_approved_domain(self) -> None:
+        from claw_v2.computer import _browser_use_high_risk_allowed
+
+        self.assertFalse(
+            _browser_use_high_risk_allowed(
+                action_name="upload_file",
+                url="https://x.com/home",
+                params={"path": "/tmp/file.png"},
+                approved_domains=["x.com"],
+                allow_high_risk_actions=True,
+                allowed_high_risk_actions=["evaluate", "save_as_pdf"],
+            )
+        )
+
     def test_guarded_tools_import_does_not_mutate_claw_model_env(self) -> None:
         import os
 
@@ -1335,6 +1363,46 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
         self.assertEqual(capability.calls, [(9250, "~/.claw/chrome-profile")])
         self.assertEqual(fake.cdp_url, "http://127.0.0.1:9250")
 
+    def test_delegated_browser_use_receives_non_sensitive_read_grant(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict]] = []
+                self.cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                self.calls.append((task, dict(kwargs)))
+                return "feed capturado"
+
+        fake = FakeBrowserUse()
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=["ads.google.com"],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        out = handler.run_delegated_browser_task(
+            "Revisa https://example.com/home y resume el texto visible",
+            task_id="t-grant",
+            mode="browse",
+        )
+
+        self.assertEqual(out, "feed capturado")
+        kwargs = fake.calls[0][1]
+        self.assertEqual(kwargs["allowed_domains"], ["example.com"])
+        self.assertTrue(kwargs["allow_high_risk_actions"])
+        self.assertEqual(kwargs["allowed_high_risk_actions"], ["evaluate", "save_as_pdf"])
+        self.assertIsNone(kwargs["prohibited_domains"])
+
     def test_simple_instagram_open_uses_deterministic_cdp_not_browser_use(self) -> None:
         import types
         from unittest.mock import patch
@@ -1400,6 +1468,151 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
             fake_dev_browser.calls,
             [("navigate", "https://www.instagram.com/"), ("screenshot", "instagram-open.png")],
         )
+
+    def test_simple_url_open_uses_deterministic_cdp_not_browser_use(self) -> None:
+        import types
+        from unittest.mock import patch
+
+        from claw_v2.browser import BrowseResult
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            def __init__(self) -> None:
+                self.called = False
+
+            async def run_task(self, task, **kwargs):
+                self.called = True
+                return "should not run"
+
+        class FakeDevBrowserService:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, str | None]] = []
+
+            def chrome_navigate(self, url, *, cdp_url, page_url_pattern=None):
+                self.calls.append(("navigate", url, page_url_pattern))
+                return BrowseResult(
+                    url="https://example.com/",
+                    title="Example Domain",
+                    content="Example Domain",
+                )
+
+            def chrome_screenshot(self, *, cdp_url, page_url_pattern=None, name="chrome.png"):
+                self.calls.append(("screenshot", name, page_url_pattern))
+                return BrowseResult(
+                    url="https://example.com/",
+                    title="Example Domain",
+                    content="Example Domain",
+                    screenshot_path="/tmp/claw-example-open.png",
+                )
+
+        fake_browser_use = FakeBrowserUse()
+        fake_dev_browser = FakeDevBrowserService()
+        handler = ComputerHandler(
+            browser_use=fake_browser_use,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        with patch("claw_v2.computer_handler.DevBrowserService", return_value=fake_dev_browser):
+            out = handler.run_delegated_browser_task(
+                "Abre https://example.com en Chrome con CDP. NO uses browser_use.",
+                task_id="t-open",
+                mode="browse",
+            )
+
+        self.assertIn("Navegador abierto en Chrome CDP", out)
+        self.assertIn("Captura guardada: /tmp/claw-example-open.png", out)
+        self.assertFalse(fake_browser_use.called)
+        self.assertEqual(
+            fake_dev_browser.calls,
+            [
+                ("navigate", "https://example.com", "example.com"),
+                ("screenshot", "example-com-open.png", "example.com"),
+            ],
+        )
+
+    def test_explicit_no_browser_use_without_url_does_not_fall_back_to_browser_use(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            def __init__(self) -> None:
+                self.called = False
+
+            async def run_task(self, task, **kwargs):
+                self.called = True
+                return "should not run"
+
+        fake_browser_use = FakeBrowserUse()
+        handler = ComputerHandler(
+            browser_use=fake_browser_use,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        out = handler.run_delegated_browser_task(
+            "Abre el dashboard con CDP. NO uses browser_use.",
+            task_id="t-no-target",
+            mode="browse",
+        )
+
+        self.assertIn("No pude completar la tarea de navegador determinística", out)
+        self.assertIn("URL o dominio", out)
+        self.assertFalse(fake_browser_use.called)
+
+    def test_delegated_browser_policy_interrupt_returns_approval_message(self) -> None:
+        import types
+
+        from claw_v2.computer import BrowserUsePolicyInterrupt
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                raise BrowserUsePolicyInterrupt(
+                    action_name="upload_file",
+                    params={"path": "/tmp/file.png"},
+                    url="https://example.com/home",
+                    risk="high",
+                    approved_domains=["example.com"],
+                )
+
+        handler = ComputerHandler(
+            browser_use=FakeBrowserUse(),
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        out = handler.run_delegated_browser_task(
+            "Revisa https://example.com/home y resume el texto visible",
+            task_id="t-interrupt",
+            mode="browse",
+        )
+
+        self.assertIn("No pude completar la tarea de navegador", out)
+        self.assertIn("necesito autorización", out)
+        self.assertIn("upload_file", out)
 
     def test_x_feed_review_pre_navigates_home_before_browser_use(self) -> None:
         import types
