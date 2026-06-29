@@ -50,6 +50,38 @@ def terminal_notification_key(payload: dict) -> str:
     return f"{task_id}#attempt-{attempt_num}"
 
 
+def should_skip_terminal_notification(
+    notification_key: str,
+    *,
+    notified_task_ids: set[str],
+    pending_task_ids: set[str],
+) -> bool:
+    return notification_key in notified_task_ids or notification_key in pending_task_ids
+
+
+def finalize_terminal_notification(
+    done: Any,
+    *,
+    notification_key: str,
+    notified_task_ids: set[str],
+    pending_task_ids: set[str],
+) -> bool:
+    """Finalize a scheduled terminal notification.
+
+    Returns True only when Telegram confirmed delivery. Failed sends clear the
+    pending marker so a future terminal/drain pass can retry instead of being
+    silently deduped.
+    """
+    pending_task_ids.discard(notification_key)
+    exc = done.exception()
+    if exc is not None:
+        return False
+    if not done.result():
+        return False
+    notified_task_ids.add(notification_key)
+    return True
+
+
 def should_notify_task_ledger_terminal(payload: dict, notified_task_ids: set[str]) -> bool:
     session_id = str(payload.get("session_id") or "")
     task_id = str(payload.get("task_id") or "")
@@ -365,23 +397,60 @@ async def run() -> int:
             runtime.observation_window.set_alert_notifier(_send_observability_telegram_message)
             runtime.observation_window.set_stream_notifier(_send_observability_stream_message)
 
-        def _send_session_telegram_message(session_id: str, message: str) -> None:
+        def _send_session_telegram_message(
+            session_id: str,
+            message: str,
+            *,
+            notification_key: str | None = None,
+            notified_task_ids: set[str] | None = None,
+            pending_task_ids: set[str] | None = None,
+        ) -> bool:
             if not session_id.startswith("tg-") or not transport._app:
-                return
+                return False
             chat_id_raw = session_id.removeprefix("tg-")
             try:
                 chat_id = int(chat_id_raw)
             except ValueError:
                 logger.warning("Cannot notify non-numeric Telegram session id: %s", session_id)
-                return
+                return False
             future = asyncio.run_coroutine_threadsafe(
                 transport.send_text(chat_id=chat_id, text=message),
                 _loop,
             )
-            future.add_done_callback(_log_session_telegram_failure)
+            if notification_key is not None and pending_task_ids is not None:
+                pending_task_ids.add(notification_key)
+            future.add_done_callback(
+                lambda done: _log_session_telegram_failure(
+                    done,
+                    notification_key=notification_key,
+                    notified_task_ids=notified_task_ids,
+                    pending_task_ids=pending_task_ids,
+                )
+            )
+            return True
 
-        def _log_session_telegram_failure(done: Any) -> None:
+        def _log_session_telegram_failure(
+            done: Any,
+            *,
+            notification_key: str | None = None,
+            notified_task_ids: set[str] | None = None,
+            pending_task_ids: set[str] | None = None,
+        ) -> None:
             try:
+                if (
+                    notification_key is not None
+                    and notified_task_ids is not None
+                    and pending_task_ids is not None
+                ):
+                    delivered = finalize_terminal_notification(
+                        done,
+                        notification_key=notification_key,
+                        notified_task_ids=notified_task_ids,
+                        pending_task_ids=pending_task_ids,
+                    )
+                    if not delivered:
+                        logger.warning("Telegram session notification was not delivered")
+                    return
                 exc = done.exception()
             except Exception as callback_exc:
                 logger.warning("Telegram session notification callback failed: %s", callback_exc)
@@ -393,41 +462,63 @@ async def run() -> int:
                 logger.warning("Telegram session notification was not delivered")
 
         _notified_task_ids: set[str] = set()
+        _pending_notification_ids: set[str] = set()
 
         def _autonomous_task_complete_consumer(payload: dict) -> None:
             session_id = str(payload.get("session_id") or "")
-            task_id = str(payload.get("task_id") or "")
             notification_key = terminal_notification_key(payload)
-            if notification_key in _notified_task_ids:
+            if should_skip_terminal_notification(
+                notification_key,
+                notified_task_ids=_notified_task_ids,
+                pending_task_ids=_pending_notification_ids,
+            ):
                 return
             message = format_autonomous_task_terminal_message(payload)
             if message:
-                _send_session_telegram_message(session_id, message)
-            if task_id:
-                _notified_task_ids.add(notification_key)
+                _send_session_telegram_message(
+                    session_id,
+                    message,
+                    notification_key=notification_key,
+                    notified_task_ids=_notified_task_ids,
+                    pending_task_ids=_pending_notification_ids,
+                )
 
         def _autonomous_task_failed_consumer(payload: dict) -> None:
             session_id = str(payload.get("session_id") or "")
-            task_id = str(payload.get("task_id") or "")
             notification_key = terminal_notification_key(payload)
-            if notification_key in _notified_task_ids:
+            if should_skip_terminal_notification(
+                notification_key,
+                notified_task_ids=_notified_task_ids,
+                pending_task_ids=_pending_notification_ids,
+            ):
                 return
             message = format_autonomous_task_terminal_message(payload, failed=True)
             if message:
-                _send_session_telegram_message(session_id, message)
-            if task_id:
-                _notified_task_ids.add(notification_key)
+                _send_session_telegram_message(
+                    session_id,
+                    message,
+                    notification_key=notification_key,
+                    notified_task_ids=_notified_task_ids,
+                    pending_task_ids=_pending_notification_ids,
+                )
 
         def _task_ledger_terminal_consumer(payload: dict) -> None:
             if not should_notify_task_ledger_terminal(payload, _notified_task_ids):
                 return
-            task_id = str(payload.get("task_id") or "")
+            notification_key = terminal_notification_key(payload)
+            if should_skip_terminal_notification(
+                notification_key,
+                notified_task_ids=_notified_task_ids,
+                pending_task_ids=_pending_notification_ids,
+            ):
+                return
             _send_session_telegram_message(
                 str(payload.get("session_id") or ""),
                 format_task_ledger_terminal_message(payload),
+                notification_key=notification_key,
+                notified_task_ids=_notified_task_ids,
+                pending_task_ids=_pending_notification_ids,
             )
-            if task_id:
-                _notified_task_ids.add(terminal_notification_key(payload))
 
         runtime.observe.subscribe("autonomous_task_completed", _autonomous_task_complete_consumer)
         runtime.observe.subscribe("autonomous_task_failed", _autonomous_task_failed_consumer)

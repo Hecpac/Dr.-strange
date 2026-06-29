@@ -163,7 +163,7 @@ class _StubTaskHandler:
 
 
 def _ctx(message_id: int | None = 111) -> dict[str, Any]:
-    inbound: dict[str, Any] = {"channel": "telegram"}
+    inbound: dict[str, Any] = {"channel": "telegram", "external_user_id": "1"}
     if message_id is not None:
         inbound["message_id"] = message_id
     return {"inbound": inbound}
@@ -235,6 +235,14 @@ class GateTests(unittest.TestCase):
         self.assertEqual(job.kind, F4_DELEGATION_JOB_KIND)
         self.assertEqual(job.payload["task_id"], f4b_delivery_task_id(self._delivery_key()))
         self.assertEqual(job.payload["session_id"], "tg-1")
+        self.assertEqual(
+            job.payload["route"],
+            {
+                "channel": "telegram",
+                "external_session_id": "1",
+                "external_user_id": "1",
+            },
+        )
         self.assertEqual(job.payload["mode"], "chat")
         self.assertEqual(job.payload["task_kind"], "authenticated_browse")
         # the runner is NOT run here -> no coordinator job yet, no start_autonomous_task

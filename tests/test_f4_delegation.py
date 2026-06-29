@@ -309,6 +309,11 @@ class F4DelegationRunnerTests(unittest.TestCase):
             "mode": "chat",
             "task_kind": "authenticated_browse",
             "source_text": "Haz un repaso por X",
+            "route": {
+                "channel": "telegram",
+                "external_session_id": "1",
+                "external_user_id": "1",
+            },
             "delegation_metadata": {"source": "f4_deterministic_delegation"},
         }
 
@@ -333,7 +338,12 @@ class F4DelegationRunnerTests(unittest.TestCase):
 
         self.assertEqual(processed, 1)
         # Exactly one agent_tasks row.
-        self.assertIsNotNone(self.ledger.get(task_id))
+        record = self.ledger.get(task_id)
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.channel, "telegram")
+        self.assertEqual(record.external_session_id, "1")
+        self.assertEqual(record.external_user_id, "1")
         # Exactly one coordinator job.
         coord_jobs = self._coordinator_jobs()
         self.assertEqual(len(coord_jobs), 1)

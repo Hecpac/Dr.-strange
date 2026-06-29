@@ -535,7 +535,8 @@ class TaskHandler:
         mode: str,
         task_kind: str,
         source_text: str,
-        delegation_metadata: dict[str, Any] | None,
+        route: dict[str, Any] | None = None,
+        delegation_metadata: dict[str, Any] | None = None,
     ) -> AutonomousTaskBootstrapResult:
         """Idempotently materialise one autonomous task for a deterministic id.
 
@@ -617,7 +618,7 @@ class TaskHandler:
                 session_id=session_id,
                 objective=objective,
                 mode=mode,
-                route={},
+                route=dict(route or {}),
                 goal_id=None,
                 task_contract=task_contract,
                 verify=None,

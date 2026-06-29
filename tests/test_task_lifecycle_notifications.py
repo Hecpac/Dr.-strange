@@ -3,9 +3,11 @@ from __future__ import annotations
 import unittest
 
 from claw_v2.lifecycle import (
+    finalize_terminal_notification,
     format_autonomous_task_terminal_message,
     format_task_ledger_terminal_message,
     should_notify_task_ledger_terminal,
+    should_skip_terminal_notification,
     terminal_notification_key,
 )
 
@@ -127,6 +129,59 @@ class TaskLifecycleNotificationTests(unittest.TestCase):
         # AM-NOTIFY (2026-06-12): dedupe keys are per attempt, not bare task ids.
         notified = {terminal_notification_key(payload)}
         self.assertFalse(should_notify_task_ledger_terminal(payload, notified))
+
+    def test_terminal_notification_pending_dedupes_until_send_succeeds(self) -> None:
+        notified: set[str] = set()
+        pending: set[str] = {"task-1#attempt-0"}
+
+        self.assertTrue(
+            should_skip_terminal_notification(
+                "task-1#attempt-0", notified_task_ids=notified, pending_task_ids=pending
+            )
+        )
+
+        class _Delivered:
+            def exception(self) -> None:
+                return None
+
+            def result(self) -> bool:
+                return True
+
+        finalize_terminal_notification(
+            _Delivered(),
+            notification_key="task-1#attempt-0",
+            notified_task_ids=notified,
+            pending_task_ids=pending,
+        )
+
+        self.assertEqual(notified, {"task-1#attempt-0"})
+        self.assertEqual(pending, set())
+
+    def test_terminal_notification_failure_remains_retryable(self) -> None:
+        notified: set[str] = set()
+        pending: set[str] = {"task-1#attempt-0"}
+
+        class _Undelivered:
+            def exception(self) -> None:
+                return None
+
+            def result(self) -> bool:
+                return False
+
+        finalize_terminal_notification(
+            _Undelivered(),
+            notification_key="task-1#attempt-0",
+            notified_task_ids=notified,
+            pending_task_ids=pending,
+        )
+
+        self.assertEqual(notified, set())
+        self.assertEqual(pending, set())
+        self.assertFalse(
+            should_skip_terminal_notification(
+                "task-1#attempt-0", notified_task_ids=notified, pending_task_ids=pending
+            )
+        )
 
     def test_autonomous_completion_message_uses_response_without_system_header(self) -> None:
         payload = {
