@@ -29,6 +29,7 @@ from claw_v2.scheduled_background_jobs import (
     kairos_tick_result_summary,
     safe_non_negative_int,
     wiki_research_result_summary,
+    wiki_scrape_result_summary,
 )
 
 
@@ -160,6 +161,9 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
                 return_value={
                     "topics_researched": 2,
                     "pages_written": 1,
+                    "candidates_researched": 1,
+                    "raw_sources_written": 1,
+                    "candidates_blocked": 0,
                     "candidates": [{"topic": "large raw candidate"}],
                 }
             )
@@ -192,13 +196,74 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
                 {
                     "topics_researched": 2,
                     "pages_written": 1,
+                    "candidates_researched": 1,
+                    "raw_sources_written": 1,
+                    "candidates_blocked": 0,
                     "candidate_count": 1,
+                    "candidate_previews": [
+                        {
+                            "slug": "",
+                            "topic": "large raw candidate",
+                            "category": "",
+                            "status": "",
+                            "source_query_count": 0,
+                        }
+                    ],
                 },
             )
             self.assertNotIn("candidates", job.result)
             event_names = [call.args[0] for call in observe.emit.call_args_list]
             self.assertIn("wiki_research_job_started", event_names)
             self.assertIn("wiki_research_job_completed", event_names)
+
+    def test_wiki_scrape_result_summary_keeps_bounded_source_diagnostics(self) -> None:
+        source_results = [
+            {
+                "source": f"Source {idx}",
+                "url": f"https://example.com/{idx}",
+                "status": "scraped",
+                "items_extracted": idx,
+                "items_ingested": 0,
+                "items_skipped": 2,
+                "skip_reasons": {"duplicate": 1, "body_too_short": 1},
+                "raw_body": "must not persist",
+            }
+            for idx in range(12)
+        ]
+        source_results[0]["source"] = "Source A"
+        item_results = [
+            {
+                "source": "Source A",
+                "title": "Duplicate Topic " + ("x" * 200),
+                "slug": f"duplicate-topic-{idx}",
+                "status": "skipped",
+                "reason": "duplicate",
+                "body": "must not persist",
+            }
+            for idx in range(25)
+        ]
+        result = wiki_scrape_result_summary(
+            {
+                "sources_scraped": 8,
+                "pages_ingested": 0,
+                "sources_skipped": 0,
+                "source_results": source_results,
+                "item_results": item_results,
+            }
+        )
+
+        self.assertEqual(result["sources_scraped"], 8)
+        self.assertEqual(result["pages_ingested"], 0)
+        self.assertEqual(result["sources_skipped"], 0)
+        self.assertEqual(len(result["source_results"]), 10)
+        self.assertEqual(len(result["item_results"]), 20)
+        self.assertEqual(result["source_results"][0]["source"], "Source A")
+        self.assertEqual(result["source_results"][0]["skip_reasons"]["duplicate"], 1)
+        self.assertNotIn("raw_body", result["source_results"][0])
+        self.assertEqual(result["item_results"][0]["reason"], "duplicate")
+        self.assertLessEqual(len(result["item_results"][0]["title"]), 123)
+        self.assertTrue(result["item_results"][0]["title"].endswith("..."))
+        self.assertNotIn("body", result["item_results"][0])
 
     def test_safe_non_negative_int_defaults_none_and_invalid_values(self) -> None:
         self.assertEqual(safe_non_negative_int(None, default=3), 3)
@@ -570,6 +635,7 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(queued_kairos[0].status, "queued")
                 self.assertEqual(len(queued_wiki), 1)
                 self.assertEqual(queued_wiki[0].status, "queued")
+                self.assertEqual(queued_wiki[0].payload["research_limit"], 1)
                 self.assertEqual(len(queued_scrape), 1)
                 self.assertEqual(queued_scrape[0].status, "queued")
                 self.assertEqual(len(queued_perf), 1)
@@ -981,7 +1047,9 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(scrape_rows[0].result["sources_scraped"], 1)
                 self.assertEqual(scrape_rows[0].result["pages_ingested"], 1)
                 self.assertEqual(perf_rows[0].status, "completed")
-                runtime.bot.wiki.auto_research.assert_called_once_with(max_topics=3)
+                runtime.bot.wiki.auto_research.assert_called_once_with(
+                    max_topics=3, research_limit=1
+                )
                 runtime.bot.wiki.auto_scrape_sources.assert_called_once_with()
                 runtime.auto_research.run_loop.assert_called_once_with(
                     "perf-optimizer",

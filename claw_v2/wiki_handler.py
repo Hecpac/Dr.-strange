@@ -20,8 +20,8 @@ class WikiHandler:
             BotCommand(
                 "wiki",
                 self.handle_command,
-                exact=("/wiki", "/wiki lint"),
-                prefixes=("/wiki ingest ", "/wiki query "),
+                exact=("/wiki", "/wiki lint", "/wiki quality", "/wiki research"),
+                prefixes=("/wiki ingest ", "/wiki query ", "/wiki research "),
             ),
         ]
 
@@ -31,6 +31,14 @@ class WikiHandler:
             return self._stats_response()
         if stripped == "/wiki lint":
             return self._lint_response()
+        if stripped == "/wiki quality":
+            return self._quality_response()
+        if stripped == "/wiki research":
+            return self._research_response()
+        if stripped.startswith("/wiki research "):
+            parts = stripped.split(maxsplit=2)
+            status = parts[2].strip() if len(parts) == 3 else ""
+            return self._research_response(status=status or None)
         if stripped.startswith("/wiki ingest "):
             parts = stripped.split(maxsplit=2)
             if len(parts) != 3:
@@ -76,6 +84,52 @@ class WikiHandler:
             parts.append(f"Missing: {', '.join(result['missing'][:10])}")
         return "\n".join(parts)
 
+    def _quality_response(self) -> str:
+        if self.wiki is None:
+            return "wiki service not available"
+        result = self.wiki.quality_report(search_limit=3)
+        embedding = result.get("embedding_coverage", {})
+        confidence = result.get("confidence_distribution", {})
+        category = result.get("category_coverage", {})
+        search = result.get("search_self_test", {})
+        return "\n".join(
+            [
+                "Wiki quality",
+                f"pages={result.get('wiki_pages', 0)}",
+                f"embedding={_pct(embedding.get('ratio'))} stale={embedding.get('stale', 0)}",
+                (
+                    "confidence="
+                    f"high:{confidence.get('high', 0)} "
+                    f"medium:{confidence.get('medium', 0)} "
+                    f"low:{confidence.get('low', 0)} "
+                    f"unknown:{confidence.get('unknown', 0)}"
+                ),
+                f"category={_pct(category.get('ratio'))}",
+                (
+                    f"search_hit={_pct(search.get('hit_rate'))} "
+                    f"sample={search.get('sample_size', 0)}"
+                ),
+            ]
+        )
+
+    def _research_response(self, *, status: str | None = None) -> str:
+        if self.wiki is None:
+            return "wiki service not available"
+        candidates = self.wiki.research_candidates(limit=5, status=status)
+        if not candidates:
+            suffix = f" for status={status}" if status else ""
+            return f"Research queue is empty{suffix}."
+        lines = ["Research queue"]
+        for candidate in candidates:
+            queries = candidate.get("source_queries") or []
+            first_query = str(queries[0]) if queries else "no source query"
+            lines.append(
+                f"- [{candidate.get('status', 'unknown')}] {candidate.get('slug', '')} - "
+                f"{candidate.get('topic', '')} ({candidate.get('category', 'Research')})"
+            )
+            lines.append(f"  query: {first_query}")
+        return "\n".join(lines)
+
     def _ingest_response(self, title: str, session_id: str) -> str:
         if self.wiki is None:
             return "wiki service not available"
@@ -100,3 +154,10 @@ class WikiHandler:
             return "wiki service not available"
         answer = self.wiki.query(question, archive=True)
         return answer or "No relevant information found in the wiki."
+
+
+def _pct(value: object) -> str:
+    try:
+        return f"{float(value or 0.0) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "0.0%"

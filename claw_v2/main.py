@@ -136,6 +136,7 @@ from claw_v2.scheduled_background_jobs import (
     kairos_tick_result_summary,
     safe_non_negative_int,
     wiki_research_result_summary,
+    wiki_scrape_result_summary,
 )
 from claw_v2.skill_expand_jobs import SkillExpandJobRunner, enqueue_skill_expand_job
 
@@ -2041,7 +2042,8 @@ def _setup_scheduler(
             job_kind=WIKI_RESEARCH_JOB_KIND,
             job_service=job_service,
             handler=lambda payload: wiki.auto_research(
-                max_topics=safe_non_negative_int(payload.get("max_topics"), default=3)
+                max_topics=safe_non_negative_int(payload.get("max_topics"), default=3),
+                research_limit=safe_non_negative_int(payload.get("research_limit"), default=1),
             ),
             observe=observe,
             worker_id="wiki-research-runner",
@@ -2058,6 +2060,7 @@ def _setup_scheduler(
             handler=lambda _payload: wiki.auto_scrape_sources(),
             observe=observe,
             worker_id="wiki-scrape-runner",
+            result_summary=wiki_scrape_result_summary,
         )
         daemon.register_background_job_runner(
             name="wiki_scrape",
@@ -2112,7 +2115,7 @@ def _setup_scheduler(
                     resume_key=WIKI_RESEARCH_RESUME_KEY,
                     job_service=job_service,
                     observe=observe,
-                    payload={"max_topics": 3},
+                    payload={"max_topics": 3, "research_limit": 1},
                 ),
                 skip_if=_maintenance_skip,
             ),
