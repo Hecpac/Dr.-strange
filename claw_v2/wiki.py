@@ -686,7 +686,7 @@ class WikiService:
     # Auto-Research (periodic knowledge acquisition)
     # ------------------------------------------------------------------
 
-    def auto_research(self, *, max_topics: int = 3) -> dict:
+    def auto_research(self, *, max_topics: int = 3, research_limit: int = 0) -> dict:
         """Identify knowledge gaps that need raw source research.
 
         Designed to run as a scheduled job (e.g. every 12 hours).
@@ -758,11 +758,22 @@ class WikiService:
             "auto_research", f"topics={len(candidates)} candidates={len(candidates)} written=0", 0
         )
         persisted_candidates = self._persist_research_candidates(candidates)
-        return {
+        result = {
             "topics_researched": len(persisted_candidates),
             "pages_written": 0,
             "candidates": persisted_candidates,
         }
+        if research_limit > 0:
+            research_result = self.research_queued_candidates(max_candidates=research_limit)
+            current_by_slug = {
+                str(item.get("slug") or ""): item for item in self._load_research_candidates()
+            }
+            result["candidates"] = [
+                current_by_slug.get(str(candidate.get("slug") or ""), candidate)
+                for candidate in persisted_candidates
+            ]
+            result.update(research_result)
+        return result
 
     def research_candidates(self, *, limit: int = 10, status: str | None = None) -> list[dict]:
         """Return recent persisted research candidates for operator inspection."""
@@ -772,6 +783,31 @@ class WikiService:
         candidates.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         safe_limit = max(0, int(limit))
         return candidates[:safe_limit]
+
+    def research_queued_candidates(self, *, max_candidates: int = 1) -> dict:
+        """Turn queued candidates into raw evidence without compiling wiki pages."""
+        candidates = [
+            item for item in self._load_research_candidates() if item.get("status") == "new"
+        ]
+        candidates.sort(key=lambda item: str(item.get("created_at") or item.get("updated_at") or ""))
+        researched = 0
+        blocked = 0
+        raw_written = 0
+        results: list[dict] = []
+        for candidate in candidates[: max(0, int(max_candidates))]:
+            outcome = self._research_candidate(candidate)
+            results.append(outcome)
+            if outcome.get("status") == "researched":
+                researched += 1
+                raw_written += int(bool(outcome.get("raw_source_slug")))
+            elif outcome.get("status") == "blocked":
+                blocked += 1
+        return {
+            "candidates_researched": researched,
+            "raw_sources_written": raw_written,
+            "candidates_blocked": blocked,
+            "research_results": results,
+        }
 
     def _persist_research_candidates(self, candidates: list[dict]) -> list[dict]:
         if not candidates:
@@ -830,6 +866,185 @@ class WikiService:
         self._research_candidates_path.write_text(
             json.dumps(candidates, ensure_ascii=False, indent=2, sort_keys=True),
             encoding="utf-8",
+        )
+
+    def _research_candidate(self, candidate: dict) -> dict:
+        slug = str(candidate.get("slug") or "").strip()
+        topic = str(candidate.get("topic") or "").strip()
+        if not slug or not topic:
+            return {"slug": slug, "status": "blocked", "reason": "invalid_candidate"}
+        prompt = textwrap.dedent(f"""\
+            Research this wiki candidate using web/source tools and return raw evidence only.
+
+            Topic: {topic}
+            Category: {candidate.get("category", "Research")}
+            Reason: {candidate.get("reason", "")}
+            Source queries: {json.dumps(candidate.get("source_queries") or [], ensure_ascii=False)}
+
+            Return ONLY a JSON object:
+            {{
+              "summary": "short source-grounded summary",
+              "confidence": "high|medium|low",
+              "blocked_reason": "",
+              "sources": [
+                {{
+                  "title": "source title",
+                  "url": "https://...",
+                  "source_kind": "primary|wire|aggregator|social|unknown",
+                  "published_at": "YYYY-MM-DD or empty",
+                  "evidence": "specific facts from the source"
+                }}
+              ]
+            }}
+
+            Rules:
+            - Do not invent sources or URLs.
+            - If no verifiable sources are available, return sources=[] and blocked_reason.
+            - Do not write a wiki article; this step only gathers raw evidence.
+        """)
+        try:
+            resp = self.router.ask(
+                prompt,
+                lane=self.lane,
+                max_budget=0.50,
+                timeout=180.0,
+                allowed_tools=[
+                    "WebSearch",
+                    "WebFetch",
+                    "FirecrawlSearch",
+                    "FirecrawlScrape",
+                    "WikiSearch",
+                ],
+                evidence_pack={"operation": "wiki_research_candidate", "candidate_slug": slug},
+            )
+            payload = self._parse_json(resp.content)
+        except Exception as exc:
+            logger.exception("Wiki research candidate failed for %s", slug)
+            reason = f"research_failed:{exc.__class__.__name__}"
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "blocked",
+                    "blocked_reason": reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {"slug": slug, "status": "blocked", "reason": reason}
+
+        sources = self._valid_research_sources(payload.get("sources"))
+        if not sources:
+            reason = str(payload.get("blocked_reason") or "no_verifiable_sources").strip()
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "blocked",
+                    "blocked_reason": reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {"slug": slug, "status": "blocked", "reason": reason}
+
+        raw_slug = f"research-{slug}"
+        raw_path = self.raw_dir / f"{raw_slug}.md"
+        if raw_path.exists():
+            raw_slug = f"{raw_slug}-{int(time.time())}"
+            raw_path = self.raw_dir / f"{raw_slug}.md"
+        raw_path.write_text(
+            self._render_research_raw_source(
+                candidate=candidate,
+                raw_slug=raw_slug,
+                summary=str(payload.get("summary") or "").strip(),
+                confidence=str(payload.get("confidence") or "medium").strip(),
+                sources=sources,
+            ),
+            encoding="utf-8",
+        )
+        updates = {
+            "status": "researched",
+            "raw_source_slug": raw_slug,
+            "raw_path": str(raw_path),
+            "sources_count": len(sources),
+            "confidence": str(payload.get("confidence") or "medium").strip(),
+            "researched_at": _now_iso(),
+            "updated_at": _now_iso(),
+        }
+        self._update_research_candidate(slug, updates)
+        return {
+            "slug": slug,
+            "status": "researched",
+            "raw_source_slug": raw_slug,
+            "sources_count": len(sources),
+        }
+
+    def _update_research_candidate(self, slug: str, updates: dict) -> None:
+        candidates = self._load_research_candidates()
+        for candidate in candidates:
+            if candidate.get("slug") == slug:
+                candidate.update(updates)
+                break
+        self._save_research_candidates(candidates)
+
+    def _valid_research_sources(self, value: object) -> list[dict]:
+        if not isinstance(value, list):
+            return []
+        sources: list[dict] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            evidence = str(item.get("evidence") or "").strip()
+            title = str(item.get("title") or "").strip()
+            if not url or not evidence:
+                continue
+            sources.append(
+                {
+                    "title": title or url,
+                    "url": url,
+                    "source_kind": str(item.get("source_kind") or "unknown").strip(),
+                    "published_at": str(item.get("published_at") or "").strip(),
+                    "evidence": evidence,
+                }
+            )
+        return sources
+
+    def _render_research_raw_source(
+        self,
+        *,
+        candidate: dict,
+        raw_slug: str,
+        summary: str,
+        confidence: str,
+        sources: list[dict],
+    ) -> str:
+        topic = str(candidate.get("topic") or raw_slug)
+        source_lines = []
+        for source in sources:
+            meta = ", ".join(
+                part
+                for part in [
+                    source.get("source_kind", "unknown"),
+                    source.get("published_at", ""),
+                ]
+                if part
+            )
+            source_lines.append(
+                f"- [{source['title']}]({source['url']})"
+                f"{f' ({meta})' if meta else ''}\n  {source['evidence']}"
+            )
+        return (
+            f"---\n"
+            f"title: {topic}\n"
+            f"type: auto-research\n"
+            f"candidate: {candidate.get('slug', '')}\n"
+            f"raw_slug: {raw_slug}\n"
+            f"researched: {_now_iso()}\n"
+            f"confidence: {confidence}\n"
+            f"sources_count: {len(sources)}\n"
+            f"---\n\n"
+            f"# {topic}\n\n"
+            f"{summary}\n\n"
+            f"## Sources\n\n"
+            f"{chr(10).join(source_lines)}\n"
         )
 
     # ------------------------------------------------------------------

@@ -3,7 +3,7 @@
 ## Spec
 
 - Goal: make the wiki research loop inspectable and useful as durable agent knowledge, following the LLM Wiki pattern of raw evidence first, candidate queue second, compiled wiki pages last.
-- Scope: persist auto-research candidates, expose read-only wiki quality/research commands, and return per-source/per-item scrape diagnostics so zero-ingest runs are explainable.
+- Scope: persist auto-research candidates, process a bounded number of queued candidates into raw evidence, expose read-only wiki quality/research commands, and return per-source/per-item scrape diagnostics so zero-ingest runs are explainable.
 - Out of scope: changing brain retrieval behavior, enforcing AI-news validation, adding new external scrapers, or touching F2 RuntimeDb/F3 leases/F4 browser orchestration.
 - Expected files:
   - `claw_v2/wiki.py`
@@ -14,6 +14,7 @@
   - `tests/test_scheduled_background_jobs.py`
 - Acceptance criteria:
   - `WikiService.auto_research()` writes a bounded candidate queue artifact with status metadata and does not create wiki pages.
+  - `WikiService.auto_research(research_limit=1)` turns queued `new` candidates into raw evidence files and marks them `researched`, or marks them `blocked` when sources are unavailable.
   - Scheduled job summaries include bounded candidate previews while avoiding full raw candidate bodies.
   - `WikiService.auto_scrape_sources()` returns enough diagnostics to explain scraped-but-not-ingested runs.
   - `/wiki quality` and `/wiki research` provide concise read-only operator visibility.

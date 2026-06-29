@@ -543,6 +543,96 @@ class AutoResearchTests(unittest.TestCase):
         self.assertEqual(result["topics_researched"], 1)
         self.assertEqual(result["candidates"][0]["source_queries"], [])
 
+    def test_auto_research_worker_writes_raw_evidence_without_wiki_page(self) -> None:
+        svc, router, tmp = _make_wiki()
+        _write_page(svc.wiki_dir, "existing", "Existing", "Content.")
+        router.ask.side_effect = [
+            MagicMock(
+                content=json.dumps(
+                    [
+                        {
+                            "topic": "Computer Use Runbooks",
+                            "category": "Operaciones Dr. Strange",
+                            "reason": "Recurring automation failures need durable guidance.",
+                            "source_queries": ["computer use agents best practices"],
+                        }
+                    ]
+                )
+            ),
+            MagicMock(
+                content=json.dumps(
+                    {
+                        "summary": "Computer-use agents need bounded tools and observable outcomes.",
+                        "confidence": "medium",
+                        "sources": [
+                            {
+                                "title": "Computer use guide",
+                                "url": "https://example.com/computer-use",
+                                "source_kind": "primary",
+                                "published_at": "2026-06-01",
+                                "evidence": "Agents should run with scoped tools and verification.",
+                            }
+                        ],
+                    }
+                )
+            ),
+        ]
+
+        result = svc.auto_research(max_topics=1, research_limit=1)
+
+        self.assertEqual(result["topics_researched"], 1)
+        self.assertEqual(result["candidates_researched"], 1)
+        self.assertEqual(result["raw_sources_written"], 1)
+        self.assertEqual(result["candidates_blocked"], 0)
+        self.assertFalse((svc.wiki_dir / "computer-use-runbooks.md").exists())
+        raw_path = svc.raw_dir / "research-computer-use-runbooks.md"
+        self.assertTrue(raw_path.exists())
+        raw_text = raw_path.read_text(encoding="utf-8")
+        self.assertIn("Computer-use agents need bounded tools", raw_text)
+        self.assertIn("https://example.com/computer-use", raw_text)
+        candidate = svc.research_candidates(limit=1)[0]
+        self.assertEqual(candidate["status"], "researched")
+        self.assertEqual(candidate["raw_source_slug"], "research-computer-use-runbooks")
+        self.assertEqual(candidate["sources_count"], 1)
+
+    def test_auto_research_worker_blocks_candidate_without_sources(self) -> None:
+        svc, router, tmp = _make_wiki()
+        _write_page(svc.wiki_dir, "existing", "Existing", "Content.")
+        router.ask.side_effect = [
+            MagicMock(
+                content=json.dumps(
+                    [
+                        {
+                            "topic": "Unverifiable Topic",
+                            "category": "Research",
+                            "reason": "Needs evidence.",
+                            "source_queries": ["unverifiable topic"],
+                        }
+                    ]
+                )
+            ),
+            MagicMock(
+                content=json.dumps(
+                    {
+                        "summary": "",
+                        "confidence": "low",
+                        "sources": [],
+                        "blocked_reason": "No primary sources found.",
+                    }
+                )
+            ),
+        ]
+
+        result = svc.auto_research(max_topics=1, research_limit=1)
+
+        self.assertEqual(result["candidates_researched"], 0)
+        self.assertEqual(result["raw_sources_written"], 0)
+        self.assertEqual(result["candidates_blocked"], 1)
+        candidate = svc.research_candidates(limit=1)[0]
+        self.assertEqual(candidate["status"], "blocked")
+        self.assertEqual(candidate["blocked_reason"], "No primary sources found.")
+        self.assertFalse((svc.raw_dir / "research-unverifiable-topic.md").exists())
+
 
 class EvidenceTests(unittest.TestCase):
     def test_raw_source_detection(self) -> None:

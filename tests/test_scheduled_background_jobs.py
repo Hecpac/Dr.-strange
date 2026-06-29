@@ -161,6 +161,9 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
                 return_value={
                     "topics_researched": 2,
                     "pages_written": 1,
+                    "candidates_researched": 1,
+                    "raw_sources_written": 1,
+                    "candidates_blocked": 0,
                     "candidates": [{"topic": "large raw candidate"}],
                 }
             )
@@ -193,6 +196,9 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
                 {
                     "topics_researched": 2,
                     "pages_written": 1,
+                    "candidates_researched": 1,
+                    "raw_sources_written": 1,
+                    "candidates_blocked": 0,
                     "candidate_count": 1,
                     "candidate_previews": [
                         {
@@ -620,6 +626,7 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(queued_kairos[0].status, "queued")
                 self.assertEqual(len(queued_wiki), 1)
                 self.assertEqual(queued_wiki[0].status, "queued")
+                self.assertEqual(queued_wiki[0].payload["research_limit"], 1)
                 self.assertEqual(len(queued_scrape), 1)
                 self.assertEqual(queued_scrape[0].status, "queued")
                 self.assertEqual(len(queued_perf), 1)
@@ -1031,7 +1038,9 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(scrape_rows[0].result["sources_scraped"], 1)
                 self.assertEqual(scrape_rows[0].result["pages_ingested"], 1)
                 self.assertEqual(perf_rows[0].status, "completed")
-                runtime.bot.wiki.auto_research.assert_called_once_with(max_topics=3)
+                runtime.bot.wiki.auto_research.assert_called_once_with(
+                    max_topics=3, research_limit=1
+                )
                 runtime.bot.wiki.auto_scrape_sources.assert_called_once_with()
                 runtime.auto_research.run_loop.assert_called_once_with(
                     "perf-optimizer",
