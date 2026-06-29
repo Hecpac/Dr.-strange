@@ -594,6 +594,8 @@ class AutoResearchTests(unittest.TestCase):
         self.assertEqual(candidate["status"], "researched")
         self.assertEqual(candidate["raw_source_slug"], "research-computer-use-runbooks")
         self.assertEqual(candidate["sources_count"], 1)
+        self.assertEqual(router.ask.call_args_list[1].kwargs["lane"], "worker")
+        self.assertIn("WebSearch", router.ask.call_args_list[1].kwargs["allowed_tools"])
 
     def test_auto_research_worker_blocks_candidate_without_sources(self) -> None:
         svc, router, tmp = _make_wiki()

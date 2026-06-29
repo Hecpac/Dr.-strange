@@ -905,7 +905,7 @@ class WikiService:
         try:
             resp = self.router.ask(
                 prompt,
-                lane=self.lane,
+                lane="worker",
                 max_budget=0.50,
                 timeout=180.0,
                 allowed_tools=[
