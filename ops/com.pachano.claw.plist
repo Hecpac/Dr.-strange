@@ -8,7 +8,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/hector/Projects/Dr.-strange/ops/claw-launcher.sh</string>
+        <string>/Users/hector/srv/claw-daemon/ops/claw-launcher.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
