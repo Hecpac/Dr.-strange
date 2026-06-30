@@ -168,6 +168,24 @@ class CapabilityGrantStoreTests(unittest.TestCase):
         self.assertEqual(loaded.metadata.get("reason"), "diagnóstico")
         self.assertEqual(loaded.metadata.get("scope_tags"), ["audit", "safe"])
 
+    def test_domain_grant_does_not_authorize_browser_high_actions(self) -> None:
+        record = self.store.grant(GrantScope(kind="domain", target="x.com"), grantor="user")
+
+        self.assertFalse(
+            record.allows_browser_use_action(
+                "evaluate",
+                url="https://x.com/home",
+                params={"script": "document.title"},
+            )
+        )
+        self.assertFalse(
+            record.allows_browser_use_action(
+                "save_as_pdf",
+                url="https://x.com/home",
+                params={"path": "/tmp/page.pdf"},
+            )
+        )
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

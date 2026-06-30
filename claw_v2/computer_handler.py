@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from claw_v2.automation_policy import make_approval_scope
+from claw_v2.automation_contracts import AutomationSurface, CapabilityGrant
 from claw_v2.browser_capability import (
     DEFAULT_CDP_PORT,
     DEFAULT_CDP_PROFILE_DIR,
@@ -31,6 +33,14 @@ from claw_v2.redaction import redact_text
 logger = logging.getLogger(__name__)
 
 _URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+")
+_DOMAIN_RE = re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,24}\b", re.IGNORECASE)
+_BROWSER_BRAND_DOMAINS = {
+    "chatgpt": "chatgpt.com",
+    "instagram": "instagram.com",
+    "insta": "instagram.com",
+    "twitter": "x.com",
+    "x": "x.com",
+}
 BROWSER_USE_TIMEOUT_SECONDS = 180
 # Extra wall-clock the worker-thread future is allowed beyond the agent timeout,
 # to cover the bounded post-task screenshot capture plus browser cleanup.
@@ -42,6 +52,18 @@ _INSTAGRAM_OPEN_RE = re.compile(
 )
 _SIMPLE_SOCIAL_BROWSER_ACTION_RE = re.compile(
     r"\b(?:abre|abrir|open|revisa|review|check|navega|navegar|entra|entrar|perfil|feed)\b",
+    re.IGNORECASE,
+)
+_SIMPLE_BROWSER_OPEN_RE = re.compile(
+    r"\b(?:abre|abrir|open|navega|navegar|entra|entrar)\b",
+    re.IGNORECASE,
+)
+_BROWSER_AGENT_ANALYSIS_RE = re.compile(
+    r"\b(?:analiza|analyze|extrae|extract|resume|summarize|resumen|revisa|review|feed|posts?)\b",
+    re.IGNORECASE,
+)
+_NO_BROWSER_USE_RE = re.compile(
+    r"\b(?:no|sin|without|dont|don't|do not)\b[^\n.]{0,100}\bbrowser_use\b",
     re.IGNORECASE,
 )
 
@@ -104,6 +126,37 @@ def _instagram_target_url(objective: str) -> str | None:
         if host and (host == "instagram.com" or host.endswith(".instagram.com")):
             return url
     return "https://www.instagram.com/"
+
+
+def _explicitly_disallows_browser_use(objective: str) -> bool:
+    return _NO_BROWSER_USE_RE.search(str(objective or "")) is not None
+
+
+def _deterministic_browser_target_url(objective: str) -> str | None:
+    text = str(objective or "")
+    explicit_no_browser_use = _explicitly_disallows_browser_use(text)
+    simple_open = _SIMPLE_BROWSER_OPEN_RE.search(text) is not None
+    analysis_task = _BROWSER_AGENT_ANALYSIS_RE.search(text) is not None
+    if not explicit_no_browser_use and (not simple_open or analysis_task):
+        return None
+    for raw_url in _URL_RE.findall(text):
+        url = raw_url.rstrip(".,;:!?)]}")
+        if _host_from_url(url):
+            return url
+    for raw_domain in _DOMAIN_RE.findall(text):
+        host = _host_from_url(raw_domain)
+        if host:
+            return f"https://{host}"
+    lowered = text.lower()
+    for brand, host in _BROWSER_BRAND_DOMAINS.items():
+        if re.search(rf"\b{re.escape(brand)}\b", lowered):
+            return f"https://{host}/"
+    return None
+
+
+def _browser_screenshot_name(host: str | None) -> str:
+    safe = re.sub(r"[^a-z0-9]+", "-", (host or "browser").lower()).strip("-")
+    return f"{safe or 'browser'}-open.png"
 
 
 class ComputerHandler:
@@ -319,6 +372,7 @@ class ComputerHandler:
             },
         )
         try:
+            setattr(session, "session_id", session_id)
             if self._is_browser_use_session(session):
                 result = self._run_browser_use_session(session)
             else:
@@ -411,6 +465,9 @@ class ComputerHandler:
                 "screenshot_hash": screenshot_metadata.get("screenshot_hash"),
                 "approved_domains": _normalized_domains(pending.get("approved_domains")),
             }
+            browser_policy_scope = pending.get("browser_policy_scope")
+            if isinstance(browser_policy_scope, dict):
+                approval_scope["browser_policy_scope"] = browser_policy_scope
             pending["approval_scope"] = approval_scope
             summary = _format_computer_pending_summary(session.task, pending)
             pending_approval = self.approvals.create(
@@ -614,6 +671,26 @@ class ComputerHandler:
             self._sessions.pop(session_id, None)
             return "Aprobación registrada, pero el contexto de computer cambió. Reenvíame el objetivo para generar una aprobación nueva."
         if session.pending_action is not None:
+            approval_scope = metadata.get("approval_scope") if isinstance(metadata, dict) else {}
+            if isinstance(approval_scope, dict) and isinstance(
+                approval_scope.get("browser_policy_scope"), dict
+            ):
+                session.pending_action.setdefault(
+                    "browser_policy_scope", approval_scope["browser_policy_scope"]
+                )
+            if (
+                isinstance(session.pending_action.get("browser_policy_scope"), dict)
+                and payload.get("resolved_by") != "human"
+            ):
+                self._emit(
+                    "computer_approval_resume_blocked",
+                    {
+                        "approval_id": approval_id,
+                        "session_id": session_id,
+                        "reason": "browser_policy_scope_requires_human",
+                    },
+                )
+                return "Aprobación registrada, pero esta acción de navegador requiere aprobación humana explícita."
             session.pending_action["approved"] = True
         session.status = "running"
         self._emit(
@@ -717,6 +794,7 @@ class ComputerHandler:
             and isinstance(pending.get("approval_id"), str)
         )
         explicitly_approved = approved
+        auto_approved = False
         if (
             not approved
             and self._auto_approve_enabled()
@@ -725,6 +803,7 @@ class ComputerHandler:
             )
         ):
             approved = True
+            auto_approved = True
             self._emit(
                 "computer_browser_use_auto_approved",
                 {
@@ -768,17 +847,32 @@ class ComputerHandler:
             },
         )
         try:
+            approved_domains = _normalized_domains(
+                pending.get("approved_domains")
+                or _domains_for_browser_task(
+                    session.task,
+                    getattr(session, "current_url", None),
+                    sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
+                )
+            )
+            allow_high_risk_actions = explicitly_approved
+            allowed_high_risk_actions = None
+            approval_scope = pending.get("browser_policy_scope")
+            if auto_approved:
+                grant = CapabilityGrant.browser_read(
+                    domains=approved_domains,
+                    reason="interactive browser_use auto-approved read task",
+                    auto_approved=True,
+                )
+                approved_domains = grant.approved_domains_list()
+                allow_high_risk_actions = False
+                allowed_high_risk_actions = None
             result = self._run_browser_use_task(
                 session,
-                allow_high_risk_actions=explicitly_approved,
-                approved_domains=_normalized_domains(
-                    pending.get("approved_domains")
-                    or _domains_for_browser_task(
-                        session.task,
-                        getattr(session, "current_url", None),
-                        sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
-                    )
-                ),
+                allow_high_risk_actions=allow_high_risk_actions,
+                approved_domains=approved_domains,
+                allowed_high_risk_actions=allowed_high_risk_actions,
+                approval_scope=approval_scope,
             )
         except Exception as exc:
             from claw_v2.computer import BrowserUsePolicyInterrupt
@@ -786,16 +880,24 @@ class ComputerHandler:
             if not isinstance(exc, BrowserUsePolicyInterrupt):
                 raise
             session.status = "awaiting_approval"
-            session.pending_action = {
+            browser_policy_scope = self._browser_policy_scope_from_interrupt(exc)
+            interrupted_action = {
+                "action": exc.action_name,
+                "params_hash": exc.params_hash,
+                "url": exc.url,
+                "target_url": exc.target_url,
+                "risk": exc.risk,
+                "reason_code": exc.reason_code,
+                "current_origin": exc.current_origin,
+                "target_origin": exc.target_origin,
+                "task_id": exc.task_id,
+                "browser_context_id": exc.browser_context_id,
+            }
+            pending_action = {
                 "action": "browser_use_task",
                 "backend": "browser_use",
                 "task": session.task,
-                "interrupted_action": {
-                    "action": exc.action_name,
-                    "params": exc.params,
-                    "url": exc.url,
-                    "risk": exc.risk,
-                },
+                "interrupted_action": interrupted_action,
                 "approved_domains": exc.approved_domains
                 or _domains_for_browser_task(
                     session.task,
@@ -803,13 +905,22 @@ class ComputerHandler:
                     sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
                 ),
             }
+            if browser_policy_scope is not None:
+                pending_action["browser_policy_scope"] = browser_policy_scope
+            session.pending_action = pending_action
             self._emit(
                 "computer_browser_use_policy_interrupted",
                 {
                     "backend": "browser_use",
                     "action": exc.action_name,
                     "risk": exc.risk,
+                    "reason_code": exc.reason_code,
                     "current_url": exc.url,
+                    "current_origin": exc.current_origin,
+                    "target_origin": exc.target_origin,
+                    "task_id": exc.task_id,
+                    "browser_context_id": exc.browser_context_id,
+                    "params_hash": exc.params_hash,
                     "instruction_hash": _instruction_hash(getattr(session, "task", "")),
                 },
             )
@@ -844,6 +955,8 @@ class ComputerHandler:
         *,
         allow_high_risk_actions: bool = False,
         approved_domains: list[str] | None = None,
+        allowed_high_risk_actions: list[str] | None = None,
+        approval_scope: Any | None = None,
         timeout_seconds: float | None = None,
     ) -> str:
         import asyncio
@@ -875,6 +988,15 @@ class ComputerHandler:
                     if allow_high_risk_actions
                     else list(getattr(self.config, "sensitive_urls", []) or []),
                     allow_high_risk_actions=allow_high_risk_actions,
+                    allowed_high_risk_actions=allowed_high_risk_actions
+                    if allow_high_risk_actions
+                    else None,
+                    approval_scope=approval_scope,
+                    task_id=self._browser_policy_task_id(session),
+                    browser_context_id=self._browser_policy_context_id(session),
+                    policy_audit_callback=lambda payload: self._emit(
+                        "browser_policy_decision", payload
+                    ),
                     max_actions_per_step=1,
                 )
             except asyncio.TimeoutError as exc:
@@ -962,6 +1084,14 @@ class ComputerHandler:
             )
             if deterministic is not None:
                 return deterministic
+            deterministic = self._run_deterministic_browser_task(
+                objective,
+                cdp_endpoint=cdp_endpoint,
+                task_id=task_id,
+                mode=mode,
+            )
+            if deterministic is not None:
+                return deterministic
             with self._browser_use_lock:
                 self._ensure_browser_use_service(cdp_endpoint)
                 self._set_browser_use_cdp_url(cdp_endpoint)
@@ -975,13 +1105,46 @@ class ComputerHandler:
                     "delegated_browser_task_started",
                     {"task_id": task_id, "mode": mode, "objective": objective[:200]},
                 )
+                grant = self._browser_read_grant_for_task(
+                    objective_for_agent,
+                    current_url=prelude.final_url if prelude is not None else None,
+                    reason="delegated browser executor read task",
+                )
                 session = _types.SimpleNamespace(
                     task=objective_for_agent,
                     screenshot_path=prelude.screenshot_path if prelude is not None else None,
                 )
-                output = self._run_browser_use_task(
-                    session, timeout_seconds=_LONG_BROWSER_OPERATION_TIMEOUT_SECONDS
-                )
+                try:
+                    output = self._run_browser_use_task(
+                        session,
+                        allow_high_risk_actions=False,
+                        approved_domains=grant.approved_domains_list(),
+                        allowed_high_risk_actions=None,
+                        timeout_seconds=_LONG_BROWSER_OPERATION_TIMEOUT_SECONDS,
+                    )
+                except Exception as exc:
+                    from claw_v2.computer import BrowserUsePolicyInterrupt
+
+                    if not isinstance(exc, BrowserUsePolicyInterrupt):
+                        raise
+                    self._emit(
+                        "delegated_browser_task_policy_interrupted",
+                        {
+                            "task_id": task_id,
+                            "mode": mode,
+                            "action": exc.action_name,
+                            "risk": exc.risk,
+                            "current_url": exc.url,
+                            "approved_domains": exc.approved_domains,
+                        },
+                    )
+                    domains = ", ".join(exc.approved_domains) or "dominio no identificado"
+                    return (
+                        "No pude completar la tarea de navegador: necesito autorización "
+                        "explícita para continuar con una acción de alto riesgo.\n"
+                        f"Acción: {exc.action_name}\n"
+                        f"Dominio: {domains}"
+                    )
                 if prelude is not None and _is_unverifiable_browser_result(output):
                     evidence = "\n".join(f"- {line}" for line in prelude.evidence_lines())
                     return f"{output}\n\nEvidencia inicial deterministica:\n{evidence}"
@@ -1144,6 +1307,166 @@ class ComputerHandler:
             ]
         )
         return "\n".join(line for line in lines if line is not None)
+
+    def _run_deterministic_browser_task(
+        self,
+        objective: str,
+        *,
+        cdp_endpoint: str,
+        task_id: str | None,
+        mode: str | None,
+    ) -> str | None:
+        target_url = _deterministic_browser_target_url(objective)
+        if target_url is None:
+            if _explicitly_disallows_browser_use(objective):
+                self._emit(
+                    "deterministic_browser_task_missing_target",
+                    {"task_id": task_id, "mode": mode},
+                )
+                return (
+                    "No pude completar la tarea de navegador determinística: "
+                    "no encontré una URL o dominio navegable y la instrucción "
+                    "prohíbe usar browser_use."
+                )
+            return None
+        host = _host_from_url(target_url)
+        self._emit(
+            "deterministic_browser_task_started",
+            {"task_id": task_id, "mode": mode, "target_url": target_url},
+        )
+        try:
+            browser = DevBrowserService()
+            result = browser.chrome_navigate(
+                target_url,
+                cdp_url=cdp_endpoint,
+                page_url_pattern=host,
+            )
+            screenshot = browser.chrome_screenshot(
+                cdp_url=cdp_endpoint,
+                page_url_pattern=host,
+                name=_browser_screenshot_name(host),
+            )
+        except Exception as exc:
+            message = _error_message(exc)
+            self._emit(
+                "deterministic_browser_task_failed",
+                {"task_id": task_id, "mode": mode, "target_url": target_url, "error": message},
+            )
+            return f"No pude completar la tarea de navegador determinística: {message}"
+
+        final_url = str(getattr(result, "url", "") or getattr(screenshot, "url", "") or target_url)
+        title = str(getattr(result, "title", "") or getattr(screenshot, "title", "") or "").strip()
+        screenshot_path = str(getattr(screenshot, "screenshot_path", "") or "").strip()
+        content = str(
+            getattr(result, "content", "") or getattr(screenshot, "content", "") or ""
+        ).strip()
+        wall_probe = " ".join((final_url, title, content)).lower()
+        wall_markers = ("accounts/login", "iniciar sesión", "log in", "checkpoint", "challenge")
+        if any(marker in wall_probe for marker in wall_markers):
+            message = (
+                f"login/challenge wall en {final_url}; "
+                "inicia sesión en el perfil de Chrome y reintenta."
+            )
+            self._emit(
+                "deterministic_browser_task_unverifiable_result",
+                {
+                    "task_id": task_id,
+                    "mode": mode,
+                    "target_url": target_url,
+                    "final_url": final_url,
+                    "title": title,
+                    "screenshot_path": screenshot_path,
+                },
+            )
+            return f"No pude completar la tarea de navegador determinística: {message}"
+        content_hint = ""
+        if content:
+            compact = " ".join(content.split())
+            content_hint = f"\nTexto visible: {compact[:240]}"
+        self._emit(
+            "deterministic_browser_task_completed",
+            {
+                "task_id": task_id,
+                "mode": mode,
+                "target_url": target_url,
+                "final_url": final_url,
+                "title": title,
+                "screenshot_path": screenshot_path,
+            },
+        )
+        lines = [
+            "Navegador abierto en Chrome CDP.",
+            f"URL final: {final_url}",
+        ]
+        if title:
+            lines.append(f"Título: {title}")
+        if screenshot_path:
+            lines.append(f"Captura guardada: {screenshot_path}")
+        if content_hint:
+            lines.append(content_hint.strip())
+        return "\n".join(lines)
+
+    def _browser_read_grant_for_task(
+        self,
+        task: str,
+        *,
+        current_url: str | None,
+        reason: str,
+    ) -> CapabilityGrant:
+        approved_domains = _domains_for_browser_task(
+            task,
+            current_url,
+            sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
+        )
+        sensitive = self._browser_task_is_sensitive(task, current_url)
+        if self._auto_approve_enabled() and not sensitive:
+            return CapabilityGrant.browser_read(
+                domains=approved_domains,
+                reason=reason,
+                auto_approved=True,
+            )
+        return CapabilityGrant(
+            surface=AutomationSurface.BROWSER,
+            reason=reason,
+            approved_domains=tuple(_normalized_domains(approved_domains)),
+            sensitive=sensitive,
+        )
+
+    def _browser_policy_scope_from_interrupt(self, exc: Any) -> dict[str, Any] | None:
+        if str(getattr(exc, "risk", "")).lower() != "high":
+            return None
+        action_name = str(getattr(exc, "action_name", "") or "")
+        if not action_name:
+            return None
+        return make_approval_scope(
+            action_name=action_name,
+            params=dict(getattr(exc, "params", {}) or {}),
+            current_url=getattr(exc, "url", None),
+            target_url=getattr(exc, "target_url", None) or getattr(exc, "url", None),
+            task_id=str(getattr(exc, "task_id", "") or ""),
+            browser_context_id=str(getattr(exc, "browser_context_id", "") or ""),
+            approved_by="human",
+        ).to_dict()
+
+    def _browser_policy_task_id(self, session: Any) -> str:
+        raw_pending = getattr(session, "pending_action", None)
+        pending = raw_pending if isinstance(raw_pending, dict) else {}
+        value = (
+            pending.get("task_id")
+            or getattr(session, "task_id", None)
+            or getattr(session, "session_id", None)
+            or _instruction_hash(getattr(session, "task", ""))
+        )
+        return str(value or "")
+
+    def _browser_policy_context_id(self, session: Any) -> str:
+        raw_pending = getattr(session, "pending_action", None)
+        pending = raw_pending if isinstance(raw_pending, dict) else {}
+        value = pending.get("browser_context_id") or getattr(session, "browser_context_id", None)
+        if value:
+            return str(value)
+        cdp_url = str(getattr(self.browser_use, "cdp_url", "") or "").strip()
+        return f"cdp:{cdp_url}" if cdp_url else ""
 
     def _run_deterministic_social_browser_task(
         self,
@@ -1525,11 +1848,14 @@ def _domains_for_browser_task(
     sensitive_urls: list[str] | None = None,
 ) -> list[str]:
     domains: list[str] = []
-    for value in [current_url, *_URL_RE.findall(task or "")]:
+    for value in [current_url, *_URL_RE.findall(task or ""), *_DOMAIN_RE.findall(task or "")]:
         host = _host_from_url(value)
         if host and host not in domains:
             domains.append(host)
     lowered = (task or "").lower()
+    for brand, host in _BROWSER_BRAND_DOMAINS.items():
+        if re.search(rf"\b{re.escape(brand)}\b", lowered) and host not in domains:
+            domains.append(host)
     for value in sensitive_urls or []:
         host = _host_from_url(value)
         if not host:

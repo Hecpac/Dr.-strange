@@ -116,6 +116,15 @@ class CapabilityGrant:
         data["scope_target"] = self.scope.target
         return data
 
+    def allows_browser_use_action(
+        self,
+        action_name: str,
+        *,
+        url: str | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> bool:
+        return False
+
 
 class CapabilityGrantStore:
     """Durable store for capability grants.

@@ -265,6 +265,20 @@ class RiskLevelTests(unittest.TestCase):
         risk = self.gate.risk_browser_use_action("screenshot", {}, url="https://ads.google.com")
         self.assertEqual(risk, RiskLevel.LOW)
 
+    def test_browser_use_high_risk_actions_match_policy_matrix(self) -> None:
+        from claw_v2.automation_policy import HIGH_RISK_BROWSER_ACTIONS
+        from claw_v2.computer_gate import BROWSER_USE_HIGH_RISK_ACTIONS
+
+        self.assertEqual(BROWSER_USE_HIGH_RISK_ACTIONS, HIGH_RISK_BROWSER_ACTIONS)
+        for action in HIGH_RISK_BROWSER_ACTIONS:
+            with self.subTest(action=action):
+                risk = self.gate.risk_browser_use_action(
+                    action,
+                    {"script": "document.title"} if action == "evaluate" else {},
+                    url="https://example.com",
+                )
+                self.assertEqual(risk, RiskLevel.HIGH)
+
 
 class ActionGateAutoApproveTests(unittest.TestCase):
     """auto_approve=True auto-approves LOW + MEDIUM actions but still gates HIGH
@@ -340,10 +354,12 @@ class _StubBrowserUse:
     def __init__(self) -> None:
         self.called = False
         self.instruction = ""
+        self.kwargs: dict = {}
 
     async def run_task(self, instruction: str, **kwargs) -> str:
         self.called = True
         self.instruction = instruction
+        self.kwargs = dict(kwargs)
         return "browser task done"
 
 
@@ -374,6 +390,9 @@ class ComputerHandlerBrowserAutoApproveTests(unittest.TestCase):
         self.assertTrue(stub.called)
         self.assertEqual(session.status, "done")
         self.assertEqual(result, "browser task done")
+        self.assertIsNone(stub.kwargs["allowed_domains"])
+        self.assertFalse(stub.kwargs["allow_high_risk_actions"])
+        self.assertIsNone(stub.kwargs["allowed_high_risk_actions"])
 
     def test_sensitive_task_still_requires_approval_when_enabled(self) -> None:
         stub = _StubBrowserUse()

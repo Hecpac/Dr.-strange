@@ -16,6 +16,17 @@
 - Never share credentials across agent classes
 - No secrets in workspace directory — credential adapter retrieves at runtime
 
+## Secret Scanning Gate
+- Never place secrets in tracked, untracked, or ignored workspace files.
+- Local scan command: `.venv/bin/python scripts/scan_secrets.py`
+- Exit codes: `0` means clean, `1` means findings were detected, `2` means scanner execution/configuration failed.
+- Findings are redacted and include path, line number, source set, rule id, and fingerprint. Do not paste or store raw secret values when triaging findings.
+- `scripts/_*.py` files are scanned, including ignored local scripts.
+- Release gate: release requires a clean scan or a reviewed exception ticket with path, rule id, fingerprint, owner, and remediation plan.
+- Scanner allowlist entries must be exact path + rule id + fingerprint suppressions with classification and reason; never suppress true positives or unknown owner-review findings.
+- If a `FAL_KEY` literal appears, treat the key as compromised and rotate it manually out of band. Rotation is not automated from this repository.
+- CI runs `scripts/scan_secrets.py` without credentials or external providers. CI covers files present in checkout; ignored local files are only covered when they exist in the job, so run the local scanner before release.
+
 ## Input Validation & Hardening
 - **Path traversal**: all file operations resolve and validate against allowed roots (`tools.py`, `browser.py`, `telegram.py`, `adapters/ollama.py`)
 - **Command injection**: `sandbox.py` uses `shlex.split` + token-level checking (not substring blacklists); `pipeline.py` validates branch names via strict regex `^[a-zA-Z0-9._/-]+$`

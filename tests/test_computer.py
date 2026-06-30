@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -691,14 +692,33 @@ class ComputerHandlerModelTests(_ComputerHandlerConfigTest):
 
 
 class BrowserUseArtifactTests(unittest.TestCase):
-    def _fakes(self, *, screenshot_raises: bool = False, final: str = "imagen creada"):
+    def _fakes(
+        self,
+        *,
+        screenshot_raises: bool = False,
+        final: str = "imagen creada",
+        final_url: str | None = "https://example.com/",
+        title: str | None = "Example Domain",
+    ):
         import types
 
         events: dict = {}
 
+        class FakePage:
+            url = final_url
+
+            async def title(self):
+                return title
+
         class FakeBrowserSession:
             def __init__(self, **kwargs):
                 pass
+
+            async def get_current_page_url(self):
+                return final_url
+
+            async def get_current_page(self):
+                return FakePage()
 
             async def take_screenshot(self, path=None, full_page=False):
                 if screenshot_raises:
@@ -770,6 +790,104 @@ class BrowserUseArtifactTests(unittest.TestCase):
             result = asyncio.run(svc.run_task("hola"))
         self.assertEqual(result, "texto resultado")
         self.assertIsNone(svc.last_artifact_path)
+
+    def test_run_task_outcome_requires_final_screenshot_for_passed(self) -> None:
+        import asyncio
+        import sys
+        from claw_v2.computer import BrowserUseService
+
+        module, _ = self._fakes(screenshot_raises=True, final="Done")
+        with (
+            patch.dict(sys.modules, {"browser_use": module}),
+            patch.object(BrowserUseService, "_build_browser_llm", return_value=(object(), None)),
+        ):
+            svc = BrowserUseService()
+            outcome = asyncio.run(svc.run_task_outcome("Abre https://example.com"))
+
+        self.assertEqual(outcome.status, "no_result")
+        self.assertEqual(outcome.reason_code, "missing_screenshot")
+
+    def test_run_task_outcome_passed_includes_url_screenshot_and_assertion(self) -> None:
+        import asyncio
+        import sys
+        from claw_v2.computer import BrowserUseService
+
+        module, _ = self._fakes(final="Navegador abierto")
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(sys.modules, {"browser_use": module}),
+                patch.object(
+                    BrowserUseService, "_build_browser_llm", return_value=(object(), None)
+                ),
+            ):
+                svc = BrowserUseService()
+                outcome = asyncio.run(
+                    svc.run_task_outcome("Abre https://example.com", artifact_dir=tmp)
+                )
+
+        self.assertEqual(outcome.status, "passed")
+        self.assertTrue(outcome.is_passed_validated())
+        self.assertEqual(outcome.final_url, "https://example.com/")
+        self.assertIsNotNone(outcome.screenshot_artifact_id)
+        self.assertEqual(outcome.assertions[0].name, "expected_url_reached")
+
+    def test_run_task_outcome_missing_final_url_is_no_result(self) -> None:
+        import asyncio
+        import sys
+        from claw_v2.computer import BrowserUseService
+
+        module, _ = self._fakes(final="Done", final_url=None)
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(sys.modules, {"browser_use": module}),
+                patch.object(
+                    BrowserUseService, "_build_browser_llm", return_value=(object(), None)
+                ),
+            ):
+                svc = BrowserUseService()
+                outcome = asyncio.run(svc.run_task_outcome("Abre la web", artifact_dir=tmp))
+
+        self.assertEqual(outcome.status, "no_result")
+        self.assertEqual(outcome.reason_code, "missing_final_url")
+
+    def test_run_task_outcome_login_marker_is_needs_login(self) -> None:
+        import asyncio
+        import sys
+        from claw_v2.computer import BrowserUseService
+
+        module, _ = self._fakes(final="accounts/login solicita iniciar sesión")
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(sys.modules, {"browser_use": module}),
+                patch.object(
+                    BrowserUseService, "_build_browser_llm", return_value=(object(), None)
+                ),
+            ):
+                svc = BrowserUseService()
+                outcome = asyncio.run(svc.run_task_outcome("Abre https://example.com", artifact_dir=tmp))
+
+        self.assertEqual(outcome.status, "needs_login")
+        self.assertEqual(outcome.reason_code, "login_required")
+
+    def test_run_task_outcome_policy_interrupt_maps_to_policy_denied(self) -> None:
+        import asyncio
+        from claw_v2.computer import BrowserUsePolicyInterrupt, BrowserUseService
+
+        async def blocked(*args, **kwargs):
+            raise BrowserUsePolicyInterrupt(
+                action_name="evaluate",
+                params={},
+                url="https://example.com/",
+                risk="high",
+                reason_code="high_requires_approval",
+            )
+
+        svc = BrowserUseService()
+        with patch.object(svc, "run_task", side_effect=blocked):
+            outcome = asyncio.run(svc.run_task_outcome("Evalua document.title"))
+
+        self.assertEqual(outcome.status, "needs_approval")
+        self.assertEqual(outcome.reason_code, "policy_denied")
 
     def test_agent_timeout_raises(self) -> None:
         import asyncio
@@ -1013,6 +1131,34 @@ class BrowserUseArtifactTests(unittest.TestCase):
 
 
 class BrowserUseGuardTests(unittest.TestCase):
+    def test_high_risk_allowlist_does_not_authorize_evaluate_without_scope(self) -> None:
+        from claw_v2.computer import _browser_use_high_risk_allowed
+
+        self.assertFalse(
+            _browser_use_high_risk_allowed(
+                action_name="evaluate",
+                url="https://x.com/home",
+                params={},
+                approved_domains=["x.com"],
+                allow_high_risk_actions=True,
+                allowed_high_risk_actions=["evaluate", "save_as_pdf"],
+            )
+        )
+
+    def test_high_risk_allowlist_blocks_upload_on_approved_domain(self) -> None:
+        from claw_v2.computer import _browser_use_high_risk_allowed
+
+        self.assertFalse(
+            _browser_use_high_risk_allowed(
+                action_name="upload_file",
+                url="https://x.com/home",
+                params={"path": "/tmp/file.png"},
+                approved_domains=["x.com"],
+                allow_high_risk_actions=True,
+                allowed_high_risk_actions=["evaluate", "save_as_pdf"],
+            )
+        )
+
     def test_guarded_tools_import_does_not_mutate_claw_model_env(self) -> None:
         import os
 
@@ -1074,6 +1220,76 @@ class BrowserUseGuardTests(unittest.TestCase):
         self.assertIsInstance(state["interrupt"], BrowserUsePolicyInterrupt)
         self.assertEqual(state["interrupt"].action_name, "navigate")
 
+    def test_guarded_tools_allows_high_risk_action_with_exact_policy_scope(self) -> None:
+        import asyncio
+        import types
+        from unittest.mock import patch
+
+        from claw_v2.automation_policy import make_approval_scope
+        from claw_v2.computer import BrowserUseService
+
+        class FakeAction:
+            def model_dump(self, **kwargs):
+                return {"evaluate": {"script": "document.title"}}
+
+        class FakeBrowserSession:
+            async def get_current_page_url(self):
+                return "https://example.com/dashboard"
+
+        approval_scope = make_approval_scope(
+            action_name="evaluate",
+            params={"script": "document.title"},
+            current_url="https://example.com/dashboard",
+            target_url="https://example.com/dashboard",
+            task_id="task-1",
+            browser_context_id="ctx-1",
+            approved_by="hector",
+            nonce="nonce-1",
+            ttl_seconds=60,
+        ).to_dict()
+        audits: list[dict] = []
+        class FakeActionResult:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        class FakeTools:
+            async def act(self, action, browser_session, **kwargs):
+                return FakeActionResult(done=True)
+
+        fake_views = types.SimpleNamespace(ActionResult=FakeActionResult)
+        fake_service = types.SimpleNamespace(Tools=FakeTools)
+        with patch.dict(
+            sys.modules,
+            {
+                "browser_use.agent.views": fake_views,
+                "browser_use.tools.service": fake_service,
+            },
+        ):
+            svc = BrowserUseService()
+            gate = ActionGate(sensitive_urls=[], auto_approve=True)
+            tools, state = svc._guarded_browser_tools(
+                action_gate=gate,
+                approved_domains=["example.com"],
+                allow_high_risk_actions=True,
+                allowed_high_risk_actions=["evaluate"],
+                approval_scope=approval_scope,
+                task_id="task-1",
+                browser_context_id="ctx-1",
+                policy_audit_callback=audits.append,
+            )
+
+            result = asyncio.run(
+                tools.act(action=FakeAction(), browser_session=FakeBrowserSession())
+            )
+
+        self.assertFalse(getattr(result, "error", None))
+        self.assertFalse(state["should_stop"])
+        self.assertEqual(audits[-1]["decision"], "allow")
+        self.assertEqual(audits[-1]["reason_code"], "approved")
+        self.assertEqual(audits[-1]["params_hash"], approval_scope["params_hash"])
+        self.assertNotIn("script", audits[-1])
+        self.assertNotIn("document.title", repr(audits[-1]))
+
 
 class ComputerHandlerSessionArtifactTests(unittest.TestCase):
     def test_run_browser_use_task_binds_artifact_to_session(self) -> None:
@@ -1131,6 +1347,133 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
         self.assertEqual(session.status, "awaiting_approval")
         self.assertEqual(session.pending_action["interrupted_action"]["action"], "navigate")
         self.assertEqual(session.pending_action["approved_domains"], ["robinhood.com"])
+        self.assertIn("params_hash", session.pending_action["interrupted_action"])
+        self.assertNotIn("params", session.pending_action["interrupted_action"])
+        self.assertIn("browser_policy_scope", session.pending_action)
+
+    def test_browser_policy_scope_transports_after_human_approval(self) -> None:
+        import types
+
+        from claw_v2.approval import ApprovalManager
+        from claw_v2.automation_policy import make_approval_scope
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            def __init__(self) -> None:
+                self.kwargs: dict = {}
+
+            async def run_task(self, task, **kwargs):
+                self.kwargs = dict(kwargs)
+                return "ok"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            approvals = ApprovalManager(Path(tmpdir), "secret")
+            fake = FakeBrowserUse()
+            scope = make_approval_scope(
+                action_name="evaluate",
+                params={"script": "document.title"},
+                current_url="https://example.com/dashboard",
+                target_url="https://example.com/dashboard",
+                task_id="task-1",
+                browser_context_id="ctx-1",
+                approved_by="human",
+                nonce="nonce-1",
+                ttl_seconds=60,
+            ).to_dict()
+            pending = approvals.create(
+                "browser_use_task",
+                "evaluate",
+                metadata={
+                    "kind": "computer_use",
+                    "session_id": "s1",
+                    "approval_scope": {"browser_policy_scope": scope},
+                },
+            )
+            session = types.SimpleNamespace(
+                task="read title",
+                current_url="https://example.com/dashboard",
+                status="awaiting_approval",
+                pending_action={
+                    "action": "browser_use_task",
+                    "backend": "browser_use",
+                    "approval_id": pending.approval_id,
+                    "task_id": "task-1",
+                    "browser_context_id": "ctx-1",
+                    "browser_policy_scope": scope,
+                },
+                screenshot_path=None,
+            )
+            handler = ComputerHandler(browser_use=fake, approvals=approvals, config=None)
+            handler._sessions["s1"] = session
+            approvals.approve(pending.approval_id, pending.token)
+
+            result = handler._resume_approved_computer_action(pending.approval_id)
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(fake.kwargs["approval_scope"], scope)
+        self.assertEqual(fake.kwargs["task_id"], "task-1")
+        self.assertEqual(fake.kwargs["browser_context_id"], "ctx-1")
+
+    def test_browser_policy_scope_rejects_internal_approval(self) -> None:
+        import types
+
+        from claw_v2.approval import ApprovalManager
+        from claw_v2.automation_policy import make_approval_scope
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                raise AssertionError("internal approval must not execute browser HIGH")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            approvals = ApprovalManager(Path(tmpdir), "secret")
+            scope = make_approval_scope(
+                action_name="evaluate",
+                params={"script": "document.title"},
+                current_url="https://example.com/dashboard",
+                target_url="https://example.com/dashboard",
+                task_id="task-1",
+                browser_context_id="ctx-1",
+                approved_by="human",
+                nonce="nonce-1",
+                ttl_seconds=60,
+            ).to_dict()
+            pending = approvals.create(
+                "browser_use_task",
+                "evaluate",
+                metadata={
+                    "kind": "computer_use",
+                    "session_id": "s1",
+                    "approval_scope": {"browser_policy_scope": scope},
+                },
+            )
+            session = types.SimpleNamespace(
+                task="read title",
+                current_url="https://example.com/dashboard",
+                status="awaiting_approval",
+                pending_action={
+                    "action": "browser_use_task",
+                    "backend": "browser_use",
+                    "approval_id": pending.approval_id,
+                    "task_id": "task-1",
+                    "browser_context_id": "ctx-1",
+                    "browser_policy_scope": scope,
+                },
+                screenshot_path=None,
+            )
+            handler = ComputerHandler(browser_use=FakeBrowserUse(), approvals=approvals, config=None)
+            handler._sessions["s1"] = session
+            approvals.approve_internal(pending.approval_id)
+
+            result = handler._resume_approved_computer_action(pending.approval_id)
+
+        self.assertIn("requiere aprobación humana", result)
 
     def test_resume_blocks_when_approval_screenshot_hash_changed(self) -> None:
         import types
@@ -1335,6 +1678,46 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
         self.assertEqual(capability.calls, [(9250, "~/.claw/chrome-profile")])
         self.assertEqual(fake.cdp_url, "http://127.0.0.1:9250")
 
+    def test_delegated_browser_use_receives_non_sensitive_read_grant(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict]] = []
+                self.cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                self.calls.append((task, dict(kwargs)))
+                return "feed capturado"
+
+        fake = FakeBrowserUse()
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=["ads.google.com"],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        out = handler.run_delegated_browser_task(
+            "Revisa https://x.com/home y resume los posts visibles",
+            task_id="t-grant",
+            mode="browse",
+        )
+
+        self.assertEqual(out, "feed capturado")
+        kwargs = fake.calls[0][1]
+        self.assertIsNone(kwargs["allowed_domains"])
+        self.assertFalse(kwargs["allow_high_risk_actions"])
+        self.assertIsNone(kwargs["allowed_high_risk_actions"])
+        self.assertEqual(kwargs["prohibited_domains"], ["ads.google.com"])
+
     def test_simple_instagram_open_uses_deterministic_cdp_not_browser_use(self) -> None:
         import types
         from unittest.mock import patch
@@ -1518,6 +1901,151 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
         self.assertIn("Evidencia inicial deterministica", out)
         self.assertIn("URL inicial: https://x.com/home", out)
         self.assertIn("Captura inicial: /tmp/claw-x-home.png", out)
+
+    def test_simple_url_open_uses_deterministic_cdp_not_browser_use(self) -> None:
+        import types
+        from unittest.mock import patch
+
+        from claw_v2.browser import BrowseResult
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            def __init__(self) -> None:
+                self.called = False
+
+            async def run_task(self, task, **kwargs):
+                self.called = True
+                return "should not run"
+
+        class FakeDevBrowserService:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, str | None]] = []
+
+            def chrome_navigate(self, url, *, cdp_url, page_url_pattern=None):
+                self.calls.append(("navigate", url, page_url_pattern))
+                return BrowseResult(
+                    url="https://example.com/",
+                    title="Example Domain",
+                    content="Example Domain",
+                )
+
+            def chrome_screenshot(self, *, cdp_url, page_url_pattern=None, name="chrome.png"):
+                self.calls.append(("screenshot", name, page_url_pattern))
+                return BrowseResult(
+                    url="https://example.com/",
+                    title="Example Domain",
+                    content="Example Domain",
+                    screenshot_path="/tmp/claw-example-open.png",
+                )
+
+        fake_browser_use = FakeBrowserUse()
+        fake_dev_browser = FakeDevBrowserService()
+        handler = ComputerHandler(
+            browser_use=fake_browser_use,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        with patch("claw_v2.computer_handler.DevBrowserService", return_value=fake_dev_browser):
+            out = handler.run_delegated_browser_task(
+                "Abre https://example.com en Chrome con CDP. NO uses browser_use.",
+                task_id="t-open",
+                mode="browse",
+            )
+
+        self.assertIn("Navegador abierto en Chrome CDP", out)
+        self.assertIn("Captura guardada: /tmp/claw-example-open.png", out)
+        self.assertFalse(fake_browser_use.called)
+        self.assertEqual(
+            fake_dev_browser.calls,
+            [
+                ("navigate", "https://example.com", "example.com"),
+                ("screenshot", "example-com-open.png", "example.com"),
+            ],
+        )
+
+    def test_explicit_no_browser_use_without_url_does_not_fall_back_to_browser_use(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            def __init__(self) -> None:
+                self.called = False
+
+            async def run_task(self, task, **kwargs):
+                self.called = True
+                return "should not run"
+
+        fake_browser_use = FakeBrowserUse()
+        handler = ComputerHandler(
+            browser_use=fake_browser_use,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        out = handler.run_delegated_browser_task(
+            "Abre el dashboard con CDP. NO uses browser_use.",
+            task_id="t-no-target",
+            mode="browse",
+        )
+
+        self.assertIn("No pude completar la tarea de navegador determinística", out)
+        self.assertIn("URL o dominio", out)
+        self.assertFalse(fake_browser_use.called)
+
+    def test_delegated_browser_policy_interrupt_returns_approval_message(self) -> None:
+        import types
+
+        from claw_v2.computer import BrowserUsePolicyInterrupt
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                raise BrowserUsePolicyInterrupt(
+                    action_name="upload_file",
+                    params={"path": "/tmp/file.png"},
+                    url="https://x.com/home",
+                    risk="high",
+                    approved_domains=["x.com"],
+                )
+
+        handler = ComputerHandler(
+            browser_use=FakeBrowserUse(),
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        out = handler.run_delegated_browser_task(
+            "Revisa https://x.com/home y resume los posts visibles",
+            task_id="t-interrupt",
+            mode="browse",
+        )
+
+        self.assertIn("No pude completar la tarea de navegador", out)
+        self.assertIn("necesito autorización", out)
+        self.assertIn("upload_file", out)
 
     def test_unavailable_browser_use_returns_clear_message(self) -> None:
         from claw_v2.computer_handler import ComputerHandler

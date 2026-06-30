@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from claw_v2.automation_outcome import AutomationOutcome
+from claw_v2.automation_policy import ActionPolicyEngine, HIGH_RISK_BROWSER_ACTIONS
+
 logger = logging.getLogger(__name__)
 
 pyautogui: Any | None = None
@@ -40,6 +43,13 @@ class BrowserUsePolicyInterrupt(RuntimeError):
         url: str | None,
         risk: str,
         approved_domains: list[str] | None = None,
+        reason_code: str = "",
+        params_hash: str = "",
+        current_origin: str = "",
+        target_origin: str = "",
+        target_url: str | None = None,
+        task_id: str = "",
+        browser_context_id: str = "",
     ) -> None:
         super().__init__(f"browser_use action requires approval: {action_name}")
         self.action_name = action_name
@@ -47,6 +57,13 @@ class BrowserUsePolicyInterrupt(RuntimeError):
         self.url = url
         self.risk = risk
         self.approved_domains = list(approved_domains or [])
+        self.reason_code = reason_code
+        self.params_hash = params_hash
+        self.current_origin = current_origin
+        self.target_origin = target_origin
+        self.target_url = target_url
+        self.task_id = task_id
+        self.browser_context_id = browser_context_id
 
 
 def _load_pyautogui() -> Any:
@@ -761,6 +778,22 @@ class BrowserUseService:
     def last_artifact_path(self, value: str | None) -> None:
         self._artifact_local.path = value
 
+    @property
+    def last_final_url(self) -> str | None:
+        return getattr(self._artifact_local, "final_url", None)
+
+    @last_final_url.setter
+    def last_final_url(self, value: str | None) -> None:
+        self._artifact_local.final_url = value
+
+    @property
+    def last_title(self) -> str | None:
+        return getattr(self._artifact_local, "title", None)
+
+    @last_title.setter
+    def last_title(self, value: str | None) -> None:
+        self._artifact_local.title = value
+
     def _build_browser_llm(self, model: str) -> tuple[Any, Any | None]:
         """Build the browser_use planning LLM (primary, fallback_llm).
 
@@ -816,11 +849,18 @@ class BrowserUseService:
         allowed_domains: list[str] | None = None,
         prohibited_domains: list[str] | None = None,
         allow_high_risk_actions: bool = False,
+        allowed_high_risk_actions: list[str] | None = None,
+        approval_scope: Any | None = None,
+        task_id: str | None = None,
+        browser_context_id: str | None = None,
+        policy_audit_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
         with _preserve_browser_use_import_env():
             from browser_use import Agent, BrowserSession
 
         self.last_artifact_path = None
+        self.last_final_url = None
+        self.last_title = None
         normalized_allowed = _normalize_domain_patterns(allowed_domains)
         normalized_prohibited = _normalize_domain_patterns(prohibited_domains or sensitive_urls)
         browser = BrowserSession(
@@ -838,6 +878,11 @@ class BrowserUseService:
                 action_gate=action_gate,
                 approved_domains=normalized_allowed,
                 allow_high_risk_actions=allow_high_risk_actions,
+                allowed_high_risk_actions=allowed_high_risk_actions,
+                approval_scope=approval_scope,
+                task_id=str(task_id or ""),
+                browser_context_id=browser_context_id,
+                policy_audit_callback=policy_audit_callback,
             )
 
             async def _should_stop() -> bool:
@@ -875,6 +920,9 @@ class BrowserUseService:
             )
             if policy_interrupt is not None:
                 raise policy_interrupt
+            metadata = await _browser_use_page_metadata(browser)
+            self.last_final_url = metadata.get("final_url")
+            self.last_title = metadata.get("title")
             artifact_path = await self._capture_page_artifact(browser, artifact_dir)
         finally:
             await browser.stop()
@@ -889,36 +937,122 @@ class BrowserUseService:
             return f"{text}\n\n[Captura guardada: {artifact_path}]"
         return text
 
+    async def run_task_outcome(
+        self,
+        task: str,
+        **kwargs: Any,
+    ) -> AutomationOutcome:
+        try:
+            text = await self.run_task(task, **kwargs)
+        except BrowserUsePolicyInterrupt as exc:
+            return AutomationOutcome.needs_approval(
+                human_summary=str(exc),
+                reason_code="policy_denied",
+                final_url=exc.url,
+                screenshot_artifact_id=self.last_artifact_path,
+            )
+        except Exception as exc:
+            return AutomationOutcome.failed(
+                human_summary=f"No pude completar la tarea de navegador: {str(exc)[:200]}",
+                reason_code="executor_error",
+                final_url=self.last_final_url,
+                title=self.last_title,
+                screenshot_artifact_id=self.last_artifact_path,
+            )
+        return AutomationOutcome.from_legacy_text(
+            text,
+            final_url=self.last_final_url,
+            title=self.last_title,
+            screenshot_artifact_id=self.last_artifact_path,
+            objective=task,
+        )
+
     def _guarded_browser_tools(
         self,
         *,
         action_gate: Any,
         approved_domains: list[str],
         allow_high_risk_actions: bool,
+        allowed_high_risk_actions: list[str] | None = None,
+        approval_scope: Any | None = None,
+        task_id: str = "",
+        browser_context_id: str | None = None,
+        policy_audit_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         with _preserve_browser_use_import_env():
             from browser_use.agent.views import ActionResult
             from browser_use.tools.service import Tools
 
-        state: dict[str, Any] = {"should_stop": False, "interrupt": None}
+        state: dict[str, Any] = {"should_stop": False, "interrupt": None, "decisions": []}
+        policy_engine = ActionPolicyEngine()
 
         class GuardedBrowserTools(Tools):
             async def act(self, action, browser_session, **kwargs):  # type: ignore[override]
                 action_name, params = _browser_use_action_parts(action)
                 current_url = await _browser_use_current_url(browser_session)
+                target_url = str(params.get("url") or "").strip() or current_url
+                effective_browser_context_id = browser_context_id or _browser_context_id(
+                    browser_session
+                )
+                policy_decision = policy_engine.evaluate(
+                    action_name=action_name,
+                    params=params,
+                    current_url=current_url,
+                    target_url=target_url,
+                    task_id=task_id,
+                    browser_context_id=effective_browser_context_id,
+                    approval=approval_scope,
+                    auto_approved=not bool(approval_scope),
+                )
+                audit_payload = policy_decision.to_audit_dict()
+                state["decisions"].append(audit_payload)
+                if policy_audit_callback is not None:
+                    try:
+                        policy_audit_callback(audit_payload)
+                    except Exception:
+                        logger.debug("browser policy audit callback failed", exc_info=True)
+                if not policy_decision.allowed:
+                    interrupt = BrowserUsePolicyInterrupt(
+                        action_name=action_name,
+                        params=params,
+                        url=current_url,
+                        risk=policy_decision.risk,
+                        reason_code=policy_decision.reason_code,
+                        params_hash=policy_decision.params_hash,
+                        current_origin=policy_decision.current_origin,
+                        target_origin=policy_decision.target_origin,
+                        target_url=target_url,
+                        task_id=task_id,
+                        browser_context_id=effective_browser_context_id,
+                        approved_domains=_browser_use_interrupt_domains(
+                            current_url=current_url,
+                            params=params,
+                            fallback_domains=approved_domains,
+                        ),
+                    )
+                    state["interrupt"] = interrupt
+                    state["should_stop"] = True
+                    return ActionResult(error=str(interrupt))
                 risk = action_gate.risk_browser_use_action(action_name, params, url=current_url)
                 risk_value = str(getattr(risk, "value", risk))
-                if risk_value == "high" and not _browser_use_high_risk_allowed(
-                    url=current_url,
-                    params=params,
-                    approved_domains=approved_domains,
-                    allow_high_risk_actions=allow_high_risk_actions,
+                if (
+                    risk_value == "high"
+                    and policy_decision.risk != "high"
+                    and not _browser_use_high_risk_allowed(
+                        action_name=action_name,
+                        url=current_url,
+                        params=params,
+                        approved_domains=approved_domains,
+                        allow_high_risk_actions=allow_high_risk_actions,
+                        allowed_high_risk_actions=allowed_high_risk_actions,
+                    )
                 ):
                     interrupt = BrowserUsePolicyInterrupt(
                         action_name=action_name,
                         params=params,
                         url=current_url,
                         risk=risk_value,
+                        reason_code="legacy_gate_high_risk",
                         approved_domains=_browser_use_interrupt_domains(
                             current_url=current_url,
                             params=params,
@@ -1028,14 +1162,56 @@ async def _browser_use_current_url(browser_session: Any) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
+async def _browser_use_page_metadata(browser_session: Any) -> dict[str, str | None]:
+    final_url = await _browser_use_current_url(browser_session)
+    title: str | None = None
+    try:
+        page = await browser_session.get_current_page()
+    except Exception:
+        page = None
+    if page is not None:
+        title_attr = getattr(page, "title", None)
+        try:
+            if callable(title_attr):
+                maybe_title = title_attr()
+                if asyncio.iscoroutine(maybe_title):
+                    maybe_title = await maybe_title
+                title = str(maybe_title or "").strip() or None
+            elif title_attr:
+                title = str(title_attr).strip() or None
+            if not final_url:
+                page_url = getattr(page, "url", None)
+                final_url = str(page_url).strip() if page_url else None
+        except Exception:
+            logger.debug("could not resolve browser_use page metadata", exc_info=True)
+    return {"final_url": final_url, "title": title}
+
+
+def _browser_context_id(browser_session: Any) -> str:
+    for name in ("browser_context_id", "context_id", "id"):
+        value = getattr(browser_session, name, None)
+        if value:
+            return str(value)
+    return ""
+
+
 def _browser_use_high_risk_allowed(
     *,
+    action_name: str,
     url: str | None,
     params: dict[str, Any],
     approved_domains: list[str],
     allow_high_risk_actions: bool,
+    allowed_high_risk_actions: list[str] | None = None,
 ) -> bool:
     if not allow_high_risk_actions:
+        return False
+    if str(action_name or "").strip().lower() in HIGH_RISK_BROWSER_ACTIONS:
+        return False
+    normalized_actions = {
+        str(action or "").strip().lower() for action in (allowed_high_risk_actions or [])
+    }
+    if normalized_actions and str(action_name or "").strip().lower() not in normalized_actions:
         return False
     if not approved_domains:
         return False

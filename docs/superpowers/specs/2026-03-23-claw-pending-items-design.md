@@ -261,7 +261,7 @@ Key: uses the repo's `.venv/bin/python` (not system `python3`) and `cd`s to the 
 ```bash
 export TELEGRAM_BOT_TOKEN="..."
 export TELEGRAM_ALLOWED_USER_ID="..."
-export OPENAI_API_KEY="..."           # optional, for voice + verifier/judge lanes
+# Optional voice/verifier credentials should come from local env or Keychain.
 export GOOGLE_API_KEY="..."           # optional, for research lane
 export APPROVAL_SECRET="..."         # HMAC secret for approval tokens
 # Any other overrides (BRAIN_MODEL, WORKER_MODEL, etc.)

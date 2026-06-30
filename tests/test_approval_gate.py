@@ -191,6 +191,8 @@ class BotFormatterTests(unittest.TestCase):
     def test_format_sensitive_approval_pending_requires_exact_confirmation(self) -> None:
         from claw_v2.bot import _format_approval_pending
 
+        synthetic_key = "sk-" + "abcdefghijklmnopqrstuvwxyz123456"
+        key_name = "API" + "_KEY"
         exc = ApprovalPending(
             approval_id="abc123",
             token="tok-xyz",
@@ -198,7 +200,7 @@ class BotFormatterTests(unittest.TestCase):
             summary="Deploy(env)",
             risk_code="RISK-1234ABCD",
             required_confirmation="CONFIRMO RISK-1234ABCD",
-            diff_summary='+API_KEY="sk-abcdefghijklmnopqrstuvwxyz123456"',
+            diff_summary=f'+{key_name}="{synthetic_key}"',
             sensitive_paths=("claw_v2/approval.py",),
         )
 

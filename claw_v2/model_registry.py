@@ -5,6 +5,15 @@ from typing import Any
 
 
 VALID_MODEL_LANES = frozenset({"brain", "worker", "worker_heavy", "research", "verifier", "judge"})
+VALID_MODEL_ROLES = frozenset(
+    {
+        "brain_primary",
+        "computer_use_primary",
+        "computer_use_fast",
+        "browser_agent_primary",
+        "browser_agent_fallback",
+    }
+)
 LANE_ALIASES = {
     "coding": "worker",
     "code": "worker",
@@ -50,6 +59,24 @@ class ModelOverride:
         return asdict(self) | {"key": self.key}
 
 
+@dataclass(frozen=True, slots=True)
+class ModelRoleDefault:
+    role: str
+    provider: str
+    model: str
+    billing: str
+    source: str
+    tool_capable: bool
+    notes: str = ""
+
+    @property
+    def key(self) -> str:
+        return f"{self.provider}:{self.model}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self) | {"key": self.key}
+
+
 class ModelRegistry:
     """Declarative model registry with explicit billing/source semantics."""
 
@@ -65,18 +92,59 @@ class ModelRegistry:
     DEFAULT_MODELS = (
         ("anthropic", "claude-opus-4-7", "Claude primary brain model"),
         ("anthropic", "claude-sonnet-4-6", "Claude worker/advisory model"),
+        ("anthropic", "claude-haiku-4-5", "Claude browser fallback model"),
         ("codex", "codex-mini-latest", "Codex CLI via ChatGPT subscription"),
         ("codex", "gpt-5.3-codex", "Codex coding model via ChatGPT subscription"),
         ("codex", "gpt-5.5", "Only valid if your Codex CLI account exposes this model"),
+        ("codex", "gpt-5.4-mini", "Fast Codex CLI model via ChatGPT subscription"),
         ("openai", "gpt-5.5", "OpenAI API billing, not ChatGPT subscription"),
         ("openai", "gpt-5.4", "OpenAI API billing"),
         ("openai", "gpt-5.4-mini", "OpenAI API billing"),
         ("google", "gemini-2.5-pro", "Google API billing"),
         ("ollama", "gemma4", "Local Ollama runtime"),
     )
+    DEFAULT_MODEL_ROLES = (
+        (
+            "brain_primary",
+            "anthropic",
+            "claude-opus-4-7",
+            "Primary reasoning brain. Keep separate from browser/computer executors.",
+        ),
+        (
+            "computer_use_primary",
+            "codex",
+            "gpt-5.5",
+            "Primary desktop automation model through Codex CLI and ChatGPT subscription.",
+        ),
+        (
+            "computer_use_fast",
+            "codex",
+            "gpt-5.4-mini",
+            "Fast desktop automation lane through Codex CLI and ChatGPT subscription.",
+        ),
+        (
+            "browser_agent_primary",
+            "anthropic",
+            "claude-sonnet-4-6",
+            "Browser-use planning model through Claude subscription/OAuth when configured.",
+        ),
+        (
+            "browser_agent_fallback",
+            "anthropic",
+            "claude-haiku-4-5",
+            "Secondary browser-use OAuth model for primary-model availability failures.",
+        ),
+    )
 
-    def __init__(self, models: list[ModelRef] | None = None) -> None:
+    def __init__(
+        self,
+        models: list[ModelRef] | None = None,
+        model_roles: list[ModelRoleDefault] | None = None,
+    ) -> None:
         self._models = {model.key: model for model in (models or self._default_models())}
+        self._model_roles = {
+            role.role: role for role in (model_roles or self._default_model_roles())
+        }
 
     @classmethod
     def default(cls) -> "ModelRegistry":
@@ -84,6 +152,18 @@ class ModelRegistry:
 
     def list_models(self) -> list[ModelRef]:
         return sorted(self._models.values(), key=lambda item: (item.provider, item.model))
+
+    def list_model_roles(self) -> list[ModelRoleDefault]:
+        return sorted(self._model_roles.values(), key=lambda item: item.role)
+
+    def resolve_role(self, role: str) -> ModelRoleDefault:
+        normalized = str(role or "").strip().lower()
+        if normalized not in VALID_MODEL_ROLES:
+            raise ValueError(f"Role inválido: {role}")
+        try:
+            return self._model_roles[normalized]
+        except KeyError as exc:
+            raise ValueError(f"Role sin modelo configurado: {role}") from exc
 
     def resolve(self, value: str) -> ModelRef:
         provider, model = parse_model_selector(value)
@@ -126,6 +206,21 @@ class ModelRegistry:
                 notes=notes,
             )
             for provider, model, notes in cls.DEFAULT_MODELS
+        ]
+
+    @classmethod
+    def _default_model_roles(cls) -> list[ModelRoleDefault]:
+        return [
+            ModelRoleDefault(
+                role=role,
+                provider=provider,
+                model=model,
+                billing=cls.PROVIDER_BILLING[provider],
+                source="registry",
+                tool_capable=provider in cls.TOOL_CAPABLE_PROVIDERS,
+                notes=notes,
+            )
+            for role, provider, model, notes in cls.DEFAULT_MODEL_ROLES
         ]
 
 

@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from claw_v2.automation_outcome import AssertionResult, AutomationOutcome
 from claw_v2.coordinator import CoordinatorResult
 from claw_v2.f4_delegation import (
     F4_DELEGATION_JOB_KIND,
@@ -535,7 +536,15 @@ class F4DelegationRunnerTests(unittest.TestCase):
 
         def browser_executor(objective, *, task_id, mode):
             recorded["browser_executor"] = (objective, task_id, mode)
-            return "Capturé 32 posts del timeline de X con enlaces destacados."
+            return AutomationOutcome.passed(
+                human_summary="Capturé 32 posts del timeline de X con enlaces destacados.",
+                final_url="https://x.com/home",
+                title="Home / X",
+                screenshot_artifact_id="artifact://browser/f4bdeliv-tg-1-browser/final.png",
+                assertions=(
+                    AssertionResult(name="browser_reached_page", passed=True),
+                ),
+            )
 
         handler = TaskHandler(
             coordinator=_RecordingCoordinator(),

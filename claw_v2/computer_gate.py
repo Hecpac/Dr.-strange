@@ -3,6 +3,11 @@ from __future__ import annotations
 import re
 from enum import Enum
 
+from claw_v2.automation_policy import (
+    BROWSER_ACTION_DEFINITIONS,
+    HIGH_RISK_BROWSER_ACTIONS as BROWSER_USE_HIGH_RISK_ACTIONS,
+)
+
 
 class ActionVerdict(Enum):
     SAFE = "safe"
@@ -34,30 +39,9 @@ DESKTOP_NAV_KEYS = frozenset(
 CDP_ALWAYS_APPROVE = frozenset({"submit"})
 CDP_WRITE_ACTIONS = frozenset({"click", "fill", "select", "check", "uncheck"})
 BROWSER_USE_READ_ACTIONS = frozenset(
-    {
-        "done",
-        "wait",
-        "screenshot",
-        "scroll",
-        "find_text",
-        "search_page",
-        "find_elements",
-        "dropdown_options",
-        "extract",
-        "read_file",
-        "read_long_content",
-    }
+    name for name, definition in BROWSER_ACTION_DEFINITIONS.items() if definition.risk == "low"
 )
 BROWSER_USE_NAV_ACTIONS = frozenset({"navigate", "search", "go_back", "switch", "close"})
-BROWSER_USE_HIGH_RISK_ACTIONS = frozenset(
-    {
-        "evaluate",
-        "upload_file",
-        "write_file",
-        "replace_file",
-        "save_as_pdf",
-    }
-)
 BROWSER_USE_WRITE_ACTIONS = frozenset({"click", "input", "send_keys", "select_dropdown"})
 
 
