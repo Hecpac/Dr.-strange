@@ -1690,7 +1690,67 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             event_types = [e["event_type"] for e in handler.observe.recent_events(limit=50)]
             self.assertIn("autonomous_task_failed", event_types)
             self.assertNotIn("autonomous_task_pending", event_types)
+            outcome_events = [
+                e
+                for e in handler.observe.recent_events(limit=50)
+                if e["event_type"] == "automation_outcome_recorded"
+            ]
+            self.assertEqual(outcome_events[-1]["payload"]["status"], "no_result")
+            self.assertEqual(outcome_events[-1]["payload"]["reason_code"], "no_result")
             record = ledger.get("t-nores")
+            self.assertEqual(record.status, "failed")
+
+    def test_deterministic_browser_executor_records_structured_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir),
+                browser_executor=lambda o, *, task_id, mode: (
+                    "Navegador abierto en Chrome CDP.\n"
+                    "URL final: https://www.instagram.com/pachanodesign/\n"
+                    "Título: Instagram\n"
+                    "Captura guardada: /tmp/claw-instagram-open.png"
+                ),
+            )
+            self._run_autonomous_browser(
+                handler, ledger, jobs, task_id="t-cdp", objective="abre mi perfil"
+            )
+            outcome_events = [
+                e
+                for e in handler.observe.recent_events(limit=50)
+                if e["event_type"] == "automation_outcome_recorded"
+            ]
+            payload = outcome_events[-1]["payload"]
+            self.assertEqual(payload["status"], "passed")
+            self.assertEqual(payload["surface"], "browser")
+            self.assertEqual(payload["executor"], "deterministic_browser")
+            record = ledger.get("t-cdp")
+            self.assertEqual(record.status, "succeeded")
+
+    def test_browser_executor_needs_approval_records_structured_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir),
+                browser_executor=lambda o, *, task_id, mode: (
+                    "No pude completar la tarea de navegador: necesito autorización "
+                    "explícita para continuar con una acción de alto riesgo.\n"
+                    "Acción: upload_file\n"
+                    "Dominio: x.com"
+                ),
+            )
+            self._run_autonomous_browser(
+                handler, ledger, jobs, task_id="t-approval", objective="repaso por X"
+            )
+            outcome_events = [
+                e
+                for e in handler.observe.recent_events(limit=50)
+                if e["event_type"] == "automation_outcome_recorded"
+            ]
+            payload = outcome_events[-1]["payload"]
+            self.assertEqual(payload["status"], "needs_approval")
+            self.assertEqual(payload["reason_code"], "needs_approval")
+            self.assertEqual(payload["surface"], "browser")
+            self.assertEqual(payload["executor"], "browser_use")
+            record = ledger.get("t-approval")
             self.assertEqual(record.status, "failed")
 
     def test_browser_executor_refusal_text_terminates_failed_not_passed(self) -> None:

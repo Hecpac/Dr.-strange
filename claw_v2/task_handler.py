@@ -20,6 +20,12 @@ from claw_v2.artifacts import (
     planned_phases_for_mode,
 )
 from claw_v2.action_events import ActionResult, ProposedAction, emit_event
+from claw_v2.automation_contracts import (
+    AutomationExecutor,
+    AutomationOutcome,
+    AutomationStatus,
+    AutomationSurface,
+)
 from claw_v2.bot_helpers import (
     _build_coordinator_tasks,
     _coordinator_checkpoint,
@@ -142,12 +148,90 @@ _BROWSER_FAILURE_MARKERS = (
 _AUTHENTICATED_BROWSE_TASK_KIND = "authenticated_browse"
 
 
+def _browser_executor_for_output(output: str) -> AutomationExecutor:
+    normalized = _normalize_command_text(output or "").strip()
+    if normalized.startswith(
+        (
+            "navegador abierto en chrome cdp",
+            "no pude completar la tarea de navegador deterministica",
+        )
+    ):
+        return AutomationExecutor.DETERMINISTIC_BROWSER
+    return AutomationExecutor.BROWSER_USE
+
+
 def _browser_output_indicates_failure(output: str) -> bool:
     """True when a browser-executor result is empty or a known failure sentinel."""
     text = _normalize_command_text(output or "")
     if not text:
         return True
     return any(_normalize_command_text(marker) in text for marker in _BROWSER_FAILURE_MARKERS)
+
+
+def _browser_executor_automation_outcome(
+    *,
+    output: str,
+    status: str,
+    error_text: str,
+) -> AutomationOutcome:
+    summary = (output or error_text or "Tarea de navegador sin salida").strip()
+    normalized = _normalize_command_text(summary)
+    executor = _browser_executor_for_output(summary)
+    if status == "passed":
+        return AutomationOutcome.passed(
+            surface=AutomationSurface.BROWSER,
+            executor=executor,
+            summary=summary[:180],
+        )
+    if "necesito autorizacion" in normalized or "needs approval" in normalized:
+        return AutomationOutcome.needs_approval(
+            surface=AutomationSurface.BROWSER,
+            executor=executor,
+            summary=summary[:180],
+            reason=error_text or summary[:300],
+        )
+    if "(no result)" in normalized or "sin resultado" in normalized:
+        return AutomationOutcome.failed(
+            surface=AutomationSurface.BROWSER,
+            executor=executor,
+            summary=summary[:180],
+            detail=error_text,
+            reason_code="no_result",
+            status=AutomationStatus.NO_RESULT,
+        )
+    if "timed out" in normalized or "timeout" in normalized:
+        return AutomationOutcome.failed(
+            surface=AutomationSurface.BROWSER,
+            executor=executor,
+            summary=summary[:180],
+            detail=error_text,
+            reason_code="timed_out",
+            status=AutomationStatus.TIMED_OUT,
+        )
+    if "quedo deslogueado" in normalized:
+        return AutomationOutcome.failed(
+            surface=AutomationSurface.BROWSER,
+            executor=executor,
+            summary=summary[:180],
+            detail=error_text,
+            reason_code="blocked_by_login",
+            status=AutomationStatus.BLOCKED_BY_LOGIN,
+        )
+    if "muro de verificacion" in normalized:
+        return AutomationOutcome.failed(
+            surface=AutomationSurface.BROWSER,
+            executor=executor,
+            summary=summary[:180],
+            detail=error_text,
+            reason_code="blocked_by_challenge",
+            status=AutomationStatus.BLOCKED_BY_CHALLENGE,
+        )
+    return AutomationOutcome.failed(
+        surface=AutomationSurface.BROWSER,
+        executor=executor,
+        summary=summary[:180],
+        detail=error_text,
+    )
 
 
 def _execution_mode_for_autonomous_task(mode: str, metadata: dict[str, Any]) -> str:
@@ -1212,10 +1296,16 @@ class TaskHandler:
             output = f"No pude completar la tarea de navegador: {str(exc)[:200]}"
             status = "failed"
             error_text = str(exc)[:200]
+        automation_outcome = _browser_executor_automation_outcome(
+            output=output,
+            status=status,
+            error_text=error_text,
+        )
         checkpoint = {
             "summary": (output or objective)[:180],
             "verification_status": status,
             "task_id": task_id,
+            "automation_outcome": automation_outcome.to_dict(),
         }
         if status == "failed":
             checkpoint["error"] = error_text
@@ -1228,6 +1318,14 @@ class TaskHandler:
         self._emit(
             "browser_executor_completed",
             {"session_id": session_id, "task_id": task_id, "status": status},
+        )
+        self._emit(
+            "automation_outcome_recorded",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                **automation_outcome.to_dict(),
+            },
         )
         return output or "Tarea de navegador completada sin salida."
 

@@ -816,6 +816,7 @@ class BrowserUseService:
         allowed_domains: list[str] | None = None,
         prohibited_domains: list[str] | None = None,
         allow_high_risk_actions: bool = False,
+        allowed_high_risk_actions: list[str] | None = None,
     ) -> str:
         with _preserve_browser_use_import_env():
             from browser_use import Agent, BrowserSession
@@ -838,6 +839,7 @@ class BrowserUseService:
                 action_gate=action_gate,
                 approved_domains=normalized_allowed,
                 allow_high_risk_actions=allow_high_risk_actions,
+                allowed_high_risk_actions=allowed_high_risk_actions,
             )
 
             async def _should_stop() -> bool:
@@ -895,6 +897,7 @@ class BrowserUseService:
         action_gate: Any,
         approved_domains: list[str],
         allow_high_risk_actions: bool,
+        allowed_high_risk_actions: list[str] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
         with _preserve_browser_use_import_env():
             from browser_use.agent.views import ActionResult
@@ -909,10 +912,12 @@ class BrowserUseService:
                 risk = action_gate.risk_browser_use_action(action_name, params, url=current_url)
                 risk_value = str(getattr(risk, "value", risk))
                 if risk_value == "high" and not _browser_use_high_risk_allowed(
+                    action_name=action_name,
                     url=current_url,
                     params=params,
                     approved_domains=approved_domains,
                     allow_high_risk_actions=allow_high_risk_actions,
+                    allowed_high_risk_actions=allowed_high_risk_actions,
                 ):
                     interrupt = BrowserUsePolicyInterrupt(
                         action_name=action_name,
@@ -1030,12 +1035,19 @@ async def _browser_use_current_url(browser_session: Any) -> str | None:
 
 def _browser_use_high_risk_allowed(
     *,
+    action_name: str,
     url: str | None,
     params: dict[str, Any],
     approved_domains: list[str],
     allow_high_risk_actions: bool,
+    allowed_high_risk_actions: list[str] | None = None,
 ) -> bool:
     if not allow_high_risk_actions:
+        return False
+    normalized_actions = {
+        str(action or "").strip().lower() for action in (allowed_high_risk_actions or [])
+    }
+    if normalized_actions and str(action_name or "").strip().lower() not in normalized_actions:
         return False
     if not approved_domains:
         return False
