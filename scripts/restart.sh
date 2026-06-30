@@ -6,6 +6,18 @@ source "$HOME/.claw/env" 2>/dev/null || true
 LABEL="${CLAW_LAUNCHD_LABEL:-com.pachano.claw}"
 DOMAIN="gui/$(id -u)/$LABEL"
 
+run_runtime_db_preflight() {
+  if [ "${CLAW_RESTART_SKIP_DB_PREFLIGHT:-}" = "1" ]; then
+    echo "WARN: skipping runtime DB preflight because CLAW_RESTART_SKIP_DB_PREFLIGHT=1" >&2
+    return 0
+  fi
+  db_path="${DB_PATH:-data/claw.db}"
+  backup_dir="${CLAW_RESTART_DB_BACKUP_DIR:-data/backups/restart}"
+  "$PWD/.venv/bin/python" scripts/runtime_db_preflight.py \
+    --db "$db_path" \
+    --backup-dir "$backup_dir"
+}
+
 wait_for_process() {
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     pid="$(pgrep -f "claw_v2.main" 2>/dev/null | head -n 1)"
@@ -58,6 +70,8 @@ stop_pid() {
   done
   return 1
 }
+
+run_runtime_db_preflight
 
 if launchctl print "$DOMAIN" >/dev/null 2>&1; then
   # T10 (2026-06-12): two daemons overlapping on the same SQLite WAL risk
