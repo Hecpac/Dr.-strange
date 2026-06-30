@@ -1678,6 +1678,17 @@ class TaskHandler:
                     },
                 )
                 return
+            terminal_state = {
+                "verification_status": verification_status,
+                "pending_action": "",
+                "task_queue": self._terminal_task_queue(
+                    session_id=session_id,
+                    objective=objective,
+                    mode=mode,
+                    status=terminal_status,
+                ),
+                "last_checkpoint": completed_checkpoint,
+            }
             if active_task.get("task_id") == task_id:
                 active_task["status"] = "completed" if terminal_status == "succeeded" else "failed"
                 active_task["completed_at"] = time.time()
@@ -1687,9 +1698,10 @@ class TaskHandler:
                     session_id,
                     active_task,
                     active_object,
-                    verification_status=verification_status,
-                    last_checkpoint=completed_checkpoint,
+                    **terminal_state,
                 )
+            else:
+                self._update_session_state(session_id, **terminal_state)
             if terminal_status == "succeeded":
                 self._complete_autonomous_job(
                     task_id=task_id,

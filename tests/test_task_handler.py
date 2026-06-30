@@ -1405,6 +1405,48 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             self.assertEqual(record.mode, "browse")
             self.assertEqual(record.status, "succeeded")
 
+    def test_browser_executor_terminal_failure_blocks_original_task_queue_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            objective = "Ya tengo mi cuenta creada y debe estar autenticada por defecto"
+
+            class _RecordingCoordinator:
+                def run(self, task_id, objective, research_tasks, **kwargs):
+                    raise AssertionError("browser objective must not run coordinator")
+
+            def browser_executor(_objective, *, task_id, mode):
+                return "(no result)"
+
+            handler = TaskHandler(
+                coordinator=_RecordingCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                browser_executor=browser_executor,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+            )
+            memory.update_session_state("tg-1", autonomy_mode="autonomous", step_budget=8)
+
+            reply = handler.start_autonomous_task("tg-1", objective, mode="browse")
+            task_id = reply.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=2))
+
+            state = memory.get_session_state("tg-1")
+            queue = state.get("task_queue") or []
+            queue_item = next(item for item in queue if item["summary"] == objective)
+            self.assertEqual(queue_item["status"], "blocked")
+            self.assertEqual(state.get("pending_action"), "")
+            self.assertEqual(state["active_object"]["active_task"]["status"], "failed")
+            record = ledger.get(task_id)
+            self.assertIsNotNone(record)
+            self.assertEqual(record.status, "failed")
+            self.assertEqual(record.verification_status, "failed")
+
     def test_publish_planning_language_falls_through_to_brain(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
