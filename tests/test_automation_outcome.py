@@ -100,6 +100,15 @@ class AutomationOutcomeTests(unittest.TestCase):
         self.assertEqual(outcome.status, "failed")
         self.assertEqual(outcome.reason_code, "wrong_page")
 
+    def test_legacy_malformed_url_port_fails_without_crashing(self) -> None:
+        outcome = AutomationOutcome.from_legacy_text(
+            "Navegador abierto\nURL final: https://example.com:notaport/\nCaptura guardada: shot.png",
+            objective="Abre https://example.com",
+        )
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(outcome.reason_code, "wrong_page")
+
     def test_legacy_challenge_marker_blocks(self) -> None:
         outcome = AutomationOutcome.from_legacy_text(
             "muro de verificación en la página\n"

@@ -1147,12 +1147,22 @@ class ToolRegistry:
         traversal_service = WorkspaceTraversalService(_ws)
 
         def _traversal_policy(args: dict, *, default_max_matches: int) -> TraversalPolicy:
+            def _get_int(key: str, default: int) -> int:
+                value = args.get(key)
+                if value is None:
+                    return default
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    return default
+                return parsed if parsed >= 0 else default
+
             return TraversalPolicy(
-                max_files=int(args.get("max_files", 5_000)),
-                max_matches=int(args.get("max_matches", default_max_matches)),
-                max_file_bytes=int(args.get("max_file_bytes", 1_000_000)),
-                max_total_bytes=int(args.get("max_total_bytes", 50_000_000)),
-                deadline_ms=int(args.get("deadline_ms", 2_000)),
+                max_files=_get_int("max_files", 5_000),
+                max_matches=_get_int("max_matches", default_max_matches),
+                max_file_bytes=_get_int("max_file_bytes", 1_000_000),
+                max_total_bytes=_get_int("max_total_bytes", 50_000_000),
+                deadline_ms=_get_int("deadline_ms", 2_000),
             )
 
         def _allow_readable_file(_display_path: Path, read_path: Path) -> bool:

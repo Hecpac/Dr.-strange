@@ -420,7 +420,10 @@ def _origin(url: str | None) -> str | None:
     parsed = urlsplit(url)
     if not parsed.scheme or not parsed.hostname:
         return None
-    port = parsed.port
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
     if port is None:
         port = 443 if parsed.scheme == "https" else 80 if parsed.scheme == "http" else None
     if port is None:

@@ -187,6 +187,19 @@ class SecretScanningTests(unittest.TestCase):
             self.assertEqual(result.findings, ())
             self.assertIn("binary", {skipped.reason for skipped in result.skipped})
 
+    def test_binary_file_with_late_nul_is_reported_without_scanning_rest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / "blob.bin").write_bytes(
+                f'abcd\x00{OPENAI_NAME} = "sk-live-binary-rest-1234567890"\n'.encode()
+            )
+
+            result = scan_repository(repo, config=SecretScanConfig(binary_sample_bytes=4))
+
+            self.assertEqual(result.findings, ())
+            self.assertIn("binary", {skipped.reason for skipped in result.skipped})
+
     def test_too_large_file_is_reported_without_reading(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)

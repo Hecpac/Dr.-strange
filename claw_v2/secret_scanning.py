@@ -431,6 +431,9 @@ def _scan_path(
                 skipped.append(SkippedFile(relative_text, source_set, "binary"))
                 return []
             rest = handle.read(max(config.max_file_bytes - len(sample), 0))
+            if b"\0" in rest:
+                skipped.append(SkippedFile(relative_text, source_set, "binary"))
+                return []
     except OSError:
         skipped.append(SkippedFile(relative_text, source_set, "read_failed"))
         return []

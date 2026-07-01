@@ -1342,6 +1342,41 @@ class ToolTraversalIntegrationTests(unittest.TestCase):
             self.assertEqual(result["telemetry"]["matches_returned"], 2)
             self.assertTrue(result["telemetry"]["truncated"])
 
+    def test_glob_budget_args_fall_back_safely_for_invalid_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+            expected = TraversalResult(
+                matches=(),
+                telemetry=TraversalTelemetry(),
+            )
+
+            with patch(
+                "claw_v2.tools.WorkspaceTraversalService.glob_files",
+                return_value=expected,
+            ) as call:
+                registry.execute(
+                    "Glob",
+                    {
+                        "root": str(workspace),
+                        "pattern": "**/*.py",
+                        "max_files": None,
+                        "max_matches": "0",
+                        "max_file_bytes": "bad",
+                        "max_total_bytes": -1,
+                        "deadline_ms": None,
+                    },
+                    agent_class="researcher",
+                )
+
+            policy = call.call_args.kwargs["policy"]
+            self.assertEqual(policy.max_files, 5_000)
+            self.assertEqual(policy.max_matches, 0)
+            self.assertEqual(policy.max_file_bytes, 1_000_000)
+            self.assertEqual(policy.max_total_bytes, 50_000_000)
+            self.assertEqual(policy.deadline_ms, 2_000)
+
     def test_grep_legacy_matches_respects_max_matches_and_exposes_telemetry(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir) / "workspace"
