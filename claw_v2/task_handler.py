@@ -38,10 +38,12 @@ from claw_v2.bot_helpers import (
     detect_meta_introspection_request,
     has_explicit_implementation_request,
 )
+from claw_v2.cli_maintenance import CliMaintenanceResult, run_cli_maintenance_update
 from claw_v2.coordinator import CoordinatorResult
 from claw_v2.evidence_ledger import EvidenceRef, record_claim
 from claw_v2.f2_recovery import F2RecoveryPlan, F2RecoveryStatus, plan_f2_recovery
 from claw_v2.goal_contract import create_goal
+from claw_v2.maintenance import job_claim_block_reason
 from claw_v2.model_registry import model_overrides_from_state
 from claw_v2.verification import (
     DimensionRawResponse,
@@ -243,6 +245,7 @@ class TaskHandler:
         job_service: Any | None = None,
         router: Any | None = None,
         browser_executor: Callable[..., str] | None = None,
+        cli_maintenance_runner: Callable[..., CliMaintenanceResult] | None = None,
         get_session_state: Callable[[str], dict[str, Any]],
         update_session_state: Callable[..., Any],
         merge_active_object: Callable[..., Any] | None = None,
@@ -263,6 +266,7 @@ class TaskHandler:
         # (BrowserUseService / Playwright in the daemon venv) instead. None ->
         # fall back to the coordinator (current behavior).
         self.browser_executor = browser_executor
+        self._cli_maintenance_runner = cli_maintenance_runner or run_cli_maintenance_update
         self._get_session_state = get_session_state
         self._update_session_state = update_session_state
         self._merge_active_object = merge_active_object
@@ -411,7 +415,7 @@ class TaskHandler:
         verify: str | None = None,
         delegation_metadata: dict[str, Any] | None = None,
     ) -> str:
-        if self.coordinator is None:
+        if self.coordinator is None and task_kind != "maintenance_update_tools":
             return "coordinator unavailable"
         if self._reject_non_actionable_objective(
             objective, session_id=session_id, source="start_autonomous_task"
@@ -466,6 +470,8 @@ class TaskHandler:
             "status": "running",
             "started_at": time.time(),
         }
+        if task_kind:
+            active_object["active_task"]["task_kind"] = task_kind
         if goal_id:
             active_object["active_task"]["goal_id"] = goal_id
         if delegation_metadata:
@@ -903,6 +909,14 @@ class TaskHandler:
         run_id: str | None = None,
         resumed: bool = False,
     ) -> str:
+        task_kind = self._task_kind_for_task(session_id=session_id, task_id=task_id)
+        if task_kind == "maintenance_update_tools":
+            return self._run_cli_maintenance_task(
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                task_id=task_id,
+            )
         # Option (b), 2026-06-13: CDP/browser objectives run via the daemon's
         # in-process browser executor (Playwright in the venv), NOT the Codex
         # coordinator whose workers are network-denied (--sandbox workspace-write)
@@ -1042,6 +1056,20 @@ class TaskHandler:
             last_checkpoint=checkpoint,
         )
         return _format_coordinator_response(result, checkpoint=checkpoint, forced=forced)
+
+    def _task_kind_for_task(self, *, session_id: str, task_id: str) -> str:
+        if self.task_ledger is not None:
+            record = self.task_ledger.get(task_id)
+            if record is not None:
+                task_kind = (record.metadata or {}).get("task_kind")
+                if task_kind:
+                    return str(task_kind)
+        state = self._get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_task = dict(active_object.get("active_task") or {})
+        if active_task.get("task_id") == task_id and active_task.get("task_kind"):
+            return str(active_task["task_kind"])
+        return ""
 
     def _legacy_resume_start_phase(self, task_id: str) -> str | None:
         try:
@@ -1280,6 +1308,100 @@ class TaskHandler:
             },
         )
         return output or "Tarea de navegador completada sin salida."
+
+    def _run_cli_maintenance_task(
+        self,
+        *,
+        session_id: str,
+        objective: str,
+        mode: str,
+        task_id: str,
+    ) -> str:
+        self._emit(
+            "cli_maintenance_started",
+            {"session_id": session_id, "task_id": task_id, "objective": objective[:200]},
+        )
+        try:
+            result = self._cli_maintenance_runner(cwd=self._workspace_root, observe=self.observe)
+        except Exception as exc:  # noqa: BLE001 - maintenance failures must terminalize cleanly
+            logger.exception("cli maintenance failed for %s", task_id)
+            result = CliMaintenanceResult(
+                verification_status="failed",
+                summary=f"CLI maintenance failed: {type(exc).__name__}",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        verification_status = result.verification_status
+        if verification_status not in {"passed", "failed"}:
+            verification_status = "failed"
+        tool_versions = {
+            str(name): {str(key): str(value) for key, value in dict(values).items()}
+            for name, values in dict(result.tool_versions).items()
+        }
+        checkpoint: dict[str, Any] = {
+            "summary": result.summary,
+            "verification_status": verification_status,
+            "task_id": task_id,
+            "operation": "maintenance_update_tools",
+            "tools": tool_versions,
+            "commands_run": [" ".join(command) for command in result.commands_run[:20]],
+            "installed_packages": list(result.installed_packages),
+        }
+        if result.error or verification_status == "failed":
+            checkpoint["error"] = result.error or "cli maintenance verification failed"
+        self._update_session_state(
+            session_id,
+            mode=mode,
+            verification_status=verification_status,
+            pending_action="",
+            task_queue=self._terminal_task_queue(
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                status=verification_status,
+            ),
+            last_checkpoint=checkpoint,
+        )
+        self._emit(
+            "cli_maintenance_completed",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "verification_status": verification_status,
+                "installed_packages": list(result.installed_packages),
+                **({"error": checkpoint["error"]} if checkpoint.get("error") else {}),
+            },
+        )
+        if verification_status == "passed":
+            return (
+                f"Listo. Cerré la tarea `{task_id}`.\n"
+                f"{result.summary}\n"
+                "Verification Status: passed"
+            )
+        return (
+            f"No pude cerrar bien la tarea `{task_id}`.\n"
+            f"{result.summary}\n"
+            f"Error: {checkpoint.get('error', 'cli maintenance failed')}"
+        )
+
+    def _terminal_task_queue(
+        self,
+        *,
+        session_id: str,
+        objective: str,
+        mode: str,
+        status: str,
+    ) -> list[dict[str, Any]]:
+        state = self._get_session_state(session_id)
+        current_queue = state.get("task_queue") or []
+        return self.upsert_task_queue_entry(
+            current_queue,
+            summary=objective,
+            mode=mode,
+            status=status,
+            source="coordinator",
+            priority=0,
+            depends_on=self.derive_task_dependencies(current_queue, summary=objective),
+        )
 
     def _run_autonomous_task(
         self,
@@ -1606,6 +1728,17 @@ class TaskHandler:
                     },
                 )
                 return
+            terminal_state = {
+                "verification_status": verification_status,
+                "pending_action": "",
+                "task_queue": self._terminal_task_queue(
+                    session_id=session_id,
+                    objective=objective,
+                    mode=mode,
+                    status=terminal_status,
+                ),
+                "last_checkpoint": completed_checkpoint,
+            }
             if active_task.get("task_id") == task_id:
                 active_task["status"] = "completed" if terminal_status == "succeeded" else "failed"
                 active_task["completed_at"] = time.time()
@@ -1615,9 +1748,10 @@ class TaskHandler:
                     session_id,
                     active_task,
                     active_object,
-                    verification_status=verification_status,
-                    last_checkpoint=completed_checkpoint,
+                    **terminal_state,
                 )
+            else:
+                self._update_session_state(session_id, **terminal_state)
             if terminal_status == "succeeded":
                 self._complete_autonomous_job(
                     task_id=task_id,
@@ -2339,6 +2473,120 @@ class TaskHandler:
             },
         )
 
+    def _mark_job_claim_blocked_task_state(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        objective: str,
+        mode: str,
+        job_id: str | None,
+        job_status: str,
+        reason: str,
+    ) -> None:
+        error = f"job_claim_blocked:{reason or job_status or 'unknown'}"
+        summary = f"Autonomous task blocked before execution: {objective[:180]}"
+        checkpoint = {
+            "summary": summary,
+            "verification_status": "blocked",
+            "reason": "job_claim_blocked",
+            "task_id": task_id,
+            "job_id": job_id or "",
+            "job_status": job_status,
+            "error": error,
+        }
+        state = self._get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_task = dict(active_object.get("active_task") or {})
+        if active_task.get("task_id") == task_id:
+            active_task["status"] = "blocked"
+            active_task["error"] = error
+            active_task["completed_at"] = time.time()
+            active_object["active_task"] = active_task
+        self._write_active_task(
+            session_id,
+            active_task if active_task.get("task_id") == task_id else None,
+            active_object,
+            verification_status="blocked",
+            pending_action="",
+            task_queue=self._terminal_task_queue(
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                status="blocked",
+            ),
+            last_checkpoint=checkpoint,
+        )
+        self._fail_autonomous_job(
+            task_id=task_id,
+            job_id=job_id,
+            error=error,
+            checkpoint={
+                "operation": "coordinator",
+                "mode": mode,
+                "session_id": session_id,
+                "verification_status": "blocked",
+                "reason": "job_claim_blocked",
+                "job_status": job_status,
+            },
+        )
+        response = f"No pude iniciar la tarea `{task_id}`.\nError: {error}"
+        if self._store_message is not None:
+            self._store_message(session_id, "assistant", response[:4000])
+        if self.task_ledger is not None:
+            artifacts = self._outcome_artifacts(
+                task_id=task_id,
+                session_id=session_id,
+                status="failed",
+                summary=summary,
+                objective=objective,
+                mode=mode,
+                error=error,
+                verification_status="blocked",
+                extra={"response_preview": response[:1000], "job_status": job_status},
+            )
+            self.task_ledger.mark_terminal(
+                task_id,
+                status="failed",
+                summary=summary,
+                error=error,
+                verification_status="blocked",
+                artifacts=artifacts,
+            )
+        self._emit(
+            "autonomous_task_failed",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "objective": objective,
+                "response": response,
+                "verification_status": "blocked",
+                "terminal_status": "failed",
+                "error": error,
+                "attempt": self._task_attempt(task_id),
+            },
+        )
+        goal_id = self._p0_goal_id_for_task(
+            task_id, session_id=session_id, objective=objective, mode=mode
+        )
+        claim_id = self._p0_record_task_claim(
+            goal_id=goal_id,
+            task_id=task_id,
+            text=f"Autonomous task {task_id} was blocked before execution: {reason}.",
+            status="failed",
+        )
+        self._p0_emit_task_event(
+            event_type="action_failed",
+            goal_id=goal_id,
+            session_id=session_id,
+            task_id=task_id,
+            objective=objective,
+            mode=mode,
+            status="failure",
+            error=error,
+            claims=[claim_id] if claim_id else [],
+        )
+
     def _task_attempt(self, task_id: str) -> int:
         """Attempt number for AM-NOTIFY dedupe — ledger resume_count, else 0."""
         if self.task_ledger is None:
@@ -3017,7 +3265,39 @@ class TaskHandler:
                 },
             )
             return False
-        return True
+        block_reason = self._job_claim_block_reason()
+        if (
+            block_reason
+            or record is None
+            or record.status in {"queued", "retrying", "waiting_approval"}
+        ):
+            self._mark_job_claim_blocked_task_state(
+                session_id=session_id,
+                task_id=task_id,
+                objective=objective,
+                mode=mode,
+                job_id=job_id,
+                job_status=record.status if record is not None else "missing",
+                reason=block_reason or "claim_unavailable",
+            )
+            return False
+        self._emit(
+            "autonomous_task_job_skipped",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "job_id": job_id,
+                "job_status": record.status,
+                "reason": "claim_unavailable",
+            },
+        )
+        return False
+
+    def _job_claim_block_reason(self) -> str:
+        if self.job_service is None:
+            return ""
+        reason = getattr(self.job_service, "_safe_mode_reason", None) or job_claim_block_reason()
+        return str(reason or "")
 
     def _complete_autonomous_job(
         self, *, task_id: str, job_id: str | None, result: dict[str, Any]

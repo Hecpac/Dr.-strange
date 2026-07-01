@@ -1938,21 +1938,26 @@ def _setup_scheduler(
     if daemon is not None and job_service is not None:
 
         def _observe_maintenance_handler() -> None:
-            # Off-tick maintenance: cap the table to the absolute ceiling, then
-            # VACUUM to reclaim freed pages. Both are blocking-but-local; the
-            # background runner keeps them off daemon.tick (Core Invariant 1)
-            # and the maintenance-window gate keeps the heavy VACUUM out of
-            # peak hours. See test_vacuum_only_runs_off_tick.
+            # Off-tick maintenance: cap the table to the absolute ceiling.
+            # VACUUM is a heavier dedicated-connection rewrite and stays
+            # opt-in via CLAW_OBSERVE_VACUUM_ENABLED.
             if _maintenance_skip():
                 return
             deleted = observe.prune(
                 retention_days=OBSERVE_RETENTION_DAYS,
                 max_total_rows=OBSERVE_MAX_TOTAL_ROWS,
             )
-            observe.maintenance_vacuum()
+            vacuum_ran = False
+            if config.observe_vacuum_enabled:
+                observe.maintenance_vacuum()
+                vacuum_ran = True
             observe.emit(
                 "observe_maintenance",
-                payload={"deleted_rows": deleted, "max_total_rows": OBSERVE_MAX_TOTAL_ROWS},
+                payload={
+                    "deleted_rows": deleted,
+                    "max_total_rows": OBSERVE_MAX_TOTAL_ROWS,
+                    "vacuum_ran": vacuum_ran,
+                },
             )
 
         daemon.register_background_job_runner(

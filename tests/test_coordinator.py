@@ -917,7 +917,7 @@ class RetryAndContextTests(unittest.TestCase):
         self.assertIn("Estado Técnico Consolidado", verify_prompts[0])
         self.assertIn("i1: result", verify_prompts[0])
 
-    def test_verification_surfaces_implementation_errors(self) -> None:
+    def test_verification_surfaces_mixed_implementation_errors(self) -> None:
         from claw_v2.adapters.base import AdapterError
 
         svc, router, *_ = _make_service()
@@ -925,7 +925,7 @@ class RetryAndContextTests(unittest.TestCase):
 
         def fake_ask(prompt, **kwargs):
             lane = kwargs.get("lane")
-            if lane == "worker":
+            if lane == "worker" and "fail build" in prompt:
                 raise AdapterError("Codex CLI timed out after 120s")
             captured.append(prompt)
             return MagicMock(content="ok")
@@ -933,7 +933,10 @@ class RetryAndContextTests(unittest.TestCase):
         router.ask.side_effect = fake_ask
 
         research = [WorkerTask(name="r1", instruction="find")]
-        impl = [WorkerTask(name="i1", instruction="build", lane="worker")]
+        impl = [
+            WorkerTask(name="i1", instruction="fail build", lane="worker"),
+            WorkerTask(name="i2", instruction="build ok", lane="worker"),
+        ]
         verify = [WorkerTask(name="v1", instruction="check", lane="verifier")]
         svc.run("t", "obj", research, impl, verify)
 
@@ -941,6 +944,64 @@ class RetryAndContextTests(unittest.TestCase):
         self.assertEqual(len(verify_prompts), 1)
         self.assertIn("Artefacto de Referencia en Scratch", verify_prompts[0])
         self.assertIn("i1: ERROR: Codex CLI timed out after 120s", verify_prompts[0])
+
+    def test_research_phase_all_worker_errors_fails_closed_before_synthesis(self) -> None:
+        from claw_v2.adapters.base import AdapterError
+
+        svc, router, observe, _ = _make_service()
+        router.ask.side_effect = AdapterError("Codex CLI timed out after 90.0s")
+
+        result = svc.run(
+            "t-research-fail",
+            "obj",
+            [WorkerTask(name="scope_and_risks", instruction="research", lane="research")],
+            implementation_tasks=[
+                WorkerTask(name="implement_change", instruction="build", lane="worker")
+            ],
+            verification_tasks=[
+                WorkerTask(name="verify_change", instruction="check", lane="verifier")
+            ],
+        )
+
+        self.assertIn("research_phase_failed", result.error)
+        self.assertIn("Codex CLI timed out after 90.0s", result.error)
+        self.assertNotIn("implementation", result.phase_results)
+        self.assertNotIn("verification", result.phase_results)
+        self.assertEqual(router.ask.call_count, 1)
+        failed_events = [
+            call
+            for call in observe.emit.call_args_list
+            if call.args and call.args[0] == "coordinator_phase_failed"
+        ]
+        self.assertEqual(len(failed_events), 1)
+
+    def test_implementation_phase_all_worker_errors_fails_closed_before_verification(self) -> None:
+        from claw_v2.adapters.base import AdapterError
+
+        svc, router, *_ = _make_service()
+
+        def fake_ask(prompt, **kwargs):
+            if kwargs.get("lane") == "worker":
+                raise AdapterError("Codex CLI timed out after 180.0s")
+            return MagicMock(content="ok")
+
+        router.ask.side_effect = fake_ask
+
+        result = svc.run(
+            "t-impl-fail",
+            "obj",
+            [WorkerTask(name="scope_and_risks", instruction="research", lane="research")],
+            implementation_tasks=[
+                WorkerTask(name="implement_change", instruction="build", lane="worker")
+            ],
+            verification_tasks=[
+                WorkerTask(name="verify_change", instruction="check", lane="verifier")
+            ],
+        )
+
+        self.assertIn("implementation_phase_failed", result.error)
+        self.assertIn("Codex CLI timed out after 180.0s", result.error)
+        self.assertNotIn("verification", result.phase_results)
 
 
 class ResumeFromScratchTests(unittest.TestCase):
@@ -1262,6 +1323,7 @@ class AbortEventTests(unittest.TestCase):
             task_name = evidence.get("coordinator_task")
             if task_name == "critical":
                 critical_started.set()
+                sibling_attempted.wait(timeout=2)
                 return MagicMock(
                     content="CRITICAL ERROR EN WORKER\nTraceback: broken environment"
                 )
