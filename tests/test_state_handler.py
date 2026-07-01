@@ -180,6 +180,35 @@ class StateHandlerRegressionTests(unittest.TestCase):
         self.assertEqual(state["task_queue"][0]["status"], "blocked")
         self.assertEqual(state["verification_status"], "blocked")
 
+    def test_proceed_gate_fires_on_pending_approvals_after_sibling_clobbers_status(self) -> None:
+        # issue #166: a concurrent sibling task's terminal finalize rewrites the
+        # session-global `verification_status` away from "awaiting_approval"
+        # (it is written unconditionally in the finalize path). The approval
+        # reminder must STILL fire on a proceed request — `pending_approvals`
+        # survives every clobber path. Fails if the gate regresses to keying
+        # only on `verification_status`.
+        memory, handler = self._handler()
+        memory.update_session_state(
+            "s1",
+            verification_status="passed",  # clobbered by a concurrent sibling's finalize
+            step_budget=8,
+            pending_approvals=[
+                {
+                    "approval_id": "appr-B",
+                    "action": "coordinated_task",
+                    "summary": "tarea B requiere aprobación",
+                    "approve_command": "/task_approve appr-B tok-B",
+                    "abort_command": "/task_abort appr-B",
+                }
+            ],
+        )
+
+        response = handler.maybe_resolve_stateful_followup("procede", session_id="s1")
+
+        self.assertIsInstance(response, str)
+        self.assertIn("aprobación pendiente antes de continuar", response)
+        self.assertIn("appr-B", response)
+
     def test_assistant_turn_summary_does_not_overwrite_rolling_summary(self) -> None:
         memory, handler = self._handler()
         memory.update_session_state("s1", rolling_summary="resumen acumulado anterior")
