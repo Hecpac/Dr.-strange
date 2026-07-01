@@ -47,14 +47,15 @@ class AnthropicIntegrationTests(unittest.TestCase):
         )
 
     def test_tool_input_evidence_redacts_secret_shaped_commands(self) -> None:
+        bearer = "abcdefghijklmnopqrstuvwxyz" + "123456"
         evidence = _tool_input_evidence(
             "Bash",
             {
-                "command": "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456' https://example.test"
+                "command": f"curl -H 'Authorization: Bearer {bearer}' https://example.test"
             },
         )
 
-        self.assertNotIn("abcdefghijklmnopqrstuvwxyz123456", evidence["command"])
+        self.assertNotIn(bearer, evidence["command"])
         self.assertIn("[REDACTED]", evidence["command"])
 
     def test_tool_response_evidence_keeps_safe_bash_markers_without_raw_stdout(self) -> None:

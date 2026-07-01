@@ -27,6 +27,15 @@ from claw_v2.task_handler import TaskHandler
 from claw_v2.task_ledger import TaskLedger
 
 
+def _browser_success_text(
+    *,
+    url: str = "https://example.com/",
+    screenshot: str = "/tmp/browser-shot.png",
+    summary: str = "Navegador abierto",
+) -> str:
+    return f"{summary}\nURL final: {url}\nCaptura guardada: {screenshot}"
+
+
 class _BlockingCoordinator:
     def __init__(self) -> None:
         self.started = threading.Event()
@@ -60,6 +69,30 @@ class _BlockingCoordinator:
 
 
 class TaskHandlerTests(unittest.TestCase):
+    def test_internal_autonomous_cancel_uses_request_cancel_with_formal_leases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(Path(tmpdir) / "claw.db", formal_leases_enabled=True)
+            created = jobs.enqueue(kind="pipeline.issue", metadata={"owner": "runner"})
+            handler = TaskHandler.__new__(TaskHandler)
+            handler.job_service = jobs
+
+            handler._cancel_autonomous_job(
+                "task-1",
+                reason="cancelled_before_start",
+                job_id=created.job_id,
+            )
+
+            persisted = jobs.get(created.job_id)
+            self.assertEqual(persisted.status, "queued")
+            self.assertEqual(
+                persisted.metadata["cancel_request"]["requested_by"],
+                "task_handler",
+            )
+            self.assertEqual(
+                persisted.metadata["cancel_request"]["reason"],
+                "cancelled_before_start",
+            )
+
     def test_passed_verification_is_rejected_when_result_says_not_verified(self) -> None:
         self.assertTrue(
             TaskHandler._response_contradicts_passed_verification(
@@ -1352,7 +1385,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
 
             def fake_exec(objective, *, task_id, mode):
                 recorded["executor"] = (objective, task_id, mode)
-                return "feed capturado: 30 posts"
+                return _browser_success_text(summary="feed capturado: 30 posts")
 
             handler = self._handler(Path(tmpdir), recorded, browser_executor=fake_exec)
             out = handler._run_coordinated_task(
@@ -1378,7 +1411,11 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
 
             def fake_exec(objective, *, task_id, mode):
                 recorded["executor"] = (objective, task_id, mode)
-                return "Instagram visible y verificado"
+                return _browser_success_text(
+                    url="https://www.instagram.com/",
+                    screenshot="/tmp/instagram.png",
+                    summary="Instagram visible y verificado",
+                )
 
             handler = TaskHandler(
                 coordinator=_RecordingCoordinator(),
@@ -1521,7 +1558,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
 
             def fake_exec(objective, *, task_id, mode):
                 recorded["executor"] = (objective, task_id, mode)
-                return "feed capturado: 30 posts"
+                return _browser_success_text(summary="feed capturado: 30 posts")
 
             handler = self._handler(Path(tmpdir), recorded, browser_executor=fake_exec)
             out = handler._run_coordinated_task(
@@ -1591,7 +1628,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
 
             def fake_exec(objective, *, task_id, mode):
                 calls["executor"] += 1
-                return "feed capturado: 30 posts"
+                return _browser_success_text(summary="feed capturado: 30 posts")
 
             def flaky_update(session_id, **kwargs):
                 if kwargs.get("verification_status") == "passed" and calls["failed_update"] == 0:
@@ -1690,7 +1727,114 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             event_types = [e["event_type"] for e in handler.observe.recent_events(limit=50)]
             self.assertIn("autonomous_task_failed", event_types)
             self.assertNotIn("autonomous_task_pending", event_types)
+            outcome_events = [
+                e
+                for e in handler.observe.recent_events(limit=50)
+                if e["event_type"] == "automation_outcome_recorded"
+            ]
+            self.assertEqual(outcome_events[-1]["payload"]["status"], "no_result")
+            self.assertEqual(outcome_events[-1]["payload"]["reason_code"], "no_result")
             record = ledger.get("t-nores")
+            self.assertEqual(record.status, "failed")
+
+    def test_browser_executor_text_success_without_evidence_does_not_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir),
+                browser_executor=lambda o, *, task_id, mode: "Navegador abierto",
+            )
+            self._run_autonomous_browser(
+                handler, ledger, jobs, task_id="t-no-evidence", objective="Abre la web"
+            )
+
+            outcome_events = [
+                e
+                for e in handler.observe.recent_events(limit=50)
+                if e["event_type"] == "automation_outcome_recorded"
+            ]
+            payload = outcome_events[-1]["payload"]
+            self.assertEqual(payload["status"], "no_result")
+            self.assertEqual(payload["reason_code"], "missing_final_url")
+            record = ledger.get("t-no-evidence")
+            self.assertEqual(record.status, "failed")
+
+    def test_browser_executor_url_outside_objective_fails_wrong_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir),
+                browser_executor=lambda o, *, task_id, mode: _browser_success_text(
+                    url="https://evil.example/",
+                    summary="Navegador abierto",
+                ),
+            )
+            self._run_autonomous_browser(
+                handler,
+                ledger,
+                jobs,
+                task_id="t-wrong-page",
+                objective="Abre https://example.com",
+            )
+
+            outcome_events = [
+                e
+                for e in handler.observe.recent_events(limit=50)
+                if e["event_type"] == "automation_outcome_recorded"
+            ]
+            payload = outcome_events[-1]["payload"]
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["reason_code"], "wrong_page")
+            record = ledger.get("t-wrong-page")
+            self.assertEqual(record.status, "failed")
+
+    def test_browser_executor_login_marker_is_blocked_not_passed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir),
+                browser_executor=lambda o, *, task_id, mode: (
+                    "accounts/login solicita iniciar sesión\n"
+                    "URL final: https://example.com/accounts/login\n"
+                    "Captura guardada: /tmp/login.png"
+                ),
+            )
+            self._run_autonomous_browser(
+                handler, ledger, jobs, task_id="t-login", objective="Abre https://example.com"
+            )
+
+            outcome_events = [
+                e
+                for e in handler.observe.recent_events(limit=50)
+                if e["event_type"] == "automation_outcome_recorded"
+            ]
+            payload = outcome_events[-1]["payload"]
+            self.assertEqual(payload["status"], "needs_login")
+            self.assertEqual(payload["reason_code"], "login_required")
+            record = ledger.get("t-login")
+            self.assertEqual(record.status, "failed")
+            self.assertEqual(record.verification_status, "failed")
+
+    def test_browser_executor_needs_approval_records_structured_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir),
+                browser_executor=lambda o, *, task_id, mode: (
+                    "No pude completar la tarea de navegador: necesito autorización "
+                    "explícita para continuar con una acción de alto riesgo.\n"
+                    "Acción: upload_file\n"
+                    "Dominio: x.com"
+                ),
+            )
+            self._run_autonomous_browser(
+                handler, ledger, jobs, task_id="t-approval", objective="repaso por X"
+            )
+            outcome_events = [
+                e
+                for e in handler.observe.recent_events(limit=50)
+                if e["event_type"] == "automation_outcome_recorded"
+            ]
+            payload = outcome_events[-1]["payload"]
+            self.assertEqual(payload["status"], "needs_approval")
+            self.assertEqual(payload["reason_code"], "policy_denied")
+            record = ledger.get("t-approval")
             self.assertEqual(record.status, "failed")
 
     def test_browser_executor_refusal_text_terminates_failed_not_passed(self) -> None:
@@ -1715,7 +1859,9 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             handler, ledger, jobs = self._autonomous_handler(
                 Path(tmpdir),
-                browser_executor=lambda o, *, task_id, mode: "Capturé 32 posts del timeline: ...",
+                browser_executor=lambda o, *, task_id, mode: _browser_success_text(
+                    summary="Capturé 32 posts del timeline: ..."
+                ),
             )
             self._run_autonomous_browser(
                 handler, ledger, jobs, task_id="t-ok", objective="repaso por X"

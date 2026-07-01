@@ -23,6 +23,7 @@ from claw_v2.sandbox import SandboxPolicy
 from claw_v2.sanitizer import extract_structured, sanitize
 from claw_v2.tool_policy import validate_workspace_path
 from claw_v2.types import AgentClass, SanitizedContent
+from claw_v2.workspace_traversal import TraversalPolicy, WorkspaceTraversalService
 
 logger = logging.getLogger(__name__)
 
@@ -1143,36 +1144,57 @@ class ToolRegistry:
             path.write_text(updated, encoding="utf-8")
             return {"path": str(path), "replaced": True}
 
+        traversal_service = WorkspaceTraversalService(_ws)
+
+        def _traversal_policy(args: dict, *, default_max_matches: int) -> TraversalPolicy:
+            def _get_int(key: str, default: int) -> int:
+                value = args.get(key)
+                if value is None:
+                    return default
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    return default
+                return parsed if parsed >= 0 else default
+
+            return TraversalPolicy(
+                max_files=_get_int("max_files", 5_000),
+                max_matches=_get_int("max_matches", default_max_matches),
+                max_file_bytes=_get_int("max_file_bytes", 1_000_000),
+                max_total_bytes=_get_int("max_total_bytes", 50_000_000),
+                deadline_ms=_get_int("deadline_ms", 2_000),
+            )
+
+        def _allow_readable_file(_display_path: Path, read_path: Path) -> bool:
+            try:
+                _readable_path(read_path)
+            except PermissionError:
+                return False
+            return True
+
         def glob_files(args: dict) -> dict:
             root = _safe_path(args.get("root", registry.workspace_root))
             pattern = args.get("pattern", "**/*")
-            matches = [str(path) for path in root.glob(pattern)]
-            return {"matches": matches[:200]}
+            result = traversal_service.glob_files(
+                root=root,
+                pattern=pattern,
+                policy=_traversal_policy(args, default_max_matches=200),
+                file_filter=_allow_readable_file,
+            )
+            return result.to_dict()
 
         def grep_files(args: dict) -> dict:
             root = _readable_path(args.get("root", registry.workspace_root))
             needle = args.get("query", "")
-            matches: list[dict] = []
-            candidates = [root] if root.is_file() else root.rglob("*")
-            for path in candidates:
-                if not path.is_file():
-                    continue
-                try:
-                    readable = _readable_path(path)
-                except PermissionError:
-                    continue
-                try:
-                    content = readable.read_text(encoding="utf-8")
-                except UnicodeDecodeError:
-                    continue
-                for line_number, line in enumerate(content.splitlines(), start=1):
-                    if needle in line:
-                        matches.append(
-                            {"path": str(readable), "line_number": line_number, "line": line}
-                        )
-                        if len(matches) >= 100:
-                            return {"matches": matches}
-            return {"matches": matches}
+            result = traversal_service.grep_files(
+                root=root,
+                query=str(needle),
+                pattern=str(args.get("pattern", "**/*")),
+                policy=_traversal_policy(args, default_max_matches=200),
+                file_filter=_allow_readable_file,
+                case_sensitive=args.get("case_sensitive") is not False,
+            )
+            return result.to_dict()
 
         def search_memory(args: dict) -> dict:
             if memory is None:
@@ -1288,6 +1310,9 @@ class ToolRegistry:
                     "properties": {
                         "pattern": {"type": "string", "description": "Glob pattern (e.g. **/*.py)"},
                         "root": {"type": "string", "description": "Root directory (optional)"},
+                        "max_files": {"type": "integer"},
+                        "max_matches": {"type": "integer"},
+                        "deadline_ms": {"type": "integer"},
                     },
                     "required": ["pattern"],
                 },
@@ -1305,6 +1330,13 @@ class ToolRegistry:
                     "properties": {
                         "query": {"type": "string", "description": "Text to search for"},
                         "root": {"type": "string", "description": "Root directory (optional)"},
+                        "pattern": {"type": "string", "description": "File glob pattern (optional)"},
+                        "case_sensitive": {"type": "boolean"},
+                        "max_files": {"type": "integer"},
+                        "max_matches": {"type": "integer"},
+                        "max_file_bytes": {"type": "integer"},
+                        "max_total_bytes": {"type": "integer"},
+                        "deadline_ms": {"type": "integer"},
                     },
                     "required": ["query"],
                 },

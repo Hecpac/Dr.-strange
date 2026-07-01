@@ -25,6 +25,7 @@ from claw_v2.tools import (
 )
 from claw_v2.observation_window import ObservationWindowState
 from claw_v2.verification.local_tool_contracts import LOCAL_TOOL_SUCCESS_CONDITIONS
+from claw_v2.workspace_traversal import TraversalResult, TraversalTelemetry
 
 
 class ToolRegistryTests(unittest.TestCase):
@@ -1270,6 +1271,169 @@ class BrowserReadToolsTests(unittest.TestCase):
         self.assertTrue(TOOL_POLICIES["BrowserType"].requires_human)
         self.assertTrue(TOOL_POLICIES["BrowserNavigate"].read_only)
         self.assertFalse(TOOL_POLICIES["BrowserScreenshot"].read_only)
+
+
+class ToolTraversalIntegrationTests(unittest.TestCase):
+    def test_glob_uses_workspace_traversal_service(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+            expected = TraversalResult(
+                matches=(str(workspace / "a.py"),),
+                telemetry=TraversalTelemetry(files_scanned=1, matches_returned=1),
+            )
+
+            with patch(
+                "claw_v2.tools.WorkspaceTraversalService.glob_files",
+                return_value=expected,
+            ) as call:
+                result = registry.execute(
+                    "Glob",
+                    {"root": str(workspace), "pattern": "**/*.py"},
+                    agent_class="researcher",
+                )
+
+            call.assert_called_once()
+            self.assertEqual(result["matches"], [str(workspace / "a.py")])
+            self.assertEqual(result["telemetry"]["matches_returned"], 1)
+
+    def test_grep_uses_workspace_traversal_service(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+            expected = TraversalResult(
+                matches=(
+                    {"path": str(workspace / "a.txt"), "line_number": 1, "line": "needle"},
+                ),
+                telemetry=TraversalTelemetry(files_scanned=1, matches_returned=1),
+            )
+
+            with patch(
+                "claw_v2.tools.WorkspaceTraversalService.grep_files",
+                return_value=expected,
+            ) as call:
+                result = registry.execute(
+                    "Grep",
+                    {"root": str(workspace), "query": "needle"},
+                    agent_class="researcher",
+                )
+
+            call.assert_called_once()
+            self.assertEqual(len(result["matches"]), 1)
+            self.assertEqual(result["telemetry"]["matches_returned"], 1)
+
+    def test_glob_legacy_matches_respects_max_matches_and_exposes_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            for idx in range(5):
+                (workspace / f"file_{idx}.py").write_text("x", encoding="utf-8")
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            result = registry.execute(
+                "Glob",
+                {"root": str(workspace), "pattern": "**/*.py", "max_matches": 2},
+                agent_class="researcher",
+            )
+
+            self.assertEqual(len(result["matches"]), 2)
+            self.assertEqual(result["telemetry"]["matches_returned"], 2)
+            self.assertTrue(result["telemetry"]["truncated"])
+
+    def test_glob_budget_args_fall_back_safely_for_invalid_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            registry = ToolRegistry.default(workspace_root=workspace)
+            expected = TraversalResult(
+                matches=(),
+                telemetry=TraversalTelemetry(),
+            )
+
+            with patch(
+                "claw_v2.tools.WorkspaceTraversalService.glob_files",
+                return_value=expected,
+            ) as call:
+                registry.execute(
+                    "Glob",
+                    {
+                        "root": str(workspace),
+                        "pattern": "**/*.py",
+                        "max_files": None,
+                        "max_matches": "0",
+                        "max_file_bytes": "bad",
+                        "max_total_bytes": -1,
+                        "deadline_ms": None,
+                    },
+                    agent_class="researcher",
+                )
+
+            policy = call.call_args.kwargs["policy"]
+            self.assertEqual(policy.max_files, 5_000)
+            self.assertEqual(policy.max_matches, 0)
+            self.assertEqual(policy.max_file_bytes, 1_000_000)
+            self.assertEqual(policy.max_total_bytes, 50_000_000)
+            self.assertEqual(policy.deadline_ms, 2_000)
+
+    def test_grep_legacy_matches_respects_max_matches_and_exposes_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            (workspace / "note.txt").write_text("needle\nneedle\n", encoding="utf-8")
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            result = registry.execute(
+                "Grep",
+                {"root": str(workspace), "query": "needle", "max_matches": 1},
+                agent_class="researcher",
+            )
+
+            self.assertEqual(len(result["matches"]), 1)
+            self.assertEqual(result["telemetry"]["matches_returned"], 1)
+            self.assertTrue(result["telemetry"]["truncated"])
+
+    def test_glob_skips_default_heavy_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            (workspace / "src").mkdir()
+            (workspace / "node_modules").mkdir()
+            (workspace / "src" / "app.py").write_text("x", encoding="utf-8")
+            (workspace / "node_modules" / "pkg.py").write_text("x", encoding="utf-8")
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            result = registry.execute(
+                "Glob",
+                {"root": str(workspace), "pattern": "**/*.py"},
+                agent_class="researcher",
+            )
+
+            self.assertEqual([Path(path).name for path in result["matches"]], ["app.py"])
+            self.assertIn("skip_dir", result["telemetry"]["skipped_reasons"])
+
+    def test_grep_respects_file_byte_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir) / "workspace"
+            workspace.mkdir()
+            (workspace / "big.txt").write_text("a" * 100 + "needle", encoding="utf-8")
+            registry = ToolRegistry.default(workspace_root=workspace)
+
+            result = registry.execute(
+                "Grep",
+                {
+                    "root": str(workspace),
+                    "query": "needle",
+                    "max_file_bytes": 10,
+                    "max_total_bytes": 1_000,
+                },
+                agent_class="researcher",
+            )
+
+            self.assertEqual(result["matches"], [])
+            self.assertLessEqual(result["telemetry"]["bytes_scanned"], 10)
+            self.assertTrue(result["telemetry"]["truncated"])
 
 
 if __name__ == "__main__":

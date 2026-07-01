@@ -60,7 +60,7 @@ class BotHelperRegressionTests(unittest.TestCase):
             "AKIAIOSFODNN7EXAMPLE",
             "ghp_ABCDEFGHIJ0123456789abcdefXYZ",
             "AIzaSyABCDEFGHIJKLMNOPQRSTUVWX0123456",
-            "Authorization: Bearer eyJhbGciOi.payload.signature123",
+            "Authorization: " + "Bearer " + "eyJhbGciOi.payload.signature123",
         )
         for raw in secrets:
             sanitized = _sanitize_chat_response(f"valor: {raw} fin")

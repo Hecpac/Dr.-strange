@@ -20,6 +20,7 @@ from claw_v2.artifacts import (
     planned_phases_for_mode,
 )
 from claw_v2.action_events import ActionResult, ProposedAction, emit_event
+from claw_v2.automation_outcome import AutomationOutcome
 from claw_v2.bot_helpers import (
     _build_coordinator_tasks,
     _coordinator_checkpoint,
@@ -148,6 +149,40 @@ def _browser_output_indicates_failure(output: str) -> bool:
     if not text:
         return True
     return any(_normalize_command_text(marker) in text for marker in _BROWSER_FAILURE_MARKERS)
+
+
+def _browser_executor_automation_outcome(
+    *,
+    output: str,
+    error_text: str,
+    objective: str,
+) -> AutomationOutcome:
+    summary = (output or error_text or "Tarea de navegador sin salida").strip()
+    normalized = _normalize_command_text(summary)
+    if "necesito autorizacion" in normalized or "needs approval" in normalized:
+        return AutomationOutcome.needs_approval(
+            human_summary=summary[:300],
+            reason_code="policy_denied",
+        )
+    if "timed out" in normalized or "timeout" in normalized:
+        return AutomationOutcome.failed(human_summary=summary[:300], reason_code="browser_error")
+    return AutomationOutcome.from_legacy_text(summary, objective=objective)
+
+
+def _verification_status_for_automation_outcome(outcome: AutomationOutcome) -> str:
+    if outcome.is_passed_validated():
+        return "passed"
+    return "failed"
+
+
+def _error_text_for_automation_outcome(outcome: AutomationOutcome) -> str:
+    if outcome.is_passed_validated():
+        return ""
+    return (
+        f"{outcome.reason_code}: {outcome.human_summary}"
+        if outcome.reason_code
+        else outcome.human_summary
+    )
 
 
 def _execution_mode_for_autonomous_task(mode: str, metadata: dict[str, Any]) -> str:
@@ -1192,17 +1227,17 @@ class TaskHandler:
         )
         error_text = ""
         try:
-            output = str(self.browser_executor(objective, task_id=task_id, mode=mode))
-            # The executor returns the agent's own report; it does NOT raise when
-            # the agent merely failed to produce a result (LLM rate-limited, CDP
-            # unreachable, agent gave up). Classify that as a terminal failure —
-            # otherwise "pending" is non-terminal and the lifecycle watchdog
-            # resumes the task forever while the real error never reaches the user.
-            if _browser_output_indicates_failure(output):
-                status = "failed"
-                error_text = output.strip() or "el agente de navegador no produjo resultado"
+            raw_output = self.browser_executor(objective, task_id=task_id, mode=mode)
+            if isinstance(raw_output, AutomationOutcome):
+                automation_outcome = raw_output
+                output = automation_outcome.to_legacy_text()
             else:
-                status = "passed"
+                output = str(raw_output)
+                automation_outcome = _browser_executor_automation_outcome(
+                    output=output,
+                    error_text=error_text,
+                    objective=objective,
+                )
         except Exception as exc:  # noqa: BLE001 - executor failures must not crash the runner
             logger.exception("browser executor failed for %s", task_id)
             self._emit(
@@ -1210,14 +1245,21 @@ class TaskHandler:
                 {"session_id": session_id, "task_id": task_id, "error": str(exc)[:200]},
             )
             output = f"No pude completar la tarea de navegador: {str(exc)[:200]}"
-            status = "failed"
             error_text = str(exc)[:200]
+            automation_outcome = AutomationOutcome.failed(
+                human_summary=output,
+                reason_code="executor_error",
+            )
+        status = _verification_status_for_automation_outcome(automation_outcome)
+        error_text = _error_text_for_automation_outcome(automation_outcome)
         checkpoint = {
             "summary": (output or objective)[:180],
             "verification_status": status,
+            "reason_code": automation_outcome.reason_code,
             "task_id": task_id,
+            "automation_outcome": automation_outcome.to_dict(),
         }
-        if status == "failed":
+        if status != "passed":
             checkpoint["error"] = error_text
         self._update_session_state(
             session_id,
@@ -1228,6 +1270,14 @@ class TaskHandler:
         self._emit(
             "browser_executor_completed",
             {"session_id": session_id, "task_id": task_id, "status": status},
+        )
+        self._emit(
+            "automation_outcome_recorded",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                **automation_outcome.to_dict(),
+            },
         )
         return output or "Tarea de navegador completada sin salida."
 
@@ -3125,6 +3175,13 @@ class TaskHandler:
             return
         record_id = job_id or self._active_job_id_for_task(task_id)
         if record_id is not None:
+            if getattr(self.job_service, "formal_leases_enabled", False):
+                self.job_service.request_cancel(
+                    record_id,
+                    actor="task_handler",
+                    reason=reason,
+                )
+                return
             self.job_service.cancel(record_id, reason=reason)
 
     def _active_job_id_for_task(self, task_id: str) -> str | None:

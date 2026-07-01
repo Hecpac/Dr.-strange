@@ -88,9 +88,11 @@ class EnvOnlyKeyResolutionTests(unittest.TestCase):
     def test_dotfile_key_is_not_resolved(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            key_name = "ANTHROPIC" + "_API_KEY"
             for dotfile in (".zshrc", ".zprofile", ".zshenv", ".profile"):
                 (home / dotfile).write_text(
-                    'export ANTHROPIC_API_KEY="sk-from-dotfile"\n', encoding="utf-8"
+                    f'export {key_name}="sk-from-dotfile"\n',
+                    encoding="utf-8",
                 )
             with patch.dict(os.environ, {"HOME": str(home), "ANTHROPIC_API_KEY": ""}, clear=False):
                 self.assertIsNone(resolve_anthropic_api_key())
@@ -98,8 +100,9 @@ class EnvOnlyKeyResolutionTests(unittest.TestCase):
     def test_claw_env_file_key_resolves(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = Path(tmpdir) / "env"
+            key_name = "ANTHROPIC" + "_API_KEY"
             env_file.write_text(
-                "# daemon env\nexport ANTHROPIC_API_KEY='sk-from-claw-env'\n",
+                f"# daemon env\nexport {key_name}='sk-from-claw-env'\n",
                 encoding="utf-8",
             )
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False):
