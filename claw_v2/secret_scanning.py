@@ -4,11 +4,12 @@ import argparse
 import hashlib
 import json
 import re
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, TextIO
+
+from claw_v2.subprocess_runner import run_subprocess_bounded
 
 
 SOURCE_TRACKED = "tracked"
@@ -136,6 +137,7 @@ class SecretScanResult:
 class SecretScanConfig:
     max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES
     binary_sample_bytes: int = _BINARY_SAMPLE_BYTES
+    skip_virtualenv: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,20 +223,19 @@ def discover_git_files(repo_root: str | Path) -> dict[str, tuple[Path, ...]]:
     )
     discovered: dict[str, tuple[Path, ...]] = {}
     for source_set, command in commands:
-        completed = subprocess.run(
+        completed = run_subprocess_bounded(
             list(command),
             cwd=root,
             check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
+            timeout_s=_GIT_COMMAND_TIMEOUT_SECONDS,
+            max_output_chars=2_000_000,
         )
         if completed.returncode != 0:
-            detail = completed.stderr.decode("utf-8", errors="replace").strip()
+            detail = _process_output_text(completed.stderr).strip()
             raise RuntimeError(f"{source_set} discovery failed: {detail[:200]}")
         discovered[source_set] = tuple(
-            Path(raw.decode("utf-8", errors="replace"))
-            for raw in completed.stdout.split(b"\0")
+            Path(raw)
+            for raw in _process_output_text(completed.stdout).split("\0")
             if raw
         )
     return discovered
@@ -263,6 +264,10 @@ def scan_repository(
 
     for source_set in SOURCE_SETS:
         for relative_path in discovered.get(source_set, ()):
+            relative_text = relative_path.as_posix()
+            if active_config.skip_virtualenv and _is_virtualenv_path(relative_text):
+                skipped.append(SkippedFile(relative_text, source_set, "virtualenv"))
+                continue
             findings.extend(
                 _scan_path(
                     root=root,
@@ -295,6 +300,19 @@ def scan_repository(
         suppressed_findings=tuple(suppressed),
         skipped=tuple(skipped),
     )
+
+
+def _process_output_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _is_virtualenv_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").lstrip("./")
+    return normalized.startswith(".venv/") or normalized.startswith("venv/")
 
 
 def render_text(result: SecretScanResult) -> str:

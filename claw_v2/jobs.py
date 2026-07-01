@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 import threading
@@ -1187,7 +1186,6 @@ class JobService:
         except Exception:
             return None
         current = time.time() if now is None else float(now)
-        token_hash = _authority_token_hash(authority_token)
         correlation_id = f"admin_force_cancel:{uuid.uuid4().hex[:12]}"
 
         def admin_cancel_once() -> JobRecord | sqlite3.Row | None:
@@ -1209,7 +1207,7 @@ class JobService:
                         "cancelled_at": current,
                         "admin_actor": admin_actor,
                         "reason": reason,
-                        "authority_token_hash": token_hash,
+                        "authority_reference": correlation_id,
                         "previous_status": str(row["status"]),
                         "new_status": "cancelled",
                         "previous_worker_id": _as_optional_str(row["worker_id"]),
@@ -2089,8 +2087,3 @@ def _require_non_empty(name: str, value: str) -> str:
     if not text:
         raise ValueError(f"{name} is required")
     return text
-
-
-def _authority_token_hash(authority_token: str) -> str:
-    digest = hashlib.sha256(authority_token.encode("utf-8")).hexdigest()
-    return f"sha256:{digest}"

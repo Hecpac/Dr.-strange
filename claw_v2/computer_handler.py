@@ -616,6 +616,16 @@ class ComputerHandler:
             return "approval does not belong to this session"
         status = str(payload.get("status") or "")
         if status == "pending":
+            if _metadata_has_browser_policy_scope(metadata):
+                self._emit(
+                    "computer_approval_resume_blocked",
+                    {
+                        "approval_id": approval_id,
+                        "session_id": metadata.get("session_id"),
+                        "reason": "browser_policy_scope_requires_human",
+                    },
+                )
+                return "Aprobación registrada, pero esta acción de navegador requiere aprobación humana explícita."
             if not self.approvals.approve_internal(approval_id):
                 return "approval could not be registered"
         elif status != "approved":
@@ -1897,6 +1907,20 @@ def _url_origin(url: str | None) -> str | None:
         return None
     port = f":{parsed.port}" if parsed.port else ""
     return f"{parsed.scheme.lower()}://{parsed.hostname.lower()}{port}"
+
+
+def _metadata_has_browser_policy_scope(metadata: Any) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    approval_scope = metadata.get("approval_scope")
+    if isinstance(approval_scope, dict) and isinstance(
+        approval_scope.get("browser_policy_scope"), dict
+    ):
+        return True
+    pending_action = metadata.get("pending_action")
+    return isinstance(pending_action, dict) and isinstance(
+        pending_action.get("browser_policy_scope"), dict
+    )
 
 
 def _canonical_hash(value: Any) -> str:

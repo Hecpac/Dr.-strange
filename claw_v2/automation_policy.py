@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import secrets
 import time
 from dataclasses import asdict, dataclass
@@ -138,20 +139,38 @@ class ApprovalScope:
         if value is None:
             return None
         if isinstance(value, cls):
+            if not math.isfinite(value.expires_at):
+                return None
             return value
         if not isinstance(value, dict):
             return None
         try:
+            fields = {
+                name: _required_scope_string(value, name)
+                for name in (
+                    "action_name",
+                    "params_hash",
+                    "current_origin",
+                    "target_origin",
+                    "task_id",
+                    "browser_context_id",
+                    "nonce",
+                    "approved_by",
+                )
+            }
+            expires_at = float(value["expires_at"])
+            if not math.isfinite(expires_at):
+                return None
             return cls(
-                action_name=str(value["action_name"]),
-                params_hash=str(value["params_hash"]),
-                current_origin=str(value["current_origin"]),
-                target_origin=str(value["target_origin"]),
-                task_id=str(value["task_id"]),
-                browser_context_id=str(value["browser_context_id"]),
-                expires_at=float(value["expires_at"]),
-                nonce=str(value["nonce"]),
-                approved_by=str(value["approved_by"]),
+                action_name=fields["action_name"],
+                params_hash=fields["params_hash"],
+                current_origin=fields["current_origin"],
+                target_origin=fields["target_origin"],
+                task_id=fields["task_id"],
+                browser_context_id=fields["browser_context_id"],
+                expires_at=expires_at,
+                nonce=fields["nonce"],
+                approved_by=fields["approved_by"],
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -247,7 +266,9 @@ class ActionPolicyEngine:
         if scope is None:
             return _decision(
                 allowed=False,
-                reason_code="approval_required",
+                reason_code="approval_scope_incomplete"
+                if approval is not None
+                else "approval_required",
                 context=context,
                 definition=definition,
                 approval_scope_present=approval is not None,
@@ -326,19 +347,24 @@ def normalize_origin(url: str | None) -> str:
     scheme = parsed.scheme.lower()
     host = parsed.hostname
     if not scheme or not host:
-        return ""
+        return _opaque_origin(text, scheme=scheme)
     try:
         ascii_host = host.strip(".").lower().encode("idna").decode("ascii")
     except UnicodeError:
-        return ""
+        return _opaque_origin(text, scheme=scheme)
     try:
         explicit_port = parsed.port
     except ValueError:
-        return ""
+        return _opaque_origin(text, scheme=scheme)
     port = explicit_port or _effective_port(scheme)
     if port is None:
-        return ""
+        return _opaque_origin(text, scheme=scheme)
     return f"{scheme}://{ascii_host}:{port}"
+
+
+def _opaque_origin(text: str, *, scheme: str | None) -> str:
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:24]
+    return f"opaque:{scheme or 'unknown'}:{digest}"
 
 
 def _normalize_for_json(value: Any, *, key: str | None = None) -> Any:
@@ -385,7 +411,7 @@ def _approval_scope_mismatch_reason(
 ) -> str | None:
     if not scope.nonce or not scope.approved_by:
         return "approval_scope_incomplete"
-    if now > scope.expires_at:
+    if now >= scope.expires_at:
         return "approval_expired"
     if _normalize_action_name(scope.action_name) != context.action_name:
         return "approval_action_mismatch"
@@ -400,6 +426,16 @@ def _approval_scope_mismatch_reason(
     if scope.browser_context_id != context.browser_context_id:
         return "approval_browser_context_mismatch"
     return None
+
+
+def _required_scope_string(value: dict[str, Any], name: str) -> str:
+    raw = value[name]
+    if raw is None:
+        raise ValueError(name)
+    text = str(raw).strip()
+    if not text:
+        raise ValueError(name)
+    return text
 
 
 def _decision(

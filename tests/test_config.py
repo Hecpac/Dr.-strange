@@ -689,7 +689,7 @@ class CodexConfigTests(unittest.TestCase):
                     config = AppConfig.from_env()
             finally:
                 os.chdir(previous_cwd)
-        self.assertEqual(config.codex_model, "gpt-5.5")
+        self.assertEqual(config.codex_model, "codex-mini-latest")
         self.assertEqual(config.computer_use_backend, "openai")
         self.assertFalse(config.computer_use_required)
 

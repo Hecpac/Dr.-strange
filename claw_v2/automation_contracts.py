@@ -259,7 +259,7 @@ def _normalize_domains(values: list[str] | tuple[str, ...]) -> list[str]:
     for value in values:
         host = _host_from_url(value)
         if not host:
-            host = str(value or "").strip().lower().strip("/")
+            host = _normalize_host(str(value or "").strip().lower().strip("/"))
         if not host or host in seen:
             continue
         seen.add(host)
@@ -272,7 +272,9 @@ def _url_matches_domains(url: str | None, domains: tuple[str, ...]) -> bool:
     if not host:
         return False
     for domain in domains:
-        normalized = domain.lower().lstrip("*.").strip()
+        normalized = _normalize_host(domain.lower().lstrip("*.").strip())
+        if not normalized:
+            continue
         if host == normalized or host.endswith("." + normalized):
             return True
     return False
@@ -291,4 +293,16 @@ def _host_from_url(url: str | None) -> str | None:
     host = parsed.hostname
     if not host:
         return None
-    return host.lower().strip(".")
+    return _normalize_host(host)
+
+
+def _normalize_host(host: str | None) -> str | None:
+    if not host:
+        return None
+    text = str(host).strip().strip(".").lower()
+    if not text:
+        return None
+    try:
+        return text.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -327,7 +328,11 @@ class AutomationOutcome:
 
 
 def _normalize(value: str) -> str:
-    return " ".join(value.lower().strip().split())
+    decomposed = unicodedata.normalize("NFKD", value)
+    without_marks = "".join(
+        char for char in decomposed if not unicodedata.combining(char)
+    )
+    return " ".join(without_marks.lower().strip().split())
 
 
 def _extract_legacy_field(text: str, label: str) -> str | None:
@@ -417,8 +422,12 @@ def _first_url(text: str) -> str | None:
 def _origin(url: str | None) -> str | None:
     if not url:
         return None
-    parsed = urlsplit(url)
-    if not parsed.scheme or not parsed.hostname:
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+    except ValueError:
+        return None
+    if not parsed.scheme or not hostname:
         return None
     try:
         port = parsed.port
@@ -428,4 +437,8 @@ def _origin(url: str | None) -> str | None:
         port = 443 if parsed.scheme == "https" else 80 if parsed.scheme == "http" else None
     if port is None:
         return None
-    return f"{parsed.scheme.lower()}://{parsed.hostname.encode('idna').decode('ascii').lower()}:{port}"
+    try:
+        ascii_host = hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+    return f"{parsed.scheme.lower()}://{ascii_host}:{port}"

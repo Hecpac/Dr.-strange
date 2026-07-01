@@ -1469,11 +1469,15 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
             )
             handler = ComputerHandler(browser_use=FakeBrowserUse(), approvals=approvals, config=None)
             handler._sessions["s1"] = session
-            approvals.approve_internal(pending.approval_id)
 
-            result = handler._resume_approved_computer_action(pending.approval_id)
+            result = handler.action_approve_internal_response(
+                pending.approval_id,
+                session_id="s1",
+            )
+            approval_after = approvals.read(pending.approval_id)
 
         self.assertIn("requiere aprobación humana", result)
+        self.assertEqual(approval_after["status"], "pending")
 
     def test_resume_blocks_when_approval_screenshot_hash_changed(self) -> None:
         import types

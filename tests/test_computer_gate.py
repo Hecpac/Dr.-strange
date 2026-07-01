@@ -253,6 +253,16 @@ class RiskLevelTests(unittest.TestCase):
         )
         self.assertEqual(risk, RiskLevel.HIGH)
 
+    def test_browser_use_navigation_from_sensitive_url_is_high(self) -> None:
+        for action in ("navigate", "search", "go_back", "switch", "close"):
+            with self.subTest(action=action):
+                risk = self.gate.risk_browser_use_action(
+                    action,
+                    {},
+                    url="https://ads.google.com/campaigns",
+                )
+                self.assertEqual(risk, RiskLevel.HIGH)
+
     def test_browser_use_input_on_sensitive_url_is_high(self) -> None:
         risk = self.gate.risk_browser_use_action(
             "input",

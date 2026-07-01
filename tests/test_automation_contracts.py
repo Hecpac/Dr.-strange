@@ -52,6 +52,34 @@ class CapabilityGrantTests(unittest.TestCase):
         self.assertFalse(payload["allow_high_risk_actions"])
         self.assertTrue(payload["auto_approved"])
 
+    def test_browser_read_grant_normalizes_idna_domains(self) -> None:
+        grant = CapabilityGrant.browser_read(
+            domains=["https://bücher.example/path"],
+            reason="delegated browser read",
+            auto_approved=True,
+        )
+
+        self.assertEqual(grant.approved_domains_list(), ["xn--bcher-kva.example"])
+
+    def test_domain_matching_normalizes_idna_urls(self) -> None:
+        grant = CapabilityGrant(
+            surface=AutomationSurface.BROWSER,
+            reason="explicit scoped high-risk fixture",
+            approved_domains=("xn--bcher-kva.example",),
+            allow_high_risk_actions=True,
+            allowed_high_risk_actions=("evaluate",),
+            approved_by="user",
+            sensitive=True,
+        )
+
+        self.assertTrue(
+            grant.allows_browser_use_action(
+                "evaluate",
+                url="https://bücher.example/path",
+                params={},
+            )
+        )
+
     def test_browser_read_grant_does_not_authorize_evaluate_on_approved_domain(self) -> None:
         grant = CapabilityGrant.browser_read(
             domains=["x.com"],

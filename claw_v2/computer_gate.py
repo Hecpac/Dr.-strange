@@ -38,10 +38,12 @@ DESKTOP_NAV_KEYS = frozenset(
 )
 CDP_ALWAYS_APPROVE = frozenset({"submit"})
 CDP_WRITE_ACTIONS = frozenset({"click", "fill", "select", "check", "uncheck"})
-BROWSER_USE_READ_ACTIONS = frozenset(
-    name for name, definition in BROWSER_ACTION_DEFINITIONS.items() if definition.risk == "low"
-)
 BROWSER_USE_NAV_ACTIONS = frozenset({"navigate", "search", "go_back", "switch", "close"})
+BROWSER_USE_READ_ACTIONS = frozenset(
+    name
+    for name, definition in BROWSER_ACTION_DEFINITIONS.items()
+    if definition.risk == "low" and name not in BROWSER_USE_NAV_ACTIONS
+)
 BROWSER_USE_WRITE_ACTIONS = frozenset({"click", "input", "send_keys", "select_dropdown"})
 
 

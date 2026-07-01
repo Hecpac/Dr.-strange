@@ -3175,6 +3175,13 @@ class TaskHandler:
             return
         record_id = job_id or self._active_job_id_for_task(task_id)
         if record_id is not None:
+            if getattr(self.job_service, "formal_leases_enabled", False):
+                self.job_service.request_cancel(
+                    record_id,
+                    actor="task_handler",
+                    reason=reason,
+                )
+                return
             self.job_service.cancel(record_id, reason=reason)
 
     def _active_job_id_for_task(self, task_id: str) -> str | None:

@@ -139,6 +139,9 @@ class WorkspaceTraversalService:
         active_policy = policy or self.policy
         telemetry = _TelemetryState()
         matches: list[str] = []
+        if active_policy.max_matches <= 0:
+            telemetry.truncate("max_matches")
+            return TraversalResult(matches=(), telemetry=telemetry.snapshot())
         for display_path, _read_path in self._iter_files(
             root=root,
             pattern=pattern,
@@ -168,6 +171,9 @@ class WorkspaceTraversalService:
         telemetry = _TelemetryState()
         matches: list[dict] = []
         if query == "":
+            return TraversalResult(matches=(), telemetry=telemetry.snapshot())
+        if active_policy.max_matches <= 0:
+            telemetry.truncate("max_matches")
             return TraversalResult(matches=(), telemetry=telemetry.snapshot())
         needle = query if case_sensitive else query.lower()
         for display_path, read_path in self._iter_files(
@@ -312,9 +318,29 @@ class WorkspaceTraversalService:
             with read_path.open("rb") as handle:
                 while True:
                     if telemetry.bytes_scanned >= policy.max_total_bytes:
+                        self._flush_pending_line(
+                            display_path=display_path,
+                            pending=pending,
+                            line_number=line_number,
+                            needle=needle,
+                            case_sensitive=case_sensitive,
+                            matches=matches,
+                            policy=policy,
+                        )
+                        telemetry.matches_returned = len(matches)
                         telemetry.truncate("max_total_bytes")
                         return True
                     if file_bytes >= policy.max_file_bytes:
+                        self._flush_pending_line(
+                            display_path=display_path,
+                            pending=pending,
+                            line_number=line_number,
+                            needle=needle,
+                            case_sensitive=case_sensitive,
+                            matches=matches,
+                            policy=policy,
+                        )
+                        telemetry.matches_returned = len(matches)
                         telemetry.truncate("max_file_bytes")
                         return False
                     to_read = min(
@@ -323,6 +349,16 @@ class WorkspaceTraversalService:
                         policy.max_total_bytes - telemetry.bytes_scanned,
                     )
                     if to_read <= 0:
+                        self._flush_pending_line(
+                            display_path=display_path,
+                            pending=pending,
+                            line_number=line_number,
+                            needle=needle,
+                            case_sensitive=case_sensitive,
+                            matches=matches,
+                            policy=policy,
+                        )
+                        telemetry.matches_returned = len(matches)
                         telemetry.truncate("budget_exhausted")
                         return True
                     chunk = handle.read(to_read)
@@ -358,6 +394,7 @@ class WorkspaceTraversalService:
                         needle=needle,
                         case_sensitive=case_sensitive,
                         matches=matches,
+                        policy=policy,
                     )
                     if len(matches) >= policy.max_matches:
                         telemetry.matches_returned = len(matches)
@@ -394,6 +431,7 @@ class WorkspaceTraversalService:
                 needle=needle,
                 case_sensitive=case_sensitive,
                 matches=matches,
+                policy=policy,
             )
             processed += 1
             if len(matches) >= policy.max_matches:
@@ -410,13 +448,39 @@ class WorkspaceTraversalService:
         needle: str,
         case_sensitive: bool,
         matches: list[dict],
+        policy: TraversalPolicy,
     ) -> None:
+        if len(matches) >= policy.max_matches:
+            return
         line = raw_line.decode("utf-8", errors="replace")
         haystack = line if case_sensitive else line.lower()
         if needle in haystack:
             matches.append(
                 {"path": str(display_path), "line_number": line_number, "line": line}
             )
+
+    def _flush_pending_line(
+        self,
+        *,
+        display_path: Path,
+        pending: bytes,
+        line_number: int,
+        needle: str,
+        case_sensitive: bool,
+        matches: list[dict],
+        policy: TraversalPolicy,
+    ) -> None:
+        if not pending:
+            return
+        self._append_line_match(
+            display_path=display_path,
+            raw_line=pending,
+            line_number=line_number,
+            needle=needle,
+            case_sensitive=case_sensitive,
+            matches=matches,
+            policy=policy,
+        )
 
     def _resolve_requested_root(self, root: str | Path | None) -> Path | None:
         raw_root = self.workspace_root if root is None else Path(root)

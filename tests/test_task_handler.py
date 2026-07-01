@@ -69,6 +69,30 @@ class _BlockingCoordinator:
 
 
 class TaskHandlerTests(unittest.TestCase):
+    def test_internal_autonomous_cancel_uses_request_cancel_with_formal_leases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(Path(tmpdir) / "claw.db", formal_leases_enabled=True)
+            created = jobs.enqueue(kind="pipeline.issue", metadata={"owner": "runner"})
+            handler = TaskHandler.__new__(TaskHandler)
+            handler.job_service = jobs
+
+            handler._cancel_autonomous_job(
+                "task-1",
+                reason="cancelled_before_start",
+                job_id=created.job_id,
+            )
+
+            persisted = jobs.get(created.job_id)
+            self.assertEqual(persisted.status, "queued")
+            self.assertEqual(
+                persisted.metadata["cancel_request"]["requested_by"],
+                "task_handler",
+            )
+            self.assertEqual(
+                persisted.metadata["cancel_request"]["reason"],
+                "cancelled_before_start",
+            )
+
     def test_passed_verification_is_rejected_when_result_says_not_verified(self) -> None:
         self.assertTrue(
             TaskHandler._response_contradicts_passed_verification(

@@ -161,6 +161,17 @@ class BrowserPolicyPDPContracts(unittest.TestCase):
             "https://xn--bcher-kva.example:443",
         )
 
+    def test_policy_non_verifiable_origins_are_distinct_not_empty(self) -> None:
+        about_origin = self._normalize_origin("about:blank")
+        data_origin = self._normalize_origin("data:text/plain,hello")
+        file_origin = self._normalize_origin("file:///tmp/report.html")
+
+        self.assertTrue(about_origin.startswith("opaque:about:"))
+        self.assertTrue(data_origin.startswith("opaque:data:"))
+        self.assertTrue(file_origin.startswith("opaque:file:"))
+        self.assertNotEqual(about_origin, data_origin)
+        self.assertNotEqual(file_origin, about_origin)
+
     def test_policy_params_hash_is_canonical_and_semantic(self) -> None:
         self.assertEqual(
             self._params_hash({"b": 2, "a": "x"}),
@@ -437,6 +448,30 @@ class BrowserPolicyPDPContracts(unittest.TestCase):
             reason_code="approval_expired",
         )
 
+    def test_policy_approval_expires_at_exact_boundary(self) -> None:
+        approval = self._make_approval(
+            action_name="evaluate",
+            params={"script": "document.title"},
+            current_url="https://example.com/dashboard",
+            target_url="https://example.com/dashboard",
+            task_id="task-1",
+            browser_context_id="ctx-1",
+            approved_by="hector",
+            nonce="nonce-1",
+            now=1_900_000_000.0,
+            ttl_seconds=1,
+        )
+
+        self._assert_blocked(
+            self._evaluate(
+                action_name="evaluate",
+                params={"script": "document.title"},
+                approval=approval,
+                now=1_900_000_001.0,
+            ),
+            reason_code="approval_expired",
+        )
+
     def test_policy_missing_nonce_or_approved_by_denies(self) -> None:
         missing_nonce = self._exact_evaluate_approval()
         missing_nonce["nonce"] = ""
@@ -459,6 +494,23 @@ class BrowserPolicyPDPContracts(unittest.TestCase):
             ),
             reason_code="approval_scope_incomplete",
         )
+
+    def test_policy_malformed_approval_scope_denies_as_incomplete(self) -> None:
+        cases = (
+            {"action_name": None, "expires_at": 1_900_000_010.0},
+            {**self._exact_evaluate_approval(), "params_hash": None},
+            {**self._exact_evaluate_approval(), "expires_at": float("nan")},
+        )
+        for approval in cases:
+            with self.subTest(approval=approval):
+                self._assert_blocked(
+                    self._evaluate(
+                        action_name="evaluate",
+                        params={"script": "document.title"},
+                        approval=approval,
+                    ),
+                    reason_code="approval_scope_incomplete",
+                )
 
     def test_policy_auto_approve_does_not_authorize_evaluate(self) -> None:
         decision = self._evaluate(

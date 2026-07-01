@@ -40,6 +40,19 @@ class WorkspaceTraversalServiceTests(unittest.TestCase):
             self.assertTrue(result.telemetry.truncated)
             self.assertIn("max_matches", result.telemetry.skipped_reasons)
 
+    def test_glob_respects_zero_max_matches_before_scanning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "file.py").write_text("x", encoding="utf-8")
+            service = WorkspaceTraversalService(root, policy=TraversalPolicy(max_matches=0))
+
+            result = service.glob_files(pattern="**/*.py")
+
+            self.assertEqual(result.matches, ())
+            self.assertEqual(result.telemetry.files_scanned, 0)
+            self.assertTrue(result.telemetry.truncated)
+            self.assertIn("max_matches", result.telemetry.skipped_reasons)
+
     def test_glob_respects_max_files_before_scanning_entire_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -122,6 +135,34 @@ class WorkspaceTraversalServiceTests(unittest.TestCase):
             self.assertEqual(len(result.matches), 2)
             self.assertTrue(result.telemetry.truncated)
             self.assertIn("max_matches", result.telemetry.skipped_reasons)
+
+    def test_grep_respects_zero_max_matches_before_scanning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "note.txt").write_text("needle\n", encoding="utf-8")
+            service = WorkspaceTraversalService(root, policy=TraversalPolicy(max_matches=0))
+
+            result = service.grep_files(query="needle")
+
+            self.assertEqual(result.matches, ())
+            self.assertEqual(result.telemetry.files_scanned, 0)
+            self.assertTrue(result.telemetry.truncated)
+            self.assertIn("max_matches", result.telemetry.skipped_reasons)
+
+    def test_grep_processes_pending_line_before_max_file_bytes_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "big.txt").write_text("prefix needle then trailing", encoding="utf-8")
+            service = WorkspaceTraversalService(
+                root, policy=TraversalPolicy(max_file_bytes=13, max_total_bytes=1_000)
+            )
+
+            result = service.grep_files(query="needle")
+
+            self.assertEqual(len(result.matches), 1)
+            self.assertIn("needle", result.matches[0]["line"])
+            self.assertTrue(result.telemetry.truncated)
+            self.assertIn("max_file_bytes", result.telemetry.skipped_reasons)
 
     def test_grep_detects_binary_without_reading_entire_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

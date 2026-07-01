@@ -141,10 +141,10 @@ class SecretScanningTests(unittest.TestCase):
 
         def fake_run(command, **kwargs):
             calls.append(list(command))
-            return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("claw_v2.secret_scanning.subprocess.run", side_effect=fake_run):
+            with patch("claw_v2.secret_scanning.run_subprocess_bounded", side_effect=fake_run):
                 discover_git_files(Path(tmpdir))
 
         self.assertEqual(
@@ -155,6 +155,23 @@ class SecretScanningTests(unittest.TestCase):
                 ["git", "ls-files", "-o", "-i", "--exclude-standard", "-z"],
             ],
         )
+
+    def test_virtualenv_paths_are_skipped_by_secret_scanner_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+            package = repo / ".venv" / "lib" / "python3.99" / "site-packages"
+            package.mkdir(parents=True)
+            (package / "fixture.py").write_text(
+                f'{OPENAI_NAME} = "sk-live-virtualenv-1234567890"\n',
+                encoding="utf-8",
+            )
+
+            result = scan_repository(repo)
+
+            self.assertEqual(result.findings, ())
+            self.assertIn("virtualenv", {skipped.reason for skipped in result.skipped})
 
     def test_reference_without_literal_is_not_a_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -383,6 +400,7 @@ class SecretScanWiringTests(unittest.TestCase):
         self.assertIn("python scripts/scan_secrets.py", text)
         self.assertIn("actions/checkout@v4", text)
         self.assertIn("actions/setup-python@v5", text)
+        self.assertIn("persist-credentials: false", text)
         self.assertIn("contents: read", text)
         self.assertNotIn("upload-artifact", text)
         self.assertNotIn("${{ secrets.", text)

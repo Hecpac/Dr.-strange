@@ -1435,7 +1435,8 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(audit["previous_lease_owner"], "worker-1")
             self.assertEqual(audit["previous_lease_generation"], claimed.lease_generation)
             self.assertEqual(audit["previous_lease_expires_at"], start + 30)
-            self.assertTrue(audit["authority_token_hash"].startswith("sha256:"))
+            self.assertEqual(audit["authority_reference"], audit["correlation_id"])
+            self.assertNotIn("authority_token_hash", audit)
             self.assertNotIn("secret-token", str(cancelled.metadata))
             events = [event["event_type"] for event in observe.job_events(created.job_id)]
             self.assertIn("job_admin_force_cancelled", events)
