@@ -157,6 +157,13 @@ def _quoted_assignment_pattern(name: str) -> re.Pattern[str]:
     )
 
 
+def _unquoted_assignment_pattern(name: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"^\s*(?:export\s+)?{re.escape(name)}\s*=\s*"
+        r"(?P<value>[^\s#'\"]+)"
+    )
+
+
 def _env_assignment_pattern(name: str) -> re.Pattern[str]:
     return re.compile(
         rf"os\.environ\[\s*['\"]{re.escape(name)}['\"]\s*\]\s*=\s*"
@@ -167,15 +174,25 @@ def _env_assignment_pattern(name: str) -> re.Pattern[str]:
 SECRET_RULES: tuple[SecretRule, ...] = (
     SecretRule("fal_key_literal", _env_assignment_pattern("FAL_KEY")),
     SecretRule("fal_key_literal", _quoted_assignment_pattern("FAL_KEY")),
+    SecretRule("fal_key_literal", _unquoted_assignment_pattern("FAL_KEY")),
     SecretRule("openai_api_key_literal", _env_assignment_pattern("OPENAI_API_KEY")),
     SecretRule("openai_api_key_literal", _quoted_assignment_pattern("OPENAI_API_KEY")),
+    SecretRule("openai_api_key_literal", _unquoted_assignment_pattern("OPENAI_API_KEY")),
     SecretRule("anthropic_api_key_literal", _env_assignment_pattern("ANTHROPIC_API_KEY")),
     SecretRule("anthropic_api_key_literal", _quoted_assignment_pattern("ANTHROPIC_API_KEY")),
+    SecretRule("anthropic_api_key_literal", _unquoted_assignment_pattern("ANTHROPIC_API_KEY")),
     SecretRule(
         "generic_secret_assignment",
         re.compile(
             r"(?:^|[^\w])(?:export\s+)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET)\s*=\s*"
             r"(?P<quote>['\"])(?P<value>[^'\"]{12,})(?P=quote)"
+        ),
+    ),
+    SecretRule(
+        "generic_secret_assignment",
+        re.compile(
+            r"^\s*(?:export\s+)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET)\s*=\s*"
+            r"(?P<value>[^\s#'\"]{12,})"
         ),
     ),
     SecretRule(
@@ -187,7 +204,10 @@ SECRET_RULES: tuple[SecretRule, ...] = (
     ),
     SecretRule(
         "authorization_bearer",
-        re.compile(r"Authorization\s*:\s*Bearer\s+(?P<value>[A-Za-z0-9._~+/=-]{12,})"),
+        re.compile(
+            r"['\"]?Authorization['\"]?\s*:\s*['\"]?Bearer\s+"
+            r"(?P<value>[A-Za-z0-9._~+/=-]{12,})"
+        ),
     ),
 )
 

@@ -82,6 +82,43 @@ class SecretScanningTests(unittest.TestCase):
                 triples,
             )
 
+    def test_detects_unquoted_dotenv_secret_assignments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            (repo / ".env").write_text(
+                "\n".join(
+                    (
+                        f"{OPENAI_NAME}=sk-" + "live-unquoted-dotenv-1234567890",
+                        f"export {FAL_NAME}=fal-" + "local-unquoted-1234567890",
+                        "LOCAL_TOKEN=local-" + "token-unquoted-1234567890",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = scan_repository(repo)
+
+            rules = {finding.rule_id for finding in result.findings}
+            self.assertIn("openai_api_key_literal", rules)
+            self.assertIn("fal_key_literal", rules)
+            self.assertIn("generic_secret_assignment", rules)
+
+    def test_detects_quoted_authorization_bearer_header_literals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            _init_repo(repo)
+            bearer_secret = "abcdefghijklmnopqrstuvwxyz" + "123456"
+            (repo / "headers.py").write_text(
+                f'headers = {{"Authorization": "Bearer {bearer_secret}"}}\n',
+                encoding="utf-8",
+            )
+
+            result = scan_repository(repo)
+
+            self.assertIn("authorization_bearer", {finding.rule_id for finding in result.findings})
+
     def test_git_discovery_keeps_three_source_sets_separate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
