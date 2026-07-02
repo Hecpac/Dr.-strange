@@ -618,6 +618,26 @@ def _user_authoritatively_marked_done(source_text: str) -> bool:
     return any(pattern.search(source_text) for pattern in _USER_AUTHORITATIVE_DONE_PATTERNS)
 
 
+_USER_KNOWLEDGE_ANSWER_PATTERNS = (
+    re.compile(r"\bus[ae]\s+tu\s+(?:propio\s+)?conocimiento\b", re.IGNORECASE),
+    re.compile(r"\b(?:de|con)\s+tu\s+(?:propio\s+)?conocimiento\b", re.IGNORECASE),
+    re.compile(r"\bde\s+memoria\b", re.IGNORECASE),
+    re.compile(r"\bresp[oó]nde(?:me|lo|la)?\s+direct[oa]\b", re.IGNORECASE),
+    re.compile(r"\bsin\s+(?:usar\s+)?(?:tools|herramientas)\b", re.IGNORECASE),
+    re.compile(r"\buse\s+your\s+(?:own\s+)?knowledge\b", re.IGNORECASE),
+    re.compile(r"\bfrom\s+memory\b", re.IGNORECASE),
+)
+
+
+def _user_authorized_knowledge_answer(source_text: str) -> bool:
+    """True when the CURRENT user message explicitly authorizes answering from
+    the model's own knowledge (no tool evidence). Only the current turn's text
+    counts — authorization never leaks from history."""
+    if not source_text:
+        return False
+    return any(pattern.search(source_text) for pattern in _USER_KNOWLEDGE_ANSWER_PATTERNS)
+
+
 _EVIDENCE_REFERENCE_PATTERNS = (
     re.compile(
         r"\bartifacts/(?:verification|heygen|content|x_sweep|notebooklm|behavior_audit|email)/\S+",
@@ -3031,6 +3051,19 @@ class BotService:
             self._emit_safe(
                 "evidence_gate_skipped_user_authority",
                 {"session_id": session_id, "claim_type": "completion"},
+            )
+            return False
+        if _user_authorized_knowledge_answer(source_text):
+            # A knowledge-authorized turn redefines the ask as a content
+            # answer; suppressing it broke the S-α rescue arc (2026-07-02,
+            # obs 401107). Invariant: evidence_gate_user_knowledge_authority.
+            self._emit_safe(
+                "evidence_gate_skipped_user_authority",
+                {
+                    "session_id": session_id,
+                    "claim_type": "completion",
+                    "authority": "knowledge_answer",
+                },
             )
             return False
         if _brain_content_references_evidence(content):
@@ -6940,7 +6973,11 @@ class BotService:
         return task_id
 
     def _pending_evidence_response(self, task_id: str | None = None) -> str:
-        return "Decime qué disparo y te lo ejecuto con evidencia."
+        return (
+            "Retuve mi respuesta: afirmaba un resultado sin evidencia de ejecución "
+            "en este turno. Dime «ejecútalo» y lo corro con evidencia, o "
+            "«usa tu conocimiento» y te respondo directo."
+        )
 
     def _unconfirmed_record_response(self, task_id: str | None = None) -> str:
         return (
@@ -6951,9 +6988,10 @@ class BotService:
         )
 
     def _unexecuted_start_response(self, task_id: str | None = None) -> str:
-        if task_id:
-            return "No arranqué nada todavía. Decime qué disparo y te lo ejecuto con evidencia."
-        return "Decime qué disparo y te lo ejecuto con evidencia."
+        return (
+            "No ejecuté nada aún: mi respuesta afirmaba un arranque sin evidencia. "
+            "Dime «ejecútalo» y lo disparo con evidencia real."
+        )
 
     def _emit_identity_capability_binding_guard(
         self,

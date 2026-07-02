@@ -1044,6 +1044,30 @@ invariants:
          KeepAlive tg-574707975). Slice S-α of the autonomy remediation block
          (α announce / β bounded re-drive / γ evidence phase / δ structured
          verdict); regressing it reopens the dead end silently.
+
+  evidence_gate_user_knowledge_authority:
+    rule: When the CURRENT user message explicitly authorizes answering from
+          the model's own knowledge (_user_authorized_knowledge_answer,
+          claw_v2/bot.py), _completion_claim_lacks_evidence MUST skip the
+          completion-claim block with an audited
+          evidence_gate_skipped_user_authority event
+          (authority=knowledge_answer) and deliver the brain content intact.
+          Without that authorization in the current turn, an unevidenced
+          completion claim MUST stay suppressed and replaced by the
+          informative template — F4-B1 is never weakened, and authorization
+          never leaks from prior messages (predicate reads source_text of the
+          current turn only).
+    enforced_by:
+      - tests/test_evidence_gate_user_authority.py::test_user_authorized_knowledge_close_is_delivered
+      - tests/test_evidence_gate_user_authority.py::test_unauthorized_completion_claim_stays_blocked
+    why: On 2026-07-02 (obs 400609/401107) the gate suppressed two legitimate
+         inline deliverables — including Hector's reply to the S-α recovery
+         announcement ("USA tu propio conocimiento… y cierra") — replacing
+         each with a 49-char stub. The S-α rescue arc was broken in prod by
+         the gate's own false positive; the gate must block confabulated
+         side-effect claims, not user-authorized knowledge answers. Slice
+         C0-S1 of the autonomy remediation plan
+         (memoria autonomy-remediation-plan-2026-07-02).
 ```
 
 ---
