@@ -679,20 +679,15 @@ class CoordinatorService:
                         start_time=start,
                     )
                 _mark_f2_phase_completed("verification", results=verify_results)
-                critical = _critical_worker_result(verify_results)
-                if critical is not None:
-                    return self._complete_critical_worker_run(
-                        result=result,
-                        objective=objective,
-                        phase="verification",
-                        critical_result=critical,
-                        collected_results=research_results + impl_results + verify_results,
-                        scratch=scratch,
-                        orchestration_run_id=orchestration_run_id,
-                        trace_context=trace,
-                        lane_overrides=lane_overrides,
-                        start_time=start,
-                    )
+                # Verification is the terminal phase: the self-healing-synthesis
+                # path exists to abort pending work and re-plan a NEXT phase, of
+                # which there is none here. A genuine verifier crash surfaces as
+                # `error=str(exc)` (no marker) and flows through as a normal
+                # result. The only thing the CRITICAL-worker sentinel catches in
+                # this phase is the verifier LLM *echoing* the marker phrase while
+                # reviewing failed findings — always a false positive that
+                # discarded an already-successful synthesis. So the sentinel is
+                # not applied to the verification phase.
 
             result.duration_seconds = time.time() - start
             _mark_f2_task_terminal("succeeded")
