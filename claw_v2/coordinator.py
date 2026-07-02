@@ -969,6 +969,25 @@ class CoordinatorService:
             error=str(last_exc) if last_exc else "unknown_error",
         )
 
+    _EVIDENCE_SCRATCH_MAX_CHARS = 64_000
+
+    def run_evidence_worker(self, *, task_id: str, instruction: str) -> WorkerResult:
+        """C1-Sγ — UNA WorkerTask de evidencia fuera del pipeline de fases
+        (invariante evidence_pre_step_contained): lane worker (sandbox del CLI
+        y retry _RETRY_LANES por identidad con los workers de fase), y el
+        RUNNER — no el LLM — persiste el output crudo FRESCO a
+        scratch/<task_id>/evidence.md, en la raíz del scratch, nunca en
+        research/ (los artefactos de fase quedan congelados entre re-drives).
+        El llamador (task_handler) anexa solo un extracto acotado al objective.
+        """
+        result = self._execute_worker(
+            WorkerTask(name="gather_evidence", instruction=instruction, lane="worker")
+        )
+        scratch = self._ensure_scratch(task_id)
+        raw = result.content or (f"[pre-step error] {result.error}" if result.error else "")
+        self._write_scratch_text(scratch, "evidence.md", raw[: self._EVIDENCE_SCRATCH_MAX_CHARS])
+        return result
+
     def _run_langgraph_shadow(
         self,
         *,

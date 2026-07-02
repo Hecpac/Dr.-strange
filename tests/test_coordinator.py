@@ -31,6 +31,51 @@ def _make_service(**overrides):
     return svc, router, observe, tmpdir
 
 
+class RunEvidenceWorkerTests(unittest.TestCase):
+    """C1-Sγ.1 — run_evidence_worker: UNA WorkerTask lane worker fuera del
+    pipeline de fases; el RUNNER persiste el output crudo fresco a
+    scratch/<task_id>/evidence.md (raíz — nunca research/), acotado."""
+
+    def test_worker_lane_and_scratch_persistence(self) -> None:
+        svc, router, _observe, tmpdir = _make_service()
+        router.ask.return_value = MagicMock(content="$ man launchd.plist\nExitTimeOut ...")
+        result = svc.run_evidence_worker(task_id="t-ev", instruction="junta la evidencia")
+        self.assertEqual(result.error, "")
+        self.assertIn("ExitTimeOut", result.content)
+        kwargs = router.ask.call_args.kwargs
+        self.assertEqual(kwargs["lane"], "worker")
+        self.assertEqual(router.ask.call_args.args[0], "junta la evidencia")
+        evidence_path = tmpdir / "t-ev" / "evidence.md"
+        self.assertTrue(evidence_path.is_file())
+        self.assertIn("ExitTimeOut", evidence_path.read_text(encoding="utf-8"))
+        # nunca dentro de un directorio de fase (quedaría congelada entre re-drives)
+        self.assertFalse((tmpdir / "t-ev" / "research").exists())
+
+    def test_adapter_error_returns_error_result_and_persists_note(self) -> None:
+        from claw_v2.adapters.base import AdapterError
+
+        svc, router, _observe, tmpdir = _make_service()
+        router.ask.side_effect = AdapterError("Codex CLI timed out after 240.0s")
+        result = svc.run_evidence_worker(task_id="t-ev", instruction="junta la evidencia")
+        self.assertIn("timed out", result.error)
+        # retry heredado de _RETRY_LANES para lane worker
+        self.assertEqual(router.ask.call_count, 2)
+        note = (tmpdir / "t-ev" / "evidence.md").read_text(encoding="utf-8")
+        self.assertIn("pre-step error", note)
+
+    def test_scratch_write_bounded_and_fresh_per_attempt(self) -> None:
+        svc, router, _observe, tmpdir = _make_service()
+        router.ask.return_value = MagicMock(content="y" * 100_000)
+        svc.run_evidence_worker(task_id="t-ev", instruction="junta la evidencia")
+        first = (tmpdir / "t-ev" / "evidence.md").read_text(encoding="utf-8")
+        self.assertLessEqual(len(first), 64_000)
+        # fresca por intento: el segundo pre-step SOBRESCRIBE, no acumula
+        router.ask.return_value = MagicMock(content="z-fresca")
+        svc.run_evidence_worker(task_id="t-ev", instruction="junta la evidencia")
+        second = (tmpdir / "t-ev" / "evidence.md").read_text(encoding="utf-8")
+        self.assertEqual(second, "z-fresca")
+
+
 class DispatchParallelTests(unittest.TestCase):
     def test_empty_tasks_returns_empty(self) -> None:
         svc, *_ = _make_service()
