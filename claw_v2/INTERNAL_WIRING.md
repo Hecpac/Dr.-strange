@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "C1-Sβ autonomy-plan: bounded task re-drive — verifier structured verdict tail (parse_verdict_tail + CLASE_BLOCKER contract in _build_coordinator_tasks), redrive governor on active_task (attempts/seen/pending, CLAW_MAX_TASK_REDRIVES), class router at the blocked branch of task_handler (formato → start_phase=synthesis re-work via existing deferral re-enqueue; decision_usuario/evidencia_externa/unparseable → today's S-α fail-closed path), ObservationWindow gate via redrive_budget_frozen wired in BotService. Invariant task_redrive_bounded_and_classified added to §1. Predecessor C0-S3 (doc_version 2.46) in main"
-doc_version: 2.47
+describes_commit: "C1-Sγ.0 autonomy-plan: redrive observability — every governor decision on a DECLARED blocker class emits autonomous_task_redrive_decision (action fail_closed for non-redrivable classes; classless checkpoints stay silent — they are normal verification deferrals, not class decisions), blocker_class persisted in redrive_pending and carried on autonomous_task_redrive_resumed + terminal autonomous_task_failed events. Governor stale-task guard now runs before class routing. Predecessor C1-Sβ (doc_version 2.47) in main"
+doc_version: 2.48
 last_verified: 2026-07-02
-verification_method: "code cross-read of the redrive router (task_handler blocked branch), parse_verdict_tail + _coordinator_checkpoint (bot_helpers) and the BotService redrive_budget_frozen wiring against this doc + tests/test_task_redrive.py (parser fail-closed, governor unit guards incl. deferral-budget veto, first-cycle integration, consume-once reentry, redrive_history) + adjacent task_handler/coordinator suites green + adversarial review PR #175 (property-vs-callable wiring bug fixed with a re-reading lambda + wiring test). Live smoke of the full redrive arc pending deploy"
+verification_method: "code cross-read of _maybe_start_redrive / _consume_redrive_pending / the terminal autonomous_task_failed emit against this doc + tests/test_task_redrive.py (RedriveObservabilityTests: fail_closed event per declared class, no-spam on classless checkpoints, stale-task silent, blocker_class in pending/resumed/terminal) + β suites green (35 tests) + adjacent task_handler/architecture/bot_helpers/lifecycle suites green (138 tests). Live smoke of γ (evidence pre-step) pending — γ.0 makes the smoke measurable against the 2026-07-02 baseline (4 deaths/13h)"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1110,13 +1110,22 @@ invariants:
           research, never re-executes implementation — and appends the
           verdict to the objective (_consume_redrive_pending, consume-once).
           Terminal failures after re-drives append redrive_history to the
-          notification. Every decision emits
-          autonomous_task_redrive_decision.
+          notification. γ.0 (2026-07-02): every governor decision on a
+          DECLARED class emits autonomous_task_redrive_decision — including
+          action=fail_closed for non-redrivable declared classes; a
+          checkpoint WITHOUT a class is a normal verification deferral and
+          stays silent (the governor runs on every non-terminal cycle —
+          emitting there would flood the stream with misleading fail_closed
+          events for cycles that actually defer). blocker_class persists in
+          redrive_pending and is carried on autonomous_task_redrive_resumed
+          and on the terminal autonomous_task_failed event, making deaths
+          measurable by class.
     enforced_by:
       - tests/test_task_redrive.py::RedriveIntegrationTests::test_formato_blocker_redrives_instead_of_terminal
       - tests/test_task_redrive.py::RedriveDecisionUnitTests (cap, dedup, frozen, knob=0, clases no-formato)
       - tests/test_task_redrive.py::RedriveReentryTests::test_consume_redrive_pending_forces_synthesis_and_verdict
       - tests/test_task_redrive.py::ParseVerdictTailTests (fail-closed sin contrato)
+      - tests/test_task_redrive.py::RedriveObservabilityTests (γ.0 — evento por clase declarada, mudo sin clase, blocker_class en pending/resumed/terminal)
     why: 6/8 autonomous tasks died at the FIRST verifier objection with no
          retry branch (recon 2026-07-02) — the deferral loop re-verified but
          never re-worked, and the dominant failure was structurally
