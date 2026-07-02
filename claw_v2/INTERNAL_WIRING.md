@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "P0-2 daemon branch-integrity safe mode: detect a wrong-branch strand of the live shared checkout (pure .git/HEAD read, fail-open, no auto-heal) and stop claiming jobs via a JobService safe-mode latch"
-doc_version: 2.43
-last_verified: 2026-06-28
-verification_method: "code cross-read of the P0-2 branch-integrity path (daemon.py _read_current_branch/_check_branch_integrity/_enter|_clear_branch_integrity_safe_mode + tick/run_loop wiring, jobs.py set_safe_mode_reason + 4 claim sites, main.py _branch_integrity_check_enabled arming gate) against this doc + new test_daemon_branch_integrity.py (19) + adversarial false-positive panel (deploy-sim/head-edge/config-throttle, all HOLD) + full suite re-run in an ISOLATED worktree (3876 passed, 1 skipped, 0 foreign-kill-guard violations) + test_architecture_invariants green (subprocess-free tick preserved). Predecessor C1-C5 (doc_version 2.42) remains in main"
+describes_commit: "S-α autonomy-block slice 1: waiting_for_user_input failure notifications announce the pre-existing rescue path (reply-in-chat re-drive ~24h + /task_pending) via _WAITING_USER_INPUT_RECOVERY_HINT in task_handler._failure_response_text"
+doc_version: 2.44
+last_verified: 2026-07-01
+verification_method: "code cross-read of _failure_response_text + _blocked_user_input_reason (task_handler.py) and the rescue chain (_recent_waiting_for_user_task / _telegram_continuation_shortcut, bot.py) against this doc + WaitingUserInputRecoveryHintTests (2, green inside 54-test task_handler file) + live deploy 965871a: clean restart (pid 68921, zero stderr delta), composer exercised on the daemon checkout with the production-verbatim KeepAlive error shape. Predecessor P0-2 branch-integrity (doc_version 2.43) remains in main"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1025,6 +1025,25 @@ invariants:
       - tests/test_daemon.py::AutonomyStaleRunningAllowlistTests::test_f4b_delegation_in_stale_running_allowlist
       - tests/test_daemon.py::F4DelegationClaimExclusivityTests::test_claim_next_calls_are_filtered_and_f4b_kind_is_exclusive
       - tests/test_daemon.py::F4DelegationClaimExclusivityTests::test_main_does_not_wire_a_generic_consumer_for_f4b_kind
+
+  waiting_user_input_failure_announces_recovery:
+    rule: A terminal task-failure notification whose error carries the
+          waiting_for_user_input class MUST append
+          _WAITING_USER_INPUT_RECOVERY_HINT (claw_v2/task_handler.py,
+          _failure_response_text), announcing the pre-existing rescue path —
+          reply-in-chat re-drives the task (continuation shortcut,
+          _recent_waiting_for_user_task, ~24h window) and /task_pending shows
+          the blocker detail. The hint fires ONLY for that error class; every
+          other failure text stays hint-free.
+    enforced_by:
+      - tests/test_task_handler.py::WaitingUserInputRecoveryHintTests::test_waiting_user_input_failure_announces_recovery_path
+      - tests/test_task_handler.py::WaitingUserInputRecoveryHintTests::test_failure_text_without_user_input_block_has_no_recovery_hint
+    why: The rescue mechanism predates the hint but was never announced, so the
+         notification was a dead end — the user received worker-internal
+         blockers with no visible way to respond (recon jul-2026, caso
+         KeepAlive tg-574707975). Slice S-α of the autonomy remediation block
+         (α announce / β bounded re-drive / γ evidence phase / δ structured
+         verdict); regressing it reopens the dead end silently.
 ```
 
 ---
