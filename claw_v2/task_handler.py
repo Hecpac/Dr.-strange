@@ -3572,6 +3572,8 @@ class TaskHandler:
         if active_task.get("task_id") != task_id:
             return False
         clase = str(checkpoint.get("blocker_class") or "")
+        if not clase:
+            return False
         payload_base = {"session_id": session_id, "task_id": task_id, "clase": clase}
         max_redrives = _max_task_redrives()
         try:
@@ -3583,18 +3585,17 @@ class TaskHandler:
             normalize_blocker_ident(clase, blocker.split(":", 1)[0]) for blocker in blockers
         ] or [normalize_blocker_ident(clase, "sin-slug")]
         if clase != "formato":
-            if clase:
-                # γ.0: el return mudo dejaba las muertes por evidencia/decision
-                # sin evento — el baseline (4 muertes/13h) no era medible por clase.
-                self._emit(
-                    "autonomous_task_redrive_decision",
-                    {
-                        **payload_base,
-                        "attempt": attempts,
-                        "idents": idents,
-                        "action": "fail_closed",
-                    },
-                )
+            # γ.0: el return mudo dejaba las muertes por evidencia/decision
+            # sin evento — el baseline (4 muertes/13h) no era medible por clase.
+            self._emit(
+                "autonomous_task_redrive_decision",
+                {
+                    **payload_base,
+                    "attempt": attempts,
+                    "idents": idents,
+                    "action": "fail_closed",
+                },
+            )
             return False
         try:
             deferrals = int(active_task.get("verification_deferrals") or 0)

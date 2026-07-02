@@ -507,7 +507,7 @@ class RedriveObservabilityTests(unittest.TestCase):
 
     def test_declared_fail_closed_class_emits_decision_event(self) -> None:
         for clase in ("evidencia_externa", "decision_usuario"):
-            with tempfile.TemporaryDirectory() as tmpdir:
+            with self.subTest(clase=clase), tempfile.TemporaryDirectory() as tmpdir:
                 handler, memory, observe, *_ = _mk_handler(
                     Path(tmpdir), _TailCoordinator(FORMATO_TAIL)
                 )
@@ -519,14 +519,14 @@ class RedriveObservabilityTests(unittest.TestCase):
                     active_task=active,
                     checkpoint=self._checkpoint(clase),
                 )
-                self.assertFalse(started, clase)
+                self.assertFalse(started)
                 decisions = self._decisions(observe)
-                self.assertEqual(len(decisions), 1, clase)
+                self.assertEqual(len(decisions), 1)
                 payload = decisions[0]["payload"]
-                self.assertEqual(payload["action"], "fail_closed", clase)
-                self.assertEqual(payload["clase"], clase, clase)
-                self.assertEqual(payload["attempt"], 0, clase)
-                self.assertEqual(payload["idents"], [f"{clase}:cita-man-page"], clase)
+                self.assertEqual(payload["action"], "fail_closed")
+                self.assertEqual(payload["clase"], clase)
+                self.assertEqual(payload["attempt"], 0)
+                self.assertEqual(payload["idents"], [f"{clase}:cita-man-page"])
 
     def test_no_class_checkpoint_emits_no_decision_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -565,7 +565,7 @@ class RedriveObservabilityTests(unittest.TestCase):
                 session_id="tg-1",
                 task_id="t-1",
                 active_task=active,
-                checkpoint={**self._checkpoint("formato")},
+                checkpoint=self._checkpoint("formato"),
             )
             self.assertTrue(started)
             pending = _active_task(memory, "tg-1").get("redrive_pending") or {}
