@@ -2409,6 +2409,7 @@ class TaskHandler:
             )
         state = self._get_session_state(record.session_id)
         active_object = dict(state.get("active_object") or {})
+        prior_task = dict(active_object.get("active_task") or {})
         active_object["active_task"] = {
             "task_id": record.task_id,
             "objective": record.objective,
@@ -2417,6 +2418,22 @@ class TaskHandler:
             "resumed_at": metadata["last_resumed_at"],
             "resume_reason": reason,
         }
+        if prior_task.get("task_id") == record.task_id:
+            # El rebuild borraba los contadores durables entre ciclos: el
+            # governor de re-drive (redrive_*) perdía su pending armado antes
+            # de que _consume_redrive_pending corriera (smoke 2026-07-02
+            # 12:10: synthesis resumida de scratch en vez de re-trabajada), y
+            # el cap F1.1 (verification_deferrals) nunca acumulaba entre
+            # resumes. Estas llaves viven en active_task PORQUE sobreviven la
+            # re-creación de jobs — deben sobrevivir también el resume.
+            for key in (
+                "redrive_attempts",
+                "redrive_seen",
+                "redrive_pending",
+                "verification_deferrals",
+            ):
+                if key in prior_task:
+                    active_object["active_task"][key] = prior_task[key]
         if execution_mode != mode:
             active_object["active_task"]["execution_mode"] = execution_mode
         if goal_id:

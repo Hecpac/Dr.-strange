@@ -273,6 +273,50 @@ class RedriveExhaustedRoutingTests(unittest.TestCase):
             self.assertNotIn("autonomous_task_verification_stalled", types)
 
 
+class RedriveSurvivesResumeTests(unittest.TestCase):
+    def test_resume_preserves_redrive_and_deferral_counters(self) -> None:
+        """Smoke 2026-07-02 12:10: _resume_autonomous_record reconstruía
+        active_task desde cero y borraba redrive_pending/attempts/seen (y el
+        contador F1.1 de deferrals) — el consume nunca veía el pending y el
+        ciclo 2 re-verificaba sin re-trabajar."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            handler, memory, _observe, _jobs, _stored = _mk_handler(
+                root, _TailCoordinator(FORMATO_TAIL)
+            )
+            handler.task_ledger.create(
+                task_id="t-res",
+                session_id="tg-1",
+                objective="obj",
+                runtime="coordinator",
+                mode="research",
+                status="running",
+                notify_policy="none",
+                metadata={},
+                artifacts={},
+            )
+            record = handler.task_ledger.get("t-res")
+            memory.update_session_state(
+                "tg-1",
+                active_object={
+                    "active_task": {
+                        "task_id": "t-res",
+                        "status": "pending",
+                        "redrive_attempts": 1,
+                        "redrive_seen": ["formato:x"],
+                        "redrive_pending": {"start_phase": "synthesis", "verdict": "v"},
+                        "verification_deferrals": 3,
+                    }
+                },
+            )
+            handler._resume_autonomous_record(record, reason="test")
+            active = _active_task(memory, "tg-1")
+            self.assertEqual(active.get("redrive_attempts"), 1)
+            self.assertEqual(active.get("redrive_seen"), ["formato:x"])
+            self.assertEqual((active.get("redrive_pending") or {}).get("start_phase"), "synthesis")
+            self.assertEqual(active.get("verification_deferrals"), 3)
+
+
 class RedriveWiringTests(unittest.TestCase):
     def test_bot_wires_frozen_gate_as_live_callable(self) -> None:
         """Review PR #175 #1 (MUST-FIX): ObservationWindowState.frozen es
