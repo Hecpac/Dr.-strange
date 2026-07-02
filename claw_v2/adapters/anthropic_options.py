@@ -152,7 +152,11 @@ def build_options(
     if request.lane in ADVISORY_LANES:
         tools = []
         system_prompt = effective_system_prompt
-        permission_mode = "plan"
+        # El read-only de las lanes advisory lo garantiza tools=[] (mecánico).
+        # permission_mode="plan" NO añadía seguridad y sí inyectaba el andamiaje
+        # de planner del SDK: el verifier derivaba a "escribir el plan file" y
+        # se tragaba el veredicto (drift observado 2026-07-02, 10:47-12:00 UTC).
+        permission_mode = "default"
     else:
         tools = {"type": "preset", "preset": "claude_code"}
         system_prompt = {"type": "preset", "preset": "claude_code"}
