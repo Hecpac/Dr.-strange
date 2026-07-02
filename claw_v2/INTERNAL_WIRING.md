@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "B2.0 (bloque F4-B2, opción c escalonada): DELEGATION_CONTRACT declares multi-source research with a deliverable delegable via mode=research (Spanish anchors) and drops the unconditional 'WebSearch/WebFetch stays inline' clause — only a single quick-fact lookup stays inline; single-URL read exception (BROWSER_DELEGATION_RULE) and git/fs/logs/local-DB inline list intact; include_delegation still conditional on delegation_handler. New §1 invariant delegation_contract_research_delegable. Predecessor: C1-Sγ closure Fix 2 mini-δ (doc_version 2.51) in main"
-doc_version: 2.52
+describes_commit: "B2.1 (bloque F4-B2, opción c escalonada): shadow-mode delegation-gap telemetry — _maybe_emit_shadow_delegation_gap in _brain_text_response (post-model, after _prepare_visible_brain_content), opt-in ONLY at the raw dispatch→brain fallback call site (shadow_gap_eligible=True); emits shadow_delegation_gap action=gap reason=no_action|research_inline; knob CLAW_SHADOW_DELEGATION_GAP (default on, =0 emits action=disabled once); new detector _looks_like_research_deliverable_ask; shared helpers consumed read-only; evidence-gate completion branch byte-identical. New §1 invariant shadow_delegation_gap_observational. Predecessor: B2.0 delegation_contract_research_delegable (doc_version 2.52) in main"
+doc_version: 2.53
 last_verified: 2026-07-02
-verification_method: "TDD red-first (3 marker tests watched fail against the old contract, then green): tests/test_brain_core.py::DelegationContractResearchTests + existing include_delegation and BROWSER_DELEGATION_RULE-embedding locks; full test_brain_core.py 66 green. Live smoke pending deploy: a bare Spanish research ask ('Investiga X y entrégame un reporte', no 'delega' keyword) must produce organic brain_delegation_requested mode=research + the C1 pipeline closing the task (combined B2.0+B2.1 smoke — report honestly if the model still answers inline)"
+verification_method: "TDD red-first (8 tests watched fail without the feature, then 11 green): tests/test_shadow_delegation_gap.py — live-baseline fixtures (3214/3216/3218/3239→gap; 3323 single-URL→no gap; delegated→no gap; S-α knowledge reply→no gap; meta→no gap; eligible=False→no emit; knob=0→disabled once; brain answer delivered intact). Adjacent invariant suites green: meta_introspection_integration + evidence_gate_user_authority + final_render_idempotency + architecture_invariants + dispatch_routing (135 passed). Live smoke pending deploy: bare Spanish research ask via web chat must delegate organically (B2.0) with ZERO shadow gap on that turn; organic gap event if one occurs in-window, else fixture-locked (report honestly)"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1303,6 +1303,37 @@ invariants:
          delegated correctly without being asked to. Slice B2.0 of the F4-B2
          block (opción c escalonada authorized 2026-07-02); the B2.1 shadow
          telemetry measures the effect before any enforcement is considered.
+
+  shadow_delegation_gap_observational:
+    rule: _maybe_emit_shadow_delegation_gap (claw_v2/bot.py) is OBSERVATIONAL
+          ONLY — it never blocks a turn, never re-prompts, never makes an
+          extra LLM call, and never alters the user-visible text; its only
+          output is the `shadow_delegation_gap` observe event (action=gap
+          with reason=no_action|research_inline, or a single action=disabled
+          when CLAW_SHADOW_DELEGATION_GAP=0). It consumes
+          _looks_like_operator_action_request, _user_authorized_knowledge_answer
+          and _user_authoritatively_marked_done READ-ONLY (no refactor), adds
+          its own _looks_like_research_deliverable_ask (research verb AND
+          deliverable noun — single-URL asks stay out), and opts in ONLY at
+          the raw dispatch→brain fallback boundary (shadow_gap_eligible=True
+          at the _flush_dispatch_decision call site): continuation shortcuts,
+          slash commands, internal prompts and meta turns (P0-1 ContextVar)
+          never count as inaction. A turn whose trace or tool_calls show
+          delegate_task never emits a gap. Promotion to any enforcement is a
+          future explicit decision, not a config drift.
+    enforced_by:
+      - tests/test_shadow_delegation_gap.py (11 tests — baseline fixtures
+        msgs 3214/3216/3218/3239 → gap, 3323 single-URL → no gap, delegated
+        turn → no gap, S-α knowledge reply → no gap, meta → no gap,
+        eligible=False → no emit, knob=0 → disabled once, response delivered
+        intact)
+    why: F4-B2 opción c escalonada (authorized 2026-07-02): the shadow
+         measures the delegation gap after the B2.0 contract fix so
+         shadow→enforcement is decided by Hector with data. reason
+         discriminator exists because the live baseline turns were NOT
+         tool-less — ledger rows show "brain tool-use turn: 4 tool calls
+         (unverified)" — so a pure no-tools gap would be blind exactly on
+         the dominant class (research answered inline WITH WebFetch).
 ```
 
 ---
