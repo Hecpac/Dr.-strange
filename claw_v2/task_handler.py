@@ -194,6 +194,16 @@ def _execution_mode_for_autonomous_task(mode: str, metadata: dict[str, Any]) -> 
     return mode
 
 
+# S-α (2026-07-01): the rescue path (continuation shortcut ~24h + /task_pending)
+# predates this hint but the failure message never announced it, leaving the
+# user at a dead end. The hint fires ONLY for the waiting_for_user_input class
+# — the one blocked_reason where a user reply actually re-drives the task.
+_WAITING_USER_INPUT_RECOVERY_HINT = (
+    "Puedes responder aquí mismo con el dato o la confirmación y retomo la tarea "
+    "(retoma directa disponible ~24h). Usa `/task_pending` para ver el detalle del bloqueo."
+)
+
+
 def _failure_response_text(
     *,
     task_id: str,
@@ -208,6 +218,8 @@ def _failure_response_text(
         lines.append(summary[:240])
     if error and not _INTERNAL_ERROR_CODE_RE.match(error.strip()):
         lines.append(f"Error: {error}")
+    if error.strip().lower().startswith("waiting_for_user_input"):
+        lines.append(_WAITING_USER_INPUT_RECOVERY_HINT)
     return "\n".join(lines)
 
 

@@ -2148,6 +2148,87 @@ class StaleMessageTests(unittest.TestCase):
             )
 
 
+class WaitingUserInputRecoveryHintTests(unittest.TestCase):
+    """S-α — a waiting_for_user_input failure must announce its recovery path.
+
+    The rescue mechanism (continuation shortcut ~24h + /task_pending) predates
+    this slice; the failure notification never mentioned it, leaving the user
+    at a dead end (recon jul-2026, caso KeepAlive)."""
+
+    def test_waiting_user_input_failure_announces_recovery_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            stored: list[tuple[str, str, str]] = []
+
+            class _BlockedCoordinator:
+                def run(
+                    self,
+                    task_id,
+                    objective,
+                    research_tasks,
+                    implementation_tasks=None,
+                    verification_tasks=None,
+                    lane_overrides=None,
+                    **kwargs,
+                ):
+                    return CoordinatorResult(
+                        task_id=task_id,
+                        phase_results={
+                            "verification": [
+                                WorkerResult(
+                                    task_name="verify_change",
+                                    content=(
+                                        "Verification Status: pending\n"
+                                        "Siguiente paso: solicitar al usuario el enlace del documento"
+                                    ),
+                                    duration_seconds=0.1,
+                                )
+                            ]
+                        },
+                        synthesis="plan listo",
+                    )
+
+            handler = TaskHandler(
+                coordinator=_BlockedCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                store_message=lambda sid, role, text: stored.append((sid, role, text)),
+                workspace_root=root,
+            )
+            ack = handler.start_autonomous_task("tg-1", "implementa el informe", mode="coding")
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+
+            events = observe.recent_events(limit=200)
+            failed = next(e for e in events if e["event_type"] == "autonomous_task_failed")
+            response = failed["payload"]["response"]
+            self.assertIn("/task_pending", response)
+            self.assertIn("24h", response)
+            self.assertIn("responder", response.lower())
+            assistant_texts = [text for _sid, role, text in stored if role == "assistant"]
+            self.assertTrue(assistant_texts, "assistant message must be stored")
+            self.assertIn("/task_pending", assistant_texts[-1])
+
+    def test_failure_text_without_user_input_block_has_no_recovery_hint(self) -> None:
+        from claw_v2.task_handler import _failure_response_text
+
+        text = _failure_response_text(
+            task_id="t1",
+            checkpoint={"summary": "resumen"},
+            error="research_phase_failed: gather_findings",
+            objective="obj",
+        )
+        self.assertNotIn("/task_pending", text)
+        self.assertNotIn("24h", text)
+
+
 class TaskQueueVocabularyTests(unittest.TestCase):
     """AM-VOCAB — every queue write goes through the single status map."""
 
