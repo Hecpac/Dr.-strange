@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import threading
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,11 +69,14 @@ _MAX_VERIFICATION_DEFERRALS = 5
 
 
 def _max_task_redrives() -> int:
-    """CLAW_MAX_TASK_REDRIVES — cap de re-drives por tarea (C1-Sβ). 0 = β OFF."""
+    """CLAW_MAX_TASK_REDRIVES — cap de re-drives por tarea (C1-Sβ). 0 = β OFF.
+
+    Un valor ilegible apaga β (fail-closed), no lo re-habilita al default.
+    """
     try:
         return max(0, int(os.getenv("CLAW_MAX_TASK_REDRIVES", "2")))
     except ValueError:
-        return 2
+        return 0
 
 # AM-VOCAB (2026-06-12): the session task_queue used to receive raw
 # verification/terminal statuses ("passed", "failed", "unknown", ...) next to
@@ -1631,15 +1634,20 @@ class TaskHandler:
                 )
             if not terminal_status and not redrive_in_flight:
                 blocked_reason = self._blocked_user_input_reason(completed_checkpoint)
-                if not blocked_reason and str(
-                    completed_checkpoint.get("blocker_class") or ""
-                ) in ("decision_usuario", "evidencia_externa"):
+                blocker_class = str(completed_checkpoint.get("blocker_class") or "")
+                terminal_tail_classes = ("decision_usuario", "evidencia_externa") + (
+                    # Con β activo, un formato que NO re-condujo (agotado, duplicado
+                    # o vetado) termina honesto con historial en vez de ciclar el
+                    # deferral loop hasta verification_stalled (review PR #175, #3).
+                    ("formato",) if _max_task_redrives() > 0 else ()
+                )
+                if not blocked_reason and blocker_class in terminal_tail_classes:
                     # El tail estructurado es señal más fuerte que los markers:
-                    # ambas clases requieren al dueño (evidencia_externa queda
+                    # estas clases requieren al dueño (evidencia_externa queda
                     # fail-closed hasta γ).
                     detail = "; ".join(
                         str(blocker) for blocker in (completed_checkpoint.get("blockers") or [])
-                    ) or str(completed_checkpoint.get("blocker_class"))
+                    ) or blocker_class
                     blocked_reason = f"waiting_for_user_input: {detail[:500]}"
                 if blocked_reason and active_task.get("task_id") == task_id:
                     redrive_seen = list(active_task.get("redrive_seen") or [])
@@ -1694,6 +1702,10 @@ class TaskHandler:
                         "error": checkpoint_error,
                         "reason": "verification_stalled",
                     }
+                    if active_task.get("task_id") == task_id and active_task.get("redrive_seen"):
+                        completed_checkpoint["redrive_history"] = list(
+                            active_task.get("redrive_seen") or []
+                        )
                     self._update_session_state(
                         session_id,
                         verification_status="failed",
@@ -3542,6 +3554,18 @@ class TaskHandler:
             attempts = int(active_task.get("redrive_attempts") or 0)
         except (TypeError, ValueError):
             attempts = 0
+        try:
+            deferrals = int(active_task.get("verification_deferrals") or 0)
+        except (TypeError, ValueError):
+            deferrals = 0
+        if deferrals >= _MAX_VERIFICATION_DEFERRALS:
+            # El cap de deferrals vetaría el re-run en este mismo ciclo: no
+            # quemes un intento que jamás va a correr (review PR #175, #2).
+            self._emit(
+                "autonomous_task_redrive_decision",
+                {**payload_base, "attempt": attempts, "action": "deferral_budget_exhausted"},
+            )
+            return False
         if max_redrives <= 0 or attempts >= max_redrives:
             self._emit(
                 "autonomous_task_redrive_decision",
@@ -3568,6 +3592,11 @@ class TaskHandler:
             try:
                 frozen = bool(self._redrive_budget_frozen())
             except Exception:
+                # Un gate roto debe ser visible, no un skip silencioso.
+                self._emit(
+                    "autonomous_task_redrive_gate_error",
+                    {**payload_base, "attempt": attempts},
+                )
                 frozen = False
             if frozen:
                 self._emit(

@@ -9,10 +9,15 @@ Diseño: memoria autonomy-beta-gamma-design-2026-07-02.
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from claw_v2.adapters.base import LLMRequest
+from claw_v2.main import build_runtime
+from claw_v2.types import LLMResponse
 
 from claw_v2.bot_helpers import (
     _coordinator_checkpoint,
@@ -43,12 +48,14 @@ EVIDENCIA_TAIL = (
     "- cita-man-page: falta el output crudo de man launchd.plist\n"
 )
 
+# Redactado SIN markers del heurístico legacy (_blocked_user_input_reason) para
+# que el test bloquee la rama nueva del tail, no el heurístico (review PR #175, #5).
 DECISION_TAIL = (
     "Verification Status: pending\n"
-    "Siguiente paso: confirmar con el dueño qué variante prefiere\n"
+    "Siguiente paso: el dueño debe elegir la variante\n"
     "CLASE_BLOCKER: decision_usuario\n"
     "BLOCKERS:\n"
-    "- confirmar-variante: el dueño debe elegir entre A y B\n"
+    "- eleccion-variante: el dueño debe elegir entre A y B\n"
 )
 
 
@@ -243,6 +250,64 @@ class RedriveIntegrationTests(unittest.TestCase):
             self.assertIn("/task_pending", failed["payload"]["response"])
 
 
+class RedriveExhaustedRoutingTests(unittest.TestCase):
+    def test_formato_without_redrive_goes_terminal_not_stall(self) -> None:
+        """Review PR #175 #3: un formato que NO re-condujo (agotado/duplicado/
+        vetado) debe terminar honesto por la rama blocked — no ciclar en el
+        deferral loop hasta verification_stalled."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            handler, _memory, observe, _jobs, _stored = _mk_handler(
+                root, _TailCoordinator(FORMATO_TAIL)
+            )
+            with patch.object(TaskHandler, "_maybe_start_redrive", return_value=False):
+                ack = handler.start_autonomous_task(
+                    "tg-1", "resume launchd en 3 líneas", mode="research"
+                )
+                task_id = ack.split("`", 2)[1]
+                self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+            events = observe.recent_events(limit=200)
+            failed = next(e for e in events if e["event_type"] == "autonomous_task_failed")
+            self.assertIn("/task_pending", failed["payload"]["response"])
+            types = [e["event_type"] for e in events]
+            self.assertNotIn("autonomous_task_verification_stalled", types)
+
+
+class RedriveWiringTests(unittest.TestCase):
+    def test_bot_wires_frozen_gate_as_live_callable(self) -> None:
+        """Review PR #175 #1 (MUST-FIX): ObservationWindowState.frozen es
+        @property — el wiring de BotService debe re-leer el estado en cada
+        decisión (lambda), no congelar un bool en construcción."""
+
+        def fake_anthropic(request: LLMRequest) -> LLMResponse:
+            return LLMResponse(
+                content="ok", lane=request.lane, provider="anthropic", model=request.model
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            env = {
+                "DB_PATH": str(root / "data" / "claw.db"),
+                "WORKSPACE_ROOT": str(root / "workspace"),
+                "AGENT_STATE_ROOT": str(root / "agents"),
+                "EVAL_ARTIFACTS_ROOT": str(root / "evals"),
+                "APPROVALS_ROOT": str(root / "approvals"),
+                "TELEMETRY_ROOT": str(root / "telemetry"),
+                "PIPELINE_STATE_ROOT": str(root / "pipeline"),
+                "TELEGRAM_ALLOWED_USER_ID": "123",
+                "CLAW_DISABLE_TASK_INTENT_ROUTER": "1",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                runtime = build_runtime(anthropic_executor=fake_anthropic)
+                gate = runtime.bot._task_handler._redrive_budget_frozen
+                self.assertTrue(callable(gate))
+                window = runtime.observation_window
+                self.assertIsNotNone(window)
+                self.assertFalse(gate())
+                window.freeze(reason="test", actor="test")
+                self.assertTrue(gate())
+
+
 class RedriveDecisionUnitTests(unittest.TestCase):
     """_maybe_start_redrive por unidad: guards del governor."""
 
@@ -318,6 +383,27 @@ class RedriveDecisionUnitTests(unittest.TestCase):
                     checkpoint=self._checkpoint(),
                 )
             )
+
+    def test_deferral_budget_exhausted_blocks(self) -> None:
+        # Review PR #175 #2: el cap de deferrals vetaría el re-run del mismo
+        # ciclo — no se quema un intento que jamás va a correr.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, memory = self._handler_and_memory(Path(tmpdir))
+            active = self._seed(memory, "t-1", verification_deferrals=5)
+            self.assertFalse(
+                handler._maybe_start_redrive(
+                    session_id="tg-1",
+                    task_id="t-1",
+                    active_task=active,
+                    checkpoint=self._checkpoint(),
+                )
+            )
+
+    def test_invalid_knob_value_fails_closed(self) -> None:
+        from claw_v2.task_handler import _max_task_redrives
+
+        with patch.dict(os.environ, {"CLAW_MAX_TASK_REDRIVES": "off"}):
+            self.assertEqual(_max_task_redrives(), 0)
 
     def test_knob_zero_disables(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

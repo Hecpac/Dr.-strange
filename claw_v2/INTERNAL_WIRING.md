@@ -11,7 +11,7 @@
 describes_commit: "C1-Sβ autonomy-plan: bounded task re-drive — verifier structured verdict tail (parse_verdict_tail + CLASE_BLOCKER contract in _build_coordinator_tasks), redrive governor on active_task (attempts/seen/pending, CLAW_MAX_TASK_REDRIVES), class router at the blocked branch of task_handler (formato → start_phase=synthesis re-work via existing deferral re-enqueue; decision_usuario/evidencia_externa/unparseable → today's S-α fail-closed path), ObservationWindow gate via redrive_budget_frozen wired in BotService. Invariant task_redrive_bounded_and_classified added to §1. Predecessor C0-S3 (doc_version 2.46) in main"
 doc_version: 2.47
 last_verified: 2026-07-02
-verification_method: "code cross-read of _failure_response_text + _blocked_user_input_reason (task_handler.py) and the rescue chain (_recent_waiting_for_user_task / _telegram_continuation_shortcut, bot.py) against this doc + WaitingUserInputRecoveryHintTests (2, green inside 54-test task_handler file) + live deploy 965871a: clean restart (pid 68921, zero stderr delta), composer exercised on the daemon checkout with the production-verbatim KeepAlive error shape. Predecessor P0-2 branch-integrity (doc_version 2.43) remains in main"
+verification_method: "code cross-read of the redrive router (task_handler blocked branch), parse_verdict_tail + _coordinator_checkpoint (bot_helpers) and the BotService redrive_budget_frozen wiring against this doc + tests/test_task_redrive.py (parser fail-closed, governor unit guards incl. deferral-budget veto, first-cycle integration, consume-once reentry, redrive_history) + adjacent task_handler/coordinator suites green + adversarial review PR #175 (property-vs-callable wiring bug fixed with a re-reading lambda + wiring test). Live smoke of the full redrive arc pending deploy"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1127,6 +1127,10 @@ invariants:
          re-enqueue; the continuation-shortcut race is structurally absent
          because recovering tasks never carry the waiting_for_user_input
          marker in the ledger until terminal.
+         Known gap (F2 OFF in prod): when an F2 recovery checkpoint
+         short-circuits coordinator.run, _consume_redrive_pending is skipped
+         and redrive_pending stays armed for the next cycle — bounded by the
+         deferral cap, revisit if F2 turns ON.
 ```
 
 ---
