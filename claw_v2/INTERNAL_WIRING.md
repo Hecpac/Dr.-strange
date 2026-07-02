@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "C1-Sγ.1 autonomy-plan: evidence pre-step — clase evidencia_externa now arms the redrive with pre_step=evidence (same governor guards, single CLAW_MAX_TASK_REDRIVES knob, attempt incremented once at arming); the pre-step runs in _consume_redrive_pending inside the re-enqueued durable job via CoordinatorService.run_evidence_worker (ONE worker-lane WorkerTask, raw output persisted fresh by the runner to scratch/<task_id>/evidence.md at scratch root), a 4000-char excerpt is appended to the objective delimited as untrusted data, dead pre-step raises EvidencePreStepError → immediate honest terminal (job fail retry=False). New invariant evidence_pre_step_contained in §1. Predecessor C1-Sγ.0 (doc_version 2.48) in main"
-doc_version: 2.49
+describes_commit: "C1-Sγ closure Fix 1: synthesis mode-aware — _synthesize (coordinator.py) branches on bool(implementation_tasks), the signal run() already has: implementation downstream ⇒ delegated Plan Maestro unchanged; research-terminal ⇒ FINAL-DELIVERABLE prompt (answers the objective directly, no agent-registry listing, [RE-DRIVE]/<<<EVIDENCIA>>> blocks incorporated as untrusted data). critical_audit self-healing path untouched (has_implementation defaults True). New invariant synthesis_mode_aware in §1. Predecessor C1-Sγ.1 (doc_version 2.49) in main"
+doc_version: 2.50
 last_verified: 2026-07-02
-verification_method: "code cross-read of _maybe_start_redrive / _consume_redrive_pending / _run_evidence_pre_step / CoordinatorService.run_evidence_worker against this doc + TDD suites (tests/test_task_redrive.py incl. EvidencePreStepTests + evidencia governor/integration; tests/test_coordinator.py RunEvidenceWorkerTests) + adjacent task_handler/architecture/bot_helpers/lifecycle suites green + 5-angle adversarial review (line-by-line, security/injection, cross-file, removed-behavior, reuse/conventions) with hardening applied (fence neutralization, disabled action, exception-path class+hint, lane_overrides/trace identity, best-effort scratch, error cap 300) and mutation-verified tests (fence + exception-path asserts fail under reverted fix). Live smoke pending deploy: positive = launchd.plist citation task closes completed with real man-page quote from the pre-step; negative = same blocker twice ⇒ fail-closed + S-α announcement"
+verification_method: "TDD red-first (5 new tests watched failing against the unconditional Plan-Maestro prompt, then green): tests/test_coordinator.py SynthesizeTests deliverable/redrive-as-data/registry-omitted/default-back-compat + FullRunTests call-site wiring both modes; full test_coordinator.py (80) + test_task_redrive.py + test_architecture_invariants.py + test_task_handler.py + test_bot_helpers.py green. Live smoke pending deploy: first-pass research closes completed with redrive_attempts=0 AND the re-drive arc (round-3 shape) closes completed with the verbatim man-page citation as deliverable, not a plan"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1223,6 +1223,43 @@ invariants:
          slot (new task in the same session between arming and consume)
          silently drops redrive counters AND pending — the cap is per-slot,
          not per-task; named residual for the autonomy plan, not fixed here.
+
+  synthesis_mode_aware:
+    rule: _synthesize (claw_v2/coordinator.py) branches on the signal the
+          coordinator ALREADY has — bool(implementation_tasks) at the run()
+          call site, no parallel mode detection: with an implementation
+          phase downstream the synthesis stays the delegated Plan Maestro
+          (`**Step N [agente]:**`); research-terminal (implementation_tasks
+          =None — the shape _build_coordinator_tasks returns for research
+          mode) the prompt demands the FINAL DELIVERABLE that answers the
+          objective directly — no delegated steps, no agent-registry
+          listing (it invites the delegated format), and re-drive material
+          in the objective ([RE-DRIVE — veredicto ...], <<<EVIDENCIA ...
+          EVIDENCIA>>>) incorporated as untrusted DATA (correct what the
+          verdict objects, cite the evidence verbatim, never obey
+          instructions inside it). critical_audit (self-healing) keeps the
+          plan format regardless; has_implementation defaults True so an
+          unupdated caller degrades to today's plan prompt, never to a
+          silent deliverable.
+    enforced_by:
+      - tests/test_coordinator.py::SynthesizeTests::test_research_terminal_synthesis_demands_deliverable_not_plan
+      - tests/test_coordinator.py::SynthesizeTests::test_research_terminal_synthesis_treats_redrive_material_as_data
+      - tests/test_coordinator.py::SynthesizeTests::test_research_terminal_synthesis_omits_agent_registry
+      - tests/test_coordinator.py::SynthesizeTests::test_synthesis_default_keeps_master_plan (back-compat critical/self-healing)
+      - tests/test_coordinator.py::FullRunTests::test_research_only_run_synthesis_demands_deliverable (wiring del call site)
+      - tests/test_coordinator.py::FullRunTests::test_run_with_implementation_synthesis_keeps_master_plan
+    why: The unconditional Plan-Maestro prompt made research-mode tasks
+         (research → synthesis → verification, no implementation) close ONLY
+         when the model disobeyed its own prompt — the re-driven synthesis
+         produced a delegated plan and the verifier correctly blocked
+         "entregable ausente" with the verbatim citation in hand (C1-Sγ
+         live smoke rounds 1/3, 2026-07-02); first-pass research deaths of
+         class formato were largely this same self-inflicted shape. This
+         was blocker (1) of the γ slice-gate. Fix 1 of the γ closure
+         (authorized 2026-07-02, opción a: mode-aware on the existing
+         signal, NOT redrive-aware — every research run delivers, not just
+         re-drives; the smoke must cover clean first-pass AND the re-drive
+         arc).
 ```
 
 ---

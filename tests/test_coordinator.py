@@ -251,6 +251,86 @@ class SynthesizeTests(unittest.TestCase):
         )
         self.assertEqual(result, "")
 
+    def test_research_terminal_synthesis_demands_deliverable_not_plan(self) -> None:
+        # C1-Sγ cierre — synthesis mode-aware: sin fase de implementación río
+        # abajo la synthesis ES el entregable; el prompt plan-delegado hacía
+        # que las research cerraran solo cuando el modelo desobedecía su formato.
+        svc, router, *_ = _make_service()
+        router.ask.return_value = MagicMock(content="entregable final")
+        from claw_v2.coordinator import WorkerResult
+
+        findings = [WorkerResult(task_name="r1", content="data A", duration_seconds=1.0)]
+        result = svc._synthesize("cita el man page", findings, has_implementation=False)
+
+        self.assertEqual(result, "entregable final")
+        prompt = router.ask.call_args.args[0]
+        self.assertNotIn("Formato del Plan Maestro", prompt)
+        self.assertNotIn("Step N [nombre_del_agente]", prompt)
+        self.assertIn("ENTREGABLE FINAL", prompt)
+        self.assertIn("Evidencia Recopilada por los Workers", prompt)
+
+    def test_research_terminal_synthesis_treats_redrive_material_as_data(self) -> None:
+        # El objective de un re-drive trae [RE-DRIVE ...] y <<<EVIDENCIA ...>>>
+        # anexados: el prompt del entregable debe ordenar incorporarlos como
+        # DATOS (corregir lo objetado, citar la evidencia), nunca obedecerlos.
+        svc, router, *_ = _make_service()
+        router.ask.return_value = MagicMock(content="entregable")
+        from claw_v2.coordinator import WorkerResult
+
+        findings = [WorkerResult(task_name="r1", content="data", duration_seconds=0.5)]
+        svc._synthesize("objetivo", findings, has_implementation=False)
+
+        prompt = router.ask.call_args.args[0]
+        self.assertIn("[RE-DRIVE", prompt)
+        self.assertIn("EVIDENCIA", prompt)
+
+    def test_research_terminal_synthesis_omits_agent_registry(self) -> None:
+        # El registro de subagentes invita al formato delegado — fuera del
+        # prompt del entregable (sigue presente en el prompt del plan).
+        registry = {
+            "hex": {
+                "provider": "openai",
+                "model": "gpt-5.3-codex",
+                "domains": ["code"],
+                "skills": ["bug-triage"],
+            },
+        }
+        svc, router, _, _ = _make_service(agent_registry=registry)
+        router.ask.return_value = MagicMock(content="entregable")
+        from claw_v2.coordinator import WorkerResult
+
+        findings = [WorkerResult(task_name="r1", content="data", duration_seconds=0.5)]
+        svc._synthesize("objetivo", findings, has_implementation=False)
+
+        prompt = router.ask.call_args.args[0]
+        self.assertNotIn("Registro de Subagentes Disponibles", prompt)
+
+    def test_synthesis_default_keeps_master_plan(self) -> None:
+        # Back-compat: sin el kwarg (call site self-healing con critical_audit,
+        # o cualquier caller no actualizado) el formato plan-delegado se
+        # preserva intacto.
+        svc, router, *_ = _make_service()
+        router.ask.return_value = MagicMock(content="plan")
+        from claw_v2.coordinator import WorkerResult
+
+        findings = [WorkerResult(task_name="r1", content="data", duration_seconds=0.5)]
+        svc._synthesize("build feature", findings)
+
+        prompt = router.ask.call_args.args[0]
+        self.assertIn("Formato del Plan Maestro", prompt)
+        self.assertIn("Step N [nombre_del_agente]", prompt)
+
+    def test_synthesis_with_implementation_keeps_master_plan(self) -> None:
+        svc, router, *_ = _make_service()
+        router.ask.return_value = MagicMock(content="plan")
+        from claw_v2.coordinator import WorkerResult
+
+        findings = [WorkerResult(task_name="r1", content="data", duration_seconds=0.5)]
+        svc._synthesize("build feature", findings, has_implementation=True)
+
+        prompt = router.ask.call_args.args[0]
+        self.assertIn("Formato del Plan Maestro", prompt)
+
 
 class InjectContextTests(unittest.TestCase):
     def test_prepends_artifact_reference_and_summary(self) -> None:
@@ -325,6 +405,39 @@ class FullRunTests(unittest.TestCase):
         self.assertGreater(result.duration_seconds, 0)
         self.assertEqual(result.error, "")
         self.assertEqual(observe.emit.call_count, 2)
+
+    def test_research_only_run_synthesis_demands_deliverable(self) -> None:
+        # Wiring del call site: run() sin implementation_tasks (modo research,
+        # bot_helpers._build_coordinator_tasks retorna implementation=None)
+        # debe pedir el ENTREGABLE, no el Plan Maestro.
+        svc, router, _observe, _tmpdir = _make_service()
+        router.ask.return_value = MagicMock(content="result")
+        tasks = [WorkerTask(name="r1", instruction="research")]
+
+        svc.run("research-task", "cita el man page", tasks)
+
+        synthesis_prompt = next(
+            call.args[0]
+            for call in router.ask.call_args_list
+            if "Evidencia Recopilada por los Workers" in call.args[0]
+        )
+        self.assertNotIn("Formato del Plan Maestro", synthesis_prompt)
+        self.assertIn("ENTREGABLE FINAL", synthesis_prompt)
+
+    def test_run_with_implementation_synthesis_keeps_master_plan(self) -> None:
+        svc, router, _observe, _tmpdir = _make_service()
+        router.ask.return_value = MagicMock(content="result")
+        research = [WorkerTask(name="r1", instruction="research")]
+        impl = [WorkerTask(name="i1", instruction="implement")]
+
+        svc.run("impl-task", "build feature", research, impl)
+
+        synthesis_prompt = next(
+            call.args[0]
+            for call in router.ask.call_args_list
+            if "Evidencia Recopilada por los Workers" in call.args[0]
+        )
+        self.assertIn("Formato del Plan Maestro", synthesis_prompt)
 
     def test_browser_evidence_is_appended_to_research_before_synthesis(self) -> None:
         class FakeBrowserEvidenceCollector:
