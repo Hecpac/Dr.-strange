@@ -1130,6 +1130,9 @@ class BotService:
             workspace_root=getattr(config, "workspace_root", None),
             telemetry_root=getattr(config, "telemetry_root", None),
             max_autonomous_workers=getattr(config, "max_autonomous_workers", 4),
+            redrive_budget_frozen=(
+                observation_window.frozen if observation_window is not None else None
+            ),
         )
         brain.delegation_handler_factory = self._delegation_handler_for_session
         self._state_handler = StateHandler(

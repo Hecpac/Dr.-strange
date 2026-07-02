@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import threading
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,7 @@ from claw_v2.automation_outcome import AutomationOutcome
 from claw_v2.bot_helpers import (
     _build_coordinator_tasks,
     _coordinator_checkpoint,
+    normalize_blocker_ident,
     _evaluate_autonomy_policy,
     _extract_option_reference,
     _format_autonomy_policy_block,
@@ -64,6 +66,14 @@ _PETRI_DIMENSIONS_ROOT = Path(__file__).parent / "verification" / "dimensions"
 # this many times before it is forced to a terminal "failed"
 # (verification_stalled) instead of looping forever.
 _MAX_VERIFICATION_DEFERRALS = 5
+
+
+def _max_task_redrives() -> int:
+    """CLAW_MAX_TASK_REDRIVES — cap de re-drives por tarea (C1-Sβ). 0 = β OFF."""
+    try:
+        return max(0, int(os.getenv("CLAW_MAX_TASK_REDRIVES", "2")))
+    except ValueError:
+        return 2
 
 # AM-VOCAB (2026-06-12): the session task_queue used to receive raw
 # verification/terminal statuses ("passed", "failed", "unknown", ...) next to
@@ -218,6 +228,10 @@ def _failure_response_text(
         lines.append(summary[:240])
     if error and not _INTERNAL_ERROR_CODE_RE.match(error.strip()):
         lines.append(f"Error: {error}")
+    history = [str(h) for h in (checkpoint.get("redrive_history") or []) if str(h).strip()]
+    if history:
+        label = "vez" if len(history) == 1 else "veces"
+        lines.append(f"Reintenté {len(history)} {label} sin éxito ({', '.join(history[:4])}).")
     if error.strip().lower().startswith("waiting_for_user_input"):
         lines.append(_WAITING_USER_INPUT_RECOVERY_HINT)
     return "\n".join(lines)
@@ -265,6 +279,7 @@ class TaskHandler:
         workspace_root: Path | None = None,
         telemetry_root: Path | str | None = None,
         max_autonomous_workers: int = 4,
+        redrive_budget_frozen: Callable[[], bool] | None = None,
     ) -> None:
         self.approvals = approvals
         self.coordinator = coordinator
@@ -288,6 +303,7 @@ class TaskHandler:
             Path(telemetry_root).expanduser() if telemetry_root is not None else None
         )
         self._max_autonomous_workers = max(1, int(max_autonomous_workers))
+        self._redrive_budget_frozen = redrive_budget_frozen
         self._autonomous_slots = threading.BoundedSemaphore(self._max_autonomous_workers)
         self._task_threads: dict[str, threading.Thread] = {}
         self._cancelled_tasks: set[str] = set()
@@ -996,6 +1012,12 @@ class TaskHandler:
                     else:
                         start_phase = f2_result
         if f2_recovery_checkpoint is None:
+            objective, start_phase = self._consume_redrive_pending(
+                session_id=session_id,
+                task_id=task_id,
+                objective=objective,
+                start_phase=start_phase,
+            )
             result = self.coordinator.run(
                 task_id,
                 objective,
@@ -1599,8 +1621,33 @@ class TaskHandler:
             checkpoint_error = str(completed_checkpoint.get("error") or "")
             pending_action = str(completed_checkpoint.get("pending_action") or "")
             blocked_reason = ""
+            redrive_in_flight = False
             if not terminal_status:
+                redrive_in_flight = self._maybe_start_redrive(
+                    session_id=session_id,
+                    task_id=task_id,
+                    active_task=active_task,
+                    checkpoint=completed_checkpoint,
+                )
+            if not terminal_status and not redrive_in_flight:
                 blocked_reason = self._blocked_user_input_reason(completed_checkpoint)
+                if not blocked_reason and str(
+                    completed_checkpoint.get("blocker_class") or ""
+                ) in ("decision_usuario", "evidencia_externa"):
+                    # El tail estructurado es señal más fuerte que los markers:
+                    # ambas clases requieren al dueño (evidencia_externa queda
+                    # fail-closed hasta γ).
+                    detail = "; ".join(
+                        str(blocker) for blocker in (completed_checkpoint.get("blockers") or [])
+                    ) or str(completed_checkpoint.get("blocker_class"))
+                    blocked_reason = f"waiting_for_user_input: {detail[:500]}"
+                if blocked_reason and active_task.get("task_id") == task_id:
+                    redrive_seen = list(active_task.get("redrive_seen") or [])
+                    if redrive_seen:
+                        completed_checkpoint = {
+                            **completed_checkpoint,
+                            "redrive_history": redrive_seen,
+                        }
                 if blocked_reason:
                     verification_status = "blocked"
                     terminal_status = "failed"
@@ -1671,6 +1718,13 @@ class TaskHandler:
                     checkpoint=completed_checkpoint,
                     error=checkpoint_error,
                     objective=objective,
+                )
+            elif redrive_in_flight:
+                response = (
+                    f"Reintentando la tarea `{task_id}` "
+                    f"(intento {int(active_task.get('redrive_attempts') or 0)}/"
+                    f"{_max_task_redrives()}): el verifier objetó el formato; "
+                    "re-trabajo el entregable con su veredicto."
                 )
             if self._store_message is not None:
                 self._store_message(session_id, "assistant", response[:4000])
@@ -3459,6 +3513,118 @@ class TaskHandler:
                 retry_delay_seconds=min(300.0, 15.0 * (2.0 ** max(0, attempts - 1))),
                 checkpoint=checkpoint,
             )
+
+    def _maybe_start_redrive(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        active_task: dict[str, Any],
+        checkpoint: dict[str, Any],
+    ) -> bool:
+        """C1-Sβ — decide y arma un re-drive acotado para blockers clase formato.
+
+        Invariante task_redrive_bounded_and_classified: solo la clase `formato`
+        re-conduce (v1; evidencia_externa queda fail-closed hasta γ y
+        decision_usuario jamás consume intentos), cap CLAW_MAX_TASK_REDRIVES,
+        mismo ident jamás 2×, intento persistido en active_task ANTES de que el
+        camino de deferral existente re-encole el job, y ventana de presupuesto
+        congelada ⇒ no re-drive.
+        """
+        clase = str(checkpoint.get("blocker_class") or "")
+        if clase != "formato":
+            return False
+        if active_task.get("task_id") != task_id:
+            return False
+        payload_base = {"session_id": session_id, "task_id": task_id, "clase": clase}
+        max_redrives = _max_task_redrives()
+        try:
+            attempts = int(active_task.get("redrive_attempts") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        if max_redrives <= 0 or attempts >= max_redrives:
+            self._emit(
+                "autonomous_task_redrive_decision",
+                {**payload_base, "attempt": attempts, "action": "exhausted"},
+            )
+            return False
+        blockers = [str(b) for b in (checkpoint.get("blockers") or []) if str(b).strip()]
+        idents = [
+            normalize_blocker_ident(clase, blocker.split(":", 1)[0]) for blocker in blockers
+        ] or [normalize_blocker_ident(clase, "sin-slug")]
+        seen = [str(s) for s in (active_task.get("redrive_seen") or [])]
+        if any(ident in seen for ident in idents):
+            self._emit(
+                "autonomous_task_redrive_decision",
+                {
+                    **payload_base,
+                    "attempt": attempts,
+                    "idents": idents,
+                    "action": "duplicate_blocker",
+                },
+            )
+            return False
+        if self._redrive_budget_frozen is not None:
+            try:
+                frozen = bool(self._redrive_budget_frozen())
+            except Exception:
+                frozen = False
+            if frozen:
+                self._emit(
+                    "autonomous_task_redrive_decision",
+                    {**payload_base, "attempt": attempts, "action": "budget_frozen"},
+                )
+                return False
+        active_task["redrive_attempts"] = attempts + 1
+        active_task["redrive_seen"] = seen + [i for i in idents if i not in seen]
+        active_task["redrive_pending"] = {
+            "start_phase": "synthesis",
+            "verdict": "\n".join(f"- {blocker}" for blocker in blockers)[:1500],
+        }
+        active_task["updated_at"] = time.time()
+        state = self._get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        self._write_active_task(session_id, active_task, active_object)
+        self._emit(
+            "autonomous_task_redrive_decision",
+            {**payload_base, "attempt": attempts + 1, "idents": idents, "action": "redrive"},
+        )
+        return True
+
+    def _consume_redrive_pending(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        objective: str,
+        start_phase: str | None,
+    ) -> tuple[str, str | None]:
+        """Consume-once del re-drive armado: fuerza start_phase=synthesis (re-trabaja
+        el entregable con research cacheado de scratch) y anexa el veredicto al
+        objective, que llega a _synthesize y al verifier vía coordinator.run()."""
+        state = self._get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_task = dict(active_object.get("active_task") or {})
+        if active_task.get("task_id") != task_id:
+            return objective, start_phase
+        pending = active_task.get("redrive_pending")
+        if not isinstance(pending, dict) or not pending:
+            return objective, start_phase
+        forced = str(pending.get("start_phase") or "synthesis")
+        verdict = str(pending.get("verdict") or "")[:1500]
+        active_task.pop("redrive_pending", None)
+        active_task["updated_at"] = time.time()
+        self._write_active_task(session_id, active_task, active_object)
+        self._emit(
+            "autonomous_task_redrive_resumed",
+            {"session_id": session_id, "task_id": task_id, "start_phase": forced},
+        )
+        if verdict:
+            objective = (
+                f"{objective}\n\n[RE-DRIVE — veredicto del intento anterior; corrige "
+                f"exactamente esto sin re-ejecutar trabajo ya hecho]:\n{verdict}"
+            )
+        return objective, forced
 
     def _cancel_autonomous_job(
         self, task_id: str, *, reason: str, job_id: str | None = None
