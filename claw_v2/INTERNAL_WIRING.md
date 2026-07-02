@@ -9,7 +9,7 @@
 
 ```yaml
 describes_commit: "#1 redrive_feasibility_gate (incidente 2026-07-02 task 1783021694523108000): new CoordinatorService.synthesis_redrive_would_block(task_id) stats the implementation.started marker; _maybe_start_redrive fails closed with action=fail_closed_infeasible (no arm, no attempt consumed, marker untouched) when present, positioned after the knob check and before deferral/attempts/dedup/budget. Rationale: a synthesis-restart redrive never reloads implementation (_phase_resumable: synthesis<implementation) so a present marker deterministically trips implementation_rerun_blocked — arming burned 6.5 min then died mute. New §1 invariant redrive_feasibility_gate. Predecessor: B2.1 shadow_delegation_gap_observational (doc_version 2.53) in main"
-doc_version: 2.54
+doc_version: 2.55
 last_verified: 2026-07-02
 verification_method: "TDD red-first: tests/test_task_redrive.py::RedriveInfeasibleMarkerTests — marker-present case watched fail ('redrive' != 'fail_closed_infeasible') without the gate, then green; marker-absent no-regression case green from the start. Full redrive suite + architecture_invariants green (89 passed, 25 subtests); coordinator + task_handler suites green (134 passed). ruff clean on added lines (pre-existing F541 at coordinator.py:949 and file-level format drift untouched — surgical). Live smoke pending deploy to ~/srv/claw-daemon: re-exercise an ops-network delegation whose pass-1 starts implementation, confirm the redrive fails closed with fail_closed_infeasible at the FIRST arming (no γ burn, no mute) and the owner gets the honest terminal — verbatim event-id evidence"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -1188,6 +1188,18 @@ invariants:
           here; F3.1's partial-external-effect protection stays intact. The real
           path for network missions is a daemon-side send (slice #2), not a
           worker re-run.
+          CONSEQUENCE (behavioral contract, not just mechanism): verification
+          ALWAYS runs after implementation, so a task that started implementation
+          has the marker present at EVERY verdict. Combined with the class filter
+          above the gate, this means an ops task with real implementation work is
+          NO LONGER re-drivable on formato OR evidencia_externa — ever. Only
+          research-mode tasks (which skip implementation, so never write the
+          marker) re-drive. This is not a regression — those redrives already died
+          at implementation_rerun_blocked, just slow and mute — but it reshapes
+          slice #2: #2 cannot "make the ops redrive work" (ops cannot redrive); it
+          must restructure the network action so it never NEEDS a redrive (worker
+          produces the artifact locally; the daemon sends OUTSIDE the coordinator's
+          implementation phase, with network + its approval flow).
     enforced_by:
       - tests/test_task_redrive.py::RedriveInfeasibleMarkerTests::test_marker_present_fails_closed_infeasible_no_attempt
       - tests/test_task_redrive.py::RedriveInfeasibleMarkerTests::test_marker_absent_arms_normally_no_regression
