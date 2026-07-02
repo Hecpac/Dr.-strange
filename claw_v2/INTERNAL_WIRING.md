@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "B2.1 (bloque F4-B2, opción c escalonada): shadow-mode delegation-gap telemetry — _maybe_emit_shadow_delegation_gap in _brain_text_response (post-model, after _prepare_visible_brain_content), opt-in ONLY at the raw dispatch→brain fallback call site (shadow_gap_eligible=True); emits shadow_delegation_gap action=gap reason=no_action|research_inline; knob CLAW_SHADOW_DELEGATION_GAP (default on, =0 emits action=disabled once); new detector _looks_like_research_deliverable_ask; shared helpers consumed read-only; evidence-gate completion branch byte-identical. New §1 invariant shadow_delegation_gap_observational. Predecessor: B2.0 delegation_contract_research_delegable (doc_version 2.52) in main"
-doc_version: 2.53
+describes_commit: "#1 redrive_feasibility_gate (incidente 2026-07-02 task 1783021694523108000): new CoordinatorService.synthesis_redrive_would_block(task_id) stats the implementation.started marker; _maybe_start_redrive fails closed with action=fail_closed_infeasible (no arm, no attempt consumed, marker untouched) when present, positioned after the knob check and before deferral/attempts/dedup/budget. Rationale: a synthesis-restart redrive never reloads implementation (_phase_resumable: synthesis<implementation) so a present marker deterministically trips implementation_rerun_blocked — arming burned 6.5 min then died mute. New §1 invariant redrive_feasibility_gate. Predecessor: B2.1 shadow_delegation_gap_observational (doc_version 2.53) in main"
+doc_version: 2.54
 last_verified: 2026-07-02
-verification_method: "TDD red-first (8 tests watched fail without the feature, then 11 green): tests/test_shadow_delegation_gap.py — live-baseline fixtures (3214/3216/3218/3239→gap; 3323 single-URL→no gap; delegated→no gap; S-α knowledge reply→no gap; meta→no gap; eligible=False→no emit; knob=0→disabled once; brain answer delivered intact). Adjacent invariant suites green: meta_introspection_integration + evidence_gate_user_authority + final_render_idempotency + architecture_invariants + dispatch_routing (135 passed). Live smoke pending deploy: bare Spanish research ask via web chat must delegate organically (B2.0) with ZERO shadow gap on that turn; organic gap event if one occurs in-window, else fixture-locked (report honestly)"
+verification_method: "TDD red-first: tests/test_task_redrive.py::RedriveInfeasibleMarkerTests — marker-present case watched fail ('redrive' != 'fail_closed_infeasible') without the gate, then green; marker-absent no-regression case green from the start. Full redrive suite + architecture_invariants green (89 passed, 25 subtests); coordinator + task_handler suites green (134 passed). ruff clean on added lines (pre-existing F541 at coordinator.py:949 and file-level format drift untouched — surgical). Live smoke pending deploy to ~/srv/claw-daemon: re-exercise an ops-network delegation whose pass-1 starts implementation, confirm the redrive fails closed with fail_closed_infeasible at the FIRST arming (no γ burn, no mute) and the owner gets the honest terminal — verbatim event-id evidence"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1166,6 +1166,38 @@ invariants:
          short-circuits coordinator.run, _consume_redrive_pending is skipped
          and redrive_pending stays armed for the next cycle — bounded by the
          deferral cap, revisit if F2 turns ON.
+
+  redrive_feasibility_gate:  # #1 (incidente 2026-07-02 task 1783021694523108000)
+    rule: BEFORE arming a re-drive, the governor (_maybe_start_redrive) fails
+          closed with action=fail_closed_infeasible (never arms, never consumes
+          an attempt, marker untouched) when
+          CoordinatorService.synthesis_redrive_would_block(task_id) is True —
+          i.e. the implementation.started marker is present. A re-drive always
+          restarts at synthesis; since PHASE_ORDER is
+          research<synthesis<implementation, implementation is never
+          _phase_resumable on that restart (coordinator.py _phase_resumable),
+          so its results are never reloaded and a present marker
+          DETERMINISTICALLY trips the F3.1 gate (coordinator.run →
+          implementation_rerun_blocked, resumability.implementation_gate below).
+          Arming anyway burned the pre-step γ + synthesis (~6.5 min in the
+          incident) only to die at the `if not clase` mute with no auditable
+          decision. The gate sits AFTER the knob check and BEFORE
+          deferral/attempts/dedup/budget so infeasibility is the reported
+          reason. Accessed via getattr — a coordinator lacking the predicate is
+          treated as not-infeasible (arm normally). The marker is NEVER unlinked
+          here; F3.1's partial-external-effect protection stays intact. The real
+          path for network missions is a daemon-side send (slice #2), not a
+          worker re-run.
+    enforced_by:
+      - tests/test_task_redrive.py::RedriveInfeasibleMarkerTests::test_marker_present_fails_closed_infeasible_no_attempt
+      - tests/test_task_redrive.py::RedriveInfeasibleMarkerTests::test_marker_absent_arms_normally_no_regression
+    why: the first organic post-B2 ops-network delegation (send 2 HTML to
+         Telegram) had an external-effect implementation (sendDocument); its
+         re-drive armed γ, burned 6.5 min and died mute. The on-disk marker is
+         the robust predictor ACROSS attempts (result.phase_results is per-run
+         and would misfire on a second arming). Read-only post-mortem
+         2026-07-02; signal (ii) connectivity-class fail-fast is a separate
+         open slice, not bundled here.
 
   evidence_pre_step_contained:
     rule: γ's evidence gathering is a PRE-STEP of the re-enqueued durable

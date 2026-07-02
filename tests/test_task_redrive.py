@@ -175,11 +175,19 @@ class _TailCoordinator:
         self.content = content
         self.calls: list[dict] = []
         self.evidence_calls: list[dict] = []
+        # #1 (F3.1 feasibility gate): un redrive restart-synthesis con el marker
+        # implementation.started presente chocaría implementation_rerun_blocked.
+        # El fake lo expone como flag; default False ⇒ el gate es no-op y el
+        # comportamiento previo de todos los tests existentes se preserva.
+        self.block_rerun = False
         self.evidence_result = evidence_result or WorkerResult(
             task_name="gather_evidence",
             content="$ man launchd.plist\nExitTimeOut <integer>\nThe amount of time ...",
             duration_seconds=0.1,
         )
+
+    def synthesis_redrive_would_block(self, task_id: str) -> bool:
+        return self.block_rerun
 
     def run(self, task_id, objective, research_tasks, **kwargs):
         self.calls.append({"objective": objective, **kwargs})
@@ -327,6 +335,64 @@ class RedriveIntegrationTests(unittest.TestCase):
             )
             self.assertIn("/task_pending", failed["payload"]["response"])
             self.assertEqual(failed["payload"].get("blocker_class"), "evidencia_externa")
+
+
+class RedriveInfeasibleMarkerTests(unittest.TestCase):
+    """#1 (F3.1 feasibility gate, incidente 2026-07-02 task 1783021694523108000):
+    un redrive con el marker implementation.started presente falla cerrado
+    (action=fail_closed_infeasible) SIN armar ni consumir intento. El redrive
+    siempre reinicia en synthesis (start_phase=synthesis); como
+    PHASE_ORDER: synthesis<implementation, implementation NUNCA es _phase_resumable
+    en un redrive, así que un marker presente dispara implementation_rerun_blocked
+    determinísticamente (coordinator run(): 496-532). Armarlo quemaría el pre-step
+    γ + synthesis para morir mudo en el `if not clase`. El gate es no-op cuando el
+    marker está ausente (happy path gamma/beta): probado en el 2º test.
+    """
+
+    def test_marker_present_fails_closed_infeasible_no_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coordinator = _TailCoordinator(EVIDENCIA_TAIL)
+            coordinator.block_rerun = True  # implementation.started presente
+            handler, memory, observe, _jobs, _stored = _mk_handler(root, coordinator)
+            ack = handler.start_autonomous_task(
+                "tg-1", "manda el archivo a la red", mode="research"
+            )
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+
+            events = observe.recent_events(limit=200)
+            decision = next(
+                e for e in events if e["event_type"] == "autonomous_task_redrive_decision"
+            )
+            self.assertEqual(decision["payload"]["action"], "fail_closed_infeasible")
+
+            active = _active_task(memory, "tg-1")
+            self.assertFalse(active.get("redrive_attempts"))
+            self.assertFalse(active.get("redrive_pending"))
+            # el pre-step γ jamás se armó ⇒ el worker de evidencia jamás corrió,
+            # y el marker no se tocó (F3.1 intacto — no lo verifica el fake, pero
+            # el governor no lo borra: unit-locked por ausencia de unlink).
+            self.assertEqual(coordinator.evidence_calls, [])
+
+    def test_marker_absent_arms_normally_no_regression(self) -> None:
+        # Gate no-op cuando el marker está ausente: la tarea arma su redrive como
+        # antes (gamma/beta happy path — sin marker en disco).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coordinator = _TailCoordinator(EVIDENCIA_TAIL)  # block_rerun default False
+            handler, memory, observe, _jobs, _stored = _mk_handler(root, coordinator)
+            ack = handler.start_autonomous_task("tg-1", "cita el man page", mode="research")
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+
+            decision = next(
+                e
+                for e in observe.recent_events(limit=200)
+                if e["event_type"] == "autonomous_task_redrive_decision"
+            )
+            self.assertEqual(decision["payload"]["action"], "redrive")
+            self.assertTrue(_active_task(memory, "tg-1").get("redrive_attempts"))
 
 
 class FailedVerdictRedriveTests(unittest.TestCase):
