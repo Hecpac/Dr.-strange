@@ -3718,6 +3718,26 @@ class TaskHandler:
                 {**payload_base, "attempt": attempts, "action": "disabled"},
             )
             return False
+        # #1 F3.1 feasibility gate (incidente 2026-07-02 task 1783021694523108000):
+        # un re-drive reinicia en synthesis, y como implementation nunca es
+        # _phase_resumable en ese reinicio, un marker implementation.started
+        # presente chocaría implementation_rerun_blocked determinísticamente
+        # (coordinator.run(): 496-532). Armarlo quemaría el pre-step γ + synthesis
+        # para morir mudo en el `if not clase`. Fail-closed aquí — auditable, sin
+        # consumir intento, marker intacto (protección F3.1 preservada). #2 provee
+        # el camino real para misiones de red (envío por el daemon, no el worker).
+        would_block = getattr(self.coordinator, "synthesis_redrive_would_block", None)
+        if callable(would_block) and would_block(task_id):
+            self._emit(
+                "autonomous_task_redrive_decision",
+                {
+                    **payload_base,
+                    "attempt": attempts,
+                    "idents": idents,
+                    "action": "fail_closed_infeasible",
+                },
+            )
+            return False
         try:
             deferrals = int(active_task.get("verification_deferrals") or 0)
         except (TypeError, ValueError):

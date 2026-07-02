@@ -1620,6 +1620,21 @@ class CoordinatorService:
             return "implementation"
         return "verification"
 
+    def synthesis_redrive_would_block(self, task_id: str) -> bool:
+        """True when a synthesis-restart re-drive is guaranteed to fail closed.
+
+        A re-drive always restarts at ``synthesis`` (start_phase=synthesis). Since
+        ``PHASE_ORDER`` is research<synthesis<implementation, ``implementation`` is
+        never ``_phase_resumable`` on such a restart, so its results are never
+        reloaded from scratch — meaning the ``implementation.started`` marker, if
+        present, deterministically trips the F3.1 gate in ``run()`` (496-532) and
+        returns ``implementation_rerun_blocked``. The governor calls this BEFORE
+        arming so it can fail closed at arming time instead of burning the
+        pre-step + synthesis only to die there. Read-only — the marker is never
+        removed here; F3.1's partial-external-effect protection stays intact.
+        """
+        return (self.scratch_root / task_id / IMPLEMENTATION_STARTED_MARKER).exists()
+
     def _load_scratch_results(self, task_id: str, phase: str) -> list[WorkerResult]:
         phase_dir = self.scratch_root / task_id / phase
         if not phase_dir.is_dir():
