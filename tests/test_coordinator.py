@@ -6,7 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from claw_v2.browser_evidence import BrowserEvidenceReport
 from claw_v2.coordinator import CoordinatorResult, CoordinatorService, WorkerResult, WorkerTask
@@ -29,6 +29,87 @@ def _make_service(**overrides):
     defaults.update(overrides)
     svc = CoordinatorService(**defaults)
     return svc, router, observe, tmpdir
+
+
+class RunEvidenceWorkerTests(unittest.TestCase):
+    """C1-Sγ.1 — run_evidence_worker: UNA WorkerTask lane worker fuera del
+    pipeline de fases; el RUNNER persiste el output crudo fresco a
+    scratch/<task_id>/evidence.md (raíz — nunca research/), acotado."""
+
+    def test_worker_lane_and_scratch_persistence(self) -> None:
+        svc, router, _observe, tmpdir = _make_service()
+        router.ask.return_value = MagicMock(content="$ man launchd.plist\nExitTimeOut ...")
+        result = svc.run_evidence_worker(task_id="t-ev", instruction="junta la evidencia")
+        self.assertEqual(result.error, "")
+        self.assertIn("ExitTimeOut", result.content)
+        kwargs = router.ask.call_args.kwargs
+        self.assertEqual(kwargs["lane"], "worker")
+        self.assertEqual(router.ask.call_args.args[0], "junta la evidencia")
+        evidence_path = tmpdir / "t-ev" / "evidence.md"
+        self.assertTrue(evidence_path.is_file())
+        self.assertIn("ExitTimeOut", evidence_path.read_text(encoding="utf-8"))
+        # nunca dentro de un directorio de fase (quedaría congelada entre re-drives)
+        self.assertFalse((tmpdir / "t-ev" / "research").exists())
+
+    def test_adapter_error_returns_error_result_and_persists_note(self) -> None:
+        from claw_v2.adapters.base import AdapterError
+
+        svc, router, _observe, tmpdir = _make_service()
+        router.ask.side_effect = AdapterError("Codex CLI timed out after 240.0s")
+        result = svc.run_evidence_worker(task_id="t-ev", instruction="junta la evidencia")
+        self.assertIn("timed out", result.error)
+        # retry heredado de _RETRY_LANES para lane worker
+        self.assertEqual(router.ask.call_count, 2)
+        note = (tmpdir / "t-ev" / "evidence.md").read_text(encoding="utf-8")
+        self.assertIn("pre-step error", note)
+
+    def test_scratch_write_bounded_and_fresh_per_attempt(self) -> None:
+        svc, router, _observe, tmpdir = _make_service()
+        router.ask.return_value = MagicMock(content="y" * 100_000)
+        svc.run_evidence_worker(task_id="t-ev", instruction="junta la evidencia")
+        first = (tmpdir / "t-ev" / "evidence.md").read_text(encoding="utf-8")
+        # corte acotado + marcador estándar (truncation.py) — nunca corte mudo
+        self.assertLessEqual(len(first), 64_100)
+        self.assertIn("[truncated: kept 64000 of 100000 chars]", first)
+        # fresca por intento: el segundo pre-step SOBRESCRIBE, no acumula
+        router.ask.return_value = MagicMock(content="z-fresca")
+        svc.run_evidence_worker(task_id="t-ev", instruction="junta la evidencia")
+        second = (tmpdir / "t-ev" / "evidence.md").read_text(encoding="utf-8")
+        self.assertEqual(second, "z-fresca")
+
+    def test_lane_overrides_reach_router(self) -> None:
+        # identidad con los workers de fase: los pins de sesión aplican
+        svc, router, _observe, _tmpdir = _make_service()
+        router.ask.return_value = MagicMock(content="ok")
+        svc.run_evidence_worker(
+            task_id="t-ev",
+            instruction="junta la evidencia",
+            lane_overrides={"worker": {"provider": "openai", "model": "m-pin"}},
+        )
+        kwargs = router.ask.call_args.kwargs
+        self.assertEqual(kwargs["provider"], "openai")
+        self.assertEqual(kwargs["model"], "m-pin")
+
+    def test_scratch_write_failure_does_not_kill_obtained_evidence(self) -> None:
+        # la copia de auditoría es best-effort: ENOSPC/encoding no convierte
+        # evidencia YA obtenida en muerte del pre-step
+        svc, router, _observe, _tmpdir = _make_service()
+        router.ask.return_value = MagicMock(content="evidencia buena")
+        with patch.object(
+            CoordinatorService, "_write_scratch_text", side_effect=OSError("disk full")
+        ):
+            result = svc.run_evidence_worker(task_id="t-ev", instruction="junta la evidencia")
+        self.assertEqual(result.error, "")
+        self.assertIn("evidencia buena", result.content)
+
+    def test_empty_success_writes_labeled_note(self) -> None:
+        # un evidence.md de cero bytes es mudo en el post-mortem
+        svc, router, _observe, tmpdir = _make_service()
+        router.ask.return_value = MagicMock(content="")
+        svc.run_evidence_worker(task_id="t-ev", instruction="junta la evidencia")
+        note = (tmpdir / "t-ev" / "evidence.md").read_text(encoding="utf-8")
+        self.assertIn("pre-step error", note)
+        self.assertIn("empty_output", note)
 
 
 class DispatchParallelTests(unittest.TestCase):
