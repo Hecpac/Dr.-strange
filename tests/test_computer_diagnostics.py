@@ -14,7 +14,7 @@ from claw_v2 import liveness
 from claw_v2.computer import ComputerSession
 from claw_v2.computer_handler import ComputerHandler
 from claw_v2.diagnostics import collect_diagnostics
-from claw_v2.main import _run_startup_healthchecks
+from claw_v2.main import _run_startup_healthchecks, _startup_model_role_summary
 from claw_v2.observe import ObserveStream
 from tests.helpers import make_config
 
@@ -197,6 +197,16 @@ class ComputerDiagnosticsTests(unittest.TestCase):
             self.assertTrue(
                 any(event["payload"]["name"] == "model_roles" for event in ok_events)
             )
+
+    def test_startup_model_role_summary_reports_enabled_browser_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+
+            with patch("claw_v2.computer.BROWSER_USE_OAUTH_FALLBACK_MODEL", "claude-opus-4-1"):
+                detail = _startup_model_role_summary(config)
+
+        self.assertIn("browser_agent_fallback=anthropic:claude-opus-4-1", detail)
+        self.assertNotIn("browser_agent_fallback=anthropic:claude-haiku-4-5", detail)
 
     def test_runtime_diagnostics_include_structured_computer_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

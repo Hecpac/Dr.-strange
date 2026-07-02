@@ -155,7 +155,9 @@ class CapabilityGrant:
         if self.sensitive and self.approved_by != "user":
             return False
         allowed_actions = {action.lower() for action in self.allowed_high_risk_actions}
-        if allowed_actions and str(action_name or "").lower() not in allowed_actions:
+        if not allowed_actions:
+            return False
+        if str(action_name or "").lower() not in allowed_actions:
             return False
         if not self.approved_domains:
             return False

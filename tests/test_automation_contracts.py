@@ -82,6 +82,23 @@ class CapabilityGrantTests(unittest.TestCase):
             )
         )
 
+    def test_empty_high_risk_action_grant_blocks_even_on_approved_domain(self) -> None:
+        grant = CapabilityGrant(
+            surface=AutomationSurface.BROWSER,
+            reason="empty high-risk action set",
+            approved_domains=("x.com",),
+            allow_high_risk_actions=True,
+            allowed_high_risk_actions=(),
+        )
+
+        self.assertFalse(
+            grant.allows_browser_use_action(
+                "evaluate",
+                url="https://x.com/home",
+                params={},
+            )
+        )
+
     def test_browser_read_grant_blocks_unapproved_domain(self) -> None:
         grant = CapabilityGrant.browser_read(
             domains=["x.com"],

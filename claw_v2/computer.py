@@ -1044,11 +1044,14 @@ def _browser_use_high_risk_allowed(
 ) -> bool:
     if not allow_high_risk_actions:
         return False
-    normalized_actions = {
-        str(action or "").strip().lower() for action in (allowed_high_risk_actions or [])
-    }
-    if normalized_actions and str(action_name or "").strip().lower() not in normalized_actions:
-        return False
+    if allowed_high_risk_actions is not None:
+        normalized_actions = {
+            str(action or "").strip().lower() for action in allowed_high_risk_actions
+        }
+        if not normalized_actions:
+            return False
+        if str(action_name or "").strip().lower() not in normalized_actions:
+            return False
     if not approved_domains:
         return False
     urls = [url, str(params.get("url") or "").strip() or None]

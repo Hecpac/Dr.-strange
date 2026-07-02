@@ -615,7 +615,9 @@ def _startup_model_role_summary(config: AppConfig) -> str:
         from claw_v2.computer import BROWSER_USE_OAUTH_FALLBACK_MODEL
     except Exception:
         BROWSER_USE_OAUTH_FALLBACK_MODEL = None
-    if not BROWSER_USE_OAUTH_FALLBACK_MODEL:
+    if BROWSER_USE_OAUTH_FALLBACK_MODEL:
+        pairs["browser_agent_fallback"] = f"anthropic:{BROWSER_USE_OAUTH_FALLBACK_MODEL}"
+    else:
         pairs["browser_agent_fallback"] = "disabled"
     computer_provider = (
         "codex" if config.computer_use_backend == "codex" else config.computer_use_backend
