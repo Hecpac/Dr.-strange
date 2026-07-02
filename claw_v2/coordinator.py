@@ -19,6 +19,7 @@ from claw_v2.browser_evidence import BrowserEvidenceCollector
 from claw_v2.langgraph_coordinator import LangGraphShadowRunner
 from claw_v2.redaction import redact_text
 from claw_v2.tracing import attach_trace, child_trace_context, new_trace_context
+from claw_v2.truncation import truncation_marker
 from claw_v2.types import ProviderRole
 
 logger = logging.getLogger(__name__)
@@ -971,21 +972,40 @@ class CoordinatorService:
 
     _EVIDENCE_SCRATCH_MAX_CHARS = 64_000
 
-    def run_evidence_worker(self, *, task_id: str, instruction: str) -> WorkerResult:
+    def run_evidence_worker(
+        self,
+        *,
+        task_id: str,
+        instruction: str,
+        lane_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> WorkerResult:
         """C1-Sγ — UNA WorkerTask de evidencia fuera del pipeline de fases
-        (invariante evidence_pre_step_contained): lane worker (sandbox del CLI
-        y retry _RETRY_LANES por identidad con los workers de fase), y el
-        RUNNER — no el LLM — persiste el output crudo FRESCO a
-        scratch/<task_id>/evidence.md, en la raíz del scratch, nunca en
-        research/ (los artefactos de fase quedan congelados entre re-drives).
-        El llamador (task_handler) anexa solo un extracto acotado al objective.
+        (invariante evidence_pre_step_contained): lane worker (sandbox del CLI,
+        retry _RETRY_LANES, trace y lane_overrides de sesión por identidad con
+        los workers de fase), y el RUNNER — no el LLM — persiste el output
+        crudo FRESCO a scratch/<task_id>/evidence.md, en la raíz del scratch,
+        nunca en research/ (los artefactos de fase quedan congelados entre
+        re-drives). El llamador (task_handler) anexa solo un extracto acotado
+        al objective. La copia a scratch es best-effort: un fallo de disco o
+        encoding no convierte evidencia YA obtenida en muerte del pre-step.
         """
         result = self._execute_worker(
-            WorkerTask(name="gather_evidence", instruction=instruction, lane="worker")
+            WorkerTask(name="gather_evidence", instruction=instruction, lane="worker"),
+            new_trace_context(job_id=task_id, artifact_id="gather_evidence"),
+            lane_overrides=lane_overrides,
         )
-        scratch = self._ensure_scratch(task_id)
-        raw = result.content or (f"[pre-step error] {result.error}" if result.error else "")
-        self._write_scratch_text(scratch, "evidence.md", raw[: self._EVIDENCE_SCRATCH_MAX_CHARS])
+        raw = result.content or f"[pre-step error] {result.error or 'empty_output'}"
+        if len(raw) > self._EVIDENCE_SCRATCH_MAX_CHARS:
+            total = len(raw)
+            raw = (
+                raw[: self._EVIDENCE_SCRATCH_MAX_CHARS]
+                + "\n"
+                + truncation_marker(self._EVIDENCE_SCRATCH_MAX_CHARS, total)
+            )
+        try:
+            self._write_scratch_text(self._ensure_scratch(task_id), "evidence.md", raw)
+        except Exception:
+            logger.debug("evidence.md write failed for %s", task_id, exc_info=True)
         return result
 
     def _run_langgraph_shadow(

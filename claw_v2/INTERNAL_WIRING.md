@@ -11,7 +11,7 @@
 describes_commit: "C1-Sγ.1 autonomy-plan: evidence pre-step — clase evidencia_externa now arms the redrive with pre_step=evidence (same governor guards, single CLAW_MAX_TASK_REDRIVES knob, attempt incremented once at arming); the pre-step runs in _consume_redrive_pending inside the re-enqueued durable job via CoordinatorService.run_evidence_worker (ONE worker-lane WorkerTask, raw output persisted fresh by the runner to scratch/<task_id>/evidence.md at scratch root), a 4000-char excerpt is appended to the objective delimited as untrusted data, dead pre-step raises EvidencePreStepError → immediate honest terminal (job fail retry=False). New invariant evidence_pre_step_contained in §1. Predecessor C1-Sγ.0 (doc_version 2.48) in main"
 doc_version: 2.49
 last_verified: 2026-07-02
-verification_method: "code cross-read of _maybe_start_redrive / _consume_redrive_pending / _run_evidence_pre_step / CoordinatorService.run_evidence_worker against this doc + TDD suites (tests/test_task_redrive.py 44 tests incl. EvidencePreStepTests + evidencia governor/integration; tests/test_coordinator.py RunEvidenceWorkerTests) + adjacent task_handler/architecture/bot_helpers/lifecycle suites green. Live smoke pending deploy: positive = launchd.plist citation task closes completed with real man-page quote from the pre-step; negative = same blocker twice ⇒ fail-closed + S-α announcement"
+verification_method: "code cross-read of _maybe_start_redrive / _consume_redrive_pending / _run_evidence_pre_step / CoordinatorService.run_evidence_worker against this doc + TDD suites (tests/test_task_redrive.py incl. EvidencePreStepTests + evidencia governor/integration; tests/test_coordinator.py RunEvidenceWorkerTests) + adjacent task_handler/architecture/bot_helpers/lifecycle suites green + 5-angle adversarial review (line-by-line, security/injection, cross-file, removed-behavior, reuse/conventions) with hardening applied (fence neutralization, disabled action, exception-path class+hint, lane_overrides/trace identity, best-effort scratch, error cap 300) and mutation-verified tests (fence + exception-path asserts fail under reverted fix). Live smoke pending deploy: positive = launchd.plist citation task closes completed with real man-page quote from the pre-step; negative = same blocker twice ⇒ fail-closed + S-α announcement"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1099,7 +1099,9 @@ invariants:
           `evidencia_externa` (parse_verdict_tail, claw_v2/bot_helpers.py —
           deterministic parsing, no extra LLM call, codex stays out of the
           control path); bounded by CLAW_MAX_TASK_REDRIVES (default 2, the
-          single knob — 0 disables β AND γ); the same normalized blocker
+          single knob — 0 disables β AND γ and emits action=disabled, NOT a
+          lying exhausted-at-attempt-0, so a rollback keeps the per-action
+          measurement clean); the same normalized blocker
           ident (normalize_blocker_ident) never re-drives twice — this dedup
           is also γ's honest death for insufficient/web evidence (second
           identical blocker ⇒ fail-closed + S-α); decision_usuario /
@@ -1166,16 +1168,33 @@ invariants:
           (<<<EVIDENCIA ... EVIDENCIA>>>) — one append point serves synthesis
           AND verifier because _inject_context carries the objective verbatim
           to every WorkerTask; build_effective_input and _inject_context stay
-          untouched. A dead pre-step (adapter error / empty output) raises
-          EvidencePreStepError which rides the task runner's existing
-          exception path: immediate honest terminal, job fail retry=False —
-          no limbo, no doomed evidence-less cycle. Every pre-step emits
-          autonomous_task_redrive_pre_step {clase, attempt, status,
+          untouched. Fence delimiters occurring INSIDE the worker output are
+          neutralized (« ») before the cut, so hostile content cannot close
+          the untrusted-data block nor open a fake one (delimiter injection).
+          The excerpt and scratch cuts both use the standard
+          truncation_marker (truncation.py — never a silent cut). A dead
+          pre-step (adapter error / empty output) raises EvidencePreStepError
+          which rides the task runner's existing exception path: immediate
+          honest terminal, job fail retry=False — no limbo, no doomed
+          evidence-less cycle; the exception carries blocker_class so that
+          death keeps its class on the terminal event AND the S-α recovery
+          hint in the owner message; its error detail is capped at 300 chars
+          (a failed cat must not dump sensitive content into events or the
+          owner message). The pre-step honors session lane_overrides and the
+          task trace (new_trace_context(job_id=task_id)) by identity with
+          phase workers, skips when the task is already cancelled, and the
+          scratch audit copy is best-effort (a disk/encoding failure never
+          converts obtained evidence into a pre-step death). Every pre-step
+          emits autonomous_task_redrive_pre_step {clase, attempt, status,
           output_chars|error, duration_seconds}. Web-demanding evidence needs
           no special detection: the network-blocked worker reports the raw
           failure, the verifier re-blocks the same ident, and the β dedup
           closes it fail-closed with the S-α announcement (v1 decision,
-          C1-D).
+          C1-D). Containment is config-dependent by design: worker lane =
+          codex CLI sandbox (workspace-write, network-blocked) with NO
+          networked fallback (_pick_fallback returns None for codex,
+          llm.py) — pointing the worker lane at a networked provider would
+          re-open the exfil surface (that is opción B, a NAMED escalation).
     enforced_by:
       - tests/test_task_redrive.py::EvidencePreStepTests (pre-step en consume, blockers-as-data, extracto acotado+truncado, fallo ⇒ EvidencePreStepError ⇒ terminal sin retry)
       - tests/test_task_redrive.py::RedriveIntegrationTests::test_evidencia_blocker_arms_redrive_instead_of_terminal (primer ciclo arma, pre-step NO corre al armar)
@@ -1192,6 +1211,18 @@ invariants:
          built). The pre-step lives inside the governor's single attempt
          increment (hallazgo 17), so the β budget bound (verificaciones ≤
          (1+N)·(1+deferrals)) is unchanged.
+         Known gaps (bounded, accepted v1): (a) crash window — the pending is
+         consumed BEFORE the pre-step runs (consume-once integrity), so a
+         daemon restart during the up-to-2×worker-timeout call loses
+         verdict+evidence; the resumed cycle re-verifies evidence-less, the
+         same ident hits the β dedup, and the task dies honest terminal —
+         one wasted cycle, never a loop. (b) The β F2 known gap (F2 recovery
+         checkpoint short-circuits consume, pending stays armed) now also
+         strands the pre_step — same bound, revisit if F2 turns ON. (c)
+         Pre-existing β shape: displacing the session's single active_task
+         slot (new task in the same session between arming and consume)
+         silently drops redrive counters AND pending — the cap is per-slot,
+         not per-task; named residual for the autonomy plan, not fixed here.
 ```
 
 ---
