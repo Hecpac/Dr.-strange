@@ -1159,6 +1159,20 @@ class BrowserUseGuardTests(unittest.TestCase):
             )
         )
 
+    def test_explicit_empty_high_risk_allowlist_blocks_legacy_action(self) -> None:
+        from claw_v2.computer import _browser_use_high_risk_allowed
+
+        self.assertFalse(
+            _browser_use_high_risk_allowed(
+                action_name="legacy_script_action",
+                url="https://x.com/home",
+                params={},
+                approved_domains=["x.com"],
+                allow_high_risk_actions=True,
+                allowed_high_risk_actions=[],
+            )
+        )
+
     def test_guarded_tools_import_does_not_mutate_claw_model_env(self) -> None:
         import os
 
@@ -1674,9 +1688,13 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
             config=config,
             browser_capability=capability,
         )
-        out = handler.run_delegated_browser_task("abre la web", task_id="t-1", mode="browse")
+        out = handler.run_delegated_browser_task(
+            "resume https://example.com",
+            task_id="t-1",
+            mode="browse",
+        )
         self.assertEqual(out, "feed capturado: 30 posts")
-        self.assertEqual(fake.calls[0][0], "abre la web")
+        self.assertEqual(fake.calls[0][0], "resume https://example.com")
         # Long browser/CDP budget (1200s), NOT the 180s interactive default.
         self.assertEqual(fake.calls[0][1], 1200)
         self.assertEqual(capability.calls, [(9250, "~/.claw/chrome-profile")])
@@ -1717,10 +1735,46 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
 
         self.assertEqual(out, "feed capturado")
         kwargs = fake.calls[0][1]
-        self.assertIsNone(kwargs["allowed_domains"])
+        self.assertEqual(kwargs["allowed_domains"], ["x.com"])
         self.assertFalse(kwargs["allow_high_risk_actions"])
         self.assertIsNone(kwargs["allowed_high_risk_actions"])
-        self.assertEqual(kwargs["prohibited_domains"], ["ads.google.com"])
+        self.assertIsNone(kwargs["prohibited_domains"])
+
+    def test_delegated_browser_use_without_domain_grant_fails_closed(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            def __init__(self) -> None:
+                self.called = False
+
+            async def run_task(self, task, **kwargs):
+                self.called = True
+                return "should not run"
+
+        fake = FakeBrowserUse()
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        out = handler.run_delegated_browser_task(
+            "resume la pagina abierta",
+            task_id="t-no-domain",
+            mode="browse",
+        )
+
+        self.assertIn("falta un dominio aprobado", out)
+        self.assertFalse(fake.called)
 
     def test_simple_instagram_open_uses_deterministic_cdp_not_browser_use(self) -> None:
         import types
@@ -1974,6 +2028,189 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
                 ("screenshot", "example-com-open.png", "example.com"),
             ],
         )
+
+    def test_login_wall_probe_uses_bounded_content_window(self) -> None:
+        import types
+        from unittest.mock import patch
+
+        from claw_v2.browser import BrowseResult
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                return "should not run"
+
+        class FakeDevBrowserService:
+            def chrome_navigate(self, url, *, cdp_url, page_url_pattern=None):
+                return BrowseResult(
+                    url="https://example.com/",
+                    title="Example",
+                    content="visible " + ("a" * 5000) + " accounts/login",
+                )
+
+            def chrome_screenshot(self, *, cdp_url, page_url_pattern=None, name="chrome.png"):
+                return BrowseResult(
+                    url="https://example.com/",
+                    title="Example",
+                    content="visible " + ("a" * 5000) + " accounts/login",
+                    screenshot_path="/tmp/claw-example-open.png",
+                )
+
+        handler = ComputerHandler(
+            browser_use=FakeBrowserUse(),
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        with patch("claw_v2.computer_handler.DevBrowserService", return_value=FakeDevBrowserService()):
+            out = handler.run_delegated_browser_task(
+                "Abre https://example.com en Chrome con CDP. NO uses browser_use.",
+                task_id="t-open",
+                mode="browse",
+            )
+
+        self.assertIn("Navegador abierto en Chrome CDP", out)
+        self.assertNotIn("login/challenge wall", out)
+
+    def test_simple_domain_open_wins_over_later_reference_url(self) -> None:
+        import types
+        from unittest.mock import patch
+
+        from claw_v2.browser import BrowseResult
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                return "should not run"
+
+        class FakeDevBrowserService:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, str | None]] = []
+
+            def chrome_navigate(self, url, *, cdp_url, page_url_pattern=None):
+                self.calls.append(("navigate", url, page_url_pattern))
+                return BrowseResult(url=url, title="Example", content="Example")
+
+            def chrome_screenshot(self, *, cdp_url, page_url_pattern=None, name="chrome.png"):
+                self.calls.append(("screenshot", name, page_url_pattern))
+                return BrowseResult(url="https://example.com/", title="Example", content="")
+
+        fake_dev_browser = FakeDevBrowserService()
+        handler = ComputerHandler(
+            browser_use=FakeBrowserUse(),
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        with patch("claw_v2.computer_handler.DevBrowserService", return_value=fake_dev_browser):
+            out = handler.run_delegated_browser_task(
+                "Abre example.com en Chrome con CDP; referencia https://docs.example.org/setup. NO uses browser_use.",
+                task_id="t-open-domain",
+                mode="browse",
+            )
+
+        self.assertIn("Navegador abierto en Chrome CDP", out)
+        self.assertEqual(
+            fake_dev_browser.calls[0],
+            ("navigate", "https://example.com", "example.com"),
+        )
+
+    def test_google_chrome_does_not_override_requested_browser_target(self) -> None:
+        import types
+        from unittest.mock import patch
+
+        from claw_v2.browser import BrowseResult
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                return "should not run"
+
+        class FakeDevBrowserService:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, str | None]] = []
+
+            def chrome_navigate(self, url, *, cdp_url, page_url_pattern=None):
+                self.calls.append(("navigate", url, page_url_pattern))
+                return BrowseResult(url=url, title="Target", content="Target")
+
+            def chrome_screenshot(self, *, cdp_url, page_url_pattern=None, name="chrome.png"):
+                self.calls.append(("screenshot", name, page_url_pattern))
+                return BrowseResult(url="https://x.com/", title="Target", content="Target")
+
+        fake_dev_browser = FakeDevBrowserService()
+        handler = ComputerHandler(
+            browser_use=FakeBrowserUse(),
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        with patch("claw_v2.computer_handler.DevBrowserService", return_value=fake_dev_browser):
+            out = handler.run_delegated_browser_task(
+                "Abre Twitter en Google Chrome con CDP. NO uses browser_use.",
+                task_id="t-twitter",
+                mode="browse",
+            )
+
+        self.assertIn("Navegador abierto en Chrome CDP", out)
+        self.assertEqual(fake_dev_browser.calls[0], ("navigate", "https://x.com/home", "x.com"))
+
+    def test_google_chrome_without_target_does_not_grant_google_domain(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            def __init__(self) -> None:
+                self.called = False
+
+            async def run_task(self, task, **kwargs):
+                self.called = True
+                return "should not run"
+
+        fake_browser_use = FakeBrowserUse()
+        handler = ComputerHandler(
+            browser_use=fake_browser_use,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        out = handler.run_delegated_browser_task(
+            "resume la pagina abierta en Google Chrome",
+            task_id="t-google-chrome",
+            mode="browse",
+        )
+
+        self.assertIn("falta un dominio aprobado", out)
+        self.assertFalse(fake_browser_use.called)
 
     def test_explicit_no_browser_use_without_url_does_not_fall_back_to_browser_use(self) -> None:
         import types
@@ -2231,7 +2468,7 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
                     self.active += 1
                     self.max_active = max(self.max_active, self.active)
                     self.observations.append(("start", task, start_url))
-                if task == "first":
+                if task.startswith("first"):
                     self.first_started.set()
                     self.release_first.wait(3)
                 with self.guard:
@@ -2262,8 +2499,9 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
 
         def run_task(name: str) -> None:
             try:
+                task = f"{name} https://{name}.example"
                 results[name] = handler.run_delegated_browser_task(
-                    name,
+                    task,
                     task_id=f"task-{name}",
                     mode="browse",
                 )
@@ -2294,15 +2532,21 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
         self.assertEqual(
             fake.observations,
             [
-                ("start", "first", "http://127.0.0.1:9250"),
-                ("end", "first", "http://127.0.0.1:9250"),
-                ("start", "second", "http://127.0.0.1:9251"),
-                ("end", "second", "http://127.0.0.1:9251"),
+                ("start", "first https://first.example", "http://127.0.0.1:9250"),
+                ("end", "first https://first.example", "http://127.0.0.1:9250"),
+                ("start", "second https://second.example", "http://127.0.0.1:9251"),
+                ("end", "second https://second.example", "http://127.0.0.1:9251"),
             ],
         )
         self.assertEqual(fake.mismatches, [])
-        self.assertEqual(results["first"], "first:http://127.0.0.1:9250")
-        self.assertEqual(results["second"], "second:http://127.0.0.1:9251")
+        self.assertEqual(
+            results["first"],
+            "first https://first.example:http://127.0.0.1:9250",
+        )
+        self.assertEqual(
+            results["second"],
+            "second https://second.example:http://127.0.0.1:9251",
+        )
 
 
 class ComputerHandlerTimeoutTests(_ComputerHandlerConfigTest):

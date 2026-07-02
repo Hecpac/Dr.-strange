@@ -36,6 +36,7 @@ _URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+")
 _DOMAIN_RE = re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,24}\b", re.IGNORECASE)
 _BROWSER_BRAND_DOMAINS = {
     "chatgpt": "chatgpt.com",
+    "google": "google.com",
     "instagram": "instagram.com",
     "insta": "instagram.com",
     "twitter": "x.com",
@@ -45,6 +46,16 @@ BROWSER_USE_TIMEOUT_SECONDS = 180
 # Extra wall-clock the worker-thread future is allowed beyond the agent timeout,
 # to cover the bounded post-task screenshot capture plus browser cleanup.
 BROWSER_USE_TASK_GRACE_SECONDS = 60
+_LOGIN_WALL_CONTENT_PROBE_CHARS = 4096
+_BROWSER_CONTENT_PREVIEW_SOURCE_CHARS = 4096
+_BROWSER_CONTENT_PREVIEW_CHARS = 240
+_LOGIN_WALL_MARKERS = (
+    "accounts/login",
+    "iniciar sesión",
+    "log in",
+    "checkpoint",
+    "challenge",
+)
 _NO_RESULT_SENTINEL = "(no result)"
 _INSTAGRAM_OPEN_RE = re.compile(
     r"\b(?:instagram|insta|instagram\.com)\b",
@@ -139,24 +150,54 @@ def _deterministic_browser_target_url(objective: str) -> str | None:
     analysis_task = _BROWSER_AGENT_ANALYSIS_RE.search(text) is not None
     if not explicit_no_browser_use and (not simple_open or analysis_task):
         return None
-    for raw_url in _URL_RE.findall(text):
-        url = raw_url.rstrip(".,;:!?)]}")
-        if _host_from_url(url):
-            return url
-    for raw_domain in _DOMAIN_RE.findall(text):
-        host = _host_from_url(raw_domain)
-        if host:
-            return f"https://{host}"
+    for target_url in _ordered_browser_targets(text):
+        return target_url
     lowered = text.lower()
     for brand, host in _BROWSER_BRAND_DOMAINS.items():
-        if re.search(rf"\b{re.escape(brand)}\b", lowered):
+        if _browser_brand_matches(lowered, brand):
             return f"https://{host}/"
     return None
+
+
+def _browser_brand_matches(lowered_text: str, brand: str) -> bool:
+    if brand == "google":
+        matches = list(re.finditer(r"\bgoogle\b", lowered_text))
+        return any(
+            re.match(r"\s+chrome\b", lowered_text[match.end() :]) is None
+            for match in matches
+        )
+    return re.search(rf"\b{re.escape(brand)}\b", lowered_text) is not None
+
+
+def _ordered_browser_targets(text: str) -> list[str]:
+    candidates: list[tuple[int, int, str]] = []
+    for match in _URL_RE.finditer(text):
+        url = match.group(0).rstrip(".,;:!?)]}")
+        if _host_from_url(url):
+            candidates.append((match.start(), 0, url))
+    for match in _DOMAIN_RE.finditer(text):
+        host = _host_from_url(match.group(0))
+        if host:
+            candidates.append((match.start(), 1, f"https://{host}"))
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return [url for _, _, url in candidates]
 
 
 def _browser_screenshot_name(host: str | None) -> str:
     safe = re.sub(r"[^a-z0-9]+", "-", (host or "browser").lower()).strip("-")
     return f"{safe or 'browser'}-open.png"
+
+
+def _has_login_wall_marker(final_url: str, title: str, content: str) -> bool:
+    content_probe = str(content or "")[:_LOGIN_WALL_CONTENT_PROBE_CHARS]
+    wall_probe = " ".join((final_url, title, content_probe)).lower()
+    return any(marker in wall_probe for marker in _LOGIN_WALL_MARKERS)
+
+
+def _browser_content_preview(content: str) -> str:
+    source = str(content or "")[:_BROWSER_CONTENT_PREVIEW_SOURCE_CHARS]
+    compact = " ".join(source.split())
+    return compact[:_BROWSER_CONTENT_PREVIEW_CHARS]
 
 
 class ComputerHandler:
@@ -847,15 +888,6 @@ class ComputerHandler:
             )
         if self.browser_use is None:
             raise RuntimeError("browser_use unavailable for approved browser automation")
-        self._emit(
-            "computer_browser_use_task_started",
-            {
-                "backend": "browser_use",
-                "timeout_seconds": self._browser_use_timeout(),
-                "current_url": getattr(session, "current_url", None),
-                "instruction_hash": _instruction_hash(getattr(session, "task", "")),
-            },
-        )
         try:
             approved_domains = _normalized_domains(
                 pending.get("approved_domains")
@@ -877,6 +909,37 @@ class ComputerHandler:
                 approved_domains = grant.approved_domains_list()
                 allow_high_risk_actions = False
                 allowed_high_risk_actions = None
+                if not approved_domains:
+                    session.status = "awaiting_approval"
+                    session.pending_action = {
+                        "action": "browser_use_task",
+                        "backend": "browser_use",
+                        "task": session.task,
+                        "approved_domains": [],
+                    }
+                    self._emit(
+                        "computer_browser_use_missing_domain_grant",
+                        {
+                            "backend": "browser_use",
+                            "current_url": getattr(session, "current_url", None),
+                            "instruction_hash": _instruction_hash(
+                                getattr(session, "task", "")
+                            ),
+                        },
+                    )
+                    return (
+                        "Browser automation needs approval before executing authenticated "
+                        "browser actions."
+                    )
+            self._emit(
+                "computer_browser_use_task_started",
+                {
+                    "backend": "browser_use",
+                    "timeout_seconds": self._browser_use_timeout(),
+                    "current_url": getattr(session, "current_url", None),
+                    "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+                },
+            )
             result = self._run_browser_use_task(
                 session,
                 allow_high_risk_actions=allow_high_risk_actions,
@@ -993,9 +1056,9 @@ class ComputerHandler:
                     timeout=timeout,
                     action_gate=self._get_gate(),
                     sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
-                    allowed_domains=approved_domains if allow_high_risk_actions else None,
+                    allowed_domains=approved_domains or None,
                     prohibited_domains=None
-                    if allow_high_risk_actions
+                    if approved_domains or allow_high_risk_actions
                     else list(getattr(self.config, "sensitive_urls", []) or []),
                     allow_high_risk_actions=allow_high_risk_actions,
                     allowed_high_risk_actions=allowed_high_risk_actions
@@ -1116,10 +1179,25 @@ class ComputerHandler:
                     {"task_id": task_id, "mode": mode, "objective": objective[:200]},
                 )
                 grant = self._browser_read_grant_for_task(
-                    objective_for_agent,
+                    objective,
                     current_url=prelude.final_url if prelude is not None else None,
                     reason="delegated browser executor read task",
                 )
+                approved_domains = grant.approved_domains_list()
+                if not approved_domains:
+                    self._emit(
+                        "computer_browser_use_missing_domain_grant",
+                        {
+                            "backend": "browser_use",
+                            "task_id": task_id,
+                            "mode": mode,
+                            "instruction_hash": _instruction_hash(objective_for_agent),
+                        },
+                    )
+                    return (
+                        "No puedo ejecutar la tarea de navegador: falta un dominio "
+                        "aprobado para acotar browser_use."
+                    )
                 session = _types.SimpleNamespace(
                     task=objective_for_agent,
                     screenshot_path=prelude.screenshot_path if prelude is not None else None,
@@ -1128,7 +1206,7 @@ class ComputerHandler:
                     output = self._run_browser_use_task(
                         session,
                         allow_high_risk_actions=False,
-                        approved_domains=grant.approved_domains_list(),
+                        approved_domains=approved_domains,
                         allowed_high_risk_actions=None,
                         timeout_seconds=_LONG_BROWSER_OPERATION_TIMEOUT_SECONDS,
                     )
@@ -1370,9 +1448,7 @@ class ComputerHandler:
         content = str(
             getattr(result, "content", "") or getattr(screenshot, "content", "") or ""
         ).strip()
-        wall_probe = " ".join((final_url, title, content)).lower()
-        wall_markers = ("accounts/login", "iniciar sesión", "log in", "checkpoint", "challenge")
-        if any(marker in wall_probe for marker in wall_markers):
+        if _has_login_wall_marker(final_url, title, content):
             message = (
                 f"login/challenge wall en {final_url}; "
                 "inicia sesión en el perfil de Chrome y reintenta."
@@ -1391,8 +1467,7 @@ class ComputerHandler:
             return f"No pude completar la tarea de navegador determinística: {message}"
         content_hint = ""
         if content:
-            compact = " ".join(content.split())
-            content_hint = f"\nTexto visible: {compact[:240]}"
+            content_hint = f"\nTexto visible: {_browser_content_preview(content)}"
         self._emit(
             "deterministic_browser_task_completed",
             {
@@ -1523,9 +1598,7 @@ class ComputerHandler:
         # named-profile gate above is X-first, so a logged-out Instagram lands here
         # and would otherwise be reported as a completed open. The returned message
         # carries a _BROWSER_FAILURE_MARKERS phrase so the executor never marks it passed.
-        wall_probe = " ".join((final_url, title, content)).lower()
-        wall_markers = ("accounts/login", "iniciar sesión", "log in", "checkpoint", "challenge")
-        if any(marker in wall_probe for marker in wall_markers):
+        if _has_login_wall_marker(final_url, title, content):
             message = f"login/challenge wall en {final_url}; inicia sesión en el perfil de Chrome y reintenta."
             self._emit(
                 "deterministic_browser_task_unverifiable_result",
@@ -1541,8 +1614,7 @@ class ComputerHandler:
             return f"No pude completar la tarea de navegador determinística: {message}"
         content_hint = ""
         if content:
-            compact = " ".join(content.split())
-            content_hint = f"\nTexto visible: {compact[:240]}"
+            content_hint = f"\nTexto visible: {_browser_content_preview(content)}"
         self._emit(
             "deterministic_browser_task_completed",
             {
@@ -1864,7 +1936,7 @@ def _domains_for_browser_task(
             domains.append(host)
     lowered = (task or "").lower()
     for brand, host in _BROWSER_BRAND_DOMAINS.items():
-        if re.search(rf"\b{re.escape(brand)}\b", lowered) and host not in domains:
+        if _browser_brand_matches(lowered, brand) and host not in domains:
             domains.append(host)
     for value in sensitive_urls or []:
         host = _host_from_url(value)

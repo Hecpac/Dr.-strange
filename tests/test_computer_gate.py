@@ -400,7 +400,7 @@ class ComputerHandlerBrowserAutoApproveTests(unittest.TestCase):
         self.assertTrue(stub.called)
         self.assertEqual(session.status, "done")
         self.assertEqual(result, "browser task done")
-        self.assertIsNone(stub.kwargs["allowed_domains"])
+        self.assertEqual(stub.kwargs["allowed_domains"], ["chatgpt.com"])
         self.assertFalse(stub.kwargs["allow_high_risk_actions"])
         self.assertIsNone(stub.kwargs["allowed_high_risk_actions"])
 

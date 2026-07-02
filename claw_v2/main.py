@@ -51,6 +51,7 @@ from claw_v2.buddy import BuddyService
 from claw_v2.bus import AgentBus
 from claw_v2.computer import (
     BrowserUseService,
+    BROWSER_USE_OAUTH_FALLBACK_MODEL,
     CodexComputerBackend,
     ComputerUseService,
     ComputerUseUnavailable,
@@ -624,6 +625,12 @@ def _startup_model_role_summary(config: AppConfig) -> str:
     pairs["browser_agent_configured"] = (
         f"{browser_provider}:{config.computer_browser_use_model}"
     )
+    if BROWSER_USE_OAUTH_FALLBACK_MODEL:
+        pairs["browser_agent_fallback"] = (
+            f"anthropic:{BROWSER_USE_OAUTH_FALLBACK_MODEL}"
+        )
+    else:
+        pairs["browser_agent_fallback"] = "disabled"
     return "; ".join(f"{key}={value}" for key, value in sorted(pairs.items()))
 
 

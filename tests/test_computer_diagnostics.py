@@ -14,7 +14,7 @@ from claw_v2 import liveness
 from claw_v2.computer import ComputerSession
 from claw_v2.computer_handler import ComputerHandler
 from claw_v2.diagnostics import collect_diagnostics
-from claw_v2.main import _run_startup_healthchecks
+from claw_v2.main import _run_startup_healthchecks, _startup_model_role_summary
 from claw_v2.observe import ObserveStream
 from tests.helpers import make_config
 
@@ -196,6 +196,17 @@ class ComputerDiagnosticsTests(unittest.TestCase):
             self.assertTrue(
                 any(event["payload"]["name"] == "model_roles" for event in ok_events)
             )
+
+    def test_startup_model_role_summary_reports_disabled_browser_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            config.computer_use_backend = "codex"
+            config.codex_model = "gpt-5.5"
+            config.computer_browser_use_model = "claude-sonnet-4-6"
+
+            detail = _startup_model_role_summary(config)
+
+        self.assertIn("browser_agent_fallback=disabled", detail)
 
     def test_runtime_diagnostics_include_structured_computer_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
