@@ -298,6 +298,9 @@ def wiki_research_result_summary(result: object) -> dict[str, Any]:
         "candidates_researched": _safe_int(data.get("candidates_researched")),
         "raw_sources_written": _safe_int(data.get("raw_sources_written")),
         "candidates_blocked": _safe_int(data.get("candidates_blocked")),
+        "candidates_compiled": _safe_int(data.get("candidates_compiled")),
+        "compile_blocked": _safe_int(data.get("compile_blocked")),
+        "compile_failed": _safe_int(data.get("compile_failed")),
         "candidate_count": len(candidates) if isinstance(candidates, list) else 0,
         "candidate_previews": candidate_previews,
     }
