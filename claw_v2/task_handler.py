@@ -1890,6 +1890,13 @@ class TaskHandler:
                         if terminal_status == "failed" and checkpoint_error
                         else {}
                     ),
+                    # γ.0: la clase del blocker (tail del verifier) viaja al
+                    # evento terminal — hace medibles las muertes por clase.
+                    **(
+                        {"blocker_class": str(completed_checkpoint.get("blocker_class"))}
+                        if completed_checkpoint.get("blocker_class")
+                        else {}
+                    ),
                 },
             )
             claim_id = self._p0_record_task_claim(
@@ -3558,12 +3565,14 @@ class TaskHandler:
         decision_usuario jamás consume intentos), cap CLAW_MAX_TASK_REDRIVES,
         mismo ident jamás 2×, intento persistido en active_task ANTES de que el
         camino de deferral existente re-encole el job, y ventana de presupuesto
-        congelada ⇒ no re-drive.
+        congelada ⇒ no re-drive. γ.0: toda decisión sobre una clase DECLARADA
+        emite autonomous_task_redrive_decision (un checkpoint sin clase es un
+        deferral normal de verificación — mudo, no es una decisión de clase).
         """
-        clase = str(checkpoint.get("blocker_class") or "")
-        if clase != "formato":
-            return False
         if active_task.get("task_id") != task_id:
+            return False
+        clase = str(checkpoint.get("blocker_class") or "")
+        if not clase:
             return False
         payload_base = {"session_id": session_id, "task_id": task_id, "clase": clase}
         max_redrives = _max_task_redrives()
@@ -3571,6 +3580,23 @@ class TaskHandler:
             attempts = int(active_task.get("redrive_attempts") or 0)
         except (TypeError, ValueError):
             attempts = 0
+        blockers = [str(b) for b in (checkpoint.get("blockers") or []) if str(b).strip()]
+        idents = [
+            normalize_blocker_ident(clase, blocker.split(":", 1)[0]) for blocker in blockers
+        ] or [normalize_blocker_ident(clase, "sin-slug")]
+        if clase != "formato":
+            # γ.0: el return mudo dejaba las muertes por evidencia/decision
+            # sin evento — el baseline (4 muertes/13h) no era medible por clase.
+            self._emit(
+                "autonomous_task_redrive_decision",
+                {
+                    **payload_base,
+                    "attempt": attempts,
+                    "idents": idents,
+                    "action": "fail_closed",
+                },
+            )
+            return False
         try:
             deferrals = int(active_task.get("verification_deferrals") or 0)
         except (TypeError, ValueError):
@@ -3589,10 +3615,6 @@ class TaskHandler:
                 {**payload_base, "attempt": attempts, "action": "exhausted"},
             )
             return False
-        blockers = [str(b) for b in (checkpoint.get("blockers") or []) if str(b).strip()]
-        idents = [
-            normalize_blocker_ident(clase, blocker.split(":", 1)[0]) for blocker in blockers
-        ] or [normalize_blocker_ident(clase, "sin-slug")]
         seen = [str(s) for s in (active_task.get("redrive_seen") or [])]
         if any(ident in seen for ident in idents):
             self._emit(
@@ -3626,6 +3648,7 @@ class TaskHandler:
         active_task["redrive_pending"] = {
             "start_phase": "synthesis",
             "verdict": "\n".join(f"- {blocker}" for blocker in blockers)[:1500],
+            "blocker_class": clase,
         }
         active_task["updated_at"] = time.time()
         state = self._get_session_state(session_id)
@@ -3658,12 +3681,18 @@ class TaskHandler:
             return objective, start_phase
         forced = str(pending.get("start_phase") or "synthesis")
         verdict = str(pending.get("verdict") or "")[:1500]
+        blocker_class = str(pending.get("blocker_class") or "")
         active_task.pop("redrive_pending", None)
         active_task["updated_at"] = time.time()
         self._write_active_task(session_id, active_task, active_object)
         self._emit(
             "autonomous_task_redrive_resumed",
-            {"session_id": session_id, "task_id": task_id, "start_phase": forced},
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "start_phase": forced,
+                **({"blocker_class": blocker_class} if blocker_class else {}),
+            },
         )
         if verdict:
             objective = (

@@ -480,6 +480,142 @@ class RedriveDecisionUnitTests(unittest.TestCase):
                 )
 
 
+class RedriveObservabilityTests(unittest.TestCase):
+    """C1-Sγ.0 — toda decisión del governor sobre una clase DECLARADA emite
+    autonomous_task_redrive_decision (action redrive|fail_closed|<guard>), la
+    clase persiste en redrive_pending y viaja a redrive_resumed y al evento
+    terminal failed. Un checkpoint sin clase (deferral normal de verificación)
+    NO emite decisión — el governor corre en cada ciclo no-terminal y eso
+    sería spam engañoso."""
+
+    def _checkpoint(self, clase: str) -> dict:
+        checkpoint = {
+            "verification_status": "pending",
+            "blockers": ["cita-man-page: falta el output crudo de man launchd.plist"],
+            "summary": "resumen",
+        }
+        if clase:
+            checkpoint["blocker_class"] = clase
+        return checkpoint
+
+    def _decisions(self, observe) -> list[dict]:
+        return [
+            e
+            for e in observe.recent_events(limit=100)
+            if e["event_type"] == "autonomous_task_redrive_decision"
+        ]
+
+    def test_declared_fail_closed_class_emits_decision_event(self) -> None:
+        for clase in ("evidencia_externa", "decision_usuario"):
+            with self.subTest(clase=clase), tempfile.TemporaryDirectory() as tmpdir:
+                handler, memory, observe, *_ = _mk_handler(
+                    Path(tmpdir), _TailCoordinator(FORMATO_TAIL)
+                )
+                active = {"task_id": "t-1", "status": "pending"}
+                memory.update_session_state("tg-1", active_object={"active_task": active})
+                started = handler._maybe_start_redrive(
+                    session_id="tg-1",
+                    task_id="t-1",
+                    active_task=active,
+                    checkpoint=self._checkpoint(clase),
+                )
+                self.assertFalse(started)
+                decisions = self._decisions(observe)
+                self.assertEqual(len(decisions), 1)
+                payload = decisions[0]["payload"]
+                self.assertEqual(payload["action"], "fail_closed")
+                self.assertEqual(payload["clase"], clase)
+                self.assertEqual(payload["attempt"], 0)
+                self.assertEqual(payload["idents"], [f"{clase}:cita-man-page"])
+
+    def test_no_class_checkpoint_emits_no_decision_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, memory, observe, *_ = _mk_handler(Path(tmpdir), _TailCoordinator(FORMATO_TAIL))
+            active = {"task_id": "t-1", "status": "pending"}
+            memory.update_session_state("tg-1", active_object={"active_task": active})
+            started = handler._maybe_start_redrive(
+                session_id="tg-1",
+                task_id="t-1",
+                active_task=active,
+                checkpoint=self._checkpoint(""),
+            )
+            self.assertFalse(started)
+            self.assertEqual(self._decisions(observe), [])
+
+    def test_stale_task_emits_no_decision_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, memory, observe, *_ = _mk_handler(Path(tmpdir), _TailCoordinator(FORMATO_TAIL))
+            active = {"task_id": "t-1", "status": "pending"}
+            memory.update_session_state("tg-1", active_object={"active_task": active})
+            started = handler._maybe_start_redrive(
+                session_id="tg-1",
+                task_id="t-otra",
+                active_task=active,
+                checkpoint=self._checkpoint("evidencia_externa"),
+            )
+            self.assertFalse(started)
+            self.assertEqual(self._decisions(observe), [])
+
+    def test_redrive_pending_carries_blocker_class(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, memory, *_ = _mk_handler(Path(tmpdir), _TailCoordinator(FORMATO_TAIL))
+            active = {"task_id": "t-1", "status": "pending"}
+            memory.update_session_state("tg-1", active_object={"active_task": active})
+            started = handler._maybe_start_redrive(
+                session_id="tg-1",
+                task_id="t-1",
+                active_task=active,
+                checkpoint=self._checkpoint("formato"),
+            )
+            self.assertTrue(started)
+            pending = _active_task(memory, "tg-1").get("redrive_pending") or {}
+            self.assertEqual(pending.get("blocker_class"), "formato")
+
+    def test_resumed_event_carries_blocker_class(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, memory, observe, *_ = _mk_handler(Path(tmpdir), _TailCoordinator(FORMATO_TAIL))
+            memory.update_session_state(
+                "tg-1",
+                active_object={
+                    "active_task": {
+                        "task_id": "t-1",
+                        "status": "pending",
+                        "redrive_attempts": 1,
+                        "redrive_pending": {
+                            "start_phase": "synthesis",
+                            "verdict": "corrige el formato",
+                            "blocker_class": "formato",
+                        },
+                    }
+                },
+            )
+            handler._consume_redrive_pending(
+                session_id="tg-1", task_id="t-1", objective="obj", start_phase=None
+            )
+            resumed = next(
+                e
+                for e in observe.recent_events(limit=50)
+                if e["event_type"] == "autonomous_task_redrive_resumed"
+            )
+            self.assertEqual(resumed["payload"].get("blocker_class"), "formato")
+
+    def test_terminal_failed_event_carries_blocker_class(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            handler, _memory, observe, _jobs, _stored = _mk_handler(
+                root, _TailCoordinator(EVIDENCIA_TAIL)
+            )
+            ack = handler.start_autonomous_task("tg-1", "cita el man page", mode="research")
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+            failed = next(
+                e
+                for e in observe.recent_events(limit=200)
+                if e["event_type"] == "autonomous_task_failed"
+            )
+            self.assertEqual(failed["payload"].get("blocker_class"), "evidencia_externa")
+
+
 class RedriveReentryTests(unittest.TestCase):
     def test_consume_redrive_pending_forces_synthesis_and_verdict(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
