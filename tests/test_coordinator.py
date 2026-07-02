@@ -451,6 +451,37 @@ class FullRunTests(unittest.TestCase):
         self.assertIn("Self-Healing", critical_synthesis_prompt)
         self.assertIn("CRITICAL ERROR EN WORKER", critical_synthesis_prompt)
 
+    def test_verifier_echoing_marker_does_not_fail_terminal_phase(self) -> None:
+        # Regression: the verifier is advisory and naturally discusses failures.
+        # When its review prose merely *echoes* the CRITICAL-worker sentinel, the
+        # terminal verification phase must NOT treat it as a critical worker error
+        # and discard an already-successful synthesis.
+        svc, router, _observe, _ = _make_service()
+
+        def fake_ask(prompt, **kwargs):
+            if kwargs.get("lane") == "verifier":
+                return MagicMock(
+                    content=(
+                        "Verification Status: passed\n"
+                        "Nota: un reporte previo mencionaba `CRITICAL ERROR EN WORKER` "
+                        "pero ya se resolvió; sin bloqueos."
+                    )
+                )
+            return MagicMock(content="**Hallazgos:** resumen normal de la tarea.")
+
+        router.ask.side_effect = fake_ask
+        research = [WorkerTask(name="r1", instruction="find")]
+        verify = [WorkerTask(name="v1", instruction="check", lane="verifier")]
+
+        result = svc.run("verify-echo-task", "objective", research, None, verify)
+
+        self.assertFalse(
+            result.error.startswith("critical_worker_error"),
+            f"verifier echo must not trigger a critical worker error: {result.error!r}",
+        )
+        self.assertIn("verification", result.phase_results)
+        self.assertFalse(result.audit.get("critical_worker_error", False))
+
 
 class F6FanOutFanInContractTests(unittest.TestCase):
     def _metadata_list(self, report: Any, key: str) -> list[dict[str, Any]]:
