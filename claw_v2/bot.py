@@ -618,24 +618,52 @@ def _user_authoritatively_marked_done(source_text: str) -> bool:
     return any(pattern.search(source_text) for pattern in _USER_AUTHORITATIVE_DONE_PATTERNS)
 
 
+_KNOWLEDGE_ANSWER_VERB = (
+    r"(?:resp[oó]nd\w*|cont[eé]st\w*|d[ií]me\w*|d[aá]me\w*|expl[ií]c\w*|"
+    r"res[uú]m\w*|cierr\w*|answer\w*|reply\w*|tell|summari[sz]\w*|close)"
+)
 _USER_KNOWLEDGE_ANSWER_PATTERNS = (
+    # Unambiguous imperatives.
     re.compile(r"\bus[ae]\s+tu\s+(?:propio\s+)?conocimiento\b", re.IGNORECASE),
-    re.compile(r"\b(?:de|con)\s+tu\s+(?:propio\s+)?conocimiento\b", re.IGNORECASE),
-    re.compile(r"\bde\s+memoria\b", re.IGNORECASE),
-    re.compile(r"\bresp[oó]nde(?:me|lo|la)?\s+direct[oa]\b", re.IGNORECASE),
-    re.compile(r"\bsin\s+(?:usar\s+)?(?:tools|herramientas)\b", re.IGNORECASE),
     re.compile(r"\buse\s+your\s+(?:own\s+)?knowledge\b", re.IGNORECASE),
-    re.compile(r"\bfrom\s+memory\b", re.IGNORECASE),
+    re.compile(rf"\b{_KNOWLEDGE_ANSWER_VERB}\b\s+direct[oa]\b", re.IGNORECASE),
+    # Ambiguous phrases ("de memoria", "sin tools", "de tu conocimiento") count
+    # ONLY anchored to an answering verb: "arregla la fuga de memoria" or
+    # "el verifier corre sin tools" must never authorize.
+    re.compile(
+        rf"\b{_KNOWLEDGE_ANSWER_VERB}\b[^.!?\n]{{0,15}}"
+        r"\b(?:de|con)\s+tu\s+(?:propio\s+)?conocimiento\b",
+        re.IGNORECASE,
+    ),
+    re.compile(rf"\b{_KNOWLEDGE_ANSWER_VERB}\b[^.!?\n]{{0,15}}\bde\s+memoria\b", re.IGNORECASE),
+    re.compile(rf"\b{_KNOWLEDGE_ANSWER_VERB}\b[^.!?\n]{{0,15}}\bfrom\s+memory\b", re.IGNORECASE),
+    re.compile(
+        rf"\b{_KNOWLEDGE_ANSWER_VERB}\b[^.!?\n]{{0,20}}\bsin\s+(?:usar\s+)?(?:tools|herramientas)\b",
+        re.IGNORECASE,
+    ),
+)
+_KNOWLEDGE_NEGATION_LOOKBACK = re.compile(
+    r"(?:\bno\b|\bnunca\b|\bjam[aá]s\b|\bnever\b|\bnot\b|n['’]t|\bdo\s+not\b|\bwithout\b|\bsin\b)"
+    r"\s*(?:\w+\s+){0,2}$",
+    re.IGNORECASE,
 )
 
 
 def _user_authorized_knowledge_answer(source_text: str) -> bool:
     """True when the CURRENT user message explicitly authorizes answering from
-    the model's own knowledge (no tool evidence). Only the current turn's text
-    counts — authorization never leaks from history."""
+    the model's own knowledge (no tool evidence). Ambiguous phrases count only
+    anchored to an answering verb, and a negated authorization ("no uses tu
+    conocimiento", "don't answer from memory") never counts. Only the current
+    turn's text is consulted — authorization never leaks from history."""
     if not source_text:
         return False
-    return any(pattern.search(source_text) for pattern in _USER_KNOWLEDGE_ANSWER_PATTERNS)
+    for pattern in _USER_KNOWLEDGE_ANSWER_PATTERNS:
+        for match in pattern.finditer(source_text):
+            prefix = source_text[max(0, match.start() - 24) : match.start()]
+            if _KNOWLEDGE_NEGATION_LOOKBACK.search(prefix):
+                continue
+            return True
+    return False
 
 
 _EVIDENCE_REFERENCE_PATTERNS = (
@@ -3007,7 +3035,7 @@ class BotService:
         if _user_authoritatively_marked_done(source_text):
             self._emit_safe(
                 "evidence_gate_skipped_user_authority",
-                {"session_id": session_id, "claim_type": "start"},
+                {"session_id": session_id, "claim_type": "start", "authority": "marked_done"},
             )
             return False
         if _brain_content_references_evidence(content):
@@ -3050,7 +3078,11 @@ class BotService:
         if _user_authoritatively_marked_done(source_text):
             self._emit_safe(
                 "evidence_gate_skipped_user_authority",
-                {"session_id": session_id, "claim_type": "completion"},
+                {
+                    "session_id": session_id,
+                    "claim_type": "completion",
+                    "authority": "marked_done",
+                },
             )
             return False
         if _user_authorized_knowledge_answer(source_text):
@@ -6983,7 +7015,7 @@ class BotService:
         return (
             "Corrijo: la búsqueda de dueño falló (tool con exit distinto de cero), "
             "así que NO tengo un registro confirmado ni una fuente verificada. "
-            "No baso ninguna decisión de gasto en eso. Decime si reintento el lookup "
+            "No baso ninguna decisión de gasto en eso. Dime si reintento el lookup "
             "con evidencia antes de avanzar."
         )
 

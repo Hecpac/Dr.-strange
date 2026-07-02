@@ -89,6 +89,31 @@ class TestUserAuthorizedKnowledgeAnswer:
 
     def test_negated_knowledge_request_does_not_match(self) -> None:
         assert not _user_authorized_knowledge_answer("no uses tu conocimiento, ejecútalo real")
+        assert not _user_authorized_knowledge_answer("no use tu conocimiento")
+        assert not _user_authorized_knowledge_answer(
+            "no me respondas de memoria, ejecuta el comando real"
+        )
+        assert not _user_authorized_knowledge_answer("nunca respondas de memoria")
+        assert not _user_authorized_knowledge_answer(
+            "don't use your own knowledge, actually run it"
+        )
+        assert not _user_authorized_knowledge_answer(
+            "do not answer from memory, run the command"
+        )
+        assert not _user_authorized_knowledge_answer("never answer from memory")
+
+    def test_memory_noun_collocations_do_not_match(self) -> None:
+        # "de memoria" / "sin tools" sin verbo de respuesta anclado = uso nominal
+        # o descriptivo, no una autorización (hallazgo 1 del review de PR #172).
+        assert not _user_authorized_knowledge_answer("arregla la fuga de memoria del daemon")
+        assert not _user_authorized_knowledge_answer("revisa el uso de memoria")
+        assert not _user_authorized_knowledge_answer("corrige el error de memoria")
+        assert not _user_authorized_knowledge_answer(
+            "el verifier corre sin tools, arregla el router"
+        )
+        assert not _user_authorized_knowledge_answer(
+            "eso está fuera de tu conocimiento, mejor investiga con tools"
+        )
 
     def test_empty_input(self) -> None:
         assert not _user_authorized_knowledge_answer("")
