@@ -2307,6 +2307,12 @@ _VERDICT_TAIL_INSTRUCTION = (
     "existe pero su forma/estructura incumple lo pedido; evidencia_externa = falta "
     "evidencia que un worker debe producir y adjuntar; decision_usuario = solo el "
     "dueño puede resolverlo. "
+    # mini-δ: cortesía de prompt, NO contrato — el router de task_handler trata
+    # failed+clase-re-conducible como elegible igual; no escribir tests sobre
+    # este fraseo (el contrato es el código).
+    "Con clase formato o evidencia_externa cierra con `Verification Status: "
+    "pending` (el sistema re-trabaja el entregable); reserva `failed` para "
+    "fallos no recuperables. "
 )
 
 _VERDICT_CLASS_RE = re.compile(
