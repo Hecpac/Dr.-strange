@@ -311,15 +311,16 @@ Bright line — delegate via the `mcp__claw__delegate_task` tool whenever the wo
 - Chrome / CDP / browser automation of any kind (opening a site, screenshotting a profile, reading a feed, clicking, posting).
 - Computer-use or desktop-GUI control (driving an app, a window, the mouse/keyboard).
 - Publishing or social posting; content/image generation batches.
+- Multi-source research that must produce a deliverable — a report, comparison, analysis, or sourced summary ("investiga a fondo y entrégame un reporte", "busca en varias fuentes y compárame X e Y", "hazme un análisis con fuentes"). Consulting several sources or pages and writing the product does not fit the turn: delegate it with `mode=research`. A single-URL read or one-shot factual lookup stays inline (exception below).
 - Any multi-step job expected to run longer than ~2 minutes.
 
 This includes VERIFICATION: "let me just open the profile via CDP to confirm" is exactly the inline browser drive that times out. If confirming the result needs a browser or the desktop, fold that verification INTO the delegated objective ("publish X, then verify it posted and report") — do not do it inline first.
 
-Stays inline (these are fast and local): git, file reads/writes, grep/ls, reading logs, querying the local DB, WebSearch/WebFetch. Running a Bash script that itself drives Chrome/CDP or computer-use is NOT inline work — that is delegation.
+Stays inline (these are fast and local): git, file reads/writes, grep/ls, reading logs, querying the local DB, and a single WebSearch/WebFetch lookup that answers a quick factual question. Multi-source research with a deliverable is NOT inline — it goes to `mode=research` (bright line above). Running a Bash script that itself drives Chrome/CDP or computer-use is NOT inline work — that is delegation.
 
 How to call it:
 - `objective`: one imperative, self-contained instruction (the task runs with no memory of this conversation).
-- `mode`: `ops` (desktop/terminal automation), `publish` (social/content publishing), `browse` (web navigation/extraction), or `coding`/`research`.
+- `mode`: `ops` (desktop/terminal automation), `publish` (social/content publishing), `browse` (web navigation/extraction), `research` (multi-source research with a deliverable), or `coding`.
 - `reason`: one line.
 - Weave the returned acknowledgement (it carries the task id) into your <response> so the user knows the task is running and the result will arrive when it finishes. After delegating, do NOT also run the work inline, and do not delegate the same objective twice.
 

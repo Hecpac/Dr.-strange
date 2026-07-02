@@ -796,6 +796,39 @@ class BrowserDelegationRuleTests(unittest.TestCase):
         self.assertIn(BROWSER_DELEGATION_RULE, DELEGATION_CONTRACT)
 
 
+class DelegationContractResearchTests(unittest.TestCase):
+    """B2.0 (bloque F4-B2): multi-source research with a deliverable is
+    contractually delegable via mode=research; single-URL reads and one-shot
+    lookups stay inline. Invariant: delegation_contract_research_delegable
+    (INTERNAL_WIRING §1). Baseline 2026-07-02: 5/5 bare research asks
+    (msgs 3214/3216/3218/3239/3323) were answered inline because the contract
+    listed WebSearch/WebFetch as unconditionally inline."""
+
+    def test_research_deliverable_is_declared_delegable(self) -> None:
+        from claw_v2.brain import DELEGATION_CONTRACT
+
+        self.assertIn("Multi-source research that must produce a deliverable", DELEGATION_CONTRACT)
+        self.assertIn("delegate it with `mode=research`", DELEGATION_CONTRACT)
+        # Bilingual anchors: the ask arrives in Spanish.
+        self.assertIn("investiga a fondo y entrégame un reporte", DELEGATION_CONTRACT)
+        self.assertIn("hazme un análisis con fuentes", DELEGATION_CONTRACT)
+
+    def test_blanket_inline_websearch_clause_is_gone(self) -> None:
+        from claw_v2.brain import DELEGATION_CONTRACT
+
+        self.assertNotIn("querying the local DB, WebSearch/WebFetch", DELEGATION_CONTRACT)
+        self.assertIn("a single WebSearch/WebFetch lookup", DELEGATION_CONTRACT)
+
+    def test_single_url_read_stays_inline(self) -> None:
+        from claw_v2.brain import DELEGATION_CONTRACT
+
+        self.assertIn(
+            "A single-URL read or one-shot factual lookup stays inline",
+            DELEGATION_CONTRACT,
+        )
+        self.assertIn("Do NOT delegate a single URL read", DELEGATION_CONTRACT)
+
+
 class TestRiskRank(unittest.TestCase):
     # Regression: only one _risk_rank definition should exist (the one that delegates
     # to _RISK_RANK + _normalize_risk_level). The dead inline version at the old
