@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "C1-Sγ closure Fix 2 (mini-δ): a Verification Status: failed verdict with a re-drivable declared class (formato|evidencia_externa) and fresh idents is now governor-eligible by the SAME pending path — _run_autonomous_task consults _maybe_start_redrive after the F2.5 promote gate and before the terminal tail; governor arms ⇒ task continues (verification_status normalized to pending), governor declines ⇒ today's verdict-failed terminal intact. Zero new counters — the β guards (class, dedup, cap, deferral budget, frozen window, single knob) govern inside _maybe_start_redrive. Courtesy pending-closure line appended to _VERDICT_TAIL_INSTRUCTION (prompt courtesy, never the contract). task_redrive_bounded_and_classified extended in §1 same commit. Predecessor Fix 1 synthesis_mode_aware (doc_version 2.50) in main"
-doc_version: 2.51
+describes_commit: "B2.0 (bloque F4-B2, opción c escalonada): DELEGATION_CONTRACT declares multi-source research with a deliverable delegable via mode=research (Spanish anchors) and drops the unconditional 'WebSearch/WebFetch stays inline' clause — only a single quick-fact lookup stays inline; single-URL read exception (BROWSER_DELEGATION_RULE) and git/fs/logs/local-DB inline list intact; include_delegation still conditional on delegation_handler. New §1 invariant delegation_contract_research_delegable. Predecessor: C1-Sγ closure Fix 2 mini-δ (doc_version 2.51) in main"
+doc_version: 2.52
 last_verified: 2026-07-02
-verification_method: "TDD red-first (failed+formato and failed+evidencia watched dying terminal with no decision event, then green): tests/test_task_redrive.py FailedVerdictRedriveTests — fresh formato redrives by the pending path (autonomous_task_pending carries pending), evidencia arms pre_step without running it, decision_usuario stays terminal with audited fail_closed decision, governor-declined keeps today's terminal; full redrive suite (48) green. Live smoke pending deploy: an organic failed+re-drivable+fresh-ident verdict must produce redrive_decision action=redrive from a failed (if no organic occurrence, the unit+integration lock covers — report honestly)"
+verification_method: "TDD red-first (3 marker tests watched fail against the old contract, then green): tests/test_brain_core.py::DelegationContractResearchTests + existing include_delegation and BROWSER_DELEGATION_RULE-embedding locks; full test_brain_core.py 66 green. Live smoke pending deploy: a bare Spanish research ask ('Investiga X y entrégame un reporte', no 'delega' keyword) must produce organic brain_delegation_requested mode=research + the C1 pipeline closing the task (combined B2.0+B2.1 smoke — report honestly if the model still answers inline)"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1279,6 +1279,30 @@ invariants:
          signal, NOT redrive-aware — every research run delivers, not just
          re-drives; the smoke must cover clean first-pass AND the re-drive
          arc).
+
+  delegation_contract_research_delegable:
+    rule: DELEGATION_CONTRACT (claw_v2/brain.py) MUST declare multi-source
+          research that produces a deliverable (report / comparison /
+          analysis / sourced summary) as delegable work via `mode=research`,
+          with Spanish anchors ("investiga a fondo y entrégame un reporte"),
+          and MUST NOT list WebSearch/WebFetch as unconditionally inline —
+          only a single lookup answering a quick factual question stays
+          inline. The single-URL-read exception (BROWSER_DELEGATION_RULE
+          embedded verbatim) and the git/fs/grep/logs/local-DB inline list
+          stay intact, and the contract is still injected only when a
+          delegation_handler exists (_brain_system_prompt include_delegation).
+    enforced_by:
+      - tests/test_brain_core.py::DelegationContractResearchTests
+      - tests/test_brain_core.py::HandleMessageTests::test_handle_message_passes_delegation_handler_and_contract_only_when_factory_present
+      - tests/test_brain_core.py::BrowserDelegationRuleTests::test_browser_delegation_rule_in_delegation_contract
+    why: Baseline 2026-07-02 (recon del bloque P0-5/6+F4-B2): 5/5 bare
+         Spanish research asks (msgs 3214/3216/3218/3239/3323) were answered
+         inline and organic research delegation was ~0 — not model
+         disobedience but obedience to the old clause "Stays inline: …
+         WebSearch/WebFetch". The contrast case (msg 3228, a listed category)
+         delegated correctly without being asked to. Slice B2.0 of the F4-B2
+         block (opción c escalonada authorized 2026-07-02); the B2.1 shadow
+         telemetry measures the effect before any enforcement is considered.
 ```
 
 ---
