@@ -2129,6 +2129,89 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
             ("navigate", "https://example.com", "example.com"),
         )
 
+    def test_google_chrome_does_not_override_requested_browser_target(self) -> None:
+        import types
+        from unittest.mock import patch
+
+        from claw_v2.browser import BrowseResult
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                return "should not run"
+
+        class FakeDevBrowserService:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, str | None]] = []
+
+            def chrome_navigate(self, url, *, cdp_url, page_url_pattern=None):
+                self.calls.append(("navigate", url, page_url_pattern))
+                return BrowseResult(url=url, title="Target", content="Target")
+
+            def chrome_screenshot(self, *, cdp_url, page_url_pattern=None, name="chrome.png"):
+                self.calls.append(("screenshot", name, page_url_pattern))
+                return BrowseResult(url="https://x.com/", title="Target", content="Target")
+
+        fake_dev_browser = FakeDevBrowserService()
+        handler = ComputerHandler(
+            browser_use=FakeBrowserUse(),
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        with patch("claw_v2.computer_handler.DevBrowserService", return_value=fake_dev_browser):
+            out = handler.run_delegated_browser_task(
+                "Abre Twitter en Google Chrome con CDP. NO uses browser_use.",
+                task_id="t-twitter",
+                mode="browse",
+            )
+
+        self.assertIn("Navegador abierto en Chrome CDP", out)
+        self.assertEqual(fake_dev_browser.calls[0], ("navigate", "https://x.com/home", "x.com"))
+
+    def test_google_chrome_without_target_does_not_grant_google_domain(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+            cdp_url = "http://localhost:9250"
+
+            def __init__(self) -> None:
+                self.called = False
+
+            async def run_task(self, task, **kwargs):
+                self.called = True
+                return "should not run"
+
+        fake_browser_use = FakeBrowserUse()
+        handler = ComputerHandler(
+            browser_use=fake_browser_use,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        out = handler.run_delegated_browser_task(
+            "resume la pagina abierta en Google Chrome",
+            task_id="t-google-chrome",
+            mode="browse",
+        )
+
+        self.assertIn("falta un dominio aprobado", out)
+        self.assertFalse(fake_browser_use.called)
+
     def test_explicit_no_browser_use_without_url_does_not_fall_back_to_browser_use(self) -> None:
         import types
 

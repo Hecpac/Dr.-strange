@@ -154,9 +154,19 @@ def _deterministic_browser_target_url(objective: str) -> str | None:
         return target_url
     lowered = text.lower()
     for brand, host in _BROWSER_BRAND_DOMAINS.items():
-        if re.search(rf"\b{re.escape(brand)}\b", lowered):
+        if _browser_brand_matches(lowered, brand):
             return f"https://{host}/"
     return None
+
+
+def _browser_brand_matches(lowered_text: str, brand: str) -> bool:
+    if brand == "google":
+        matches = list(re.finditer(r"\bgoogle\b", lowered_text))
+        return any(
+            re.match(r"\s+chrome\b", lowered_text[match.end() :]) is None
+            for match in matches
+        )
+    return re.search(rf"\b{re.escape(brand)}\b", lowered_text) is not None
 
 
 def _ordered_browser_targets(text: str) -> list[str]:
@@ -1926,7 +1936,7 @@ def _domains_for_browser_task(
             domains.append(host)
     lowered = (task or "").lower()
     for brand, host in _BROWSER_BRAND_DOMAINS.items():
-        if re.search(rf"\b{re.escape(brand)}\b", lowered) and host not in domains:
+        if _browser_brand_matches(lowered, brand) and host not in domains:
             domains.append(host)
     for value in sensitive_urls or []:
         host = _host_from_url(value)
