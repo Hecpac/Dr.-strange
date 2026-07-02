@@ -849,6 +849,11 @@ class EvidencePreStepTests(unittest.TestCase):
             self.assertIn("cita-man-page", instruction)
             self.assertIn("comandos de lectura", instruction)
             self.assertIn("DATOS", instruction)
+            # smoke 2026-07-02 14:16: el worker pegó el HEAD del documento y la
+            # sección pedida nunca entró — la instrucción exige la sección
+            # relevante, no el documento desde el inicio, y da la receta man.
+            self.assertIn("SOLO la sección", instruction)
+            self.assertIn("col -b", instruction)
             self.assertEqual(coordinator.evidence_calls[0]["task_id"], "t-1")
             # identidad con los workers de fase: los pins de sesión viajan
             # (_lane_model_overrides devuelve dict, jamás None)
