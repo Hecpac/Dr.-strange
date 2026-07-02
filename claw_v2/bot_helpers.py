@@ -2132,7 +2132,8 @@ def _build_coordinator_tasks(
                     "Verify the implementation from the available evidence. "
                     "Return a concise operational review and include a line `Verification Status: passed|pending|failed`. "
                     "If more work is needed, include `Siguiente paso: ...`. "
-                    f"Objective: {objective}"
+                    + _VERDICT_TAIL_INSTRUCTION
+                    + f"Objective: {objective}"
                 ),
             )
         ]
@@ -2195,7 +2196,8 @@ def _build_coordinator_tasks(
                     "Verify the operation from the available evidence. "
                     "Return a concise operational review and include a line `Verification Status: passed|pending|failed`. "
                     "If more work is needed, include `Siguiente paso: ...`. "
-                    f"Objective: {objective}"
+                    + _VERDICT_TAIL_INSTRUCTION
+                    + f"Objective: {objective}"
                 ),
             )
         ]
@@ -2225,7 +2227,8 @@ def _build_coordinator_tasks(
             lane="verifier",
             instruction=(
                 "Review the synthesized findings and include `Verification Status: passed|pending|failed`. "
-                "If follow-up work is needed, include `Siguiente paso: ...`."
+                "If follow-up work is needed, include `Siguiente paso: ...`. "
+                + _VERDICT_TAIL_INSTRUCTION
             ),
         )
     ]
@@ -2296,6 +2299,59 @@ def _looks_like_social_browser_request(text: str) -> bool:
     )
 
 
+_VERDICT_TAIL_INSTRUCTION = (
+    "Cierra SIEMPRE tu respuesta con este bloque estructurado como últimas líneas: "
+    "una línea `CLASE_BLOCKER: formato|evidencia_externa|decision_usuario|ninguna` y "
+    "después `BLOCKERS:` con una línea `- <slug-kebab-estable>: <acción concreta>` por "
+    "bloqueo (con `ninguna`, deja la lista vacía). Clases: formato = el entregable "
+    "existe pero su forma/estructura incumple lo pedido; evidencia_externa = falta "
+    "evidencia que un worker debe producir y adjuntar; decision_usuario = solo el "
+    "dueño puede resolverlo. "
+)
+
+_VERDICT_CLASS_RE = re.compile(
+    r"^\s*CLASE_BLOCKER:\s*(formato|evidencia_externa|decision_usuario|ninguna)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_VERDICT_BLOCKER_ITEM_RE = re.compile(
+    r"^\s*-\s*([A-Za-z0-9][A-Za-z0-9_-]{1,60})\s*:\s*(.+?)\s*$", re.MULTILINE
+)
+
+
+@dataclass(frozen=True)
+class VerdictTail:
+    clase: str
+    blockers: tuple[tuple[str, str], ...]
+
+
+def parse_verdict_tail(text: str | None) -> VerdictTail | None:
+    """Parser determinista del contrato de cola del veredicto (mini-δ, C1-Sβ).
+
+    Fail-closed: sin línea CLASE_BLOCKER válida, o con una clase re-conducible
+    sin blockers listados, devuelve None y el flujo queda idéntico al actual.
+    """
+    tail = str(text or "")[-2400:]
+    matches = list(_VERDICT_CLASS_RE.finditer(tail))
+    if not matches:
+        return None
+    last = matches[-1]
+    clase = last.group(1).lower()
+    blockers = tuple(
+        (item.group(1), item.group(2).strip())
+        for item in _VERDICT_BLOCKER_ITEM_RE.finditer(tail[last.end() :])
+    )
+    if clase != "ninguna" and not blockers:
+        return None
+    return VerdictTail(clase=clase, blockers=blockers)
+
+
+def normalize_blocker_ident(clase: str, slug: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", str(slug or ""))
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    cleaned = re.sub(r"[^a-z0-9_-]+", "-", stripped.casefold()).strip("-")
+    return f"{clase}:{cleaned or 'sin-slug'}"
+
+
 def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dict[str, str]:
     verification_results = result.phase_results.get("verification", [])
     implementation_results = result.phase_results.get("implementation", [])
@@ -2326,6 +2382,10 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
         "summary": summary,
         "verification_status": verification_status,
     }
+    tail = parse_verdict_tail(verification_text)
+    if tail is not None and tail.clase != "ninguna" and verification_status != "passed":
+        checkpoint["blocker_class"] = tail.clase
+        checkpoint["blockers"] = [f"{slug}: {desc}" for slug, desc in tail.blockers]
     if critical_worker_error:
         checkpoint["critical_worker_error"] = True
         checkpoint["coordinator_audit"] = dict(getattr(result, "audit", {}) or {})

@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "C0-S3 autonomy-plan: coordinator terminal verification phase no longer applies the CRITICAL-worker sentinel (verifier echo false positive, PR #173, fix rescued from stranded worktree). Invariant coordinator_verifier_echo_not_critical added to §1. Predecessor C0-S1 (doc_version 2.45, evidence_gate_user_knowledge_authority) in main"
-doc_version: 2.46
+describes_commit: "C1-Sβ autonomy-plan: bounded task re-drive — verifier structured verdict tail (parse_verdict_tail + CLASE_BLOCKER contract in _build_coordinator_tasks), redrive governor on active_task (attempts/seen/pending, CLAW_MAX_TASK_REDRIVES), class router at the blocked branch of task_handler (formato → start_phase=synthesis re-work via existing deferral re-enqueue; decision_usuario/evidencia_externa/unparseable → today's S-α fail-closed path), ObservationWindow gate via redrive_budget_frozen wired in BotService. Invariant task_redrive_bounded_and_classified added to §1. Predecessor C0-S3 (doc_version 2.46) in main"
+doc_version: 2.47
 last_verified: 2026-07-02
-verification_method: "code cross-read of _failure_response_text + _blocked_user_input_reason (task_handler.py) and the rescue chain (_recent_waiting_for_user_task / _telegram_continuation_shortcut, bot.py) against this doc + WaitingUserInputRecoveryHintTests (2, green inside 54-test task_handler file) + live deploy 965871a: clean restart (pid 68921, zero stderr delta), composer exercised on the daemon checkout with the production-verbatim KeepAlive error shape. Predecessor P0-2 branch-integrity (doc_version 2.43) remains in main"
+verification_method: "code cross-read of the redrive router (task_handler blocked branch), parse_verdict_tail + _coordinator_checkpoint (bot_helpers) and the BotService redrive_budget_frozen wiring against this doc + tests/test_task_redrive.py (parser fail-closed, governor unit guards incl. deferral-budget veto, first-cycle integration, consume-once reentry, redrive_history) + adjacent task_handler/coordinator suites green + adversarial review PR #175 (property-vs-callable wiring bug fixed with a re-reading lambda + wiring test). Live smoke of the full redrive arc pending deploy"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1092,6 +1092,45 @@ invariants:
          uncommitted in the daemon-clone worktree fix-coord-verifier until
          rescued as slice C0-S3 (autonomy remediation plan, PR #173); the
          worktree was quarantined to ~/srv/quarantine, never rm'd.
+
+  task_redrive_bounded_and_classified:
+    rule: A blocked coordinator verdict re-drives the task ONLY when the
+          verifier's structured tail declares `CLASE_BLOCKER: formato`
+          (parse_verdict_tail, claw_v2/bot_helpers.py — deterministic parsing,
+          no extra LLM call, codex stays out of the control path); bounded by
+          CLAW_MAX_TASK_REDRIVES (default 2, 0 disables β); the same
+          normalized blocker ident (normalize_blocker_ident) never re-drives
+          twice; decision_usuario / evidencia_externa / unparseable tails
+          never consume attempts (they keep today's fail-closed S-α path,
+          evidencia_externa until γ lands); the attempt is persisted on
+          active_task in session state BEFORE the existing deferral plumbing
+          (_defer_autonomous_job) re-enqueues the durable job; a frozen
+          ObservationWindow blocks the re-drive. The re-run forces
+          start_phase=synthesis — re-works the deliverable from cached
+          research, never re-executes implementation — and appends the
+          verdict to the objective (_consume_redrive_pending, consume-once).
+          Terminal failures after re-drives append redrive_history to the
+          notification. Every decision emits
+          autonomous_task_redrive_decision.
+    enforced_by:
+      - tests/test_task_redrive.py::RedriveIntegrationTests::test_formato_blocker_redrives_instead_of_terminal
+      - tests/test_task_redrive.py::RedriveDecisionUnitTests (cap, dedup, frozen, knob=0, clases no-formato)
+      - tests/test_task_redrive.py::RedriveReentryTests::test_consume_redrive_pending_forces_synthesis_and_verdict
+      - tests/test_task_redrive.py::ParseVerdictTailTests (fail-closed sin contrato)
+    why: 6/8 autonomous tasks died at the FIRST verifier objection with no
+         retry branch (recon 2026-07-02) — the deferral loop re-verified but
+         never re-worked, and the dominant failure was structurally
+         unsatisfiable prose demands. Slice C1-Sβ of the autonomy plan
+         (design: memoria autonomy-beta-gamma-design-2026-07-02). Promote
+         gate F2.5 stays upstream (the router consumes its output); Core
+         Invariant 1 holds by reusing the existing durable deferral
+         re-enqueue; the continuation-shortcut race is structurally absent
+         because recovering tasks never carry the waiting_for_user_input
+         marker in the ledger until terminal.
+         Known gap (F2 OFF in prod): when an F2 recovery checkpoint
+         short-circuits coordinator.run, _consume_redrive_pending is skipped
+         and redrive_pending stays armed for the next cycle — bounded by the
+         deferral cap, revisit if F2 turns ON.
 ```
 
 ---
