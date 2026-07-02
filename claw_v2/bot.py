@@ -539,6 +539,38 @@ def _looks_like_starting_side_effect_claim(text: str) -> bool:
     return any(pattern.search(normalized) for pattern in _STARTING_ACTION_OBJECT_PATTERNS)
 
 
+# B2.1 shadow telemetry. Matched against `_normalize_command_text` output
+# (lowercase, diacritics stripped) so all literals are ASCII-only.
+# `compar(?!t)` keeps "comparte/compartir" (share) out of the research class.
+_RESEARCH_DELIVERABLE_VERB_RE = re.compile(
+    r"\b(?:investig\w+|busca\w*|busqu\w+|averigua\w*|research|compar(?!t)\w*|analiza\w*)\b"
+)
+_RESEARCH_DELIVERABLE_OBJECT_RE = re.compile(
+    r"\b(?:reporte|informe|resumen|comparativa|comparacion|analisis|"
+    r"report|summary|comparison|analysis|recomendacion|recommendation)\b"
+)
+
+
+def _looks_like_research_deliverable_ask(text: str) -> bool:
+    """True when the user asks for multi-source research that must produce a
+    deliverable — the class DELEGATION_CONTRACT declares delegable (B2.0).
+
+    Deliberately separate from `_looks_like_operator_action_request`: the
+    shadow detector consumes that helper read-only (decision 2026-07-02, no
+    refactor), and research verbs ("investiga", "busca") are not operator
+    action terms — adding them there would widen the evidence gate's
+    precondition, which is P0-5/6 territory (next session). Requires BOTH a
+    research verb AND a deliverable noun, so single-URL asks ("investiga
+    este perfil <url>") and object-less verbs ("busca el archivo") stay out.
+    """
+    normalized = _normalize_command_text(text)
+    if not normalized.strip():
+        return False
+    if not _RESEARCH_DELIVERABLE_VERB_RE.search(normalized):
+        return False
+    return bool(_RESEARCH_DELIVERABLE_OBJECT_RE.search(normalized))
+
+
 def _looks_like_confirmed_returned_record_claim(text: str) -> bool:
     """True when the outgoing message both (a) attributes a concrete returned
     record to a search/lookup and (b) frames the data source as confirmed/real.
@@ -3215,6 +3247,112 @@ class BotService:
                 has_failure = True
         return has_failure and not has_success
 
+    def _turn_trace_called_delegate_task(self, response: Any | None) -> bool:
+        """True when the turn called ``delegate_task`` (any adapter shape).
+
+        Anthropic-lane tool activity is only visible via trace events — the
+        adapter does not populate ``artifacts["tool_calls"]`` (only ollama
+        does), and ``sdk_post_tool_use`` payloads carry ``tool_name``
+        (adapters/anthropic_hooks.py). Checks the artifact list first as the
+        cheap path, then the trace.
+        """
+        if response is None:
+            return False
+        artifacts = getattr(response, "artifacts", {}) or {}
+        if not isinstance(artifacts, dict):
+            return False
+        for call in artifacts.get("tool_calls") or []:
+            if isinstance(call, dict):
+                name = str(call.get("name") or call.get("tool_name") or "")
+            else:
+                name = str(call or "")
+            if name.endswith("delegate_task"):
+                return True
+        trace_id = str(artifacts.get("trace_id") or "")
+        if not trace_id or self.observe is None:
+            return False
+        try:
+            events = self.observe.trace_events(trace_id)
+        except Exception:
+            return False
+        for event in events:
+            if str(event.get("event_type") or "") != "sdk_post_tool_use":
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("tool_name") or "").endswith("delegate_task"):
+                return True
+        return False
+
+    def _maybe_emit_shadow_delegation_gap(
+        self,
+        *,
+        session_id: str,
+        source_text: str,
+        response: Any | None,
+        eligible: bool,
+        pre_turn_message_id: int,
+    ) -> None:
+        """B2.1 shadow-mode delegation-gap telemetry — OBSERVATIONAL ONLY.
+
+        Never blocks, never re-prompts, never alters the visible text
+        (invariant ``shadow_delegation_gap_observational``, INTERNAL_WIRING
+        §1). Emits ``shadow_delegation_gap`` action=gap when a raw user
+        action/research ask ended with reason=no_action (no tool evidence at
+        all) or reason=research_inline (a research-deliverable ask that ran
+        tools inline without calling delegate_task). ``eligible`` opts in
+        ONLY at the raw dispatch→brain fallback boundary: continuation
+        shortcuts, slash commands and internal prompts never count as
+        inaction (Fase 0 residual iii, 2026-07-02). Promotion to any
+        enforcement is a separate future decision (Hector, with this data).
+        """
+        if not eligible:
+            return
+        try:
+            if os.getenv("CLAW_SHADOW_DELEGATION_GAP", "1") == "0":
+                if not getattr(self, "_shadow_gap_disabled_emitted", False):
+                    self._shadow_gap_disabled_emitted = True
+                    self._emit_safe(
+                        "shadow_delegation_gap",
+                        {"action": "disabled", "session_id": session_id},
+                    )
+                return
+            if current_meta_introspection_kind() is not None:
+                return  # P0-1: meta turns are introspection, not work
+            if _user_authorized_knowledge_answer(source_text):
+                return  # S-α arc: the user redefined the ask as a knowledge answer
+            if _user_authoritatively_marked_done(source_text):
+                return
+            research_ask = _looks_like_research_deliverable_ask(source_text)
+            action_request = _looks_like_operator_action_request(source_text)
+            if not (research_ask or action_request):
+                return
+            if self._turn_trace_called_delegate_task(response):
+                return  # the turn delegated — no gap by definition
+            if self._response_has_evidence_signal(response):
+                if not research_ask:
+                    return  # action ask handled inline WITH tools — legitimate
+                reason = "research_inline"
+            else:
+                reason = "no_action"
+            self._emit_safe(
+                "shadow_delegation_gap",
+                {
+                    "action": "gap",
+                    "reason": reason,
+                    "session_id": session_id,
+                    "research_ask": research_ask,
+                    "action_request": action_request,
+                    "pre_turn_message_id": pre_turn_message_id,
+                    "source_preview": _normalize_command_text(source_text)[:120],
+                    "source_hash": self._stable_text_hash(source_text),
+                    "response_length": len(getattr(response, "content", "") or ""),
+                },
+            )
+        except Exception:
+            logger.debug("shadow_delegation_gap classification failed", exc_info=True)
+
     def _should_allow_tool_backed_handoff_response(
         self, response: Any | None, content: str
     ) -> bool:
@@ -4469,7 +4607,12 @@ class BotService:
         # handle_text finally backstop is a no-op after this. By construction,
         # reaching this line means every pre-brain handler fell through.
         self._flush_dispatch_decision(session_id, stripped)
-        return self._brain_text_response(session_id, stripped, runtime_channel=runtime_channel)
+        return self._brain_text_response(
+            session_id,
+            stripped,
+            runtime_channel=runtime_channel,
+            shadow_gap_eligible=True,
+        )
 
     def _build_pre_state_commands(self) -> list[BotCommand]:
         return [
@@ -5650,6 +5793,7 @@ class BotService:
         *,
         memory_text: str | None = None,
         runtime_channel: str | None = None,
+        shadow_gap_eligible: bool = False,
     ) -> str:
         prompt_text = text
         source_text = memory_text or text
@@ -5708,6 +5852,13 @@ class BotService:
             runtime_capability_question=runtime_capability_question,
             link_analysis_context=link_analysis_context,
             prefetched_evidence_context=prefetched_evidence_context,
+        )
+        self._maybe_emit_shadow_delegation_gap(
+            session_id=session_id,
+            source_text=source_text,
+            response=response,
+            eligible=shadow_gap_eligible,
+            pre_turn_message_id=pre_turn_message_id,
         )
         content = self._quality_guard_response(
             session_id,
