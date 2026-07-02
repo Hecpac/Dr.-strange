@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "C1-Sγ closure Fix 1: synthesis mode-aware — _synthesize (coordinator.py) branches on bool(implementation_tasks), the signal run() already has: implementation downstream ⇒ delegated Plan Maestro unchanged; research-terminal ⇒ FINAL-DELIVERABLE prompt (answers the objective directly, no agent-registry listing, [RE-DRIVE]/<<<EVIDENCIA>>> blocks incorporated as untrusted data). critical_audit self-healing path untouched (has_implementation defaults True). New invariant synthesis_mode_aware in §1. Predecessor C1-Sγ.1 (doc_version 2.49) in main"
-doc_version: 2.50
+describes_commit: "C1-Sγ closure Fix 2 (mini-δ): a Verification Status: failed verdict with a re-drivable declared class (formato|evidencia_externa) and fresh idents is now governor-eligible by the SAME pending path — _run_autonomous_task consults _maybe_start_redrive after the F2.5 promote gate and before the terminal tail; governor arms ⇒ task continues (verification_status normalized to pending), governor declines ⇒ today's verdict-failed terminal intact. Zero new counters — the β guards (class, dedup, cap, deferral budget, frozen window, single knob) govern inside _maybe_start_redrive. Courtesy pending-closure line appended to _VERDICT_TAIL_INSTRUCTION (prompt courtesy, never the contract). task_redrive_bounded_and_classified extended in §1 same commit. Predecessor Fix 1 synthesis_mode_aware (doc_version 2.50) in main"
+doc_version: 2.51
 last_verified: 2026-07-02
-verification_method: "TDD red-first (5 new tests watched failing against the unconditional Plan-Maestro prompt, then green): tests/test_coordinator.py SynthesizeTests deliverable/redrive-as-data/registry-omitted/default-back-compat + FullRunTests call-site wiring both modes; full test_coordinator.py (80) + test_task_redrive.py + test_architecture_invariants.py + test_task_handler.py + test_bot_helpers.py green. Live smoke pending deploy: first-pass research closes completed with redrive_attempts=0 AND the re-drive arc (round-3 shape) closes completed with the verbatim man-page citation as deliverable, not a plan"
+verification_method: "TDD red-first (failed+formato and failed+evidencia watched dying terminal with no decision event, then green): tests/test_task_redrive.py FailedVerdictRedriveTests — fresh formato redrives by the pending path (autonomous_task_pending carries pending), evidencia arms pre_step without running it, decision_usuario stays terminal with audited fail_closed decision, governor-declined keeps today's terminal; full redrive suite (48) green. Live smoke pending deploy: an organic failed+re-drivable+fresh-ident verdict must produce redrive_decision action=redrive from a failed (if no organic occurrence, the unit+integration lock covers — report honestly)"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1094,7 +1094,9 @@ invariants:
          worktree was quarantined to ~/srv/quarantine, never rm'd.
 
   task_redrive_bounded_and_classified:
-    rule: A blocked coordinator verdict re-drives the task ONLY when the
+    rule: A blocked coordinator verdict — and, mini-δ (C1-Sγ closure,
+          2026-07-02), a `Verification Status: failed` verdict — re-drives
+          the task ONLY when the
           verifier's structured tail declares `CLASE_BLOCKER: formato` or
           `evidencia_externa` (parse_verdict_tail, claw_v2/bot_helpers.py —
           deterministic parsing, no extra LLM call, codex stays out of the
@@ -1125,6 +1127,22 @@ invariants:
           redrive_pending and is carried on autonomous_task_redrive_resumed
           and on the terminal autonomous_task_failed event, making deaths
           measurable by class.
+          mini-δ failed-verdict contract (_run_autonomous_task): the
+          governor consult happens AFTER the F2.5 promote gate and BEFORE
+          the terminal tail (order promote-gate → redrive → tail preserved
+          by position) and ONLY for the verdict-failed terminal
+          (terminal_status == failed AND verification_status == failed —
+          a gate-downgraded success carries no blocker_class by
+          construction, so the governor no-ops on it). If the governor
+          ARMS, the task continues by the SAME pending deferral path
+          (verification_status normalized to pending — "treat failed as
+          pending" IS the authorized contract; the checkpoint keeps the
+          verifier's original failed for audit). If the governor DECLINES
+          (non-redrivable class, duplicate ident, exhausted attempts,
+          deferral budget, frozen window, knob=0), today's verdict-failed
+          terminal stays byte-intact. The pending-closure line appended to
+          _VERDICT_TAIL_INSTRUCTION is prompt COURTESY, not the contract —
+          no test may depend on the verifier's phrasing.
     enforced_by:
       - tests/test_task_redrive.py::RedriveIntegrationTests::test_formato_blocker_redrives_instead_of_terminal
       - tests/test_task_redrive.py::RedriveDecisionUnitTests (cap, dedup, frozen, knob=0, clases no-formato)
@@ -1133,6 +1151,7 @@ invariants:
       - tests/test_task_redrive.py::RedriveObservabilityTests (γ.0 — evento por clase declarada, mudo sin clase, blocker_class en pending/resumed/terminal)
       - tests/test_task_redrive.py::RedriveDecisionUnitTests::test_evidencia_class_arms_redrive_with_pre_step (γ — un knob, attempt único)
       - tests/test_task_redrive.py::RedriveDecisionUnitTests::test_evidencia_duplicate_ident_blocks (γ — dedup = muerte honesta)
+      - tests/test_task_redrive.py::FailedVerdictRedriveTests (mini-δ — failed+formato/evidencia re-conduce por el camino pending; decision_usuario/declinado terminal como hoy, decisión auditada)
     why: 6/8 autonomous tasks died at the FIRST verifier objection with no
          retry branch (recon 2026-07-02) — the deferral loop re-verified but
          never re-worked, and the dominant failure was structurally

@@ -58,6 +58,30 @@ DECISION_TAIL = (
     "- eleccion-variante: el dueño debe elegir entre A y B\n"
 )
 
+# mini-δ (cierre C1-Sγ): el verifier a veces emite `failed` (no `pending`) con
+# la MISMA objeción re-conducible e idents frescos — rondas 1 y 3 del smoke γ.
+FORMATO_FAILED_TAIL = (
+    "Revisión operativa: el entregable no cumple el formato pedido.\n"
+    "Verification Status: failed\n"
+    "CLASE_BLOCKER: formato\n"
+    "BLOCKERS:\n"
+    "- formato-3-lineas: el entregable debe ser exactamente 3 líneas\n"
+)
+
+EVIDENCIA_FAILED_TAIL = (
+    "Verification Status: failed\n"
+    "CLASE_BLOCKER: evidencia_externa\n"
+    "BLOCKERS:\n"
+    "- cita-man-page: falta el output crudo de man launchd.plist\n"
+)
+
+DECISION_FAILED_TAIL = (
+    "Verification Status: failed\n"
+    "CLASE_BLOCKER: decision_usuario\n"
+    "BLOCKERS:\n"
+    "- eleccion-variante: el dueño debe elegir entre A y B\n"
+)
+
 
 class ParseVerdictTailTests(unittest.TestCase):
     def test_formato_tail(self) -> None:
@@ -303,6 +327,113 @@ class RedriveIntegrationTests(unittest.TestCase):
             )
             self.assertIn("/task_pending", failed["payload"]["response"])
             self.assertEqual(failed["payload"].get("blocker_class"), "evidencia_externa")
+
+
+class FailedVerdictRedriveTests(unittest.TestCase):
+    """mini-δ (cierre C1-Sγ): `Verification Status: failed` + clase re-conducible
+    + idents frescos + presupuesto disponible ⇒ elegible para el governor —
+    mismo camino que pending. failed + governor declinando (dup/agotado/vetado/
+    clase no re-conducible) ⇒ terminal como hoy. Cero contadores nuevos."""
+
+    def test_failed_verdict_fresh_formato_redrives_instead_of_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            handler, memory, observe, _jobs, stored = _mk_handler(
+                root, _TailCoordinator(FORMATO_FAILED_TAIL)
+            )
+            ack = handler.start_autonomous_task(
+                "tg-1", "resume launchd en 3 líneas", mode="research"
+            )
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+
+            events = observe.recent_events(limit=200)
+            types = [e["event_type"] for e in events]
+            self.assertNotIn("autonomous_task_failed", types)
+            decision = next(
+                e for e in events if e["event_type"] == "autonomous_task_redrive_decision"
+            )
+            self.assertEqual(decision["payload"]["action"], "redrive")
+            self.assertEqual(decision["payload"]["clase"], "formato")
+
+            # Mismo camino que pending: la tarea continúa por el deferral
+            # durable con status pending, no arrastra el failed del veredicto.
+            pending_event = next(
+                e for e in events if e["event_type"] == "autonomous_task_pending"
+            )
+            self.assertEqual(pending_event["payload"]["verification_status"], "pending")
+
+            active = _active_task(memory, "tg-1")
+            self.assertEqual(active.get("redrive_attempts"), 1)
+            self.assertEqual(active.get("status"), "pending")
+            pending = active.get("redrive_pending") or {}
+            self.assertEqual(pending.get("start_phase"), "synthesis")
+
+            assistant = [t for _s, r, t in stored if r == "assistant"]
+            self.assertTrue(any("intento 1/" in t for t in assistant))
+
+    def test_failed_verdict_evidencia_arms_pre_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coordinator = _TailCoordinator(EVIDENCIA_FAILED_TAIL)
+            handler, memory, observe, _jobs, _stored = _mk_handler(root, coordinator)
+            ack = handler.start_autonomous_task("tg-1", "cita el man page", mode="research")
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+
+            events = observe.recent_events(limit=200)
+            self.assertNotIn("autonomous_task_failed", [e["event_type"] for e in events])
+            decision = next(
+                e for e in events if e["event_type"] == "autonomous_task_redrive_decision"
+            )
+            self.assertEqual(decision["payload"]["action"], "redrive")
+            self.assertEqual(decision["payload"]["clase"], "evidencia_externa")
+
+            pending = _active_task(memory, "tg-1").get("redrive_pending") or {}
+            self.assertEqual(pending.get("pre_step"), "evidence")
+            # El pre-step corre en el consume del job re-encolado, nunca al armar.
+            self.assertEqual(coordinator.evidence_calls, [])
+
+    def test_failed_verdict_decision_usuario_stays_terminal(self) -> None:
+        # Clase no re-conducible: terminal como hoy, pero la decisión queda
+        # auditada (γ.0: toda decisión sobre clase DECLARADA emite evento).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            handler, memory, observe, _jobs, _stored = _mk_handler(
+                root, _TailCoordinator(DECISION_FAILED_TAIL)
+            )
+            ack = handler.start_autonomous_task("tg-1", "elige la variante", mode="research")
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+
+            events = observe.recent_events(limit=200)
+            failed = next(e for e in events if e["event_type"] == "autonomous_task_failed")
+            self.assertEqual(failed["payload"].get("blocker_class"), "decision_usuario")
+            decision = next(
+                e for e in events if e["event_type"] == "autonomous_task_redrive_decision"
+            )
+            self.assertEqual(decision["payload"]["action"], "fail_closed")
+            self.assertFalse(_active_task(memory, "tg-1").get("redrive_attempts"))
+
+    def test_failed_verdict_governor_declined_stays_terminal_as_today(self) -> None:
+        # El PORQUÉ declina (dup/agotado/frozen/disabled) está unit-locked en
+        # RedriveDecisionUnitTests; aquí se bloquea el wiring: declinó ⇒ el
+        # terminal por veredicto-failed de hoy, intacto.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            handler, _memory, observe, _jobs, _stored = _mk_handler(
+                root, _TailCoordinator(FORMATO_FAILED_TAIL)
+            )
+            with patch.object(TaskHandler, "_maybe_start_redrive", return_value=False):
+                ack = handler.start_autonomous_task(
+                    "tg-1", "resume launchd en 3 líneas", mode="research"
+                )
+                task_id = ack.split("`", 2)[1]
+                self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+            events = observe.recent_events(limit=200)
+            failed = next(e for e in events if e["event_type"] == "autonomous_task_failed")
+            self.assertEqual(failed["payload"]["verification_status"], "failed")
+            self.assertEqual(failed["payload"].get("blocker_class"), "formato")
 
 
 class RedriveExhaustedRoutingTests(unittest.TestCase):

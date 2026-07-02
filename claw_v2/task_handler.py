@@ -1703,6 +1703,26 @@ class TaskHandler:
                     active_task=active_task,
                     checkpoint=completed_checkpoint,
                 )
+            elif terminal_status == "failed" and verification_status == "failed":
+                # mini-δ (cierre C1-Sγ): el verifier a veces cierra la MISMA
+                # objeción re-conducible con `failed` en vez de `pending` —
+                # idents frescos y presupuesto virgen morían terminal sin que
+                # el governor viera jamás el intento 2/2 (N≤2 era N≤1 en la
+                # práctica). Un failed con clase re-conducible es elegible
+                # para el governor por el MISMO camino que pending; los guards
+                # β existentes (clase, dedup, cap, deferral-budget, ventana
+                # congelada, knob=0) deciden dentro de _maybe_start_redrive —
+                # si declina, el terminal de hoy queda intacto. Orden
+                # promote-gate → redrive → tail preservado por posición.
+                redrive_in_flight = self._maybe_start_redrive(
+                    session_id=session_id,
+                    task_id=task_id,
+                    active_task=active_task,
+                    checkpoint=completed_checkpoint,
+                )
+                if redrive_in_flight:
+                    terminal_status = ""
+                    verification_status = "pending"
             if not terminal_status and not redrive_in_flight:
                 blocked_reason = self._blocked_user_input_reason(completed_checkpoint)
                 blocker_class = str(completed_checkpoint.get("blocker_class") or "")
