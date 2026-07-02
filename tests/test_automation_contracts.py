@@ -37,7 +37,7 @@ class CapabilityGrantTests(unittest.TestCase):
         self.assertEqual(payload["requested_actions"], ["navigate", "screenshot"])
         self.assertEqual(payload["model_policy"], "subscription_first")
 
-    def test_browser_read_grant_serializes_domains_and_actions(self) -> None:
+    def test_browser_read_grant_serializes_domains_without_high_actions(self) -> None:
         grant = CapabilityGrant.browser_read(
             domains=["https://Example.com/path", "example.com", "x.com"],
             reason="delegated browser read",
@@ -48,22 +48,65 @@ class CapabilityGrantTests(unittest.TestCase):
 
         self.assertEqual(payload["surface"], "browser")
         self.assertEqual(payload["approved_domains"], ["example.com", "x.com"])
-        self.assertEqual(payload["allowed_high_risk_actions"], ["evaluate", "save_as_pdf"])
-        self.assertTrue(payload["allow_high_risk_actions"])
+        self.assertEqual(payload["allowed_high_risk_actions"], [])
+        self.assertFalse(payload["allow_high_risk_actions"])
         self.assertTrue(payload["auto_approved"])
 
-    def test_browser_read_grant_allows_evaluate_on_approved_domain(self) -> None:
+    def test_browser_read_grant_normalizes_idna_domains(self) -> None:
+        grant = CapabilityGrant.browser_read(
+            domains=["https://bücher.example/path"],
+            reason="delegated browser read",
+            auto_approved=True,
+        )
+
+        self.assertEqual(grant.approved_domains_list(), ["xn--bcher-kva.example"])
+
+    def test_domain_matching_normalizes_idna_urls(self) -> None:
+        grant = CapabilityGrant(
+            surface=AutomationSurface.BROWSER,
+            reason="explicit scoped high-risk fixture",
+            approved_domains=("xn--bcher-kva.example",),
+            allow_high_risk_actions=True,
+            allowed_high_risk_actions=("evaluate",),
+            approved_by="user",
+            sensitive=True,
+        )
+
+        self.assertTrue(
+            grant.allows_browser_use_action(
+                "evaluate",
+                url="https://bücher.example/path",
+                params={},
+            )
+        )
+
+    def test_browser_read_grant_does_not_authorize_evaluate_on_approved_domain(self) -> None:
         grant = CapabilityGrant.browser_read(
             domains=["x.com"],
             reason="read feed",
             auto_approved=True,
         )
 
-        self.assertTrue(
+        self.assertFalse(
             grant.allows_browser_use_action(
                 "evaluate",
                 url="https://x.com/home",
                 params={},
+            )
+        )
+
+    def test_browser_read_grant_does_not_authorize_save_as_pdf(self) -> None:
+        grant = CapabilityGrant.browser_read(
+            domains=["x.com"],
+            reason="read feed",
+            auto_approved=True,
+        )
+
+        self.assertFalse(
+            grant.allows_browser_use_action(
+                "save_as_pdf",
+                url="https://x.com/home",
+                params={"path": "/tmp/page.pdf"},
             )
         )
 
@@ -82,23 +125,6 @@ class CapabilityGrantTests(unittest.TestCase):
             )
         )
 
-    def test_empty_high_risk_action_grant_blocks_even_on_approved_domain(self) -> None:
-        grant = CapabilityGrant(
-            surface=AutomationSurface.BROWSER,
-            reason="empty high-risk action set",
-            approved_domains=("x.com",),
-            allow_high_risk_actions=True,
-            allowed_high_risk_actions=(),
-        )
-
-        self.assertFalse(
-            grant.allows_browser_use_action(
-                "evaluate",
-                url="https://x.com/home",
-                params={},
-            )
-        )
-
     def test_browser_read_grant_blocks_unapproved_domain(self) -> None:
         grant = CapabilityGrant.browser_read(
             domains=["x.com"],
@@ -110,6 +136,24 @@ class CapabilityGrantTests(unittest.TestCase):
             grant.allows_browser_use_action(
                 "evaluate",
                 url="https://ads.google.com/campaigns",
+                params={},
+            )
+        )
+
+    def test_empty_high_risk_action_grant_blocks_even_on_approved_domain(self) -> None:
+        grant = CapabilityGrant(
+            surface=AutomationSurface.BROWSER,
+            reason="explicit scoped high-risk fixture",
+            approved_domains=("x.com",),
+            allow_high_risk_actions=True,
+            allowed_high_risk_actions=(),
+            approved_by="user",
+        )
+
+        self.assertFalse(
+            grant.allows_browser_use_action(
+                "evaluate",
+                url="https://x.com/home",
                 params={},
             )
         )

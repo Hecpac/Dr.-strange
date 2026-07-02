@@ -6101,7 +6101,7 @@ class BotTests(unittest.TestCase):
                     )
 
                 self.assertIn("Verificado: leí el hilo", result)
-                self.assertNotIn("Decime qué disparo", result)
+                self.assertNotIn("Retuve mi respuesta", result)
                 self.assertNotIn("No lo marco como hecho todavía", result)
                 events = [event["event_type"] for event in runtime.observe.recent_events(limit=80)]
                 self.assertNotIn("evidence_gate_blocked_completion_claim", events)

@@ -22,17 +22,18 @@ from claw_v2.tools import TIER_REQUIRES_APPROVAL, ToolDefinition
 
 class ApprovalManagerTests(unittest.TestCase):
     def test_sensitive_classifier_detects_runtime_policy_and_lockfile_changes(self) -> None:
+        synthetic_token = "sk-" + "abcdefghijklmnopqrstuvwxyz123456"
         diff = """diff --git a/claw_v2/runtime_policy.py b/claw_v2/runtime_policy.py
 --- a/claw_v2/runtime_policy.py
 +++ b/claw_v2/runtime_policy.py
 @@
-+TOKEN = "sk-abcdefghijklmnopqrstuvwxyz123456"
++TOKEN = "REPLACE_ME"
 diff --git a/package-lock.json b/package-lock.json
 --- a/package-lock.json
 +++ b/package-lock.json
 @@
 +{}
-"""
+""".replace("REPLACE_ME", synthetic_token)
         classification = classify_sensitive_change(diff=diff, action="pipeline:HEC-1")
 
         self.assertTrue(classification.sensitive)

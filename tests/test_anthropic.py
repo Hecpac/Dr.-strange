@@ -47,14 +47,13 @@ class AnthropicIntegrationTests(unittest.TestCase):
         )
 
     def test_tool_input_evidence_redacts_secret_shaped_commands(self) -> None:
+        bearer = "abcdefghijklmnopqrstuvwxyz" + "123456"
         evidence = _tool_input_evidence(
             "Bash",
-            {
-                "command": "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456' https://example.test"
-            },
+            {"command": f"curl -H 'Authorization: Bearer {bearer}' https://example.test"},
         )
 
-        self.assertNotIn("abcdefghijklmnopqrstuvwxyz123456", evidence["command"])
+        self.assertNotIn(bearer, evidence["command"])
         self.assertIn("[REDACTED]", evidence["command"])
 
     def test_tool_response_evidence_keeps_safe_bash_markers_without_raw_stdout(self) -> None:
@@ -733,6 +732,46 @@ class DetachedProcessHookLaneTests(unittest.IsolatedAsyncioTestCase):
             None,
         )
         self.assertEqual(result, {"continue_": True})
+
+
+class AdvisoryLanePermissionModeTests(unittest.TestCase):
+    def test_advisory_lane_uses_default_mode_and_no_tools(self) -> None:
+        """Drift del verifier (2026-07-02): permission_mode='plan' hacía que la
+        lane advisory escribiera 'planes' en vez del veredicto. El read-only lo
+        garantiza tools=[], no plan mode — si esto regresa, el verifier vuelve
+        a tragarse el tail del contrato de veredicto."""
+        from types import SimpleNamespace
+
+        from claw_v2.adapters.anthropic_options import build_options
+
+        captured: dict = {}
+
+        class _FakeOptions:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        fake_sdk = SimpleNamespace(ClaudeAgentOptions=_FakeOptions, AgentDefinition=object)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = make_config(Path(tmpdir))
+            request = LLMRequest(
+                prompt="verifica el entregable",
+                system_prompt="",
+                lane="verifier",
+                provider="anthropic",
+                model="claude-sonnet-5",
+                effort="medium",
+                session_id=None,
+                max_budget=0.5,
+                evidence_pack=None,
+                allowed_tools=None,
+                agents=None,
+                hooks=None,
+                timeout=30.0,
+                cwd=str(config.workspace_root),
+            )
+            build_options(fake_sdk, request, config=config, hooks=None, can_use_tool=None)
+        self.assertEqual(captured["permission_mode"], "default")
+        self.assertEqual(captured["tools"], [])
 
 
 if __name__ == "__main__":

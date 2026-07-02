@@ -188,7 +188,6 @@ class ComputerDiagnosticsTests(unittest.TestCase):
             self.assertIn("computer_use_primary=codex:gpt-5.5", model_roles.detail)
             self.assertIn("computer_use_fast=codex:gpt-5.4-mini", model_roles.detail)
             self.assertIn("browser_agent_primary=anthropic:claude-sonnet-4-6", model_roles.detail)
-            self.assertIn("browser_agent_fallback=disabled", model_roles.detail)
             self.assertNotIn("KEY", model_roles.detail)
             events = observe.recent_events(limit=50)
             ok_events = [
@@ -198,15 +197,16 @@ class ComputerDiagnosticsTests(unittest.TestCase):
                 any(event["payload"]["name"] == "model_roles" for event in ok_events)
             )
 
-    def test_startup_model_role_summary_reports_enabled_browser_fallback(self) -> None:
+    def test_startup_model_role_summary_reports_disabled_browser_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_config(Path(tmpdir))
+            config.computer_use_backend = "codex"
+            config.codex_model = "gpt-5.5"
+            config.computer_browser_use_model = "claude-sonnet-4-6"
 
-            with patch("claw_v2.computer.BROWSER_USE_OAUTH_FALLBACK_MODEL", "claude-opus-4-1"):
-                detail = _startup_model_role_summary(config)
+            detail = _startup_model_role_summary(config)
 
-        self.assertIn("browser_agent_fallback=anthropic:claude-opus-4-1", detail)
-        self.assertNotIn("browser_agent_fallback=anthropic:claude-haiku-4-5", detail)
+        self.assertIn("browser_agent_fallback=disabled", detail)
 
     def test_runtime_diagnostics_include_structured_computer_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import threading
@@ -20,15 +21,11 @@ from claw_v2.artifacts import (
     planned_phases_for_mode,
 )
 from claw_v2.action_events import ActionResult, ProposedAction, emit_event
-from claw_v2.automation_contracts import (
-    AutomationExecutor,
-    AutomationOutcome,
-    AutomationStatus,
-    AutomationSurface,
-)
+from claw_v2.automation_outcome import AutomationOutcome
 from claw_v2.bot_helpers import (
     _build_coordinator_tasks,
     _coordinator_checkpoint,
+    normalize_blocker_ident,
     _evaluate_autonomy_policy,
     _extract_option_reference,
     _format_autonomy_policy_block,
@@ -43,10 +40,12 @@ from claw_v2.bot_helpers import (
     detect_meta_introspection_request,
     has_explicit_implementation_request,
 )
+from claw_v2.cli_maintenance import CliMaintenanceResult, run_cli_maintenance_update
 from claw_v2.coordinator import CoordinatorResult
 from claw_v2.evidence_ledger import EvidenceRef, record_claim
 from claw_v2.f2_recovery import F2RecoveryPlan, F2RecoveryStatus, plan_f2_recovery
 from claw_v2.goal_contract import create_goal
+from claw_v2.maintenance import job_claim_block_reason
 from claw_v2.model_registry import model_overrides_from_state
 from claw_v2.verification import (
     DimensionRawResponse,
@@ -67,6 +66,17 @@ _PETRI_DIMENSIONS_ROOT = Path(__file__).parent / "verification" / "dimensions"
 # this many times before it is forced to a terminal "failed"
 # (verification_stalled) instead of looping forever.
 _MAX_VERIFICATION_DEFERRALS = 5
+
+
+def _max_task_redrives() -> int:
+    """CLAW_MAX_TASK_REDRIVES — cap de re-drives por tarea (C1-Sβ). 0 = β OFF.
+
+    Un valor ilegible apaga β (fail-closed), no lo re-habilita al default.
+    """
+    try:
+        return max(0, int(os.getenv("CLAW_MAX_TASK_REDRIVES", "2")))
+    except ValueError:
+        return 0
 
 # AM-VOCAB (2026-06-12): the session task_queue used to receive raw
 # verification/terminal statuses ("passed", "failed", "unknown", ...) next to
@@ -148,18 +158,6 @@ _BROWSER_FAILURE_MARKERS = (
 _AUTHENTICATED_BROWSE_TASK_KIND = "authenticated_browse"
 
 
-def _browser_executor_for_output(output: str) -> AutomationExecutor:
-    normalized = _normalize_command_text(output or "").strip()
-    if normalized.startswith(
-        (
-            "navegador abierto en chrome cdp",
-            "no pude completar la tarea de navegador deterministica",
-        )
-    ):
-        return AutomationExecutor.DETERMINISTIC_BROWSER
-    return AutomationExecutor.BROWSER_USE
-
-
 def _browser_output_indicates_failure(output: str) -> bool:
     """True when a browser-executor result is empty or a known failure sentinel."""
     text = _normalize_command_text(output or "")
@@ -171,66 +169,34 @@ def _browser_output_indicates_failure(output: str) -> bool:
 def _browser_executor_automation_outcome(
     *,
     output: str,
-    status: str,
     error_text: str,
+    objective: str,
 ) -> AutomationOutcome:
     summary = (output or error_text or "Tarea de navegador sin salida").strip()
     normalized = _normalize_command_text(summary)
-    executor = _browser_executor_for_output(summary)
-    if status == "passed":
-        return AutomationOutcome.passed(
-            surface=AutomationSurface.BROWSER,
-            executor=executor,
-            summary=summary[:180],
-        )
     if "necesito autorizacion" in normalized or "needs approval" in normalized:
         return AutomationOutcome.needs_approval(
-            surface=AutomationSurface.BROWSER,
-            executor=executor,
-            summary=summary[:180],
-            reason=error_text or summary[:300],
-        )
-    if "(no result)" in normalized or "sin resultado" in normalized:
-        return AutomationOutcome.failed(
-            surface=AutomationSurface.BROWSER,
-            executor=executor,
-            summary=summary[:180],
-            detail=error_text,
-            reason_code="no_result",
-            status=AutomationStatus.NO_RESULT,
+            human_summary=summary[:300],
+            reason_code="policy_denied",
         )
     if "timed out" in normalized or "timeout" in normalized:
-        return AutomationOutcome.failed(
-            surface=AutomationSurface.BROWSER,
-            executor=executor,
-            summary=summary[:180],
-            detail=error_text,
-            reason_code="timed_out",
-            status=AutomationStatus.TIMED_OUT,
-        )
-    if "quedo deslogueado" in normalized:
-        return AutomationOutcome.failed(
-            surface=AutomationSurface.BROWSER,
-            executor=executor,
-            summary=summary[:180],
-            detail=error_text,
-            reason_code="blocked_by_login",
-            status=AutomationStatus.BLOCKED_BY_LOGIN,
-        )
-    if "muro de verificacion" in normalized:
-        return AutomationOutcome.failed(
-            surface=AutomationSurface.BROWSER,
-            executor=executor,
-            summary=summary[:180],
-            detail=error_text,
-            reason_code="blocked_by_challenge",
-            status=AutomationStatus.BLOCKED_BY_CHALLENGE,
-        )
-    return AutomationOutcome.failed(
-        surface=AutomationSurface.BROWSER,
-        executor=executor,
-        summary=summary[:180],
-        detail=error_text,
+        return AutomationOutcome.failed(human_summary=summary[:300], reason_code="browser_error")
+    return AutomationOutcome.from_legacy_text(summary, objective=objective)
+
+
+def _verification_status_for_automation_outcome(outcome: AutomationOutcome) -> str:
+    if outcome.is_passed_validated():
+        return "passed"
+    return "failed"
+
+
+def _error_text_for_automation_outcome(outcome: AutomationOutcome) -> str:
+    if outcome.is_passed_validated():
+        return ""
+    return (
+        f"{outcome.reason_code}: {outcome.human_summary}"
+        if outcome.reason_code
+        else outcome.human_summary
     )
 
 
@@ -239,6 +205,16 @@ def _execution_mode_for_autonomous_task(mode: str, metadata: dict[str, Any]) -> 
     if task_kind == _AUTHENTICATED_BROWSE_TASK_KIND:
         return "browse"
     return mode
+
+
+# S-α (2026-07-01): the rescue path (continuation shortcut ~24h + /task_pending)
+# predates this hint but the failure message never announced it, leaving the
+# user at a dead end. The hint fires ONLY for the waiting_for_user_input class
+# — the one blocked_reason where a user reply actually re-drives the task.
+_WAITING_USER_INPUT_RECOVERY_HINT = (
+    "Puedes responder aquí mismo con el dato o la confirmación y retomo la tarea "
+    "(retoma directa disponible ~24h). Usa `/task_pending` para ver el detalle del bloqueo."
+)
 
 
 def _failure_response_text(
@@ -255,6 +231,12 @@ def _failure_response_text(
         lines.append(summary[:240])
     if error and not _INTERNAL_ERROR_CODE_RE.match(error.strip()):
         lines.append(f"Error: {error}")
+    history = [str(h) for h in (checkpoint.get("redrive_history") or []) if str(h).strip()]
+    if history:
+        label = "vez" if len(history) == 1 else "veces"
+        lines.append(f"Reintenté {len(history)} {label} sin éxito ({', '.join(history[:4])}).")
+    if error.strip().lower().startswith("waiting_for_user_input"):
+        lines.append(_WAITING_USER_INPUT_RECOVERY_HINT)
     return "\n".join(lines)
 
 
@@ -292,6 +274,7 @@ class TaskHandler:
         job_service: Any | None = None,
         router: Any | None = None,
         browser_executor: Callable[..., str] | None = None,
+        cli_maintenance_runner: Callable[..., CliMaintenanceResult] | None = None,
         get_session_state: Callable[[str], dict[str, Any]],
         update_session_state: Callable[..., Any],
         merge_active_object: Callable[..., Any] | None = None,
@@ -299,6 +282,7 @@ class TaskHandler:
         workspace_root: Path | None = None,
         telemetry_root: Path | str | None = None,
         max_autonomous_workers: int = 4,
+        redrive_budget_frozen: Callable[[], bool] | None = None,
     ) -> None:
         self.approvals = approvals
         self.coordinator = coordinator
@@ -312,6 +296,7 @@ class TaskHandler:
         # (BrowserUseService / Playwright in the daemon venv) instead. None ->
         # fall back to the coordinator (current behavior).
         self.browser_executor = browser_executor
+        self._cli_maintenance_runner = cli_maintenance_runner or run_cli_maintenance_update
         self._get_session_state = get_session_state
         self._update_session_state = update_session_state
         self._merge_active_object = merge_active_object
@@ -321,6 +306,7 @@ class TaskHandler:
             Path(telemetry_root).expanduser() if telemetry_root is not None else None
         )
         self._max_autonomous_workers = max(1, int(max_autonomous_workers))
+        self._redrive_budget_frozen = redrive_budget_frozen
         self._autonomous_slots = threading.BoundedSemaphore(self._max_autonomous_workers)
         self._task_threads: dict[str, threading.Thread] = {}
         self._cancelled_tasks: set[str] = set()
@@ -460,7 +446,7 @@ class TaskHandler:
         verify: str | None = None,
         delegation_metadata: dict[str, Any] | None = None,
     ) -> str:
-        if self.coordinator is None:
+        if self.coordinator is None and task_kind != "maintenance_update_tools":
             return "coordinator unavailable"
         if self._reject_non_actionable_objective(
             objective, session_id=session_id, source="start_autonomous_task"
@@ -515,6 +501,8 @@ class TaskHandler:
             "status": "running",
             "started_at": time.time(),
         }
+        if task_kind:
+            active_object["active_task"]["task_kind"] = task_kind
         if goal_id:
             active_object["active_task"]["goal_id"] = goal_id
         if delegation_metadata:
@@ -952,6 +940,14 @@ class TaskHandler:
         run_id: str | None = None,
         resumed: bool = False,
     ) -> str:
+        task_kind = self._task_kind_for_task(session_id=session_id, task_id=task_id)
+        if task_kind == "maintenance_update_tools":
+            return self._run_cli_maintenance_task(
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                task_id=task_id,
+            )
         # Option (b), 2026-06-13: CDP/browser objectives run via the daemon's
         # in-process browser executor (Playwright in the venv), NOT the Codex
         # coordinator whose workers are network-denied (--sandbox workspace-write)
@@ -1019,6 +1015,12 @@ class TaskHandler:
                     else:
                         start_phase = f2_result
         if f2_recovery_checkpoint is None:
+            objective, start_phase = self._consume_redrive_pending(
+                session_id=session_id,
+                task_id=task_id,
+                objective=objective,
+                start_phase=start_phase,
+            )
             result = self.coordinator.run(
                 task_id,
                 objective,
@@ -1091,6 +1093,20 @@ class TaskHandler:
             last_checkpoint=checkpoint,
         )
         return _format_coordinator_response(result, checkpoint=checkpoint, forced=forced)
+
+    def _task_kind_for_task(self, *, session_id: str, task_id: str) -> str:
+        if self.task_ledger is not None:
+            record = self.task_ledger.get(task_id)
+            if record is not None:
+                task_kind = (record.metadata or {}).get("task_kind")
+                if task_kind:
+                    return str(task_kind)
+        state = self._get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_task = dict(active_object.get("active_task") or {})
+        if active_task.get("task_id") == task_id and active_task.get("task_kind"):
+            return str(active_task["task_kind"])
+        return ""
 
     def _legacy_resume_start_phase(self, task_id: str) -> str | None:
         try:
@@ -1276,17 +1292,17 @@ class TaskHandler:
         )
         error_text = ""
         try:
-            output = str(self.browser_executor(objective, task_id=task_id, mode=mode))
-            # The executor returns the agent's own report; it does NOT raise when
-            # the agent merely failed to produce a result (LLM rate-limited, CDP
-            # unreachable, agent gave up). Classify that as a terminal failure —
-            # otherwise "pending" is non-terminal and the lifecycle watchdog
-            # resumes the task forever while the real error never reaches the user.
-            if _browser_output_indicates_failure(output):
-                status = "failed"
-                error_text = output.strip() or "el agente de navegador no produjo resultado"
+            raw_output = self.browser_executor(objective, task_id=task_id, mode=mode)
+            if isinstance(raw_output, AutomationOutcome):
+                automation_outcome = raw_output
+                output = automation_outcome.to_legacy_text()
             else:
-                status = "passed"
+                output = str(raw_output)
+                automation_outcome = _browser_executor_automation_outcome(
+                    output=output,
+                    error_text=error_text,
+                    objective=objective,
+                )
         except Exception as exc:  # noqa: BLE001 - executor failures must not crash the runner
             logger.exception("browser executor failed for %s", task_id)
             self._emit(
@@ -1294,20 +1310,21 @@ class TaskHandler:
                 {"session_id": session_id, "task_id": task_id, "error": str(exc)[:200]},
             )
             output = f"No pude completar la tarea de navegador: {str(exc)[:200]}"
-            status = "failed"
             error_text = str(exc)[:200]
-        automation_outcome = _browser_executor_automation_outcome(
-            output=output,
-            status=status,
-            error_text=error_text,
-        )
+            automation_outcome = AutomationOutcome.failed(
+                human_summary=output,
+                reason_code="executor_error",
+            )
+        status = _verification_status_for_automation_outcome(automation_outcome)
+        error_text = _error_text_for_automation_outcome(automation_outcome)
         checkpoint = {
             "summary": (output or objective)[:180],
             "verification_status": status,
+            "reason_code": automation_outcome.reason_code,
             "task_id": task_id,
             "automation_outcome": automation_outcome.to_dict(),
         }
-        if status == "failed":
+        if status != "passed":
             checkpoint["error"] = error_text
         self._update_session_state(
             session_id,
@@ -1328,6 +1345,100 @@ class TaskHandler:
             },
         )
         return output or "Tarea de navegador completada sin salida."
+
+    def _run_cli_maintenance_task(
+        self,
+        *,
+        session_id: str,
+        objective: str,
+        mode: str,
+        task_id: str,
+    ) -> str:
+        self._emit(
+            "cli_maintenance_started",
+            {"session_id": session_id, "task_id": task_id, "objective": objective[:200]},
+        )
+        try:
+            result = self._cli_maintenance_runner(cwd=self._workspace_root, observe=self.observe)
+        except Exception as exc:  # noqa: BLE001 - maintenance failures must terminalize cleanly
+            logger.exception("cli maintenance failed for %s", task_id)
+            result = CliMaintenanceResult(
+                verification_status="failed",
+                summary=f"CLI maintenance failed: {type(exc).__name__}",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        verification_status = result.verification_status
+        if verification_status not in {"passed", "failed"}:
+            verification_status = "failed"
+        tool_versions = {
+            str(name): {str(key): str(value) for key, value in dict(values).items()}
+            for name, values in dict(result.tool_versions).items()
+        }
+        checkpoint: dict[str, Any] = {
+            "summary": result.summary,
+            "verification_status": verification_status,
+            "task_id": task_id,
+            "operation": "maintenance_update_tools",
+            "tools": tool_versions,
+            "commands_run": [" ".join(command) for command in result.commands_run[:20]],
+            "installed_packages": list(result.installed_packages),
+        }
+        if result.error or verification_status == "failed":
+            checkpoint["error"] = result.error or "cli maintenance verification failed"
+        self._update_session_state(
+            session_id,
+            mode=mode,
+            verification_status=verification_status,
+            pending_action="",
+            task_queue=self._terminal_task_queue(
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                status=verification_status,
+            ),
+            last_checkpoint=checkpoint,
+        )
+        self._emit(
+            "cli_maintenance_completed",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "verification_status": verification_status,
+                "installed_packages": list(result.installed_packages),
+                **({"error": checkpoint["error"]} if checkpoint.get("error") else {}),
+            },
+        )
+        if verification_status == "passed":
+            return (
+                f"Listo. Cerré la tarea `{task_id}`.\n"
+                f"{result.summary}\n"
+                "Verification Status: passed"
+            )
+        return (
+            f"No pude cerrar bien la tarea `{task_id}`.\n"
+            f"{result.summary}\n"
+            f"Error: {checkpoint.get('error', 'cli maintenance failed')}"
+        )
+
+    def _terminal_task_queue(
+        self,
+        *,
+        session_id: str,
+        objective: str,
+        mode: str,
+        status: str,
+    ) -> list[dict[str, Any]]:
+        state = self._get_session_state(session_id)
+        current_queue = state.get("task_queue") or []
+        return self.upsert_task_queue_entry(
+            current_queue,
+            summary=objective,
+            mode=mode,
+            status=status,
+            source="coordinator",
+            priority=0,
+            depends_on=self.derive_task_dependencies(current_queue, summary=objective),
+        )
 
     def _run_autonomous_task(
         self,
@@ -1513,8 +1624,38 @@ class TaskHandler:
             checkpoint_error = str(completed_checkpoint.get("error") or "")
             pending_action = str(completed_checkpoint.get("pending_action") or "")
             blocked_reason = ""
+            redrive_in_flight = False
             if not terminal_status:
+                redrive_in_flight = self._maybe_start_redrive(
+                    session_id=session_id,
+                    task_id=task_id,
+                    active_task=active_task,
+                    checkpoint=completed_checkpoint,
+                )
+            if not terminal_status and not redrive_in_flight:
                 blocked_reason = self._blocked_user_input_reason(completed_checkpoint)
+                blocker_class = str(completed_checkpoint.get("blocker_class") or "")
+                terminal_tail_classes = ("decision_usuario", "evidencia_externa") + (
+                    # Con β activo, un formato que NO re-condujo (agotado, duplicado
+                    # o vetado) termina honesto con historial en vez de ciclar el
+                    # deferral loop hasta verification_stalled (review PR #175, #3).
+                    ("formato",) if _max_task_redrives() > 0 else ()
+                )
+                if not blocked_reason and blocker_class in terminal_tail_classes:
+                    # El tail estructurado es señal más fuerte que los markers:
+                    # estas clases requieren al dueño (evidencia_externa queda
+                    # fail-closed hasta γ).
+                    detail = "; ".join(
+                        str(blocker) for blocker in (completed_checkpoint.get("blockers") or [])
+                    ) or blocker_class
+                    blocked_reason = f"waiting_for_user_input: {detail[:500]}"
+                if blocked_reason and active_task.get("task_id") == task_id:
+                    redrive_seen = list(active_task.get("redrive_seen") or [])
+                    if redrive_seen:
+                        completed_checkpoint = {
+                            **completed_checkpoint,
+                            "redrive_history": redrive_seen,
+                        }
                 if blocked_reason:
                     verification_status = "blocked"
                     terminal_status = "failed"
@@ -1561,6 +1702,10 @@ class TaskHandler:
                         "error": checkpoint_error,
                         "reason": "verification_stalled",
                     }
+                    if active_task.get("task_id") == task_id and active_task.get("redrive_seen"):
+                        completed_checkpoint["redrive_history"] = list(
+                            active_task.get("redrive_seen") or []
+                        )
                     self._update_session_state(
                         session_id,
                         verification_status="failed",
@@ -1585,6 +1730,13 @@ class TaskHandler:
                     checkpoint=completed_checkpoint,
                     error=checkpoint_error,
                     objective=objective,
+                )
+            elif redrive_in_flight:
+                response = (
+                    f"Reintentando la tarea `{task_id}` "
+                    f"(intento {int(active_task.get('redrive_attempts') or 0)}/"
+                    f"{_max_task_redrives()}): el verifier objetó el formato; "
+                    "re-trabajo el entregable con su veredicto."
                 )
             if self._store_message is not None:
                 self._store_message(session_id, "assistant", response[:4000])
@@ -1654,6 +1806,17 @@ class TaskHandler:
                     },
                 )
                 return
+            terminal_state = {
+                "verification_status": verification_status,
+                "pending_action": "",
+                "task_queue": self._terminal_task_queue(
+                    session_id=session_id,
+                    objective=objective,
+                    mode=mode,
+                    status=terminal_status,
+                ),
+                "last_checkpoint": completed_checkpoint,
+            }
             if active_task.get("task_id") == task_id:
                 active_task["status"] = "completed" if terminal_status == "succeeded" else "failed"
                 active_task["completed_at"] = time.time()
@@ -1663,9 +1826,10 @@ class TaskHandler:
                     session_id,
                     active_task,
                     active_object,
-                    verification_status=verification_status,
-                    last_checkpoint=completed_checkpoint,
+                    **terminal_state,
                 )
+            else:
+                self._update_session_state(session_id, **terminal_state)
             if terminal_status == "succeeded":
                 self._complete_autonomous_job(
                     task_id=task_id,
@@ -1724,6 +1888,13 @@ class TaskHandler:
                     **(
                         {"error": checkpoint_error}
                         if terminal_status == "failed" and checkpoint_error
+                        else {}
+                    ),
+                    # γ.0: la clase del blocker (tail del verifier) viaja al
+                    # evento terminal — hace medibles las muertes por clase.
+                    **(
+                        {"blocker_class": str(completed_checkpoint.get("blocker_class"))}
+                        if completed_checkpoint.get("blocker_class")
                         else {}
                     ),
                 },
@@ -2245,6 +2416,7 @@ class TaskHandler:
             )
         state = self._get_session_state(record.session_id)
         active_object = dict(state.get("active_object") or {})
+        prior_task = dict(active_object.get("active_task") or {})
         active_object["active_task"] = {
             "task_id": record.task_id,
             "objective": record.objective,
@@ -2253,6 +2425,22 @@ class TaskHandler:
             "resumed_at": metadata["last_resumed_at"],
             "resume_reason": reason,
         }
+        if prior_task.get("task_id") == record.task_id:
+            # El rebuild borraba los contadores durables entre ciclos: el
+            # governor de re-drive (redrive_*) perdía su pending armado antes
+            # de que _consume_redrive_pending corriera (smoke 2026-07-02
+            # 12:10: synthesis resumida de scratch en vez de re-trabajada), y
+            # el cap F1.1 (verification_deferrals) nunca acumulaba entre
+            # resumes. Estas llaves viven en active_task PORQUE sobreviven la
+            # re-creación de jobs — deben sobrevivir también el resume.
+            for key in (
+                "redrive_attempts",
+                "redrive_seen",
+                "redrive_pending",
+                "verification_deferrals",
+            ):
+                if key in prior_task:
+                    active_object["active_task"][key] = prior_task[key]
         if execution_mode != mode:
             active_object["active_task"]["execution_mode"] = execution_mode
         if goal_id:
@@ -2385,6 +2573,120 @@ class TaskHandler:
                 "objective": objective,
                 "reason": reason,
             },
+        )
+
+    def _mark_job_claim_blocked_task_state(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        objective: str,
+        mode: str,
+        job_id: str | None,
+        job_status: str,
+        reason: str,
+    ) -> None:
+        error = f"job_claim_blocked:{reason or job_status or 'unknown'}"
+        summary = f"Autonomous task blocked before execution: {objective[:180]}"
+        checkpoint = {
+            "summary": summary,
+            "verification_status": "blocked",
+            "reason": "job_claim_blocked",
+            "task_id": task_id,
+            "job_id": job_id or "",
+            "job_status": job_status,
+            "error": error,
+        }
+        state = self._get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_task = dict(active_object.get("active_task") or {})
+        if active_task.get("task_id") == task_id:
+            active_task["status"] = "blocked"
+            active_task["error"] = error
+            active_task["completed_at"] = time.time()
+            active_object["active_task"] = active_task
+        self._write_active_task(
+            session_id,
+            active_task if active_task.get("task_id") == task_id else None,
+            active_object,
+            verification_status="blocked",
+            pending_action="",
+            task_queue=self._terminal_task_queue(
+                session_id=session_id,
+                objective=objective,
+                mode=mode,
+                status="blocked",
+            ),
+            last_checkpoint=checkpoint,
+        )
+        self._fail_autonomous_job(
+            task_id=task_id,
+            job_id=job_id,
+            error=error,
+            checkpoint={
+                "operation": "coordinator",
+                "mode": mode,
+                "session_id": session_id,
+                "verification_status": "blocked",
+                "reason": "job_claim_blocked",
+                "job_status": job_status,
+            },
+        )
+        response = f"No pude iniciar la tarea `{task_id}`.\nError: {error}"
+        if self._store_message is not None:
+            self._store_message(session_id, "assistant", response[:4000])
+        if self.task_ledger is not None:
+            artifacts = self._outcome_artifacts(
+                task_id=task_id,
+                session_id=session_id,
+                status="failed",
+                summary=summary,
+                objective=objective,
+                mode=mode,
+                error=error,
+                verification_status="blocked",
+                extra={"response_preview": response[:1000], "job_status": job_status},
+            )
+            self.task_ledger.mark_terminal(
+                task_id,
+                status="failed",
+                summary=summary,
+                error=error,
+                verification_status="blocked",
+                artifacts=artifacts,
+            )
+        self._emit(
+            "autonomous_task_failed",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "objective": objective,
+                "response": response,
+                "verification_status": "blocked",
+                "terminal_status": "failed",
+                "error": error,
+                "attempt": self._task_attempt(task_id),
+            },
+        )
+        goal_id = self._p0_goal_id_for_task(
+            task_id, session_id=session_id, objective=objective, mode=mode
+        )
+        claim_id = self._p0_record_task_claim(
+            goal_id=goal_id,
+            task_id=task_id,
+            text=f"Autonomous task {task_id} was blocked before execution: {reason}.",
+            status="failed",
+        )
+        self._p0_emit_task_event(
+            event_type="action_failed",
+            goal_id=goal_id,
+            session_id=session_id,
+            task_id=task_id,
+            objective=objective,
+            mode=mode,
+            status="failure",
+            error=error,
+            claims=[claim_id] if claim_id else [],
         )
 
     def _task_attempt(self, task_id: str) -> int:
@@ -3065,7 +3367,39 @@ class TaskHandler:
                 },
             )
             return False
-        return True
+        block_reason = self._job_claim_block_reason()
+        if (
+            block_reason
+            or record is None
+            or record.status in {"queued", "retrying", "waiting_approval"}
+        ):
+            self._mark_job_claim_blocked_task_state(
+                session_id=session_id,
+                task_id=task_id,
+                objective=objective,
+                mode=mode,
+                job_id=job_id,
+                job_status=record.status if record is not None else "missing",
+                reason=block_reason or "claim_unavailable",
+            )
+            return False
+        self._emit(
+            "autonomous_task_job_skipped",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "job_id": job_id,
+                "job_status": record.status,
+                "reason": "claim_unavailable",
+            },
+        )
+        return False
+
+    def _job_claim_block_reason(self) -> str:
+        if self.job_service is None:
+            return ""
+        reason = getattr(self.job_service, "_safe_mode_reason", None) or job_claim_block_reason()
+        return str(reason or "")
 
     def _complete_autonomous_job(
         self, *, task_id: str, job_id: str | None, result: dict[str, Any]
@@ -3216,6 +3550,157 @@ class TaskHandler:
                 checkpoint=checkpoint,
             )
 
+    def _maybe_start_redrive(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        active_task: dict[str, Any],
+        checkpoint: dict[str, Any],
+    ) -> bool:
+        """C1-Sβ — decide y arma un re-drive acotado para blockers clase formato.
+
+        Invariante task_redrive_bounded_and_classified: solo la clase `formato`
+        re-conduce (v1; evidencia_externa queda fail-closed hasta γ y
+        decision_usuario jamás consume intentos), cap CLAW_MAX_TASK_REDRIVES,
+        mismo ident jamás 2×, intento persistido en active_task ANTES de que el
+        camino de deferral existente re-encole el job, y ventana de presupuesto
+        congelada ⇒ no re-drive. γ.0: toda decisión sobre una clase DECLARADA
+        emite autonomous_task_redrive_decision (un checkpoint sin clase es un
+        deferral normal de verificación — mudo, no es una decisión de clase).
+        """
+        if active_task.get("task_id") != task_id:
+            return False
+        clase = str(checkpoint.get("blocker_class") or "")
+        if not clase:
+            return False
+        payload_base = {"session_id": session_id, "task_id": task_id, "clase": clase}
+        max_redrives = _max_task_redrives()
+        try:
+            attempts = int(active_task.get("redrive_attempts") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        blockers = [str(b) for b in (checkpoint.get("blockers") or []) if str(b).strip()]
+        idents = [
+            normalize_blocker_ident(clase, blocker.split(":", 1)[0]) for blocker in blockers
+        ] or [normalize_blocker_ident(clase, "sin-slug")]
+        if clase != "formato":
+            # γ.0: el return mudo dejaba las muertes por evidencia/decision
+            # sin evento — el baseline (4 muertes/13h) no era medible por clase.
+            self._emit(
+                "autonomous_task_redrive_decision",
+                {
+                    **payload_base,
+                    "attempt": attempts,
+                    "idents": idents,
+                    "action": "fail_closed",
+                },
+            )
+            return False
+        try:
+            deferrals = int(active_task.get("verification_deferrals") or 0)
+        except (TypeError, ValueError):
+            deferrals = 0
+        if deferrals >= _MAX_VERIFICATION_DEFERRALS:
+            # El cap de deferrals vetaría el re-run en este mismo ciclo: no
+            # quemes un intento que jamás va a correr (review PR #175, #2).
+            self._emit(
+                "autonomous_task_redrive_decision",
+                {**payload_base, "attempt": attempts, "action": "deferral_budget_exhausted"},
+            )
+            return False
+        if max_redrives <= 0 or attempts >= max_redrives:
+            self._emit(
+                "autonomous_task_redrive_decision",
+                {**payload_base, "attempt": attempts, "action": "exhausted"},
+            )
+            return False
+        seen = [str(s) for s in (active_task.get("redrive_seen") or [])]
+        if any(ident in seen for ident in idents):
+            self._emit(
+                "autonomous_task_redrive_decision",
+                {
+                    **payload_base,
+                    "attempt": attempts,
+                    "idents": idents,
+                    "action": "duplicate_blocker",
+                },
+            )
+            return False
+        if self._redrive_budget_frozen is not None:
+            try:
+                frozen = bool(self._redrive_budget_frozen())
+            except Exception:
+                # Un gate roto debe ser visible, no un skip silencioso.
+                self._emit(
+                    "autonomous_task_redrive_gate_error",
+                    {**payload_base, "attempt": attempts},
+                )
+                frozen = False
+            if frozen:
+                self._emit(
+                    "autonomous_task_redrive_decision",
+                    {**payload_base, "attempt": attempts, "action": "budget_frozen"},
+                )
+                return False
+        active_task["redrive_attempts"] = attempts + 1
+        active_task["redrive_seen"] = seen + [i for i in idents if i not in seen]
+        active_task["redrive_pending"] = {
+            "start_phase": "synthesis",
+            "verdict": "\n".join(f"- {blocker}" for blocker in blockers)[:1500],
+            "blocker_class": clase,
+        }
+        active_task["updated_at"] = time.time()
+        state = self._get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        self._write_active_task(session_id, active_task, active_object)
+        self._emit(
+            "autonomous_task_redrive_decision",
+            {**payload_base, "attempt": attempts + 1, "idents": idents, "action": "redrive"},
+        )
+        return True
+
+    def _consume_redrive_pending(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        objective: str,
+        start_phase: str | None,
+    ) -> tuple[str, str | None]:
+        """Consume-once del re-drive armado: fuerza start_phase=synthesis (re-trabaja
+        el entregable con research cacheado de scratch) y anexa el veredicto al
+        objective, que llega a _synthesize y al verifier vía coordinator.run()."""
+        state = self._get_session_state(session_id)
+        active_object = dict(state.get("active_object") or {})
+        active_task = dict(active_object.get("active_task") or {})
+        if active_task.get("task_id") != task_id:
+            return objective, start_phase
+        pending = active_task.get("redrive_pending")
+        if not isinstance(pending, dict) or not pending:
+            return objective, start_phase
+        forced = str(pending.get("start_phase") or "synthesis")
+        verdict = str(pending.get("verdict") or "")[:1500]
+        blocker_class = str(pending.get("blocker_class") or "")
+        active_task.pop("redrive_pending", None)
+        active_task["updated_at"] = time.time()
+        self._write_active_task(session_id, active_task, active_object)
+        self._emit(
+            "autonomous_task_redrive_resumed",
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "start_phase": forced,
+                **({"blocker_class": blocker_class} if blocker_class else {}),
+            },
+        )
+        if verdict:
+            objective = (
+                f"{objective}\n\n[RE-DRIVE — veredicto del intento anterior; corrige "
+                f"exactamente esto sin re-ejecutar trabajo ya hecho]:\n{verdict}"
+            )
+        return objective, forced
+
     def _cancel_autonomous_job(
         self, task_id: str, *, reason: str, job_id: str | None = None
     ) -> None:
@@ -3223,6 +3708,13 @@ class TaskHandler:
             return
         record_id = job_id or self._active_job_id_for_task(task_id)
         if record_id is not None:
+            if getattr(self.job_service, "formal_leases_enabled", False):
+                self.job_service.request_cancel(
+                    record_id,
+                    actor="task_handler",
+                    reason=reason,
+                )
+                return
             self.job_service.cancel(record_id, reason=reason)
 
     def _active_job_id_for_task(self, task_id: str) -> str | None:

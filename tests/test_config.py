@@ -82,6 +82,21 @@ class AppConfigDefaultsTests(unittest.TestCase):
             self.assertTrue(configured.maintenance_mode_enabled)
             self.assertTrue(configured.no_job_claim_enabled)
 
+    def test_observe_vacuum_defaults_off_and_can_be_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = str(Path(tmpdir) / "home")
+            with patch.dict(os.environ, {"HOME": home}, clear=True):
+                default_config = AppConfig.from_env()
+            self.assertFalse(default_config.observe_vacuum_enabled)
+
+            with patch.dict(
+                os.environ,
+                {"HOME": home, "CLAW_OBSERVE_VACUUM_ENABLED": "1"},
+                clear=True,
+            ):
+                configured = AppConfig.from_env()
+            self.assertTrue(configured.observe_vacuum_enabled)
+
     def test_langgraph_cutover_flags_default_off_and_read_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home = str(Path(tmpdir) / "home")

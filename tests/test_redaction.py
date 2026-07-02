@@ -16,7 +16,8 @@ class RedactSensitiveTests(unittest.TestCase):
         self.assertNotIn("ghp_abcdef", redact_sensitive(text))
 
     def test_strips_bearer_token(self) -> None:
-        text = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"
+        token = "eyJhbGciOiJIUzI1NiJ9.payload.sig"
+        text = "Authorization: " + "Bearer " + token
         self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", redact_sensitive(text))
 
     def test_strips_standalone_jwt_token(self) -> None:

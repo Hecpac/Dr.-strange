@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -9,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from claw_v2.jobs import JOB_TERMINAL_STATUSES, JobService
+from claw_v2.jobs import JOB_TERMINAL_STATUSES, FormalLeaseRequiredError, JobService
 from claw_v2.observe import ObserveStream
 from claw_v2.sqlite_runtime import RuntimeDb
 
@@ -27,6 +28,23 @@ class _ClosedOnceConn:
 
     def __getattr__(self, name):
         return getattr(self._real, name)
+
+
+def _set_job_columns(service: JobService, job_id: str, **columns) -> None:
+    assignments = []
+    values = []
+    for column, value in columns.items():
+        assignments.append(f"{column} = ?")
+        if column.endswith("_json"):
+            values.append(json.dumps(value, sort_keys=True))
+        else:
+            values.append(value)
+    with service._lock:
+        service._conn.execute(
+            f"UPDATE agent_jobs SET {', '.join(assignments)} WHERE job_id = ?",
+            (*values, job_id),
+        )
+        service._conn.commit()
 
 
 class JobServiceTests(unittest.TestCase):
@@ -1049,6 +1067,413 @@ class JobServiceTests(unittest.TestCase):
             self.assertEqual(cancelled.status, "cancelled")
             self.assertEqual(cancelled.error, "user requested")
             self.assertEqual(service.resume_candidates(), [])
+
+    def test_cancel_formal_leases_requires_formal_cancel_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(kind="pipeline.issue")
+            claimed = service.claim_next(worker_id="worker-1", now=time.time())
+            assert claimed is not None
+
+            with self.assertRaises(FormalLeaseRequiredError) as caught:
+                service.cancel(created.job_id, reason="user requested")
+
+            self.assertTrue(getattr(caught.exception, "formal_leases_enabled", False))
+
+    def test_cancel_formal_leases_does_not_terminalize_running_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(
+                kind="pipeline.issue",
+                metadata={"owner": "runner"},
+            )
+            claimed = service.claim_next(worker_id="worker-1", now=time.time())
+            assert claimed is not None
+            checkpointed = service.checkpoint(
+                created.job_id,
+                {"step": "started"},
+                lease_owner=claimed.lease_owner,
+                lease_generation=claimed.lease_generation,
+            )
+            assert checkpointed is not None
+
+            try:
+                service.cancel(created.job_id, reason="user requested")
+            except Exception:
+                pass
+
+            persisted = service.get(created.job_id)
+            assert persisted is not None
+            self.assertEqual(persisted.status, "running")
+            self.assertEqual(persisted.metadata, {"owner": "runner"})
+            self.assertEqual(persisted.checkpoint, {"step": "started"})
+            self.assertEqual(persisted.lease_owner, claimed.lease_owner)
+            self.assertEqual(persisted.lease_generation, claimed.lease_generation)
+
+    def test_request_cancel_records_intent_without_terminalizing_running_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                observe=observe,
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(
+                kind="pipeline.issue",
+                metadata={"owner": "runner", "nested": {"kept": True}},
+            )
+            start = float(created.next_run_at or time.time())
+            claimed = service.claim_next(worker_id="worker-1", now=start)
+            assert claimed is not None
+            checkpointed = service.checkpoint(
+                created.job_id,
+                {"step": "started"},
+                lease_owner=claimed.lease_owner,
+                lease_generation=claimed.lease_generation,
+            )
+            assert checkpointed is not None
+            _set_job_columns(service, created.job_id, result_json={"partial": "ok"})
+
+            requested = service.request_cancel(
+                created.job_id,
+                actor="operator@example.com",
+                reason="user requested stop",
+                now=start + 5,
+            )
+
+            self.assertIsNotNone(requested)
+            assert requested is not None
+            self.assertEqual(requested.status, "running")
+            self.assertEqual(requested.checkpoint, {"step": "started"})
+            self.assertEqual(requested.result, {"partial": "ok"})
+            self.assertEqual(requested.lease_owner, "worker-1")
+            self.assertEqual(requested.lease_generation, claimed.lease_generation)
+            self.assertEqual(requested.lease_expires_at, start + 30)
+            self.assertEqual(
+                requested.metadata,
+                {
+                    "owner": "runner",
+                    "nested": {"kept": True},
+                    "cancel_request": {
+                        "requested_at": start + 5,
+                        "requested_by": "operator@example.com",
+                        "reason": "user requested stop",
+                    },
+                },
+            )
+            events = [event["event_type"] for event in observe.job_events(created.job_id)]
+            self.assertIn("job_cancel_requested", events)
+
+    def test_request_cancel_preserves_queued_status_and_requires_actor_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db", formal_leases_enabled=True)
+            queued = service.enqueue(kind="pipeline.issue", metadata={"owner": "queue"})
+
+            requested = service.request_cancel(
+                queued.job_id,
+                actor="operator@example.com",
+                reason="stop before start",
+                now=123.0,
+            )
+
+            self.assertEqual(requested.status, "queued")
+            self.assertEqual(requested.metadata["owner"], "queue")
+            self.assertEqual(requested.metadata["cancel_request"]["requested_at"], 123.0)
+            self.assertIsNone(requested.lease_owner)
+            self.assertEqual(requested.lease_generation, 0)
+
+            for kwargs in (
+                {"actor": "", "reason": "stop"},
+                {"actor": "operator@example.com", "reason": ""},
+            ):
+                with self.subTest(kwargs=kwargs):
+                    another = service.enqueue(kind="pipeline.issue")
+                    with self.assertRaises(ValueError):
+                        service.request_cancel(another.job_id, **kwargs)
+                    self.assertNotIn("cancel_request", service.get(another.job_id).metadata)
+
+    def test_request_cancel_terminal_job_does_not_resurrect_or_mutate_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(Path(tmpdir) / "claw.db", formal_leases_enabled=True)
+            created = service.enqueue(kind="pipeline.issue", metadata={"done": True})
+            _set_job_columns(
+                service,
+                created.job_id,
+                status="completed",
+                completed_at=10.0,
+                updated_at=10.0,
+            )
+
+            requested = service.request_cancel(
+                created.job_id,
+                actor="operator@example.com",
+                reason="late stop",
+                now=20.0,
+            )
+
+            self.assertEqual(requested.status, "completed")
+            self.assertEqual(requested.metadata, {"done": True})
+            self.assertEqual(service.get(created.job_id).status, "completed")
+
+    def test_worker_cancel_with_valid_lease_terminalizes_and_preserves_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                observe=observe,
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            created = service.enqueue(kind="pipeline.issue", metadata={"owner": "runner"})
+            start = float(created.next_run_at or time.time())
+            claimed = service.claim_next(worker_id="worker-1", now=start)
+            assert claimed is not None
+            checkpointed = service.checkpoint(
+                created.job_id,
+                {"stage": "running"},
+                lease_owner=claimed.lease_owner,
+                lease_generation=claimed.lease_generation,
+            )
+            assert checkpointed is not None
+            _set_job_columns(service, created.job_id, result_json={"partial": "ok"})
+
+            cancelled = service.worker_cancel(
+                created.job_id,
+                lease_owner="worker-1",
+                lease_generation=claimed.lease_generation,
+                reason="worker observed cancel request",
+                now=start + 5,
+            )
+
+            self.assertIsNotNone(cancelled)
+            assert cancelled is not None
+            self.assertEqual(cancelled.status, "cancelled")
+            self.assertEqual(cancelled.error, "worker observed cancel request")
+            self.assertEqual(cancelled.completed_at, start + 5)
+            self.assertEqual(cancelled.metadata, {"owner": "runner"})
+            self.assertEqual(cancelled.checkpoint, {"stage": "running"})
+            self.assertEqual(cancelled.result, {"partial": "ok"})
+            self.assertIsNone(cancelled.lease_owner)
+            self.assertIsNone(cancelled.lease_expires_at)
+            self.assertIsNone(cancelled.lease_heartbeat_at)
+            events = [event["event_type"] for event in observe.job_events(created.job_id)]
+            self.assertIn("job_worker_cancelled", events)
+
+    def test_worker_cancel_requires_current_unexpired_lease(self) -> None:
+        for case in ("wrong_owner", "old_generation", "missing_generation", "expired_lease"):
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    service = JobService(
+                        Path(tmpdir) / "claw.db",
+                        formal_leases_enabled=True,
+                        default_lease_seconds=30,
+                    )
+                    created = service.enqueue(kind="pipeline.issue", metadata={"owner": "runner"})
+                    start = float(created.next_run_at or time.time())
+                    claimed = service.claim_next(worker_id="worker-1", now=start)
+                    assert claimed is not None
+                    kwargs = {
+                        "lease_owner": "worker-1",
+                        "lease_generation": claimed.lease_generation,
+                        "reason": "worker cancel",
+                        "now": start + 5,
+                    }
+                    if case == "wrong_owner":
+                        kwargs["lease_owner"] = "worker-2"
+                    elif case == "old_generation":
+                        kwargs["lease_generation"] = claimed.lease_generation - 1
+                    elif case == "missing_generation":
+                        kwargs["lease_generation"] = None
+                    else:
+                        kwargs["now"] = start + 31
+
+                    result = service.worker_cancel(created.job_id, **kwargs)
+
+                    self.assertIsNone(result)
+                    persisted = service.get(created.job_id)
+                    self.assertEqual(persisted.status, "running")
+                    self.assertEqual(persisted.metadata, {"owner": "runner"})
+                    self.assertEqual(persisted.lease_owner, "worker-1")
+                    self.assertEqual(persisted.lease_generation, claimed.lease_generation)
+                    self.assertEqual(persisted.error, "")
+
+    def test_admin_force_cancel_fails_closed_without_valid_authority(self) -> None:
+        for case in ("no_validator", "validator_rejects", "validator_raises"):
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    validator = None
+                    if case == "validator_rejects":
+                        validator = lambda actor, job_id, reason, token: False
+                    elif case == "validator_raises":
+                        def validator(actor, job_id, reason, token):
+                            raise RuntimeError("validator unavailable")
+
+                    service = JobService(
+                        Path(tmpdir) / "claw.db",
+                        formal_leases_enabled=True,
+                        admin_cancel_authority_validator=validator,
+                    )
+                    created = service.enqueue(kind="pipeline.issue", metadata={"owner": "runner"})
+                    start = float(created.next_run_at or time.time())
+                    claimed = service.claim_next(worker_id="worker-1", now=start)
+                    assert claimed is not None
+
+                    result = service.admin_force_cancel(
+                        created.job_id,
+                        admin_actor="admin@example.com",
+                        reason="operator requested",
+                        authority_token="secret-token",
+                        now=start + 1,
+                    )
+
+                    self.assertIsNone(result)
+                    persisted = service.get(created.job_id)
+                    self.assertEqual(persisted.status, "running")
+                    self.assertEqual(persisted.metadata, {"owner": "runner"})
+                    self.assertEqual(persisted.lease_owner, "worker-1")
+
+    def test_admin_force_cancel_requires_actor_reason_and_authority_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                admin_cancel_authority_validator=lambda actor, job_id, reason, token: True,
+            )
+            created = service.enqueue(kind="pipeline.issue")
+
+            for kwargs in (
+                {
+                    "admin_actor": "",
+                    "reason": "operator requested",
+                    "authority_token": "secret-token",
+                },
+                {
+                    "admin_actor": "admin@example.com",
+                    "reason": "",
+                    "authority_token": "secret-token",
+                },
+                {
+                    "admin_actor": "admin@example.com",
+                    "reason": "operator requested",
+                    "authority_token": "",
+                },
+            ):
+                with self.subTest(kwargs=kwargs):
+                    with self.assertRaises(ValueError):
+                        service.admin_force_cancel(created.job_id, **kwargs)
+                    self.assertEqual(service.get(created.job_id).status, "queued")
+
+    def test_admin_force_cancel_with_authority_terminalizes_running_job_and_audits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            validator_calls = []
+
+            def validator(actor, job_id, reason, token):
+                validator_calls.append((actor, job_id, reason, token))
+                return token == "secret-token"
+
+            service = JobService(
+                Path(tmpdir) / "claw.db",
+                observe=observe,
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+                admin_cancel_authority_validator=validator,
+            )
+            created = service.enqueue(kind="pipeline.issue", metadata={"owner": "runner"})
+            start = float(created.next_run_at or time.time())
+            claimed = service.claim_next(worker_id="worker-1", now=start)
+            assert claimed is not None
+            service.checkpoint(
+                created.job_id,
+                {"stage": "running"},
+                lease_owner=claimed.lease_owner,
+                lease_generation=claimed.lease_generation,
+            )
+
+            cancelled = service.admin_force_cancel(
+                created.job_id,
+                admin_actor="admin@example.com",
+                reason="operator requested",
+                authority_token="secret-token",
+                now=start + 5,
+            )
+
+            self.assertIsNotNone(cancelled)
+            assert cancelled is not None
+            self.assertEqual(cancelled.status, "cancelled")
+            self.assertEqual(cancelled.error, "operator requested")
+            self.assertEqual(cancelled.completed_at, start + 5)
+            self.assertIsNone(cancelled.lease_owner)
+            self.assertIsNone(cancelled.lease_expires_at)
+            self.assertIsNone(cancelled.lease_heartbeat_at)
+            self.assertEqual(
+                validator_calls,
+                [
+                    (
+                        "admin@example.com",
+                        created.job_id,
+                        "operator requested",
+                        "secret-token",
+                    )
+                ],
+            )
+            audit = cancelled.metadata["admin_force_cancel"]
+            self.assertEqual(audit["cancelled_at"], start + 5)
+            self.assertEqual(audit["admin_actor"], "admin@example.com")
+            self.assertEqual(audit["reason"], "operator requested")
+            self.assertEqual(audit["previous_status"], "running")
+            self.assertEqual(audit["previous_worker_id"], "worker-1")
+            self.assertEqual(audit["previous_lease_owner"], "worker-1")
+            self.assertEqual(audit["previous_lease_generation"], claimed.lease_generation)
+            self.assertEqual(audit["previous_lease_expires_at"], start + 30)
+            self.assertEqual(audit["authority_reference"], audit["correlation_id"])
+            self.assertNotIn("authority_token_hash", audit)
+            self.assertNotIn("secret-token", str(cancelled.metadata))
+            events = [event["event_type"] for event in observe.job_events(created.job_id)]
+            self.assertIn("job_admin_force_cancelled", events)
+
+    def test_admin_force_cancel_with_authority_can_cancel_active_non_running_statuses(self) -> None:
+        for status in ("queued", "retrying", "waiting_approval"):
+            with self.subTest(status=status):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    service = JobService(
+                        Path(tmpdir) / "claw.db",
+                        formal_leases_enabled=True,
+                        admin_cancel_authority_validator=(
+                            lambda actor, job_id, reason, token: token == "secret-token"
+                        ),
+                    )
+                    created = service.enqueue(kind="pipeline.issue", metadata={"status": status})
+                    if status != "queued":
+                        _set_job_columns(
+                            service,
+                            created.job_id,
+                            status=status,
+                            updated_at=100.0,
+                        )
+
+                    cancelled = service.admin_force_cancel(
+                        created.job_id,
+                        admin_actor="admin@example.com",
+                        reason="operator requested",
+                        authority_token="secret-token",
+                        now=101.0,
+                    )
+
+                    self.assertEqual(cancelled.status, "cancelled")
+                    self.assertEqual(
+                        cancelled.metadata["admin_force_cancel"]["previous_status"],
+                        status,
+                    )
 
     def test_wait_for_approval_records_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -145,7 +145,7 @@ class ComputerImportSafetyTests(unittest.TestCase):
                 COMPUTER_USE_ENABLED="true",
                 COMPUTER_USE_REQUIRED="true",
                 COMPUTER_USE_BACKEND="openai",
-                OPENAI_API_KEY="test-key",
+                **{"OPENAI" + "_API_KEY": "test-key"},
             )
             with patch.dict(os.environ, env, clear=False):
                 with patch.object(

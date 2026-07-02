@@ -51,6 +51,7 @@ from claw_v2.buddy import BuddyService
 from claw_v2.bus import AgentBus
 from claw_v2.computer import (
     BrowserUseService,
+    BROWSER_USE_OAUTH_FALLBACK_MODEL,
     CodexComputerBackend,
     ComputerUseService,
     ComputerUseUnavailable,
@@ -136,6 +137,7 @@ from claw_v2.scheduled_background_jobs import (
     kairos_tick_result_summary,
     safe_non_negative_int,
     wiki_research_result_summary,
+    wiki_scrape_result_summary,
 )
 from claw_v2.skill_expand_jobs import SkillExpandJobRunner, enqueue_skill_expand_job
 
@@ -611,14 +613,6 @@ def _run_startup_healthchecks(config: AppConfig, observe: ObserveStream) -> Star
 def _startup_model_role_summary(config: AppConfig) -> str:
     registry = ModelRegistry.default()
     pairs = {role.role: role.key for role in registry.list_model_roles()}
-    try:
-        from claw_v2.computer import BROWSER_USE_OAUTH_FALLBACK_MODEL
-    except Exception:
-        BROWSER_USE_OAUTH_FALLBACK_MODEL = None
-    if BROWSER_USE_OAUTH_FALLBACK_MODEL:
-        pairs["browser_agent_fallback"] = f"anthropic:{BROWSER_USE_OAUTH_FALLBACK_MODEL}"
-    else:
-        pairs["browser_agent_fallback"] = "disabled"
     computer_provider = (
         "codex" if config.computer_use_backend == "codex" else config.computer_use_backend
     )
@@ -631,6 +625,12 @@ def _startup_model_role_summary(config: AppConfig) -> str:
     pairs["browser_agent_configured"] = (
         f"{browser_provider}:{config.computer_browser_use_model}"
     )
+    if BROWSER_USE_OAUTH_FALLBACK_MODEL:
+        pairs["browser_agent_fallback"] = (
+            f"anthropic:{BROWSER_USE_OAUTH_FALLBACK_MODEL}"
+        )
+    else:
+        pairs["browser_agent_fallback"] = "disabled"
     return "; ".join(f"{key}={value}" for key, value in sorted(pairs.items()))
 
 
@@ -1945,21 +1945,26 @@ def _setup_scheduler(
     if daemon is not None and job_service is not None:
 
         def _observe_maintenance_handler() -> None:
-            # Off-tick maintenance: cap the table to the absolute ceiling, then
-            # VACUUM to reclaim freed pages. Both are blocking-but-local; the
-            # background runner keeps them off daemon.tick (Core Invariant 1)
-            # and the maintenance-window gate keeps the heavy VACUUM out of
-            # peak hours. See test_vacuum_only_runs_off_tick.
+            # Off-tick maintenance: cap the table to the absolute ceiling.
+            # VACUUM is a heavier dedicated-connection rewrite and stays
+            # opt-in via CLAW_OBSERVE_VACUUM_ENABLED.
             if _maintenance_skip():
                 return
             deleted = observe.prune(
                 retention_days=OBSERVE_RETENTION_DAYS,
                 max_total_rows=OBSERVE_MAX_TOTAL_ROWS,
             )
-            observe.maintenance_vacuum()
+            vacuum_ran = False
+            if config.observe_vacuum_enabled:
+                observe.maintenance_vacuum()
+                vacuum_ran = True
             observe.emit(
                 "observe_maintenance",
-                payload={"deleted_rows": deleted, "max_total_rows": OBSERVE_MAX_TOTAL_ROWS},
+                payload={
+                    "deleted_rows": deleted,
+                    "max_total_rows": OBSERVE_MAX_TOTAL_ROWS,
+                    "vacuum_ran": vacuum_ran,
+                },
             )
 
         daemon.register_background_job_runner(
@@ -2069,7 +2074,9 @@ def _setup_scheduler(
             job_kind=WIKI_RESEARCH_JOB_KIND,
             job_service=job_service,
             handler=lambda payload: wiki.auto_research(
-                max_topics=safe_non_negative_int(payload.get("max_topics"), default=3)
+                max_topics=safe_non_negative_int(payload.get("max_topics"), default=3),
+                research_limit=safe_non_negative_int(payload.get("research_limit"), default=1),
+                compile_limit=safe_non_negative_int(payload.get("compile_limit"), default=1),
             ),
             observe=observe,
             worker_id="wiki-research-runner",
@@ -2086,6 +2093,7 @@ def _setup_scheduler(
             handler=lambda _payload: wiki.auto_scrape_sources(),
             observe=observe,
             worker_id="wiki-scrape-runner",
+            result_summary=wiki_scrape_result_summary,
         )
         daemon.register_background_job_runner(
             name="wiki_scrape",
@@ -2140,7 +2148,7 @@ def _setup_scheduler(
                     resume_key=WIKI_RESEARCH_RESUME_KEY,
                     job_service=job_service,
                     observe=observe,
-                    payload={"max_topics": 3},
+                    payload={"max_topics": 3, "research_limit": 1, "compile_limit": 1},
                 ),
                 skip_if=_maintenance_skip,
             ),

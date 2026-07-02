@@ -25,6 +25,26 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _reset_wal_heal_registry():
+    """Give every test a clean sqlite_runtime WAL-heal scope.
+
+    issue #166 follow-up: stores that are not explicitly closed leave live
+    handles in the process-global ``_WAL_HEAL_REGISTRY`` until GC prunes them
+    (``register_wal_heal`` only drops already-dead handles). That cross-test
+    residue makes heal-sensitive tests — e.g.
+    ``ObserveSubscribeTests.test_locked_database_drops_event_without_breaking_emit``
+    — non-hermetic: their outcome depends on GC timing perturbed by unrelated
+    tests elsewhere in the suite. Clearing before each test removes the residue
+    so the heal only ever coordinates the current test's own connections.
+    """
+    from claw_v2.sqlite_runtime import _WAL_HEAL_REGISTRY, _WAL_HEAL_REGISTRY_LOCK
+
+    with _WAL_HEAL_REGISTRY_LOCK:
+        _WAL_HEAL_REGISTRY.clear()
+    yield
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _isolate_runtime_db_from_production():
     if os.environ.get("DB_PATH"):

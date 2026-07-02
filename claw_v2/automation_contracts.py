@@ -41,7 +41,7 @@ class AutomationStatus(Enum):
     TIMED_OUT = "timed_out"
 
 
-BROWSER_READ_HIGH_RISK_ACTIONS = ("evaluate", "save_as_pdf")
+BROWSER_READ_HIGH_RISK_ACTIONS: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,8 +128,8 @@ class CapabilityGrant:
             surface=AutomationSurface.BROWSER,
             reason=reason,
             approved_domains=tuple(_normalize_domains(domains)),
-            allow_high_risk_actions=True,
-            allowed_high_risk_actions=BROWSER_READ_HIGH_RISK_ACTIONS,
+            allow_high_risk_actions=False,
+            allowed_high_risk_actions=(),
             approved_by=approved_by,
             auto_approved=auto_approved,
             sensitive=sensitive,
@@ -154,10 +154,14 @@ class CapabilityGrant:
             return False
         if self.sensitive and self.approved_by != "user":
             return False
-        allowed_actions = {action.lower() for action in self.allowed_high_risk_actions}
+        allowed_actions = {
+            str(action or "").strip().lower()
+            for action in self.allowed_high_risk_actions
+            if str(action or "").strip()
+        }
         if not allowed_actions:
             return False
-        if str(action_name or "").lower() not in allowed_actions:
+        if str(action_name or "").strip().lower() not in allowed_actions:
             return False
         if not self.approved_domains:
             return False
@@ -261,7 +265,7 @@ def _normalize_domains(values: list[str] | tuple[str, ...]) -> list[str]:
     for value in values:
         host = _host_from_url(value)
         if not host:
-            host = str(value or "").strip().lower().strip("/")
+            host = _normalize_host(str(value or "").strip().lower().strip("/"))
         if not host or host in seen:
             continue
         seen.add(host)
@@ -274,7 +278,9 @@ def _url_matches_domains(url: str | None, domains: tuple[str, ...]) -> bool:
     if not host:
         return False
     for domain in domains:
-        normalized = domain.lower().lstrip("*.").strip()
+        normalized = _normalize_host(domain.lower().lstrip("*.").strip())
+        if not normalized:
+            continue
         if host == normalized or host.endswith("." + normalized):
             return True
     return False
@@ -293,4 +299,16 @@ def _host_from_url(url: str | None) -> str | None:
     host = parsed.hostname
     if not host:
         return None
-    return host.lower().strip(".")
+    return _normalize_host(host)
+
+
+def _normalize_host(host: str | None) -> str | None:
+    if not host:
+        return None
+    text = str(host).strip().strip(".").lower()
+    if not text:
+        return None
+    try:
+        return text.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None

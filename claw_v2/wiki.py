@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import textwrap
 import threading
@@ -19,6 +20,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from claw_v2.subprocess_runner import run_subprocess_bounded
 
 if TYPE_CHECKING:
     from claw_v2.llm import LLMRouter
@@ -33,6 +36,8 @@ _TOKEN_RE = re.compile(r"[\w][\w-]*", re.IGNORECASE)
 _MIN_CONTEXT_CHARS = 200
 _DEFAULT_CHUNK_CHARS = 2400
 _CHUNK_OVERLAP_CHARS = 160
+_MAX_RESEARCH_CANDIDATES = 200
+_MAX_SCRAPE_ITEM_RESULTS = 30
 
 VALID_CATEGORIES = [
     "AI & Herramientas",
@@ -151,6 +156,7 @@ class WikiService:
         self._embeddings_path = self.root / "embeddings.json"
         self._graph_path = self.root / "graph.json"
         self._firecrawl_state_path = self.root / "firecrawl_state.json"
+        self._research_candidates_path = self.root / "research_candidates.json"
         self.lane = lane
         # Ensure dirs exist
         self.raw_dir.mkdir(parents=True, exist_ok=True)
@@ -683,78 +689,652 @@ class WikiService:
     # Auto-Research (periodic knowledge acquisition)
     # ------------------------------------------------------------------
 
-    def auto_research(self, *, max_topics: int = 3) -> dict:
+    def auto_research(
+        self, *, max_topics: int = 3, research_limit: int = 0, compile_limit: int = 0
+    ) -> dict:
         """Identify knowledge gaps that need raw source research.
 
         Designed to run as a scheduled job (e.g. every 12 hours).
-        This does not write wiki pages from LLM synthesis; candidates must be
-        grounded through raw sources before they can become wiki truth.
+        Candidate discovery does not write wiki pages. Candidates must be grounded
+        through raw sources before the compiler can promote them to wiki truth.
         """
         pages = self._list_wiki_pages()
-        if not pages:
-            return {"topics_researched": 0, "pages_written": 0}
+        persisted_candidates: list[dict] = []
+        result = {
+            "topics_researched": 0,
+            "pages_written": 0,
+            "candidates": persisted_candidates,
+        }
 
-        existing = "\n".join(f"- [[{p.stem}]]: {self._extract_title(p)}" for p in pages[:30])
+        if pages:
+            existing = "\n".join(f"- [[{p.stem}]]: {self._extract_title(p)}" for p in pages[:30])
 
-        prompt = textwrap.dedent(f"""\
-            You are a knowledge curator for an AI/tech wiki. Analyze the existing pages
-            and suggest {max_topics} topics that are MISSING and would be valuable.
+            prompt = textwrap.dedent(f"""\
+                You are a knowledge curator for an AI/tech wiki. Analyze the existing pages
+                and suggest {max_topics} topics that are MISSING and would be valuable.
 
-            Focus on: AI developments, frontier models, AI agents, AI safety,
-            developer tools, and industry trends from 2026.
+                Focus on: AI developments, frontier models, AI agents, AI safety,
+                developer tools, and industry trends from 2026.
 
-            Existing wiki pages:
-            {existing}
+                Existing wiki pages:
+                {existing}
 
-            Respond with ONLY a JSON array of objects:
-            [
-              {{"topic": "short title", "category": "AI & Herramientas", "reason": "why this deserves research", "source_queries": ["specific source query"]}}
+                Respond with ONLY a JSON array of objects:
+                [
+                  {{"topic": "short title", "category": "AI & Herramientas", "reason": "why this deserves research", "source_queries": ["specific source query"]}}
+                ]
+
+                Rules:
+                - Only suggest topics NOT already covered by existing pages.
+                - Do not write synthesized factual summaries.
+                - Suggest concrete source queries that can produce raw evidence.
+                - Write in Spanish.
+                - ONLY valid JSON array.
+            """)
+
+            try:
+                resp = self.router.ask(
+                    prompt,
+                    lane=self.lane,
+                    max_budget=0.40,
+                    timeout=120.0,
+                    evidence_pack={"operation": "auto_research"},
+                )
+                topics = self._parse_json_array(resp.content)
+            except Exception:
+                logger.exception("Wiki auto_research failed")
+                topics = []
+
+            candidates: list[dict] = []
+            for topic in topics[:max_topics]:
+                if not isinstance(topic, dict):
+                    continue
+                title = topic.get("topic", "")
+                category = topic.get("category", "Research")
+                if not title:
+                    continue
+                slug = _slugify(title)
+                if (self.wiki_dir / f"{slug}.md").exists():
+                    continue
+                candidates.append(
+                    {
+                        "topic": title,
+                        "slug": slug,
+                        "category": self._normalize_category(category),
+                        "reason": topic.get("reason", ""),
+                        "source_queries": topic.get("source_queries", []),
+                    }
+                )
+
+            self._append_log(
+                "auto_research",
+                f"topics={len(candidates)} candidates={len(candidates)} written=0",
+                0,
+            )
+            persisted_candidates = self._persist_research_candidates(candidates)
+            result.update(
+                {
+                    "topics_researched": len(persisted_candidates),
+                    "candidates": persisted_candidates,
+                }
+            )
+        if research_limit > 0:
+            research_result = self.research_queued_candidates(max_candidates=research_limit)
+            current_by_slug = {
+                str(item.get("slug") or ""): item for item in self._load_research_candidates()
+            }
+            result["candidates"] = [
+                current_by_slug.get(str(candidate.get("slug") or ""), candidate)
+                for candidate in persisted_candidates
             ]
+            result.update(research_result)
+        if compile_limit > 0:
+            compile_result = self.compile_researched_candidates(max_candidates=compile_limit)
+            result.update(compile_result)
+            if persisted_candidates:
+                current_by_slug = {
+                    str(item.get("slug") or ""): item for item in self._load_research_candidates()
+                }
+                result["candidates"] = [
+                    current_by_slug.get(str(candidate.get("slug") or ""), candidate)
+                    for candidate in persisted_candidates
+                ]
+        return result
+
+    def research_candidates(self, *, limit: int = 10, status: str | None = None) -> list[dict]:
+        """Return recent persisted research candidates for operator inspection."""
+        with self._lock:
+            candidates = self._load_research_candidates()
+        if status:
+            candidates = [item for item in candidates if item.get("status") == status]
+        candidates.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        safe_limit = max(0, int(limit))
+        return candidates[:safe_limit]
+
+    def research_queued_candidates(self, *, max_candidates: int = 1) -> dict:
+        """Turn queued candidates into raw evidence without compiling wiki pages."""
+        candidates = [
+            item for item in self._load_research_candidates() if item.get("status") == "new"
+        ]
+        candidates.sort(key=lambda item: str(item.get("created_at") or item.get("updated_at") or ""))
+        researched = 0
+        blocked = 0
+        raw_written = 0
+        results: list[dict] = []
+        for candidate in candidates[: max(0, int(max_candidates))]:
+            outcome = self._research_candidate(candidate)
+            results.append(outcome)
+            if outcome.get("status") == "researched":
+                researched += 1
+                raw_written += int(bool(outcome.get("raw_source_slug")))
+            elif outcome.get("status") == "blocked":
+                blocked += 1
+        return {
+            "candidates_researched": researched,
+            "raw_sources_written": raw_written,
+            "candidates_blocked": blocked,
+            "research_results": results,
+        }
+
+    def compile_researched_candidates(self, *, max_candidates: int = 1) -> dict:
+        """Compile researched raw evidence into wiki pages after a quality gate."""
+        try:
+            limit = max(0, int(max_candidates))
+        except (TypeError, ValueError):
+            limit = 0
+        candidates = [
+            item for item in self._load_research_candidates() if item.get("status") == "researched"
+        ]
+        candidates.sort(key=self._compile_candidate_sort_key)
+        compiled = 0
+        blocked = 0
+        failed = 0
+        pages_written = 0
+        results: list[dict] = []
+        for candidate in candidates[:limit]:
+            outcome = self._compile_research_candidate(candidate)
+            results.append(outcome)
+            if outcome.get("status") == "compiled":
+                compiled += 1
+                pages_written += int(outcome.get("pages_written") or 0)
+            elif outcome.get("status") == "compile_blocked":
+                blocked += 1
+            elif outcome.get("status") == "compile_failed":
+                failed += 1
+        return {
+            "candidates_compiled": compiled,
+            "compile_blocked": blocked,
+            "compile_failed": failed,
+            "pages_written": pages_written,
+            "compile_results": results,
+        }
+
+    def _persist_research_candidates(self, candidates: list[dict]) -> list[dict]:
+        if not candidates:
+            return []
+        now = _now_iso()
+        with self._lock:
+            existing = self._load_research_candidates()
+            by_slug = {str(item.get("slug") or ""): item for item in existing if item.get("slug")}
+            persisted: list[dict] = []
+            for candidate in candidates:
+                slug = str(candidate.get("slug") or "").strip()
+                topic = str(candidate.get("topic") or "").strip()
+                if not slug or not topic:
+                    continue
+                queued = dict(by_slug.get(slug) or {})
+                raw_source_queries = candidate.get("source_queries")
+                source_queries = raw_source_queries if isinstance(raw_source_queries, list) else []
+                queued.update(
+                    {
+                        "topic": topic,
+                        "slug": slug,
+                        "category": self._normalize_category(
+                            str(candidate.get("category") or "")
+                        ),
+                        "reason": str(candidate.get("reason") or "").strip(),
+                        "source_queries": [
+                            str(query).strip()
+                            for query in source_queries
+                            if str(query).strip()
+                        ][:5],
+                        "status": str(queued.get("status") or "new"),
+                        "source": str(queued.get("source") or "auto_research"),
+                        "updated_at": now,
+                        "seen_count": int(queued.get("seen_count") or 0) + 1,
+                    }
+                )
+                queued.setdefault("created_at", now)
+                by_slug[slug] = queued
+                persisted.append(dict(queued))
+
+            ordered = list(by_slug.values())
+            ordered.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+            self._save_research_candidates(ordered[:_MAX_RESEARCH_CANDIDATES])
+            return persisted
+
+    def _load_research_candidates(self) -> list[dict]:
+        if not self._research_candidates_path.exists():
+            return []
+        try:
+            data = json.loads(self._research_candidates_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.debug("Failed to load wiki research candidates", exc_info=True)
+            return []
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
+
+    def _save_research_candidates(self, candidates: list[dict]) -> None:
+        payload = json.dumps(candidates, ensure_ascii=False, indent=2, sort_keys=True)
+        tmp_path = self._research_candidates_path.with_suffix(".tmp")
+        with self._lock:
+            tmp_path.write_text(payload, encoding="utf-8")
+            os.replace(tmp_path, self._research_candidates_path)
+
+    def _research_candidate(self, candidate: dict) -> dict:
+        slug = str(candidate.get("slug") or "").strip()
+        topic = str(candidate.get("topic") or "").strip()
+        if not slug or not topic:
+            return {"slug": slug, "status": "blocked", "reason": "invalid_candidate"}
+        prompt = textwrap.dedent(f"""\
+            Research this wiki candidate using web/source tools and return raw evidence only.
+
+            Topic: {topic}
+            Category: {candidate.get("category", "Research")}
+            Reason: {candidate.get("reason", "")}
+            Source queries: {json.dumps(candidate.get("source_queries") or [], ensure_ascii=False)}
+
+            Return ONLY a JSON object:
+            {{
+              "summary": "short source-grounded summary",
+              "confidence": "high|medium|low",
+              "blocked_reason": "",
+              "sources": [
+                {{
+                  "title": "source title",
+                  "url": "https://...",
+                  "source_kind": "primary|wire|aggregator|social|unknown",
+                  "published_at": "YYYY-MM-DD or empty",
+                  "evidence": "specific facts from the source"
+                }}
+              ]
+            }}
 
             Rules:
-            - Only suggest topics NOT already covered by existing pages.
-            - Do not write synthesized factual summaries.
-            - Suggest concrete source queries that can produce raw evidence.
-            - Write in Spanish.
-            - ONLY valid JSON array.
+            - Do not invent sources or URLs.
+            - If no verifiable sources are available, return sources=[] and blocked_reason.
+            - Do not write a wiki article; this step only gathers raw evidence.
         """)
+        try:
+            resp = self.router.ask(
+                prompt,
+                lane="worker",
+                max_budget=0.50,
+                timeout=180.0,
+                allowed_tools=[
+                    "WebSearch",
+                    "WebFetch",
+                    "FirecrawlSearch",
+                    "FirecrawlScrape",
+                    "WikiSearch",
+                ],
+                evidence_pack={"operation": "wiki_research_candidate", "candidate_slug": slug},
+            )
+            payload = self._parse_json(resp.content)
+        except Exception as exc:
+            logger.exception("Wiki research candidate failed for %s", slug)
+            reason = f"research_failed:{exc.__class__.__name__}"
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "blocked",
+                    "blocked_reason": reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {"slug": slug, "status": "blocked", "reason": reason}
 
+        sources = self._valid_research_sources(payload.get("sources"))
+        if not sources:
+            reason = str(payload.get("blocked_reason") or "no_verifiable_sources").strip()
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "blocked",
+                    "blocked_reason": reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {"slug": slug, "status": "blocked", "reason": reason}
+
+        raw_slug = f"research-{slug}"
+        raw_path = self.raw_dir / f"{raw_slug}.md"
+        if raw_path.exists():
+            raw_slug = f"{raw_slug}-{int(time.time())}"
+            raw_path = self.raw_dir / f"{raw_slug}.md"
+        raw_path.write_text(
+            self._render_research_raw_source(
+                candidate=candidate,
+                raw_slug=raw_slug,
+                summary=str(payload.get("summary") or "").strip(),
+                confidence=str(payload.get("confidence") or "medium").strip(),
+                sources=sources,
+            ),
+            encoding="utf-8",
+        )
+        updates = {
+            "status": "researched",
+            "raw_source_slug": raw_slug,
+            "raw_path": str(raw_path),
+            "sources_count": len(sources),
+            "confidence": str(payload.get("confidence") or "medium").strip(),
+            "researched_at": _now_iso(),
+            "updated_at": _now_iso(),
+        }
+        self._update_research_candidate(slug, updates)
+        return {
+            "slug": slug,
+            "status": "researched",
+            "raw_source_slug": raw_slug,
+            "sources_count": len(sources),
+        }
+
+    def _compile_research_candidate(self, candidate: dict) -> dict:
+        slug = str(candidate.get("slug") or "").strip()
+        topic = str(candidate.get("topic") or slug).strip()
+        raw_slug = str(candidate.get("raw_source_slug") or "").strip()
+        if not slug or not raw_slug or slug != _slugify(slug) or raw_slug != _slugify(raw_slug):
+            reason = "invalid_candidate"
+            if slug:
+                self._update_research_candidate(
+                    slug,
+                    {
+                        "status": "compile_blocked",
+                        "compile_blocked_reason": reason,
+                        "updated_at": _now_iso(),
+                    },
+                )
+            return {"slug": slug, "status": "compile_blocked", "reason": reason}
+
+        raw_path = self.raw_dir / f"{raw_slug}.md"
+        if not raw_path.exists():
+            reason = "raw_source_missing"
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "compile_blocked",
+                    "compile_blocked_reason": reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {"slug": slug, "status": "compile_blocked", "reason": reason}
+
+        try:
+            raw_text = raw_path.read_text(encoding="utf-8")
+        except Exception:
+            logger.exception("Wiki compile failed to read raw source %s", raw_slug)
+            reason = "raw_source_unreadable"
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "compile_blocked",
+                    "compile_blocked_reason": reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {"slug": slug, "status": "compile_blocked", "reason": reason}
+
+        now = _now_iso()
+        category = self._normalize_category(str(candidate.get("category") or "Research"))
+        prompt = textwrap.dedent(f"""\
+            Compile this researched raw evidence into one durable wiki page.
+
+            Candidate topic: {topic}
+            Candidate slug: {slug}
+            Category: {category}
+            Required raw source slug: {raw_slug}
+            Current time: {now}
+
+            Raw evidence:
+            {raw_text[:9000]}
+
+            Respond with ONLY a JSON object:
+            {{
+              "summary_page": {{
+                "filename": "{slug}.md",
+                "content": "full markdown with YAML frontmatter"
+              }},
+              "category": "{category}",
+              "index_entry": "- [[{slug}]] - short description"
+            }}
+
+            Required frontmatter fields in content:
+            title, tags, category, sources, created, updated.
+
+            Rules:
+            - Use only the raw evidence above.
+            - The filename must be exactly "{slug}.md".
+            - The sources frontmatter must include "{raw_slug}".
+            - Write the page body in Spanish unless the evidence is code or an exact title.
+            - Do not include claims that are not supported by the raw evidence.
+            - ONLY valid JSON.
+        """)
         try:
             resp = self.router.ask(
                 prompt,
                 lane=self.lane,
-                max_budget=0.40,
+                max_budget=0.35,
                 timeout=120.0,
-                evidence_pack={"operation": "auto_research"},
+                evidence_pack={
+                    "operation": "wiki_compile_research_candidate",
+                    "candidate_slug": slug,
+                    "raw_source_slug": raw_slug,
+                },
             )
-            topics = self._parse_json_array(resp.content)
-        except Exception:
-            logger.exception("Wiki auto_research failed")
-            return {"topics_researched": 0, "pages_written": 0}
-
-        candidates: list[dict] = []
-        for topic in topics[:max_topics]:
-            title = topic.get("topic", "")
-            category = topic.get("category", "Research")
-            if not title:
-                continue
-            slug = _slugify(title)
-            if (self.wiki_dir / f"{slug}.md").exists():
-                continue
-            candidates.append(
+            payload = self._parse_json(resp.content)
+        except Exception as exc:
+            logger.exception("Wiki compile candidate failed for %s", slug)
+            reason = f"compile_failed:{exc.__class__.__name__}"
+            self._update_research_candidate(
+                slug,
                 {
-                    "topic": title,
-                    "slug": slug,
-                    "category": self._normalize_category(category),
-                    "reason": topic.get("reason", ""),
-                    "source_queries": topic.get("source_queries", []),
+                    "status": "researched",
+                    "last_compile_failed_at": _now_iso(),
+                    "last_compile_failed_reason": reason,
+                    "compile_failures": int(candidate.get("compile_failures") or 0) + 1,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {"slug": slug, "status": "compile_failed", "reason": reason}
+
+        summary = payload.get("summary_page")
+        if not isinstance(summary, dict):
+            summary = {}
+        filename = summary.get("filename") if isinstance(summary.get("filename"), str) else ""
+        content = summary.get("content") if isinstance(summary.get("content"), str) else ""
+        quality_reason = self._compiled_page_quality_reason(
+            filename=filename,
+            content=content,
+            expected_slug=slug,
+            raw_slug=raw_slug,
+        )
+        if quality_reason:
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "compile_blocked",
+                    "compile_blocked_reason": "quality_gate_failed",
+                    "quality_gate_reason": quality_reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {
+                "slug": slug,
+                "status": "compile_blocked",
+                "reason": "quality_gate_failed",
+                "quality_gate_reason": quality_reason,
+            }
+
+        target = self.wiki_dir / filename
+        if target.exists():
+            reason = "page_already_exists"
+            self._update_research_candidate(
+                slug,
+                {
+                    "status": "compile_blocked",
+                    "compile_blocked_reason": reason,
+                    "updated_at": _now_iso(),
+                },
+            )
+            return {"slug": slug, "status": "compile_blocked", "reason": reason}
+
+        target.write_text(content.strip() + "\n", encoding="utf-8")
+        confidence = self._compute_confidence(target.stem)
+        self._set_frontmatter_field(target, "confidence", str(confidence))
+        final_content = target.read_text(encoding="utf-8")
+        self._index_page_embedding(target.stem, final_content)
+        self._save_embeddings()
+
+        output_category = self._normalize_category(
+            str(payload.get("category") or candidate.get("category") or category)
+        )
+        index_entry = (
+            str(payload.get("index_entry") or "").strip()
+            or f"- [[{target.stem}]] - {topic or target.stem}"
+        )
+        with self._lock:
+            self._update_index(output_category, index_entry)
+        self._append_log("compile_research", slug, 1)
+        self._update_research_candidate(
+            slug,
+            {
+                "status": "compiled",
+                "compiled_page_slug": target.stem,
+                "compiled_at": now,
+                "updated_at": now,
+            },
+        )
+        return {
+            "slug": slug,
+            "status": "compiled",
+            "compiled_page_slug": target.stem,
+            "raw_source_slug": raw_slug,
+            "pages_written": 1,
+        }
+
+    def _compiled_page_quality_reason(
+        self, *, filename: str, content: str, expected_slug: str, raw_slug: str
+    ) -> str:
+        filename = filename.strip()
+        if not filename or Path(filename).name != filename or not filename.endswith(".md"):
+            return "unsafe_filename"
+        page_slug = Path(filename).stem
+        if page_slug != expected_slug:
+            return "unexpected_filename"
+        stripped_content = content.strip()
+        frontmatter_match = _FRONTMATTER_RE.match(stripped_content)
+        if not stripped_content or not frontmatter_match:
+            return "missing_frontmatter"
+        fields = {
+            line.split(":", 1)[0].strip().lower()
+            for line in frontmatter_match.group(1).splitlines()
+            if ":" in line and not line[:1].isspace()
+        }
+        missing_fields = {"title", "tags", "category", "sources", "created", "updated"} - fields
+        if missing_fields:
+            return "missing_frontmatter_fields:" + ",".join(sorted(missing_fields))
+        sources = self._extract_sources(stripped_content)
+        if raw_slug not in sources:
+            return "missing_raw_source"
+        return ""
+
+    @staticmethod
+    def _compile_candidate_sort_key(candidate: dict) -> tuple[int, str]:
+        failed_at = str(candidate.get("last_compile_failed_at") or "")
+        if failed_at:
+            return (1, failed_at)
+        return (
+            0,
+            str(
+                candidate.get("researched_at")
+                or candidate.get("updated_at")
+                or candidate.get("created_at")
+                or ""
+            ),
+        )
+
+    def _update_research_candidate(self, slug: str, updates: dict) -> None:
+        with self._lock:
+            candidates = self._load_research_candidates()
+            for candidate in candidates:
+                if candidate.get("slug") == slug:
+                    candidate.update(updates)
+                    break
+            self._save_research_candidates(candidates)
+
+    def _valid_research_sources(self, value: object) -> list[dict]:
+        if not isinstance(value, list):
+            return []
+        sources: list[dict] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            evidence = str(item.get("evidence") or "").strip()
+            title = str(item.get("title") or "").strip()
+            if not url or not evidence:
+                continue
+            sources.append(
+                {
+                    "title": title or url,
+                    "url": url,
+                    "source_kind": str(item.get("source_kind") or "unknown").strip(),
+                    "published_at": str(item.get("published_at") or "").strip(),
+                    "evidence": evidence,
                 }
             )
+        return sources
 
-        self._append_log(
-            "auto_research", f"topics={len(candidates)} candidates={len(candidates)} written=0", 0
+    def _render_research_raw_source(
+        self,
+        *,
+        candidate: dict,
+        raw_slug: str,
+        summary: str,
+        confidence: str,
+        sources: list[dict],
+    ) -> str:
+        topic = str(candidate.get("topic") or raw_slug)
+        source_lines = []
+        for source in sources:
+            meta = ", ".join(
+                part
+                for part in [
+                    source.get("source_kind", "unknown"),
+                    source.get("published_at", ""),
+                ]
+                if part
+            )
+            source_lines.append(
+                f"- [{source['title']}]({source['url']})"
+                f"{f' ({meta})' if meta else ''}\n  {source['evidence']}"
+            )
+        return (
+            f"---\n"
+            f"title: {topic}\n"
+            f"type: auto-research\n"
+            f"candidate: {candidate.get('slug', '')}\n"
+            f"raw_slug: {raw_slug}\n"
+            f"researched: {_now_iso()}\n"
+            f"confidence: {confidence}\n"
+            f"sources_count: {len(sources)}\n"
+            f"---\n\n"
+            f"# {topic}\n\n"
+            f"{summary}\n\n"
+            f"## Sources\n\n"
+            f"{chr(10).join(source_lines)}\n"
         )
-        return {"topics_researched": len(candidates), "pages_written": 0, "candidates": candidates}
 
     # ------------------------------------------------------------------
     # Auto-Scrape Sources
@@ -797,8 +1377,6 @@ class WikiService:
 
     def auto_scrape_sources(self) -> dict:
         """Scrape watched sources via firecrawl, extract key items, ingest new ones."""
-        import subprocess
-
         now = time.time()
         if self._firecrawl_paused_until > now:
             remaining = int(self._firecrawl_paused_until - now)
@@ -820,28 +1398,84 @@ class WikiService:
         scraped = 0
         ingested = 0
         skipped = 0
+        source_results: list[dict] = []
+        item_results: list[dict] = []
         for name, url in self.WATCH_SOURCES:
+            source_result = {
+                "source": name,
+                "url": url,
+                "status": "pending",
+                "items_extracted": 0,
+                "items_ingested": 0,
+                "items_skipped": 0,
+                "skip_reasons": {},
+            }
+
+            def record_skip(reason: str) -> None:
+                source_result["items_skipped"] += 1
+                reasons = source_result["skip_reasons"]
+                reasons[reason] = int(reasons.get(reason, 0)) + 1
+
+            def record_item(
+                *,
+                title: str,
+                slug: str,
+                status: str,
+                reason: str = "",
+                duplicate_of: str = "",
+                pages_written: int = 0,
+            ) -> None:
+                if len(item_results) >= _MAX_SCRAPE_ITEM_RESULTS:
+                    return
+                item: dict[str, object] = {
+                    "source": name,
+                    "title": title,
+                    "slug": slug,
+                    "status": status,
+                }
+                if reason:
+                    item["reason"] = reason
+                if duplicate_of:
+                    item["duplicate_of"] = duplicate_of
+                if pages_written:
+                    item["pages_written"] = pages_written
+                item_results.append(item)
+
             try:
-                result = subprocess.run(
+                result = run_subprocess_bounded(
                     ["firecrawl", "scrape", url],
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
+                    timeout_s=60,
+                    observe=self.observe,
                 )
                 if result.returncode != 0 or not result.stdout.strip():
                     failure = classify_firecrawl_failure(result.stderr or result.stdout)
                     if failure == "insufficient_credits":
                         self._pause_firecrawl("insufficient_credits")
                         skipped += 1
+                        source_result.update(
+                            {"status": "skipped", "reason": "insufficient_credits"}
+                        )
+                        source_results.append(source_result)
                         break
                     if failure == "rate_limited":
                         self._pause_firecrawl("rate_limited", seconds=60 * 60)
                         skipped += 1
+                        source_result.update({"status": "skipped", "reason": "rate_limited"})
+                        source_results.append(source_result)
                         break
                     logger.warning("Wiki scrape failed for %s: %s", name, result.stderr[:200])
                     skipped += 1
+                    source_result.update(
+                        {
+                            "status": "skipped",
+                            "reason": "scrape_failed",
+                            "error_preview": (result.stderr or result.stdout)[:200],
+                        }
+                    )
+                    source_results.append(source_result)
                     continue
                 scraped += 1
+                source_result["status"] = "scraped"
                 content = result.stdout[:8000]
                 # Use LLM to extract distinct news items
                 prompt = textwrap.dedent(f"""\
@@ -867,24 +1501,95 @@ class WikiService:
                     evidence_pack={"operation": "auto_scrape", "source": name},
                 )
                 items = self._parse_json_array(resp.content)
+                source_result["items_extracted"] = len(items)
                 for item in items[:3]:
-                    title = item.get("title", "")
-                    body = item.get("content", "")
-                    if not title or len(body) < 50:
+                    if not isinstance(item, dict):
+                        record_skip("invalid_item")
+                        record_item(
+                            title="",
+                            slug="",
+                            status="skipped",
+                            reason="invalid_item",
+                        )
+                        continue
+                    title = str(item.get("title", "")).strip()
+                    body = str(item.get("content", "")).strip()
+                    if not title:
+                        record_skip("missing_title")
+                        record_item(title=title, slug="", status="skipped", reason="missing_title")
                         continue
                     slug = _slugify(title)
-                    if (self.wiki_dir / f"{slug}.md").exists():
+                    if len(body) < 50:
+                        record_skip("body_too_short")
+                        record_item(
+                            title=title,
+                            slug=slug,
+                            status="skipped",
+                            reason="body_too_short",
+                        )
                         continue
-                    if self._find_duplicate(body):
+                    if (self.wiki_dir / f"{slug}.md").exists():
+                        record_skip("existing_page")
+                        record_item(
+                            title=title,
+                            slug=slug,
+                            status="skipped",
+                            reason="existing_page",
+                        )
+                        continue
+                    duplicate = self._find_duplicate(body)
+                    if duplicate:
+                        record_skip("duplicate")
+                        record_item(
+                            title=title,
+                            slug=slug,
+                            status="skipped",
+                            reason="duplicate",
+                            duplicate_of=duplicate,
+                        )
                         continue
                     source_content = f"Source: {name}\nURL: {url}\n\n{body}"
                     ingest_result = self.ingest(title, source_content, source_type="auto-scrape")
-                    ingested += int(ingest_result.get("pages_written", 0))
+                    pages_written = int(ingest_result.get("pages_written", 0))
+                    ingested += pages_written
+                    if pages_written:
+                        source_result["items_ingested"] += 1
+                        record_item(
+                            title=title,
+                            slug=slug,
+                            status="ingested",
+                            pages_written=pages_written,
+                        )
+                    else:
+                        reason = (
+                            "duplicate"
+                            if ingest_result.get("duplicate_of")
+                            else "ingest_skipped"
+                            if ingest_result.get("skipped")
+                            else "ingest_no_pages"
+                        )
+                        record_skip(reason)
+                        record_item(
+                            title=title,
+                            slug=slug,
+                            status="skipped",
+                            reason=reason,
+                            duplicate_of=str(ingest_result.get("duplicate_of") or ""),
+                        )
+                source_results.append(source_result)
             except Exception:
                 logger.exception("Wiki scrape error for %s", name)
                 skipped += 1
+                source_result.update({"status": "error", "reason": "exception"})
+                source_results.append(source_result)
         self._append_log("auto_scrape", f"scraped={scraped} ingested={ingested}", ingested)
-        return {"sources_scraped": scraped, "pages_ingested": ingested, "sources_skipped": skipped}
+        return {
+            "sources_scraped": scraped,
+            "pages_ingested": ingested,
+            "sources_skipped": skipped,
+            "source_results": source_results,
+            "item_results": item_results,
+        }
 
     def _pause_firecrawl(self, reason: str, *, seconds: int = 24 * 60 * 60) -> None:
         self._firecrawl_pause_reason = reason
@@ -1776,18 +2481,19 @@ class WikiService:
     def _update_index(self, category: str, entry: str) -> None:
         if not entry.strip():
             return
-        category = self._normalize_category(category)
-        text = self.index_path.read_text(encoding="utf-8") if self.index_path.exists() else ""
-        # Check if entry already exists
-        if entry.strip() in text:
-            return
-        # Find category section and append
-        marker = f"## {category}"
-        if marker in text:
-            text = text.replace(marker, f"{marker}\n{entry.strip()}", 1)
-        else:
-            text += f"\n## {category}\n{entry.strip()}\n"
-        self.index_path.write_text(text, encoding="utf-8")
+        with self._lock:
+            category = self._normalize_category(category)
+            text = self.index_path.read_text(encoding="utf-8") if self.index_path.exists() else ""
+            # Check if entry already exists
+            if entry.strip() in text:
+                return
+            # Find category section and append
+            marker = f"## {category}"
+            if marker in text:
+                text = text.replace(marker, f"{marker}\n{entry.strip()}", 1)
+            else:
+                text += f"\n## {category}\n{entry.strip()}\n"
+            self.index_path.write_text(text, encoding="utf-8")
 
     # ------------------------------------------------------------------
     # Dedup, category normalization, graph rebuild, raw backfill

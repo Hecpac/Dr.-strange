@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from claw_v2.coordinator import CoordinatorResult, WorkerResult
+from claw_v2.cli_maintenance import CliMaintenanceResult
 from claw_v2.bot_helpers import (
     _evaluate_autonomy_policy,
     _infer_session_mode,
@@ -25,6 +26,15 @@ from claw_v2.observe import ObserveStream
 from claw_v2.sqlite_runtime import RuntimeDatabaseError, RuntimeDb
 from claw_v2.task_handler import TaskHandler
 from claw_v2.task_ledger import TaskLedger
+
+
+def _browser_success_text(
+    *,
+    url: str = "https://example.com/",
+    screenshot: str = "/tmp/browser-shot.png",
+    summary: str = "Navegador abierto",
+) -> str:
+    return f"{summary}\nURL final: {url}\nCaptura guardada: {screenshot}"
 
 
 class _BlockingCoordinator:
@@ -60,6 +70,30 @@ class _BlockingCoordinator:
 
 
 class TaskHandlerTests(unittest.TestCase):
+    def test_internal_autonomous_cancel_uses_request_cancel_with_formal_leases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(Path(tmpdir) / "claw.db", formal_leases_enabled=True)
+            created = jobs.enqueue(kind="pipeline.issue", metadata={"owner": "runner"})
+            handler = TaskHandler.__new__(TaskHandler)
+            handler.job_service = jobs
+
+            handler._cancel_autonomous_job(
+                "task-1",
+                reason="cancelled_before_start",
+                job_id=created.job_id,
+            )
+
+            persisted = jobs.get(created.job_id)
+            self.assertEqual(persisted.status, "queued")
+            self.assertEqual(
+                persisted.metadata["cancel_request"]["requested_by"],
+                "task_handler",
+            )
+            self.assertEqual(
+                persisted.metadata["cancel_request"]["reason"],
+                "cancelled_before_start",
+            )
+
     def test_passed_verification_is_rejected_when_result_says_not_verified(self) -> None:
         self.assertTrue(
             TaskHandler._response_contradicts_passed_verification(
@@ -1352,7 +1386,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
 
             def fake_exec(objective, *, task_id, mode):
                 recorded["executor"] = (objective, task_id, mode)
-                return "feed capturado: 30 posts"
+                return _browser_success_text(summary="feed capturado: 30 posts")
 
             handler = self._handler(Path(tmpdir), recorded, browser_executor=fake_exec)
             out = handler._run_coordinated_task(
@@ -1378,7 +1412,11 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
 
             def fake_exec(objective, *, task_id, mode):
                 recorded["executor"] = (objective, task_id, mode)
-                return "Instagram visible y verificado"
+                return _browser_success_text(
+                    url="https://www.instagram.com/",
+                    screenshot="/tmp/instagram.png",
+                    summary="Instagram visible y verificado",
+                )
 
             handler = TaskHandler(
                 coordinator=_RecordingCoordinator(),
@@ -1403,6 +1441,48 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             self.assertIsNotNone(record)
             self.assertEqual(record.mode, "browse")
             self.assertEqual(record.status, "succeeded")
+
+    def test_browser_executor_terminal_failure_blocks_original_task_queue_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            objective = "Ya tengo mi cuenta creada y debe estar autenticada por defecto"
+
+            class _RecordingCoordinator:
+                def run(self, task_id, objective, research_tasks, **kwargs):
+                    raise AssertionError("browser objective must not run coordinator")
+
+            def browser_executor(_objective, *, task_id, mode):
+                return "(no result)"
+
+            handler = TaskHandler(
+                coordinator=_RecordingCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                browser_executor=browser_executor,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+            )
+            memory.update_session_state("tg-1", autonomy_mode="autonomous", step_budget=8)
+
+            reply = handler.start_autonomous_task("tg-1", objective, mode="browse")
+            task_id = reply.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=2))
+
+            state = memory.get_session_state("tg-1")
+            queue = state.get("task_queue") or []
+            queue_item = next(item for item in queue if item["summary"] == objective)
+            self.assertEqual(queue_item["status"], "blocked")
+            self.assertEqual(state.get("pending_action"), "")
+            self.assertEqual(state["active_object"]["active_task"]["status"], "failed")
+            record = ledger.get(task_id)
+            self.assertIsNotNone(record)
+            self.assertEqual(record.status, "failed")
+            self.assertEqual(record.verification_status, "failed")
 
     def test_publish_planning_language_falls_through_to_brain(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1521,7 +1601,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
 
             def fake_exec(objective, *, task_id, mode):
                 recorded["executor"] = (objective, task_id, mode)
-                return "feed capturado: 30 posts"
+                return _browser_success_text(summary="feed capturado: 30 posts")
 
             handler = self._handler(Path(tmpdir), recorded, browser_executor=fake_exec)
             out = handler._run_coordinated_task(
@@ -1591,7 +1671,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
 
             def fake_exec(objective, *, task_id, mode):
                 calls["executor"] += 1
-                return "feed capturado: 30 posts"
+                return _browser_success_text(summary="feed capturado: 30 posts")
 
             def flaky_update(session_id, **kwargs):
                 if kwargs.get("verification_status") == "passed" and calls["failed_update"] == 0:
@@ -1638,6 +1718,170 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
                 "tg-1", "repaso por X", mode="browse", forced=False, task_id="t-4"
             )
             self.assertTrue(recorded["coordinator_ran"])
+
+    def test_autonomous_cli_maintenance_uses_cli_runner_not_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            recorded: dict = {}
+
+            class _RecordingCoordinator:
+                def run(self, task_id, objective, research_tasks, **kwargs):
+                    recorded["coordinator_ran"] = True
+                    return CoordinatorResult(task_id=task_id, phase_results={}, synthesis="coord")
+
+            def cli_runner(**kwargs):
+                recorded["cli_runner"] = kwargs
+                return CliMaintenanceResult(
+                    verification_status="passed",
+                    summary="Codex CLI updated to 0.142.4; Claude Code already current.",
+                    tool_versions={
+                        "codex": {
+                            "installed": "0.142.3",
+                            "latest": "0.142.4",
+                            "verified": "0.142.4",
+                            "action": "updated",
+                        },
+                        "claude": {
+                            "installed": "2.1.195",
+                            "latest": "2.1.195",
+                            "verified": "2.1.195",
+                            "action": "already_current",
+                        },
+                    },
+                    commands_run=(
+                        ("codex", "--version"),
+                        ("npm", "view", "@openai/codex", "version"),
+                    ),
+                    installed_packages=("@openai/codex@0.142.4",),
+                )
+
+            handler = TaskHandler(
+                coordinator=_RecordingCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                cli_maintenance_runner=cli_runner,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                workspace_root=root,
+            )
+            memory.update_session_state("tg-1", autonomy_mode="autonomous", step_budget=8)
+            objective = "Actualiza los cli de Claude code y codex"
+
+            reply = handler.start_autonomous_task(
+                "tg-1",
+                objective,
+                mode="ops",
+                task_kind="maintenance_update_tools",
+            )
+
+            self.assertIn("Tarea autónoma iniciada", reply)
+            task_id = reply.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=2))
+            self.assertIn("cli_runner", recorded)
+            self.assertEqual(recorded["cli_runner"]["cwd"], root)
+            self.assertNotIn("coordinator_ran", recorded)
+            record = ledger.get(task_id)
+            self.assertIsNotNone(record)
+            self.assertEqual(record.status, "succeeded")
+            self.assertEqual(record.verification_status, "passed")
+            checkpoint = memory.get_session_state("tg-1").get("last_checkpoint") or {}
+            self.assertEqual(checkpoint.get("operation"), "maintenance_update_tools")
+            self.assertEqual(checkpoint.get("verification_status"), "passed")
+            queue = memory.get_session_state("tg-1").get("task_queue") or []
+            queue_item = next(item for item in queue if item["summary"] == objective)
+            self.assertEqual(queue_item["status"], "done")
+
+    def test_autonomous_job_claim_blocked_fails_closed_without_running_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            recorded: dict = {}
+
+            class _RecordingCoordinator:
+                def run(self, task_id, objective, research_tasks, **kwargs):
+                    recorded["coordinator_ran"] = True
+                    return CoordinatorResult(task_id=task_id, phase_results={}, synthesis="coord")
+
+            task_id = "tg-1:t-claim-blocked"
+            objective = "Actualiza los cli de Claude code y codex"
+            job = jobs.enqueue(
+                kind="coordinator.autonomous_task",
+                payload={
+                    "task_id": task_id,
+                    "session_id": "tg-1",
+                    "objective": objective,
+                    "mode": "ops",
+                },
+                resume_key=TaskHandler._resume_key_for_task(task_id),
+            )
+            ledger.create(
+                task_id=task_id,
+                session_id="tg-1",
+                objective=objective,
+                mode="ops",
+                runtime="coordinator",
+                provider="codex",
+                model="gpt",
+                status="running",
+            )
+            memory.update_session_state(
+                "tg-1",
+                active_object={
+                    "active_task": {
+                        "task_id": task_id,
+                        "objective": objective,
+                        "mode": "ops",
+                        "status": "running",
+                    }
+                },
+                task_queue=TaskHandler.upsert_task_queue_entry(
+                    [],
+                    summary=objective,
+                    mode="ops",
+                    status="in_progress",
+                    source="coordinator",
+                    priority=0,
+                ),
+            )
+            jobs.set_safe_mode_reason("branch_integrity_violation")
+
+            handler = TaskHandler(
+                coordinator=_RecordingCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+            )
+
+            handler._run_autonomous_task("tg-1", task_id, objective, "ops", job_id=job.job_id)
+
+            self.assertNotIn("coordinator_ran", recorded)
+            record = ledger.get(task_id)
+            self.assertIsNotNone(record)
+            self.assertEqual(record.status, "failed")
+            self.assertEqual(record.verification_status, "blocked")
+            failed_job = jobs.get(job.job_id)
+            self.assertIsNotNone(failed_job)
+            self.assertEqual(failed_job.status, "failed")
+            self.assertIn("job_claim_blocked", failed_job.error)
+            checkpoint = memory.get_session_state("tg-1").get("last_checkpoint") or {}
+            self.assertEqual(checkpoint.get("verification_status"), "blocked")
+            self.assertEqual(checkpoint.get("reason"), "job_claim_blocked")
+            queue = memory.get_session_state("tg-1").get("task_queue") or []
+            queue_item = next(item for item in queue if item["summary"] == objective)
+            self.assertEqual(queue_item["status"], "blocked")
+            events = [event["event_type"] for event in observe.recent_events(limit=50)]
+            self.assertIn("job_claim_blocked", events)
+            self.assertIn("autonomous_task_failed", events)
 
     def _autonomous_handler(self, root: Path, *, browser_executor):
         memory = MemoryStore(root / "claw.db")
@@ -1700,31 +1944,80 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             record = ledger.get("t-nores")
             self.assertEqual(record.status, "failed")
 
-    def test_deterministic_browser_executor_records_structured_executor(self) -> None:
+    def test_browser_executor_text_success_without_evidence_does_not_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             handler, ledger, jobs = self._autonomous_handler(
                 Path(tmpdir),
-                browser_executor=lambda o, *, task_id, mode: (
-                    "Navegador abierto en Chrome CDP.\n"
-                    "URL final: https://www.instagram.com/pachanodesign/\n"
-                    "Título: Instagram\n"
-                    "Captura guardada: /tmp/claw-instagram-open.png"
-                ),
+                browser_executor=lambda o, *, task_id, mode: "Navegador abierto",
             )
             self._run_autonomous_browser(
-                handler, ledger, jobs, task_id="t-cdp", objective="abre mi perfil"
+                handler, ledger, jobs, task_id="t-no-evidence", objective="Abre la web"
             )
+
             outcome_events = [
                 e
                 for e in handler.observe.recent_events(limit=50)
                 if e["event_type"] == "automation_outcome_recorded"
             ]
             payload = outcome_events[-1]["payload"]
-            self.assertEqual(payload["status"], "passed")
-            self.assertEqual(payload["surface"], "browser")
-            self.assertEqual(payload["executor"], "deterministic_browser")
-            record = ledger.get("t-cdp")
-            self.assertEqual(record.status, "succeeded")
+            self.assertEqual(payload["status"], "no_result")
+            self.assertEqual(payload["reason_code"], "missing_final_url")
+            record = ledger.get("t-no-evidence")
+            self.assertEqual(record.status, "failed")
+
+    def test_browser_executor_url_outside_objective_fails_wrong_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir),
+                browser_executor=lambda o, *, task_id, mode: _browser_success_text(
+                    url="https://evil.example/",
+                    summary="Navegador abierto",
+                ),
+            )
+            self._run_autonomous_browser(
+                handler,
+                ledger,
+                jobs,
+                task_id="t-wrong-page",
+                objective="Abre https://example.com",
+            )
+
+            outcome_events = [
+                e
+                for e in handler.observe.recent_events(limit=50)
+                if e["event_type"] == "automation_outcome_recorded"
+            ]
+            payload = outcome_events[-1]["payload"]
+            self.assertEqual(payload["status"], "failed")
+            self.assertEqual(payload["reason_code"], "wrong_page")
+            record = ledger.get("t-wrong-page")
+            self.assertEqual(record.status, "failed")
+
+    def test_browser_executor_login_marker_is_blocked_not_passed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handler, ledger, jobs = self._autonomous_handler(
+                Path(tmpdir),
+                browser_executor=lambda o, *, task_id, mode: (
+                    "accounts/login solicita iniciar sesión\n"
+                    "URL final: https://example.com/accounts/login\n"
+                    "Captura guardada: /tmp/login.png"
+                ),
+            )
+            self._run_autonomous_browser(
+                handler, ledger, jobs, task_id="t-login", objective="Abre https://example.com"
+            )
+
+            outcome_events = [
+                e
+                for e in handler.observe.recent_events(limit=50)
+                if e["event_type"] == "automation_outcome_recorded"
+            ]
+            payload = outcome_events[-1]["payload"]
+            self.assertEqual(payload["status"], "needs_login")
+            self.assertEqual(payload["reason_code"], "login_required")
+            record = ledger.get("t-login")
+            self.assertEqual(record.status, "failed")
+            self.assertEqual(record.verification_status, "failed")
 
     def test_browser_executor_needs_approval_records_structured_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1747,9 +2040,7 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
             ]
             payload = outcome_events[-1]["payload"]
             self.assertEqual(payload["status"], "needs_approval")
-            self.assertEqual(payload["reason_code"], "needs_approval")
-            self.assertEqual(payload["surface"], "browser")
-            self.assertEqual(payload["executor"], "browser_use")
+            self.assertEqual(payload["reason_code"], "policy_denied")
             record = ledger.get("t-approval")
             self.assertEqual(record.status, "failed")
 
@@ -1775,7 +2066,9 @@ class BrowserExecutorRoutingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             handler, ledger, jobs = self._autonomous_handler(
                 Path(tmpdir),
-                browser_executor=lambda o, *, task_id, mode: "Capturé 32 posts del timeline: ...",
+                browser_executor=lambda o, *, task_id, mode: _browser_success_text(
+                    summary="Capturé 32 posts del timeline: ..."
+                ),
             )
             self._run_autonomous_browser(
                 handler, ledger, jobs, task_id="t-ok", objective="repaso por X"
@@ -1853,6 +2146,87 @@ class StaleMessageTests(unittest.TestCase):
                 assistant_texts[-1].startswith("No pude cerrar bien la tarea"),
                 assistant_texts[-1],
             )
+
+
+class WaitingUserInputRecoveryHintTests(unittest.TestCase):
+    """S-α — a waiting_for_user_input failure must announce its recovery path.
+
+    The rescue mechanism (continuation shortcut ~24h + /task_pending) predates
+    this slice; the failure notification never mentioned it, leaving the user
+    at a dead end (recon jul-2026, caso KeepAlive)."""
+
+    def test_waiting_user_input_failure_announces_recovery_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            memory = MemoryStore(root / "claw.db")
+            observe = ObserveStream(root / "observe.db")
+            ledger = TaskLedger(root / "claw.db", observe=observe)
+            jobs = JobService(root / "claw.db", observe=observe)
+            stored: list[tuple[str, str, str]] = []
+
+            class _BlockedCoordinator:
+                def run(
+                    self,
+                    task_id,
+                    objective,
+                    research_tasks,
+                    implementation_tasks=None,
+                    verification_tasks=None,
+                    lane_overrides=None,
+                    **kwargs,
+                ):
+                    return CoordinatorResult(
+                        task_id=task_id,
+                        phase_results={
+                            "verification": [
+                                WorkerResult(
+                                    task_name="verify_change",
+                                    content=(
+                                        "Verification Status: pending\n"
+                                        "Siguiente paso: solicitar al usuario el enlace del documento"
+                                    ),
+                                    duration_seconds=0.1,
+                                )
+                            ]
+                        },
+                        synthesis="plan listo",
+                    )
+
+            handler = TaskHandler(
+                coordinator=_BlockedCoordinator(),
+                observe=observe,
+                task_ledger=ledger,
+                job_service=jobs,
+                get_session_state=memory.get_session_state,
+                update_session_state=memory.update_session_state,
+                store_message=lambda sid, role, text: stored.append((sid, role, text)),
+                workspace_root=root,
+            )
+            ack = handler.start_autonomous_task("tg-1", "implementa el informe", mode="coding")
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=5))
+
+            events = observe.recent_events(limit=200)
+            failed = next(e for e in events if e["event_type"] == "autonomous_task_failed")
+            response = failed["payload"]["response"]
+            self.assertIn("/task_pending", response)
+            self.assertIn("24h", response)
+            self.assertIn("responder", response.lower())
+            assistant_texts = [text for _sid, role, text in stored if role == "assistant"]
+            self.assertTrue(assistant_texts, "assistant message must be stored")
+            self.assertIn("/task_pending", assistant_texts[-1])
+
+    def test_failure_text_without_user_input_block_has_no_recovery_hint(self) -> None:
+        from claw_v2.task_handler import _failure_response_text
+
+        text = _failure_response_text(
+            task_id="t1",
+            checkpoint={"summary": "resumen"},
+            error="research_phase_failed: gather_findings",
+            objective="obj",
+        )
+        self.assertNotIn("/task_pending", text)
+        self.assertNotIn("24h", text)
 
 
 class TaskQueueVocabularyTests(unittest.TestCase):

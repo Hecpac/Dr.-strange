@@ -557,6 +557,7 @@ class AppConfig:
     formal_job_leases_enabled: bool = False
     f2_durability_enabled: bool = False
     notebooklm_research_durable: bool = False
+    observe_vacuum_enabled: bool = False
 
     @property
     def notebooklm_research_durable_active(self) -> bool:
@@ -852,6 +853,7 @@ class AppConfig:
                 _env_bool("F2_DURABILITY_ENABLED", False),
             ),
             notebooklm_research_durable=_env_bool("CLAW_NOTEBOOKLM_RESEARCH_DURABLE", False),
+            observe_vacuum_enabled=_env_bool("CLAW_OBSERVE_VACUUM_ENABLED", False),
         )
 
     def ensure_directories(self) -> None:

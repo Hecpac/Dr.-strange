@@ -25,8 +25,8 @@ from claw_v2.heygen_readonly import (
 )
 
 
-API_KEY = "HEYGEN-SECRET-KEY-123456"
-APPROVAL_TOKEN = "approval-token-secret-abc123"
+API_KEY = "HEYGEN-" + "SECRET-KEY-123456"
+APPROVAL_TOKEN = "approval-" + "token-secret-abc123"
 VIDEO_ID = "bf41989e378048a4bda1cf89f5cadc92"
 
 

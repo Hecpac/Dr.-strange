@@ -150,7 +150,7 @@ def test_plan_request_still_blocks_explicit_unverified_execution_report() -> Non
             events = [event["event_type"] for event in runtime.observe.recent_events(limit=60)]
 
     assert response is not None
-    assert "Decime qué disparo" in response
+    assert "Retuve mi respuesta" in response
     assert "Cambi" not in response
     assert "evidence_gate_blocked_completion_claim" in events
     assert "evidence_gate_skipped_plan_status" not in events

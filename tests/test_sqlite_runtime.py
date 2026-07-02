@@ -7,10 +7,12 @@ import time
 import traceback
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from claw_v2.sqlite_runtime import (
     SQLITE_BUSY_TIMEOUT_MS,
     RuntimeDatabaseError,
+    RuntimeDbDegradedError,
     RuntimeDb,
     StoreWalHealHandle,
     _registry_key,
@@ -18,6 +20,61 @@ from claw_v2.sqlite_runtime import (
     check_runtime_sqlite_health,
     connect_runtime_sqlite,
 )
+
+
+class _FailingCursor:
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+        self.row_factory = None
+        self.closed = False
+
+    def execute(self, *args, **kwargs):
+        raise self.exc
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FailingConnection:
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+        self.closed = False
+        self.rollback_called = False
+
+    def cursor(self):
+        return _FailingCursor(self.exc)
+
+    def commit(self) -> None:
+        raise self.exc
+
+    def rollback(self) -> None:
+        self.rollback_called = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ClosedOnCursorConnection:
+    def cursor(self):
+        raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+
+    def commit(self) -> None:
+        raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+
+    def rollback(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _sqlite_error(message: str, *, code: int | None = None, name: str | None = None):
+    exc = sqlite3.OperationalError(message)
+    if code is not None:
+        exc.sqlite_errorcode = code
+    if name is not None:
+        exc.sqlite_errorname = name
+    return exc
 
 
 class RuntimeSqliteTests(unittest.TestCase):
@@ -239,6 +296,207 @@ class RuntimeDbTests(unittest.TestCase):
             db.close()
             self.assertEqual([h for h in _WAL_HEAL_REGISTRY.get(key, []) if h.alive], [])
             db.close()  # idempotent
+
+
+class RuntimeDbDegradedTests(unittest.TestCase):
+    def _runtime_db(self, tmpdir: str, **kwargs) -> RuntimeDb:
+        db = RuntimeDb(Path(tmpdir) / "claw.db", **kwargs)
+        self.addCleanup(db.close)
+        with db.transaction() as cur:
+            cur.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+            cur.execute("INSERT INTO t (v) VALUES ('ok')")
+        return db
+
+    def _trigger_cursor_failure(self, db: RuntimeDb) -> RuntimeDbDegradedError:
+        with self.assertRaises(RuntimeDbDegradedError) as caught:
+            with db.cursor() as cur:
+                cur.execute("SELECT 1")
+        return caught.exception
+
+    def test_ioerr_marks_degraded_with_structured_reason_and_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            events: list[dict[str, object]] = []
+            db = self._runtime_db(tmpdir, degraded_event_sink=events.append)
+            db._conn = _FailingConnection(
+                _sqlite_error("disk I/O error", code=sqlite3.SQLITE_IOERR, name="SQLITE_IOERR")
+            )
+
+            error = self._trigger_cursor_failure(db)
+
+            self.assertEqual(error.reason.reason_code, "sqlite_ioerr")
+            self.assertEqual(error.reason.operation, "RuntimeDb.cursor")
+            self.assertEqual(error.reason.database_path, str(db.db_path))
+            self.assertIsNotNone(error.reason.detected_at)
+            self.assertEqual(events[-1]["reason_code"], "sqlite_ioerr")
+            self.assertEqual(events[-1]["database_path"], str(db.db_path))
+            health = db.healthcheck(thorough=True)
+            self.assertFalse(health.healthy)
+            self.assertTrue(health.degraded)
+            self.assertEqual(health.reason_code, "sqlite_ioerr")
+
+    def test_critical_sqlite_errors_mark_expected_degraded_reason_codes(self) -> None:
+        cases = (
+            (
+                "short_read",
+                _sqlite_error(
+                    "disk I/O error",
+                    code=522,
+                    name="SQLITE_IOERR_SHORT_READ",
+                ),
+                "sqlite_ioerr_short_read",
+                _FailingConnection,
+            ),
+            (
+                "closed",
+                sqlite3.ProgrammingError("Cannot operate on a closed database."),
+                "connection_closed",
+                _FailingConnection,
+            ),
+            (
+                "closed_on_cursor",
+                None,
+                "connection_closed",
+                _ClosedOnCursorConnection,
+            ),
+            (
+                "malformed",
+                sqlite3.DatabaseError("database disk image is malformed"),
+                "healthcheck_failed",
+                _FailingConnection,
+            ),
+            (
+                "unknown_critical",
+                _sqlite_error(
+                    "unclassified critical sqlite failure",
+                    code=9999,
+                    name="SQLITE_UNKNOWN_CRITICAL",
+                ),
+                "unknown_sqlite_critical",
+                _FailingConnection,
+            ),
+        )
+        for name, exc, reason_code, conn_cls in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    db = self._runtime_db(tmpdir)
+                    db._conn = conn_cls() if exc is None else conn_cls(exc)
+
+                    error = self._trigger_cursor_failure(db)
+
+                    self.assertEqual(error.reason.reason_code, reason_code)
+                    self.assertEqual(db.healthcheck().reason_code, reason_code)
+
+    def test_degraded_blocks_application_reads_and_writes_but_healthcheck_reports_reason(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+            db._conn = _FailingConnection(_sqlite_error("disk I/O error"))
+            error = self._trigger_cursor_failure(db)
+
+            with self.assertRaises(RuntimeDbDegradedError) as read_error:
+                with db.cursor() as cur:
+                    cur.execute("SELECT * FROM t")
+            with self.assertRaises(RuntimeDbDegradedError) as write_error:
+                with db.transaction() as cur:
+                    cur.execute("INSERT INTO t (v) VALUES ('blocked')")
+            health = check_runtime_sqlite_health(db.db_path, thorough=True, return_status=True)
+
+            self.assertIs(read_error.exception.reason, error.reason)
+            self.assertIs(write_error.exception.reason, error.reason)
+            self.assertTrue(health.degraded)
+            self.assertEqual(health.reason_code, error.reason.reason_code)
+            self.assertEqual(health.database_path, str(db.db_path))
+
+    def test_locked_transient_does_not_degrade_but_persistent_lock_does(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir, persistent_lock_threshold=3)
+            real_conn = db._current_connection_for_tests()
+            db._conn = _FailingConnection(sqlite3.OperationalError("database is locked"))
+
+            with self.assertRaises(sqlite3.OperationalError):
+                with db.cursor() as cur:
+                    cur.execute("SELECT 1")
+            self.assertFalse(db.healthcheck().degraded)
+
+            db._conn = real_conn
+            with db.cursor() as cur:
+                self.assertEqual(cur.execute("SELECT COUNT(*) FROM t").fetchone()[0], 1)
+
+            db._conn = _FailingConnection(sqlite3.OperationalError("database is locked"))
+            for _ in range(2):
+                with self.assertRaises(sqlite3.OperationalError):
+                    with db.cursor() as cur:
+                        cur.execute("SELECT 1")
+            with self.assertRaises(RuntimeDbDegradedError) as caught:
+                with db.cursor() as cur:
+                    cur.execute("SELECT 1")
+
+            self.assertEqual(caught.exception.reason.reason_code, "persistent_lock")
+            self.assertTrue(db.healthcheck().degraded)
+
+    def test_degraded_event_sink_failure_still_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def broken_sink(payload):
+                raise RuntimeError("sink unavailable")
+
+            db = self._runtime_db(tmpdir, degraded_event_sink=broken_sink)
+            db._conn = _FailingConnection(_sqlite_error("disk I/O error"))
+
+            error = self._trigger_cursor_failure(db)
+
+            self.assertEqual(error.reason.reason_code, "sqlite_ioerr")
+            with self.assertRaises(RuntimeDbDegradedError):
+                with db.cursor():
+                    pass
+
+    def test_runtime_db_sidecar_ioerr_degrades_without_sidecar_cleanup(self) -> None:
+        import claw_v2.sqlite_runtime as sqlite_runtime
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+            wal = Path(f"{db.db_path}-wal")
+            shm = Path(f"{db.db_path}-shm")
+            wal.write_bytes(b"non-empty wal frames")
+            shm.write_bytes(b"live shm")
+            db._conn = _FailingConnection(
+                _sqlite_error("disk I/O error", name="SQLITE_IOERR")
+            )
+
+            with patch.object(
+                sqlite_runtime,
+                "_cleanup_recoverable_sidecars",
+                side_effect=AssertionError("RuntimeDb degraded path must not clean sidecars"),
+            ):
+                error = self._trigger_cursor_failure(db)
+
+            self.assertEqual(error.reason.reason_code, "sqlite_ioerr")
+            self.assertEqual(wal.read_bytes(), b"non-empty wal frames")
+            self.assertEqual(shm.read_bytes(), b"live shm")
+
+    def test_synthetic_healthcheck_writes_reads_and_cleans_up_ttl_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+
+            first = db.synthetic_healthcheck(
+                correlation_id="synthetic_healthcheck:old",
+                now=100.0,
+                ttl_seconds=1.0,
+            )
+            second = db.synthetic_healthcheck(
+                correlation_id="synthetic_healthcheck:new",
+                now=102.0,
+                ttl_seconds=60.0,
+            )
+
+            self.assertEqual(first["namespace"], "synthetic_healthcheck")
+            self.assertEqual(first["correlation_id"], "synthetic_healthcheck:old")
+            self.assertEqual(second["correlation_id"], "synthetic_healthcheck:new")
+            with db.cursor() as cur:
+                rows = cur.execute(
+                    "SELECT correlation_id FROM runtime_synthetic_healthcheck"
+                ).fetchall()
+            self.assertEqual([row["correlation_id"] for row in rows], ["synthetic_healthcheck:new"])
 
 
 class RuntimeDbHandleTests(unittest.TestCase):

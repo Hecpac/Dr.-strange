@@ -33,6 +33,9 @@ dev = [
 [tool.ruff]
 line-length = 100
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.ruff.lint]
 # Default select (E,F) plus an explicit ignore list for patterns this codebase
 # uses on purpose, so `ruff check` is real signal and the self-improve promotion

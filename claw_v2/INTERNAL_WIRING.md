@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "P0-2 daemon branch-integrity safe mode: detect a wrong-branch strand of the live shared checkout (pure .git/HEAD read, fail-open, no auto-heal) and stop claiming jobs via a JobService safe-mode latch"
-doc_version: 2.43
-last_verified: 2026-06-28
-verification_method: "code cross-read of the P0-2 branch-integrity path (daemon.py _read_current_branch/_check_branch_integrity/_enter|_clear_branch_integrity_safe_mode + tick/run_loop wiring, jobs.py set_safe_mode_reason + 4 claim sites, main.py _branch_integrity_check_enabled arming gate) against this doc + new test_daemon_branch_integrity.py (19) + adversarial false-positive panel (deploy-sim/head-edge/config-throttle, all HOLD) + full suite re-run in an ISOLATED worktree (3876 passed, 1 skipped, 0 foreign-kill-guard violations) + test_architecture_invariants green (subprocess-free tick preserved). Predecessor C1-C5 (doc_version 2.42) remains in main"
+describes_commit: "C1-Sγ.0 autonomy-plan: redrive observability — every governor decision on a DECLARED blocker class emits autonomous_task_redrive_decision (action fail_closed for non-redrivable classes; classless checkpoints stay silent — they are normal verification deferrals, not class decisions), blocker_class persisted in redrive_pending and carried on autonomous_task_redrive_resumed + terminal autonomous_task_failed events. Governor stale-task guard now runs before class routing. Predecessor C1-Sβ (doc_version 2.47) in main"
+doc_version: 2.48
+last_verified: 2026-07-02
+verification_method: "code cross-read of _maybe_start_redrive / _consume_redrive_pending / the terminal autonomous_task_failed emit against this doc + tests/test_task_redrive.py (RedriveObservabilityTests: fail_closed event per declared class, no-spam on classless checkpoints, stale-task silent, blocker_class in pending/resumed/terminal) + β suites green (35 tests) + adjacent task_handler/architecture/bot_helpers/lifecycle suites green (138 tests). Live smoke of γ (evidence pre-step) pending — γ.0 makes the smoke measurable against the 2026-07-02 baseline (4 deaths/13h)"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1025,6 +1025,121 @@ invariants:
       - tests/test_daemon.py::AutonomyStaleRunningAllowlistTests::test_f4b_delegation_in_stale_running_allowlist
       - tests/test_daemon.py::F4DelegationClaimExclusivityTests::test_claim_next_calls_are_filtered_and_f4b_kind_is_exclusive
       - tests/test_daemon.py::F4DelegationClaimExclusivityTests::test_main_does_not_wire_a_generic_consumer_for_f4b_kind
+
+  waiting_user_input_failure_announces_recovery:
+    rule: A terminal task-failure notification whose error carries the
+          waiting_for_user_input class MUST append
+          _WAITING_USER_INPUT_RECOVERY_HINT (claw_v2/task_handler.py,
+          _failure_response_text), announcing the pre-existing rescue path —
+          reply-in-chat re-drives the task (continuation shortcut,
+          _recent_waiting_for_user_task, ~24h window) and /task_pending shows
+          the blocker detail. The hint fires ONLY for that error class; every
+          other failure text stays hint-free.
+    enforced_by:
+      - tests/test_task_handler.py::WaitingUserInputRecoveryHintTests::test_waiting_user_input_failure_announces_recovery_path
+      - tests/test_task_handler.py::WaitingUserInputRecoveryHintTests::test_failure_text_without_user_input_block_has_no_recovery_hint
+    why: The rescue mechanism predates the hint but was never announced, so the
+         notification was a dead end — the user received worker-internal
+         blockers with no visible way to respond (recon jul-2026, caso
+         KeepAlive tg-574707975). Slice S-α of the autonomy remediation block
+         (α announce / β bounded re-drive / γ evidence phase / δ structured
+         verdict); regressing it reopens the dead end silently.
+
+  evidence_gate_user_knowledge_authority:
+    rule: When the CURRENT user message explicitly authorizes answering from
+          the model's own knowledge (_user_authorized_knowledge_answer,
+          claw_v2/bot.py), _completion_claim_lacks_evidence MUST skip the
+          completion-claim block with an audited
+          evidence_gate_skipped_user_authority event
+          (authority=knowledge_answer) and deliver the brain content intact.
+          Without that authorization in the current turn, an unevidenced
+          completion claim MUST stay suppressed and replaced by the
+          informative template — F4-B1 is never weakened, and authorization
+          never leaks from prior messages (predicate reads source_text of the
+          current turn only).
+    enforced_by:
+      - tests/test_evidence_gate_user_authority.py::test_user_authorized_knowledge_close_is_delivered
+      - tests/test_evidence_gate_user_authority.py::test_unauthorized_completion_claim_stays_blocked
+    why: On 2026-07-02 (obs 400609/401107) the gate suppressed two legitimate
+         inline deliverables — including Hector's reply to the S-α recovery
+         announcement ("USA tu propio conocimiento… y cierra") — replacing
+         each with a 49-char stub. The S-α rescue arc was broken in prod by
+         the gate's own false positive; the gate must block confabulated
+         side-effect claims, not user-authorized knowledge answers. Slice
+         C0-S1 of the autonomy remediation plan
+         (memoria autonomy-remediation-plan-2026-07-02).
+         Known gap (pre-existing, shared with _user_authoritatively_marked_done):
+         five dev slash-command handlers (/backtest, /grill, /tdd,
+         /improve_arch, /verify) pass a prompt that embeds skill/playbook file
+         content as source_text, so a trigger phrase inside those files could
+         authorize the turn. Operator-only surface; fix is passing
+         memory_text=<user-typed instruction> in those handlers (C3 hygiene).
+
+  coordinator_verifier_echo_not_critical:
+    rule: The CRITICAL-worker sentinel (_critical_worker_result) is NOT applied
+          to the terminal verification phase in CoordinatorService.run. A
+          verifier-lane reply that merely echoes the sentinel phrase while
+          reviewing findings MUST NOT convert an already-successful run into
+          critical_worker_error; a genuine verifier crash surfaces as
+          error=str(exc) (no marker) and flows through as a normal result. The
+          sentinel stays armed in research/synthesis/implementation.
+    enforced_by:
+      - tests/test_coordinator.py::FullRunTests::test_verifier_echoing_marker_does_not_fail_terminal_phase
+    why: The self-healing-synthesis path exists to abort pending work and
+         re-plan a NEXT phase; verification has none. Live false positive
+         2026-06-29 00:30 UTC discarded a 1934-char successful synthesis and
+         delivered "error crítico" to the user. The fix sat stranded
+         uncommitted in the daemon-clone worktree fix-coord-verifier until
+         rescued as slice C0-S3 (autonomy remediation plan, PR #173); the
+         worktree was quarantined to ~/srv/quarantine, never rm'd.
+
+  task_redrive_bounded_and_classified:
+    rule: A blocked coordinator verdict re-drives the task ONLY when the
+          verifier's structured tail declares `CLASE_BLOCKER: formato`
+          (parse_verdict_tail, claw_v2/bot_helpers.py — deterministic parsing,
+          no extra LLM call, codex stays out of the control path); bounded by
+          CLAW_MAX_TASK_REDRIVES (default 2, 0 disables β); the same
+          normalized blocker ident (normalize_blocker_ident) never re-drives
+          twice; decision_usuario / evidencia_externa / unparseable tails
+          never consume attempts (they keep today's fail-closed S-α path,
+          evidencia_externa until γ lands); the attempt is persisted on
+          active_task in session state BEFORE the existing deferral plumbing
+          (_defer_autonomous_job) re-enqueues the durable job; a frozen
+          ObservationWindow blocks the re-drive. The re-run forces
+          start_phase=synthesis — re-works the deliverable from cached
+          research, never re-executes implementation — and appends the
+          verdict to the objective (_consume_redrive_pending, consume-once).
+          Terminal failures after re-drives append redrive_history to the
+          notification. γ.0 (2026-07-02): every governor decision on a
+          DECLARED class emits autonomous_task_redrive_decision — including
+          action=fail_closed for non-redrivable declared classes; a
+          checkpoint WITHOUT a class is a normal verification deferral and
+          stays silent (the governor runs on every non-terminal cycle —
+          emitting there would flood the stream with misleading fail_closed
+          events for cycles that actually defer). blocker_class persists in
+          redrive_pending and is carried on autonomous_task_redrive_resumed
+          and on the terminal autonomous_task_failed event, making deaths
+          measurable by class.
+    enforced_by:
+      - tests/test_task_redrive.py::RedriveIntegrationTests::test_formato_blocker_redrives_instead_of_terminal
+      - tests/test_task_redrive.py::RedriveDecisionUnitTests (cap, dedup, frozen, knob=0, clases no-formato)
+      - tests/test_task_redrive.py::RedriveReentryTests::test_consume_redrive_pending_forces_synthesis_and_verdict
+      - tests/test_task_redrive.py::ParseVerdictTailTests (fail-closed sin contrato)
+      - tests/test_task_redrive.py::RedriveObservabilityTests (γ.0 — evento por clase declarada, mudo sin clase, blocker_class en pending/resumed/terminal)
+    why: 6/8 autonomous tasks died at the FIRST verifier objection with no
+         retry branch (recon 2026-07-02) — the deferral loop re-verified but
+         never re-worked, and the dominant failure was structurally
+         unsatisfiable prose demands. Slice C1-Sβ of the autonomy plan
+         (design: memoria autonomy-beta-gamma-design-2026-07-02). Promote
+         gate F2.5 stays upstream (the router consumes its output); Core
+         Invariant 1 holds by reusing the existing durable deferral
+         re-enqueue; the continuation-shortcut race is structurally absent
+         because recovering tasks never carry the waiting_for_user_input
+         marker in the ledger until terminal.
+         Known gap (F2 OFF in prod): when an F2 recovery checkpoint
+         short-circuits coordinator.run, _consume_redrive_pending is skipped
+         and redrive_pending stays armed for the next cycle — bounded by the
+         deferral cap, revisit if F2 turns ON.
 ```
 
 ---

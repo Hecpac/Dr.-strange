@@ -5,8 +5,11 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 import weakref
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +17,48 @@ SQLITE_BUSY_TIMEOUT_MS = 15_000
 SQLITE_CONNECT_TIMEOUT_SECONDS = 15.0
 SQLITE_HEADER = b"SQLite format 3\x00"
 SQLITE_WAL_AUTOCHECKPOINT_PAGES = 1_000
+SQLITE_PERSISTENT_LOCK_THRESHOLD = 3
 
 
 class RuntimeDatabaseError(sqlite3.DatabaseError):
     """Raised when the runtime database file is not usable as SQLite."""
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeDbDegradedReason:
+    reason_code: str
+    message: str
+    sqlite_error_code: int | None
+    operation: str | None
+    database_path: str
+    detected_at: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class RuntimeDbDegradedError(RuntimeDatabaseError):
+    def __init__(self, reason: RuntimeDbDegradedReason) -> None:
+        super().__init__(
+            f"RuntimeDb degraded reason_code={reason.reason_code} "
+            f"operation={reason.operation or 'unknown'} path={reason.database_path}: "
+            f"{reason.message}"
+        )
+        self.reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeSqliteHealth:
+    healthy: bool
+    degraded: bool
+    database_path: str
+    reason_code: str | None = None
+    message: str | None = None
+    detected_at: float | None = None
+    thorough_check_result: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def connect_runtime_sqlite(
@@ -31,7 +72,18 @@ def connect_runtime_sqlite(
     degraded = runtime_db_degraded_error(path)
     if degraded is not None:
         raise degraded
-    _verify_sqlite_file_header(path)
+    try:
+        _verify_sqlite_file_header(path)
+    except RuntimeDatabaseError as exc:
+        error = _degraded_error_from_reason(
+            db_path=path,
+            reason_code="healthcheck_failed",
+            message=str(exc),
+            operation="connect_runtime_sqlite",
+            sqlite_error_code=None,
+        )
+        _mark_runtime_db_degraded(path, error)
+        raise error from exc
     try:
         conn = sqlite3.connect(path, check_same_thread=False, timeout=timeout)
         if row_factory:
@@ -149,12 +201,18 @@ def is_sqlite_disk_io_error(exc: BaseException) -> bool:
     name = str(getattr(exc, "sqlite_errorname", "") or "").upper()
     if name.startswith("SQLITE_IOERR"):
         return True
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int) and code & 0xFF == sqlite3.SQLITE_IOERR:
+        return True
     return "disk i/o error" in str(exc).lower()
 
 
 def is_sqlite_closed_connection_error(exc: BaseException) -> bool:
     """True when a stale handle is used after a registry-wide reopen."""
-    return isinstance(exc, sqlite3.ProgrammingError) and "closed database" in str(exc).lower()
+    message = str(exc).lower()
+    return isinstance(exc, sqlite3.ProgrammingError) and (
+        "closed database" in message or "cannot operate on a closed database" in message
+    )
 
 
 def heal_wal_after_closed_connection(
@@ -212,6 +270,90 @@ def _mark_runtime_db_degraded(db_path: Path | str, error: RuntimeDatabaseError) 
 
 def runtime_db_degraded_error(db_path: Path | str) -> RuntimeDatabaseError | None:
     return _RUNTIME_DB_DEGRADED.get(_registry_key(db_path))
+
+
+def runtime_db_degraded_reason(db_path: Path | str) -> RuntimeDbDegradedReason | None:
+    error = runtime_db_degraded_error(db_path)
+    if isinstance(error, RuntimeDbDegradedError):
+        return error.reason
+    if error is None:
+        return None
+    return RuntimeDbDegradedReason(
+        reason_code="unknown_sqlite_critical",
+        message=str(error),
+        sqlite_error_code=None,
+        operation=None,
+        database_path=str(Path(db_path)),
+        detected_at=time.time(),
+    )
+
+
+def _degraded_error_from_reason(
+    *,
+    db_path: Path | str,
+    reason_code: str,
+    message: str,
+    operation: str | None,
+    sqlite_error_code: int | None,
+) -> RuntimeDbDegradedError:
+    return RuntimeDbDegradedError(
+        RuntimeDbDegradedReason(
+            reason_code=reason_code,
+            message=message,
+            sqlite_error_code=sqlite_error_code,
+            operation=operation,
+            database_path=str(Path(db_path)),
+            detected_at=time.time(),
+        )
+    )
+
+
+def _sqlite_error_code(exc: BaseException) -> int | None:
+    code = getattr(exc, "sqlite_errorcode", None)
+    return int(code) if isinstance(code, int) else None
+
+
+def _runtime_degraded_reason_code(exc: BaseException) -> str | None:
+    message = str(exc).lower()
+    name = str(getattr(exc, "sqlite_errorname", "") or "").upper()
+    code = _sqlite_error_code(exc)
+    if is_sqlite_closed_connection_error(exc):
+        return "connection_closed"
+    if (
+        name == "SQLITE_IOERR_SHORT_READ"
+        or code == 522
+        or "short read" in message
+    ):
+        return "sqlite_ioerr_short_read"
+    if is_sqlite_disk_io_error(exc):
+        return "sqlite_ioerr"
+    if "database disk image is malformed" in message or "file is not a database" in message:
+        return "healthcheck_failed"
+    critical_names = (
+        "SQLITE_CORRUPT",
+        "SQLITE_NOTADB",
+        "SQLITE_FULL",
+        "SQLITE_CANTOPEN",
+        "SQLITE_PERM",
+        "SQLITE_READONLY",
+        "SQLITE_UNKNOWN_CRITICAL",
+    )
+    if name.startswith(critical_names) or "critical" in message:
+        return "unknown_sqlite_critical"
+    return None
+
+
+def _is_sqlite_locked_error(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    name = str(getattr(exc, "sqlite_errorname", "") or "").upper()
+    code = _sqlite_error_code(exc)
+    return (
+        "database is locked" in message
+        or name in {"SQLITE_BUSY", "SQLITE_LOCKED"}
+        or code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    )
 
 
 class _DegradedConnection:
@@ -514,7 +656,12 @@ def _cleanup_recoverable_sidecars(key: str, db_path: Path | str) -> None:
         logger.debug("WAL sidecar cleanup failed for %s", db_path, exc_info=True)
 
 
-def check_runtime_sqlite_health(db_path: Path | str, *, thorough: bool = False) -> None:
+def check_runtime_sqlite_health(
+    db_path: Path | str,
+    *,
+    thorough: bool = False,
+    return_status: bool = False,
+) -> RuntimeSqliteHealth | None:
     """Fail fast if an existing runtime DB is structurally unhealthy.
 
     Missing or empty DB files are allowed so first boot can create them. Existing
@@ -522,10 +669,22 @@ def check_runtime_sqlite_health(db_path: Path | str, *, thorough: bool = False) 
     `integrity_check`, intended for daemon startup/restart boundaries.
     """
     path = Path(db_path)
-    _verify_sqlite_file_header(path)
-    if not path.exists() or path.stat().st_size == 0:
-        return
+    degraded = runtime_db_degraded_error(path)
+    if degraded is not None:
+        health = _health_from_degraded(path, degraded)
+        if return_status:
+            return health
+        raise degraded
     try:
+        _verify_sqlite_file_header(path)
+        if not path.exists() or path.stat().st_size == 0:
+            health = RuntimeSqliteHealth(
+                healthy=True,
+                degraded=False,
+                database_path=str(path),
+                thorough_check_result="empty_or_missing",
+            )
+            return health if return_status else None
         conn = sqlite3.connect(
             f"file:{path}?mode=ro", uri=True, timeout=SQLITE_CONNECT_TIMEOUT_SECONDS
         )
@@ -535,11 +694,44 @@ def check_runtime_sqlite_health(db_path: Path | str, *, thorough: bool = False) 
                 _run_sqlite_health_pragma(conn, path, "integrity_check")
         finally:
             conn.close()
-    except sqlite3.DatabaseError as exc:
-        raise RuntimeDatabaseError(
-            f"Runtime database failed SQLite health check: {path}. "
-            "Do not restart the daemon until the DB is recovered from a verified backup."
-        ) from exc
+    except (RuntimeDatabaseError, sqlite3.DatabaseError) as exc:
+        error = _degraded_error_from_reason(
+            db_path=path,
+            reason_code="healthcheck_failed",
+            message=(
+                f"Runtime database failed SQLite health check: {path}. "
+                "Do not restart the daemon until the DB is recovered from a verified backup."
+            ),
+            operation="check_runtime_sqlite_health",
+            sqlite_error_code=_sqlite_error_code(exc),
+        )
+        _mark_runtime_db_degraded(path, error)
+        if return_status:
+            return _health_from_degraded(path, error)
+        raise error from exc
+    health = RuntimeSqliteHealth(
+        healthy=True,
+        degraded=False,
+        database_path=str(path),
+        thorough_check_result="integrity_check_ok" if thorough else "quick_check_ok",
+    )
+    return health if return_status else None
+
+
+def _health_from_degraded(
+    db_path: Path | str,
+    error: RuntimeDatabaseError,
+) -> RuntimeSqliteHealth:
+    reason = error.reason if isinstance(error, RuntimeDbDegradedError) else None
+    return RuntimeSqliteHealth(
+        healthy=False,
+        degraded=True,
+        database_path=str(Path(db_path)),
+        reason_code=reason.reason_code if reason is not None else "unknown_sqlite_critical",
+        message=reason.message if reason is not None else str(error),
+        detected_at=reason.detected_at if reason is not None else None,
+        thorough_check_result="degraded",
+    )
 
 
 def _run_sqlite_health_pragma(conn: sqlite3.Connection, path: Path, pragma: str) -> None:
@@ -590,12 +782,22 @@ class RuntimeDb:
     callers wanting different shapes never race on global connection state.
     """
 
-    def __init__(self, db_path: Path | str, *, row_factory: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: Path | str,
+        *,
+        row_factory: bool = True,
+        persistent_lock_threshold: int = SQLITE_PERSISTENT_LOCK_THRESHOLD,
+        degraded_event_sink: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
         self._row_factory = row_factory
         self._lock = threading.RLock()
         self._in_transaction = False
         self._closed = False
+        self._persistent_lock_threshold = max(1, int(persistent_lock_threshold))
+        self._consecutive_locked_errors = 0
+        self._degraded_event_sink = degraded_event_sink
         # Opened through the shared connect/configure path so the durable
         # runtime pragmas (WAL, synchronous=FULL, busy_timeout, foreign_keys)
         # are preserved unchanged.
@@ -629,6 +831,86 @@ class RuntimeDb:
             except Exception:
                 logger.debug("RuntimeDb old connection close failed", exc_info=True)
 
+    @property
+    def degraded_reason(self) -> RuntimeDbDegradedReason | None:
+        return runtime_db_degraded_reason(self.db_path)
+
+    def healthcheck(self, *, thorough: bool = False) -> RuntimeSqliteHealth:
+        return check_runtime_sqlite_health(
+            self.db_path,
+            thorough=thorough,
+            return_status=True,
+        )
+
+    def _ensure_operational(self, operation: str) -> None:
+        degraded = runtime_db_degraded_error(self.db_path)
+        if degraded is not None:
+            raise degraded
+        if self._closed:
+            raise self._mark_degraded(
+                reason_code="connection_closed",
+                message="RuntimeDb connection is closed",
+                operation=operation,
+                sqlite_error_code=None,
+            )
+
+    def _record_sqlite_success(self) -> None:
+        self._consecutive_locked_errors = 0
+
+    def _handle_sqlite_exception(self, operation: str, exc: BaseException) -> None:
+        if _is_sqlite_locked_error(exc):
+            self._consecutive_locked_errors += 1
+            if self._consecutive_locked_errors >= self._persistent_lock_threshold:
+                raise self._mark_degraded(
+                    reason_code="persistent_lock",
+                    message=str(exc),
+                    operation=operation,
+                    sqlite_error_code=_sqlite_error_code(exc),
+                ) from exc
+            return
+        reason_code = _runtime_degraded_reason_code(exc)
+        if reason_code is None:
+            return
+        raise self._mark_degraded(
+            reason_code=reason_code,
+            message=str(exc),
+            operation=operation,
+            sqlite_error_code=_sqlite_error_code(exc),
+        ) from exc
+
+    def _mark_degraded(
+        self,
+        *,
+        reason_code: str,
+        message: str,
+        operation: str | None,
+        sqlite_error_code: int | None,
+    ) -> RuntimeDbDegradedError:
+        existing = runtime_db_degraded_error(self.db_path)
+        if isinstance(existing, RuntimeDbDegradedError):
+            return existing
+        error = _degraded_error_from_reason(
+            db_path=self.db_path,
+            reason_code=reason_code,
+            message=message,
+            operation=operation,
+            sqlite_error_code=sqlite_error_code,
+        )
+        _mark_runtime_db_degraded(self.db_path, error)
+        payload = error.reason.to_dict()
+        logger.critical(
+            "RuntimeDb marked degraded reason_code=%s operation=%s path=%s",
+            error.reason.reason_code,
+            error.reason.operation,
+            error.reason.database_path,
+        )
+        if self._degraded_event_sink is not None:
+            try:
+                self._degraded_event_sink(payload)
+            except Exception:
+                logger.exception("RuntimeDb degraded event sink failed")
+        return error
+
     # -- store wiring (F1.1a1) ------------------------------------------------
     @property
     def lock(self) -> threading.RLock:
@@ -658,14 +940,21 @@ class RuntimeDb:
         writes commit or roll back atomically with the enclosing
         ``transaction()``. ``row_factory`` shapes rows for THIS cursor only
         (``None`` -> tuples); the shared connection's factory is never mutated."""
+        cur = None
         with self._lock:
-            cur = self._conn.cursor()
-            if row_factory is not _RUNTIME_DB_DEFAULT_ROW_FACTORY:
-                cur.row_factory = row_factory
+            self._ensure_operational("RuntimeDb.cursor")
             try:
+                cur = self._conn.cursor()
+                if row_factory is not _RUNTIME_DB_DEFAULT_ROW_FACTORY:
+                    cur.row_factory = row_factory
                 yield cur
+                self._record_sqlite_success()
+            except BaseException as exc:
+                self._handle_sqlite_exception("RuntimeDb.cursor", exc)
+                raise
             finally:
-                cur.close()
+                if cur is not None:
+                    cur.close()
 
     @contextlib.contextmanager
     def transaction(self, *, row_factory=_RUNTIME_DB_DEFAULT_ROW_FACTORY):
@@ -674,23 +963,34 @@ class RuntimeDb:
         RuntimeDb are rejected: one connection has a single transaction scope,
         so an inner commit would silently commit the outer's writes."""
         with self._lock:
+            self._ensure_operational("RuntimeDb.transaction")
             if self._in_transaction:
                 raise RuntimeError(
                     "nested RuntimeDb.transaction() is not supported "
                     "(one connection has a single transaction scope)"
                 )
             self._in_transaction = True
-            cur = self._conn.cursor()
-            if row_factory is not _RUNTIME_DB_DEFAULT_ROW_FACTORY:
-                cur.row_factory = row_factory
+            cur = None
             try:
+                cur = self._conn.cursor()
+                if row_factory is not _RUNTIME_DB_DEFAULT_ROW_FACTORY:
+                    cur.row_factory = row_factory
                 yield cur
                 self._conn.commit()
-            except BaseException:
-                self._conn.rollback()
+                self._record_sqlite_success()
+            except BaseException as exc:
+                rollback_exc: BaseException | None = None
+                try:
+                    self._conn.rollback()
+                except BaseException as caught_rollback_exc:
+                    rollback_exc = caught_rollback_exc
+                self._handle_sqlite_exception("RuntimeDb.transaction", exc)
+                if rollback_exc is not None:
+                    self._handle_sqlite_exception("RuntimeDb.transaction.rollback", rollback_exc)
                 raise
             finally:
-                cur.close()
+                if cur is not None:
+                    cur.close()
                 self._in_transaction = False
 
     @contextlib.contextmanager
@@ -715,26 +1015,84 @@ class RuntimeDb:
         if not acquired:
             yield None
             return
+        cur = None
         try:
+            self._ensure_operational("RuntimeDb.try_cursor")
             cur = self._conn.cursor()
             if row_factory is not _RUNTIME_DB_DEFAULT_ROW_FACTORY:
                 cur.row_factory = row_factory
             try:
                 yield cur
+                self._record_sqlite_success()
+            except BaseException as exc:
+                self._handle_sqlite_exception("RuntimeDb.try_cursor", exc)
+                raise
             finally:
-                cur.close()
+                if cur is not None:
+                    cur.close()
         finally:
             self._lock.release()
 
     # -- lifecycle ------------------------------------------------------------
     def health(self) -> bool:
         """Lightweight liveness probe: ``True`` if a trivial query succeeds."""
-        try:
-            with self.cursor() as cur:
-                cur.execute("SELECT 1").fetchone()
-            return True
-        except sqlite3.Error:
-            return False
+        with self._lock:
+            if self._closed:
+                return False
+        return self.healthcheck().healthy
+
+    def synthetic_healthcheck(
+        self,
+        *,
+        correlation_id: str,
+        now: float | None = None,
+        ttl_seconds: float = 300.0,
+    ) -> dict[str, Any]:
+        correlation_id = str(correlation_id or "").strip()
+        if not correlation_id:
+            raise ValueError("correlation_id is required")
+        current = time.time() if now is None else float(now)
+        ttl = max(1.0, float(ttl_seconds))
+        expires_at = current + ttl
+        namespace = "synthetic_healthcheck"
+        with self.transaction() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runtime_synthetic_healthcheck (
+                    correlation_id TEXT PRIMARY KEY,
+                    namespace TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                "DELETE FROM runtime_synthetic_healthcheck WHERE expires_at <= ?",
+                (current,),
+            )
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO runtime_synthetic_healthcheck (
+                    correlation_id, namespace, created_at, expires_at
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (correlation_id, namespace, current, expires_at),
+            )
+            row = cur.execute(
+                """
+                SELECT correlation_id, namespace, created_at, expires_at
+                FROM runtime_synthetic_healthcheck
+                WHERE correlation_id = ?
+                """,
+                (correlation_id,),
+            ).fetchone()
+        return {
+            "correlation_id": str(row["correlation_id"]),
+            "namespace": str(row["namespace"]),
+            "created_at": float(row["created_at"]),
+            "expires_at": float(row["expires_at"]),
+        }
 
     def close(self) -> None:
         """Close the owned connection. Idempotent."""
@@ -772,15 +1130,39 @@ class _RuntimeConnHandle:
         self._row_factory = sqlite3.Row if row_factory else None
 
     def execute(self, sql: str, parameters=()):  # noqa: ANN001 - sqlite param shape
-        cur = self._db._conn.cursor()
-        cur.row_factory = self._row_factory
-        return cur.execute(sql, parameters)
+        self._db._ensure_operational("RuntimeDb.connection_handle.execute")
+        try:
+            cur = self._db._conn.cursor()
+            cur.row_factory = self._row_factory
+            result = cur.execute(sql, parameters)
+            self._db._record_sqlite_success()
+            return result
+        except BaseException as exc:
+            self._db._handle_sqlite_exception("RuntimeDb.connection_handle.execute", exc)
+            raise
 
     def executescript(self, sql_script: str):
-        return self._db._conn.executescript(sql_script)
+        self._db._ensure_operational("RuntimeDb.connection_handle.executescript")
+        try:
+            result = self._db._conn.executescript(sql_script)
+            self._db._record_sqlite_success()
+            return result
+        except BaseException as exc:
+            self._db._handle_sqlite_exception("RuntimeDb.connection_handle.executescript", exc)
+            raise
 
     def commit(self) -> None:
-        self._db._conn.commit()
+        self._db._ensure_operational("RuntimeDb.connection_handle.commit")
+        try:
+            self._db._conn.commit()
+            self._db._record_sqlite_success()
+        except BaseException as exc:
+            self._db._handle_sqlite_exception("RuntimeDb.connection_handle.commit", exc)
+            raise
 
     def rollback(self) -> None:
-        self._db._conn.rollback()
+        try:
+            self._db._conn.rollback()
+        except BaseException as exc:
+            self._db._handle_sqlite_exception("RuntimeDb.connection_handle.rollback", exc)
+            raise

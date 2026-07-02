@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from claw_v2.maintenance import job_claim_block_reason
 from claw_v2.sqlite_runtime import (
@@ -27,6 +27,13 @@ JOB_VALID_STATUSES = frozenset({*JOB_ACTIVE_STATUSES, *JOB_TERMINAL_STATUSES})
 DEFAULT_JOB_LEASE_SECONDS = 15 * 60
 JOB_TERMINAL_RETENTION_DAYS = 30
 JOB_TERMINAL_PRUNE_MAX_ROWS = 20_000
+
+
+class FormalLeaseRequiredError(RuntimeError):
+    def __init__(self, operation: str) -> None:
+        super().__init__(f"{operation} requires formal lease-specific API")
+        self.operation = operation
+        self.formal_leases_enabled = True
 
 
 JOBS_TABLE_SCHEMA = """
@@ -111,12 +118,16 @@ class JobService:
         runtime_db: RuntimeDb | None = None,
         formal_leases_enabled: bool = False,
         default_lease_seconds: float = DEFAULT_JOB_LEASE_SECONDS,
+        admin_cancel_authority_validator: (
+            Callable[[str, str, str, str], bool] | None
+        ) = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.observe = observe
         self.formal_leases_enabled = bool(formal_leases_enabled)
         self.default_lease_seconds = max(1.0, float(default_lease_seconds))
+        self.admin_cancel_authority_validator = admin_cancel_authority_validator
         # In-process safe-mode latch, consulted at every claim site ALONGSIDE
         # the env-based maintenance gate. The daemon's branch-integrity check
         # sets this (P0-2) when the live checkout is stranded on a wrong branch
@@ -1004,7 +1015,258 @@ class JobService:
             lease_generation=lease_generation,
         )
 
+    def request_cancel(
+        self,
+        job_id: str,
+        *,
+        actor: str,
+        reason: str,
+        now: float | None = None,
+    ) -> JobRecord | None:
+        actor = _require_non_empty("actor", actor)
+        reason = _require_non_empty("reason", reason)
+        current = time.time() if now is None else float(now)
+
+        def request_once() -> JobRecord | sqlite3.Row | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    row = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    if row is None:
+                        self._conn.commit()
+                        return None
+                    if row["status"] in JOB_TERMINAL_STATUSES:
+                        self._conn.commit()
+                        return self._row_to_record(row)
+                    metadata = _loads_json(row["metadata_json"])
+                    metadata["cancel_request"] = {
+                        "requested_at": current,
+                        "requested_by": actor,
+                        "reason": reason,
+                    }
+                    cursor = self._conn.execute(
+                        """
+                        UPDATE agent_jobs
+                        SET metadata_json = ?,
+                            updated_at = ?
+                        WHERE job_id = ?
+                          AND status NOT IN ('completed', 'failed', 'cancelled')
+                        """,
+                        (json.dumps(metadata, sort_keys=True), current, job_id),
+                    )
+                    if cursor.rowcount != 1:
+                        self._conn.commit()
+                        return None
+                    updated = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    self._conn.commit()
+                    return updated
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        updated = self._retry_after_disk_io("JobService.request_cancel", request_once)
+        if isinstance(updated, JobRecord):
+            return updated
+        record = self._row_to_record(updated) if updated is not None else None
+        if record is not None:
+            self._emit("job_cancel_requested", record)
+        return record
+
+    def worker_cancel(
+        self,
+        job_id: str,
+        *,
+        lease_owner: str,
+        lease_generation: int | None,
+        reason: str = "cancelled",
+        now: float | None = None,
+    ) -> JobRecord | None:
+        if not str(lease_owner or "").strip() or lease_generation is None:
+            return None
+        reason = _require_non_empty("reason", reason)
+        lease_generation_value = int(lease_generation)
+        current = time.time() if now is None else float(now)
+
+        def cancel_once() -> sqlite3.Row | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    row = self._conn.execute(
+                        """
+                        SELECT *
+                        FROM agent_jobs
+                        WHERE job_id = ?
+                          AND status = 'running'
+                          AND lease_owner = ?
+                          AND lease_generation = ?
+                        """,
+                        (job_id, lease_owner, lease_generation_value),
+                    ).fetchone()
+                    if row is None:
+                        self._conn.commit()
+                        return None
+                    if not self._current_lease_matches(
+                        row,
+                        lease_owner=lease_owner,
+                        lease_generation=lease_generation_value,
+                        now=current,
+                    ):
+                        self._conn.commit()
+                        return None
+                    cursor = self._conn.execute(
+                        """
+                        UPDATE agent_jobs
+                        SET status = 'cancelled',
+                            error = ?,
+                            completed_at = ?,
+                            lease_owner = NULL,
+                            lease_expires_at = NULL,
+                            lease_heartbeat_at = NULL,
+                            updated_at = ?
+                        WHERE job_id = ?
+                          AND status = 'running'
+                          AND lease_owner = ?
+                          AND lease_generation = ?
+                          AND lease_expires_at IS NOT NULL
+                          AND lease_expires_at > ?
+                        """,
+                        (
+                            reason,
+                            current,
+                            current,
+                            job_id,
+                            lease_owner,
+                            lease_generation_value,
+                            current,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        self._conn.commit()
+                        return None
+                    updated = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    self._conn.commit()
+                    return updated
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        row = self._retry_after_disk_io("JobService.worker_cancel", cancel_once)
+        record = self._row_to_record(row) if row is not None else None
+        if record is not None:
+            self._emit("job_worker_cancelled", record)
+        return record
+
+    def admin_force_cancel(
+        self,
+        job_id: str,
+        *,
+        admin_actor: str,
+        reason: str,
+        authority_token: str,
+        now: float | None = None,
+    ) -> JobRecord | None:
+        admin_actor = _require_non_empty("admin_actor", admin_actor)
+        reason = _require_non_empty("reason", reason)
+        authority_token = _require_non_empty("authority_token", authority_token)
+        validator = self.admin_cancel_authority_validator
+        if validator is None:
+            return None
+        try:
+            if not validator(admin_actor, job_id, reason, authority_token):
+                return None
+        except Exception:
+            return None
+        current = time.time() if now is None else float(now)
+        correlation_id = f"admin_force_cancel:{uuid.uuid4().hex[:12]}"
+
+        def admin_cancel_once() -> JobRecord | sqlite3.Row | None:
+            with self._lock:
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    row = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    if row is None:
+                        self._conn.commit()
+                        return None
+                    if row["status"] in JOB_TERMINAL_STATUSES:
+                        self._conn.commit()
+                        return self._row_to_record(row)
+                    metadata = _loads_json(row["metadata_json"])
+                    metadata["admin_force_cancel"] = {
+                        "cancelled_at": current,
+                        "admin_actor": admin_actor,
+                        "reason": reason,
+                        "authority_reference": correlation_id,
+                        "previous_status": str(row["status"]),
+                        "new_status": "cancelled",
+                        "previous_worker_id": _as_optional_str(row["worker_id"]),
+                        "previous_lease_owner": _as_optional_str(row["lease_owner"]),
+                        "previous_lease_generation": int(row["lease_generation"] or 0),
+                        "previous_lease_expires_at": _as_optional_float(
+                            row["lease_expires_at"]
+                        ),
+                        "correlation_id": correlation_id,
+                    }
+                    cursor = self._conn.execute(
+                        """
+                        UPDATE agent_jobs
+                        SET status = 'cancelled',
+                            metadata_json = ?,
+                            error = ?,
+                            completed_at = ?,
+                            lease_owner = NULL,
+                            lease_expires_at = NULL,
+                            lease_heartbeat_at = NULL,
+                            updated_at = ?
+                        WHERE job_id = ?
+                          AND status NOT IN ('completed', 'failed', 'cancelled')
+                        """,
+                        (
+                            json.dumps(metadata, sort_keys=True),
+                            reason,
+                            current,
+                            current,
+                            job_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        self._conn.commit()
+                        return None
+                    updated = self._conn.execute(
+                        "SELECT * FROM agent_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+                    self._conn.commit()
+                    return updated
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        updated = self._retry_after_disk_io(
+            "JobService.admin_force_cancel",
+            admin_cancel_once,
+        )
+        if isinstance(updated, JobRecord):
+            return updated
+        record = self._row_to_record(updated) if updated is not None else None
+        if record is not None:
+            self._emit("job_admin_force_cancelled", record)
+        return record
+
     def cancel(self, job_id: str, *, reason: str = "cancelled") -> JobRecord | None:
+        if self.formal_leases_enabled:
+            raise FormalLeaseRequiredError("JobService.cancel")
         record = self.get(job_id)
         if record is None:
             return None
@@ -1818,3 +2080,10 @@ def _first_not_none(*values: Any) -> Any:
         if value is not None:
             return value
     return None
+
+
+def _require_non_empty(name: str, value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{name} is required")
+    return text

@@ -253,6 +253,16 @@ class RiskLevelTests(unittest.TestCase):
         )
         self.assertEqual(risk, RiskLevel.HIGH)
 
+    def test_browser_use_navigation_from_sensitive_url_is_high(self) -> None:
+        for action in ("navigate", "search", "go_back", "switch", "close"):
+            with self.subTest(action=action):
+                risk = self.gate.risk_browser_use_action(
+                    action,
+                    {},
+                    url="https://ads.google.com/campaigns",
+                )
+                self.assertEqual(risk, RiskLevel.HIGH)
+
     def test_browser_use_input_on_sensitive_url_is_high(self) -> None:
         risk = self.gate.risk_browser_use_action(
             "input",
@@ -264,6 +274,20 @@ class RiskLevelTests(unittest.TestCase):
     def test_browser_use_read_action_is_low(self) -> None:
         risk = self.gate.risk_browser_use_action("screenshot", {}, url="https://ads.google.com")
         self.assertEqual(risk, RiskLevel.LOW)
+
+    def test_browser_use_high_risk_actions_match_policy_matrix(self) -> None:
+        from claw_v2.automation_policy import HIGH_RISK_BROWSER_ACTIONS
+        from claw_v2.computer_gate import BROWSER_USE_HIGH_RISK_ACTIONS
+
+        self.assertEqual(BROWSER_USE_HIGH_RISK_ACTIONS, HIGH_RISK_BROWSER_ACTIONS)
+        for action in HIGH_RISK_BROWSER_ACTIONS:
+            with self.subTest(action=action):
+                risk = self.gate.risk_browser_use_action(
+                    action,
+                    {"script": "document.title"} if action == "evaluate" else {},
+                    url="https://example.com",
+                )
+                self.assertEqual(risk, RiskLevel.HIGH)
 
 
 class ActionGateAutoApproveTests(unittest.TestCase):
@@ -377,11 +401,8 @@ class ComputerHandlerBrowserAutoApproveTests(unittest.TestCase):
         self.assertEqual(session.status, "done")
         self.assertEqual(result, "browser task done")
         self.assertEqual(stub.kwargs["allowed_domains"], ["chatgpt.com"])
-        self.assertTrue(stub.kwargs["allow_high_risk_actions"])
-        self.assertEqual(
-            stub.kwargs["allowed_high_risk_actions"],
-            ["evaluate", "save_as_pdf"],
-        )
+        self.assertFalse(stub.kwargs["allow_high_risk_actions"])
+        self.assertIsNone(stub.kwargs["allowed_high_risk_actions"])
 
     def test_sensitive_task_still_requires_approval_when_enabled(self) -> None:
         stub = _StubBrowserUse()

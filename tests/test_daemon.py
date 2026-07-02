@@ -887,6 +887,71 @@ class DaemonRunLoopTests(unittest.IsolatedAsyncioTestCase):
         event_names = [call.args[0] for call in observe.emit.call_args_list]
         self.assertIn("daemon_heartbeat", event_names)
 
+    async def test_background_runner_cycle_is_observable(self) -> None:
+        scheduler = CronScheduler()
+        heartbeat = MagicMock()
+        heartbeat.collect.return_value = HeartbeatSnapshot(
+            timestamp="t",
+            pending_approvals=0,
+            pending_approval_ids=[],
+            agents={},
+            lane_metrics={},
+        )
+        observe = MagicMock()
+        daemon = ClawDaemon(scheduler=scheduler, heartbeat=heartbeat, observe=observe)
+        shutdown = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def runner() -> int:
+            return 0
+
+        daemon.register_background_job_runner(name="unit_runner", handler=runner, interval=0.01)
+
+        async def stop_after_cycle() -> None:
+            deadline = loop.time() + 1.0
+            while loop.time() < deadline:
+                if any(
+                    call.args[0] == "daemon_background_runner_cycle"
+                    for call in observe.emit.call_args_list
+                ):
+                    shutdown.set()
+                    return
+                await asyncio.sleep(0.01)
+            shutdown.set()
+
+        await asyncio.gather(daemon.run_loop(shutdown, interval=0.01), stop_after_cycle())
+
+        cycle_payloads = [
+            call.kwargs["payload"]
+            for call in observe.emit.call_args_list
+            if call.args[0] == "daemon_background_runner_cycle"
+        ]
+        self.assertTrue(cycle_payloads)
+        self.assertEqual(cycle_payloads[-1]["runner"], "unit_runner")
+        self.assertEqual(cycle_payloads[-1]["claimed"], 0)
+
+    async def test_background_task_exit_before_shutdown_is_observable(self) -> None:
+        observe = MagicMock()
+        daemon = ClawDaemon(scheduler=CronScheduler(), heartbeat=MagicMock(), observe=observe)
+        shutdown = asyncio.Event()
+
+        async def exits_immediately() -> None:
+            return None
+
+        await daemon._run_named_background_task(
+            "unit_background",
+            shutdown,
+            exits_immediately(),
+        )
+
+        exit_payloads = [
+            call.kwargs["payload"]
+            for call in observe.emit.call_args_list
+            if call.args[0] == "daemon_background_task_exited"
+        ]
+        self.assertEqual(exit_payloads[-1]["runner"], "unit_background")
+        self.assertEqual(exit_payloads[-1]["status"], "stopped_before_shutdown")
+
     async def test_run_loop_processes_pending_verification_job_outside_tick(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             scheduler = CronScheduler()

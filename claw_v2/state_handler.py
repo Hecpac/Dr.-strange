@@ -509,8 +509,15 @@ class StateHandler:
                 memory_text=text,
             )
         if _looks_like_proceed_request(text):
-            if state.get("verification_status") == "awaiting_approval":
-                pending_approvals = state.get("pending_approvals") or []
+            pending_approvals = state.get("pending_approvals") or []
+            # issue #166: a concurrent sibling task's terminal finalize rewrites
+            # this session's `verification_status` unconditionally (task_handler
+            # finalize + coordinated/maintenance completion), clobbering
+            # "awaiting_approval" and silently dropping this reminder. Gate on
+            # `pending_approvals` too — it survives every clobber path, so a live
+            # pending approval keeps blocking "continúa" regardless of the racy
+            # session-global verification_status.
+            if state.get("verification_status") == "awaiting_approval" or pending_approvals:
                 latest_pending = pending_approvals[-1] if pending_approvals else {}
                 approval_id = latest_pending.get("approval_id") or (
                     state.get("last_checkpoint") or {}

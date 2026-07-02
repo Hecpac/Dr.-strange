@@ -7,7 +7,7 @@ import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Coroutine
 
 from claw_v2.cron import CronScheduler
 from claw_v2.f4_delegation import F4DelegationJobRunner
@@ -432,29 +432,43 @@ class ClawDaemon:
         # post-boot strand that is the actual incident. A pure file read, so it
         # is safe to run inline here. No-op when the check is disabled.
         self._check_branch_integrity()
+        if shutdown.is_set():
+            return
         background_tasks: list[asyncio.Task[None]] = []
         if self.observe is not None:
             background_tasks.append(
-                asyncio.create_task(self._run_liveness_heartbeat_loop(shutdown, interval=interval))
+                self._create_background_task(
+                    "liveness_heartbeat",
+                    shutdown,
+                    self._run_liveness_heartbeat_loop(shutdown, interval=interval),
+                )
             )
         if self.job_service is not None and self.task_ledger is not None:
             background_tasks.append(
-                asyncio.create_task(
+                self._create_background_task(
+                    "pending_verification_reconciliation",
+                    shutdown,
                     self._run_pending_verification_reconciliation_job_loop(
                         shutdown,
                         interval=interval,
-                    )
+                    ),
                 )
             )
         if self.job_service is not None and self.task_handler is not None:
             background_tasks.append(
-                asyncio.create_task(
+                self._create_background_task(
+                    "f4_delegation",
+                    shutdown,
                     self._run_f4_delegation_runner_loop(shutdown, interval=interval)
                 )
             )
         for runner in self._background_job_runners:
             background_tasks.append(
-                asyncio.create_task(self._run_background_job_runner_loop(shutdown, runner=runner))
+                self._create_background_task(
+                    f"background:{runner.name}",
+                    shutdown,
+                    self._run_background_job_runner_loop(shutdown, runner=runner),
+                )
             )
         try:
             while not shutdown.is_set():
@@ -488,6 +502,40 @@ class ClawDaemon:
                     await task
                 except asyncio.CancelledError:
                     pass
+
+    def _create_background_task(
+        self,
+        name: str,
+        shutdown: asyncio.Event,
+        coro: Coroutine[Any, Any, None],
+    ) -> asyncio.Task[None]:
+        return asyncio.create_task(
+            self._run_named_background_task(name, shutdown, coro),
+            name=f"claw-daemon:{name}",
+        )
+
+    async def _run_named_background_task(
+        self,
+        name: str,
+        shutdown: asyncio.Event,
+        coro: Coroutine[Any, Any, None],
+    ) -> None:
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("daemon background task failed: %s", name)
+            await self._emit_off_loop(
+                "daemon_background_task_exited",
+                payload={"runner": name, "status": "failed", "error": _safe_error_preview(exc)},
+            )
+            return
+        if not shutdown.is_set():
+            await self._emit_off_loop(
+                "daemon_background_task_exited",
+                payload={"runner": name, "status": "stopped_before_shutdown"},
+            )
 
     async def _emit_off_loop(self, event_type: str, **kwargs: Any) -> None:
         """Offload a diagnostic emit to a thread, swallowing failures.
@@ -548,7 +596,11 @@ class ClawDaemon:
         )
         while not shutdown.is_set():
             try:
-                await asyncio.to_thread(runner.run_available, limit=1)
+                claimed = await asyncio.to_thread(runner.run_available, limit=1)
+                await self._emit_background_runner_cycle(
+                    "pending_verification_reconciliation",
+                    claimed=claimed,
+                )
             except Exception as exc:
                 logger.exception("pending verification reconciliation runner failed")
                 await self._emit_off_loop(
@@ -579,7 +631,8 @@ class ClawDaemon:
         )
         while not shutdown.is_set():
             try:
-                await asyncio.to_thread(runner.run_available, limit=1)
+                claimed = await asyncio.to_thread(runner.run_available, limit=1)
+                await self._emit_background_runner_cycle("f4_delegation", claimed=claimed)
             except Exception as exc:
                 logger.exception("f4 delegation runner failed")
                 await self._emit_off_loop(
@@ -599,7 +652,9 @@ class ClawDaemon:
     ) -> None:
         while not shutdown.is_set():
             try:
-                await asyncio.to_thread(runner.handler)
+                result = await asyncio.to_thread(runner.handler)
+                claimed = result if isinstance(result, int) else None
+                await self._emit_background_runner_cycle(runner.name, claimed=claimed)
             except Exception as exc:
                 logger.exception("daemon background job runner failed: %s", runner.name)
                 await self._emit_off_loop(
@@ -610,6 +665,17 @@ class ClawDaemon:
                 await asyncio.wait_for(shutdown.wait(), timeout=runner.interval)
             except asyncio.TimeoutError:
                 pass
+
+    async def _emit_background_runner_cycle(
+        self,
+        runner: str,
+        *,
+        claimed: int | None,
+    ) -> None:
+        payload: dict[str, Any] = {"runner": runner, "ts": time.time()}
+        if claimed is not None:
+            payload["claimed"] = max(0, int(claimed))
+        await self._emit_off_loop("daemon_background_runner_cycle", payload=payload)
 
 
 class PendingVerificationReconciliationJobRunner:
