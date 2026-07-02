@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: "C0-S1 autonomy-plan: evidence gate honors user-authorized knowledge answers — _user_authorized_knowledge_answer (verb-anchored patterns + negation lookback) skips the completion-claim block with an audited evidence_gate_skipped_user_authority(authority=knowledge_answer) event; gate stubs rewritten informative/neutral. Invariant evidence_gate_user_knowledge_authority added to §1"
-doc_version: 2.45
+describes_commit: "C0-S3 autonomy-plan: coordinator terminal verification phase no longer applies the CRITICAL-worker sentinel (verifier echo false positive, PR #173, fix rescued from stranded worktree). Invariant coordinator_verifier_echo_not_critical added to §1. Predecessor C0-S1 (doc_version 2.45, evidence_gate_user_knowledge_authority) in main"
+doc_version: 2.46
 last_verified: 2026-07-02
 verification_method: "code cross-read of _failure_response_text + _blocked_user_input_reason (task_handler.py) and the rescue chain (_recent_waiting_for_user_task / _telegram_continuation_shortcut, bot.py) against this doc + WaitingUserInputRecoveryHintTests (2, green inside 54-test task_handler file) + live deploy 965871a: clean restart (pid 68921, zero stderr delta), composer exercised on the daemon checkout with the production-verbatim KeepAlive error shape. Predecessor P0-2 branch-integrity (doc_version 2.43) remains in main"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -1074,6 +1074,24 @@ invariants:
          content as source_text, so a trigger phrase inside those files could
          authorize the turn. Operator-only surface; fix is passing
          memory_text=<user-typed instruction> in those handlers (C3 hygiene).
+
+  coordinator_verifier_echo_not_critical:
+    rule: The CRITICAL-worker sentinel (_critical_worker_result) is NOT applied
+          to the terminal verification phase in CoordinatorService.run. A
+          verifier-lane reply that merely echoes the sentinel phrase while
+          reviewing findings MUST NOT convert an already-successful run into
+          critical_worker_error; a genuine verifier crash surfaces as
+          error=str(exc) (no marker) and flows through as a normal result. The
+          sentinel stays armed in research/synthesis/implementation.
+    enforced_by:
+      - tests/test_coordinator.py::FullRunTests::test_verifier_echoing_marker_does_not_fail_terminal_phase
+    why: The self-healing-synthesis path exists to abort pending work and
+         re-plan a NEXT phase; verification has none. Live false positive
+         2026-06-29 00:30 UTC discarded a 1934-char successful synthesis and
+         delivered "error crítico" to the user. The fix sat stranded
+         uncommitted in the daemon-clone worktree fix-coord-verifier until
+         rescued as slice C0-S3 (autonomy remediation plan, PR #173); the
+         worktree was quarantined to ~/srv/quarantine, never rm'd.
 ```
 
 ---
