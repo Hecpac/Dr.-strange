@@ -8,9 +8,9 @@
 ## meta
 
 ```yaml
-describes_commit: "S-α autonomy-block slice 1: waiting_for_user_input failure notifications announce the pre-existing rescue path (reply-in-chat re-drive ~24h + /task_pending) via _WAITING_USER_INPUT_RECOVERY_HINT in task_handler._failure_response_text"
-doc_version: 2.44
-last_verified: 2026-07-01
+describes_commit: "C0-S1 autonomy-plan: evidence gate honors user-authorized knowledge answers — _user_authorized_knowledge_answer (verb-anchored patterns + negation lookback) skips the completion-claim block with an audited evidence_gate_skipped_user_authority(authority=knowledge_answer) event; gate stubs rewritten informative/neutral. Invariant evidence_gate_user_knowledge_authority added to §1"
+doc_version: 2.45
+last_verified: 2026-07-02
 verification_method: "code cross-read of _failure_response_text + _blocked_user_input_reason (task_handler.py) and the rescue chain (_recent_waiting_for_user_task / _telegram_continuation_shortcut, bot.py) against this doc + WaitingUserInputRecoveryHintTests (2, green inside 54-test task_handler file) + live deploy 965871a: clean restart (pid 68921, zero stderr delta), composer exercised on the daemon checkout with the production-verbatim KeepAlive error shape. Predecessor P0-2 branch-integrity (doc_version 2.43) remains in main"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
@@ -1044,6 +1044,36 @@ invariants:
          KeepAlive tg-574707975). Slice S-α of the autonomy remediation block
          (α announce / β bounded re-drive / γ evidence phase / δ structured
          verdict); regressing it reopens the dead end silently.
+
+  evidence_gate_user_knowledge_authority:
+    rule: When the CURRENT user message explicitly authorizes answering from
+          the model's own knowledge (_user_authorized_knowledge_answer,
+          claw_v2/bot.py), _completion_claim_lacks_evidence MUST skip the
+          completion-claim block with an audited
+          evidence_gate_skipped_user_authority event
+          (authority=knowledge_answer) and deliver the brain content intact.
+          Without that authorization in the current turn, an unevidenced
+          completion claim MUST stay suppressed and replaced by the
+          informative template — F4-B1 is never weakened, and authorization
+          never leaks from prior messages (predicate reads source_text of the
+          current turn only).
+    enforced_by:
+      - tests/test_evidence_gate_user_authority.py::test_user_authorized_knowledge_close_is_delivered
+      - tests/test_evidence_gate_user_authority.py::test_unauthorized_completion_claim_stays_blocked
+    why: On 2026-07-02 (obs 400609/401107) the gate suppressed two legitimate
+         inline deliverables — including Hector's reply to the S-α recovery
+         announcement ("USA tu propio conocimiento… y cierra") — replacing
+         each with a 49-char stub. The S-α rescue arc was broken in prod by
+         the gate's own false positive; the gate must block confabulated
+         side-effect claims, not user-authorized knowledge answers. Slice
+         C0-S1 of the autonomy remediation plan
+         (memoria autonomy-remediation-plan-2026-07-02).
+         Known gap (pre-existing, shared with _user_authoritatively_marked_done):
+         five dev slash-command handlers (/backtest, /grill, /tdd,
+         /improve_arch, /verify) pass a prompt that embeds skill/playbook file
+         content as source_text, so a trigger phrase inside those files could
+         authorize the turn. Operator-only surface; fix is passing
+         memory_text=<user-typed instruction> in those handlers (C3 hygiene).
 ```
 
 ---
