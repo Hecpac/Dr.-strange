@@ -97,9 +97,7 @@ class TestUserAuthorizedKnowledgeAnswer:
         assert not _user_authorized_knowledge_answer(
             "don't use your own knowledge, actually run it"
         )
-        assert not _user_authorized_knowledge_answer(
-            "do not answer from memory, run the command"
-        )
+        assert not _user_authorized_knowledge_answer("do not answer from memory, run the command")
         assert not _user_authorized_knowledge_answer("never answer from memory")
 
     def test_memory_noun_collocations_do_not_match(self) -> None:
