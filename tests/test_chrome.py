@@ -144,6 +144,67 @@ class ManagedChromeTests(unittest.TestCase):
 
     @patch("claw_v2.chrome._check_port_pids")
     @patch("claw_v2.chrome._pid_is_headless", return_value=False)
+    @patch("claw_v2.chrome._kill_pid")
+    @patch("claw_v2.chrome._wait_for_port_free")
+    @patch("subprocess.Popen")
+    @patch("claw_v2.chrome._wait_for_cdp_ready")
+    def test_start_force_restart_kills_matching_zombie_instead_of_reattaching(
+        self, mock_ready, mock_popen, mock_wait_free, mock_kill, mock_is_headless, mock_pids
+    ) -> None:
+        # The zombie signature: a matching-profile Chrome holds the port and
+        # /json/version still answers (_is_cdp_ready True), but the caller has
+        # positively classified the endpoint as unable to create tabs. The
+        # plain reuse branch would reattach to PID 1234; force_restart must
+        # kill it and launch fresh instead.
+        mock_pids.side_effect = [[(1234, "Google Chrome")], []]
+        # After the forced kill, the profile no longer has live PIDs (the
+        # launch path re-checks it several times: wait-free, reclaim, ...).
+        profile_scans = iter([[1234]])
+        self.mock_profile_user_data_pids.side_effect = lambda *a, **k: next(profile_scans, [])
+        self.mock_cdp_ready.return_value = True
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+
+        mc.start(force_restart=True)
+
+        mock_kill.assert_called_once_with(1234)
+        mock_wait_free.assert_called_once()
+        mock_popen.assert_called_once()  # fresh launch, no reattach
+        self.assertIsNone(mc._attached_pid)
+        self.assertIs(mc._process, proc)
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("claw_v2.chrome._kill_pid")
+    def test_start_force_restart_never_kills_foreign_profile_chrome(
+        self, mock_kill, mock_pids
+    ) -> None:
+        # A Chrome on the port that does NOT use the managed profile is
+        # refused (existing semantics), never killed — even under force_restart.
+        mock_pids.return_value = [(4321, "Google Chrome")]
+        self.mock_profile_user_data_pids.return_value = []  # not our profile
+        self.mock_cdp_ready.return_value = True
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+
+        with self.assertRaises(ChromeStartError):
+            mc.start(force_restart=True)
+
+        mock_kill.assert_not_called()
+
+    def test_ensure_force_restart_bypasses_alive_process_early_return(self) -> None:
+        mc = ManagedChrome(port=9250, profile_dir="/tmp/test-profile")
+        proc = MagicMock()
+        proc.poll.return_value = None  # alive
+        mc._process = proc
+        with patch.object(mc, "start") as mock_start:
+            mc.ensure(headless=False)
+            mock_start.assert_not_called()  # default keeps the early return
+            mc.ensure(headless=False, force_restart=True)
+            mock_start.assert_called_once_with(headless=False, force_restart=True)
+
+    @patch("claw_v2.chrome._check_port_pids")
+    @patch("claw_v2.chrome._pid_is_headless", return_value=False)
     @patch("claw_v2.chrome._focus_existing_cdp_page", return_value=False)
     @patch("claw_v2.chrome._cdp_page_targets", return_value=[])
     @patch("claw_v2.chrome._open_cdp_target")

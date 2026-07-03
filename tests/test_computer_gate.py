@@ -373,6 +373,13 @@ class _StubBrowserUse:
         return "browser task done"
 
 
+class _ReadyBrowserCapability:
+    """Fake CDP preflight so interactive tests never touch real Chrome."""
+
+    def ensure_ready(self, *, port: int = 9250, profile_dir: str) -> str:
+        return f"http://127.0.0.1:{port}"
+
+
 class ComputerHandlerBrowserAutoApproveTests(unittest.TestCase):
     """browser_use_task (authenticated Chrome) auto-runs without 'te autorizo'
     when CLAW_COMPUTER_AUTO_APPROVE is on, EXCEPT when the task targets a
@@ -382,7 +389,9 @@ class ComputerHandlerBrowserAutoApproveTests(unittest.TestCase):
         config = SimpleNamespace(
             computer_auto_approve=auto_approve, sensitive_urls=["robinhood.com", "stripe.com"]
         )
-        return ComputerHandler(browser_use=stub, config=config)
+        return ComputerHandler(
+            browser_use=stub, config=config, browser_capability=_ReadyBrowserCapability()
+        )
 
     def _session(self, task: str, current_url: str | None = None) -> SimpleNamespace:
         return SimpleNamespace(
@@ -443,7 +452,9 @@ class ComputerHandlerBrowserAutoApproveTests(unittest.TestCase):
         # must NOT gate (brand match is "ads.google" as a whole word, not "google")
         config = SimpleNamespace(computer_auto_approve=True, sensitive_urls=["ads.google.com"])
         stub = _StubBrowserUse()
-        handler = ComputerHandler(browser_use=stub, config=config)
+        handler = ComputerHandler(
+            browser_use=stub, config=config, browser_capability=_ReadyBrowserCapability()
+        )
         session = self._session("abre google y busca recetas de arepas")
         handler._run_browser_use_session(session)
         self.assertTrue(stub.called)

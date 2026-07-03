@@ -908,6 +908,25 @@ class ComputerHandler:
             )
         if self.browser_use is None:
             raise RuntimeError("browser_use unavailable for approved browser automation")
+        # Same CDP preflight as the delegated route: never spend LLM against an
+        # unproven endpoint. ensure_ready() self-heals (ManagedChrome respawn)
+        # and re-probes, including the zombie tab-creation check. Serialized
+        # with the delegated route's per-profile lock so this preflight can
+        # never restart the managed Chrome mid-run of a delegated task on the
+        # same profile.
+        cdp_port = self._delegated_browser_cdp_port()
+        with self._cdp_profile_lock(f"http://127.0.0.1:{cdp_port}"):
+            try:
+                cdp_endpoint = self._get_browser_capability().ensure_ready(
+                    port=cdp_port,
+                    profile_dir=DEFAULT_CDP_PROFILE_DIR,
+                )
+            except BrowserCapabilityError as exc:
+                session.status = "done"
+                session.pending_action = None
+                return f"No pude conectar al navegador (CDP): {exc}"
+        self._mark_capability_available("chrome_cdp")
+        self._set_browser_use_cdp_url(cdp_endpoint)
         try:
             approved_domains = _normalized_domains(
                 pending.get("approved_domains")

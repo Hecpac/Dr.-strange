@@ -45,7 +45,7 @@ class BrowserCapability:
         profile_dir: str = DEFAULT_CDP_PROFILE_DIR,
         visible: bool = True,
     ) -> str:
-        """Ensure Chrome CDP responds on /json/version, starting it if needed."""
+        """Ensure Chrome CDP is usable (version + tab lifecycle), starting it if needed."""
         port = _normalize_port(port)
         endpoint = f"http://{DEFAULT_CDP_HOST}:{port}"
         profile_path = str(Path(profile_dir).expanduser().resolve(strict=False))
@@ -56,7 +56,7 @@ class BrowserCapability:
         }
         self._emit("browser_capability_preflight_started", payload)
 
-        first_error = self._probe_json_version(endpoint, visible=visible)
+        first_error, first_zombie = self._probe_endpoint(endpoint, visible=visible)
         if first_error is None:
             if visible:
                 try:
@@ -88,7 +88,11 @@ class BrowserCapability:
                 profile_dir=profile_dir,
                 observe=self._managed_chrome_observe,
             )
-            chrome.ensure(headless=not visible)
+            # A positively-classified zombie still answers /json/version, so a
+            # plain ensure() would reattach to the same broken Chrome; force a
+            # restart only in that proven case (dead/headless keep the normal
+            # recovery path).
+            chrome.ensure(headless=not visible, force_restart=first_zombie)
         except Exception as exc:
             message = (
                 "Necesito abrir/login Chrome para esta tarea de navegador. "
@@ -98,7 +102,7 @@ class BrowserCapability:
             self._fail(payload, message, stage="start_chrome", first_error=first_error)
             raise BrowserCapabilityError(message, endpoint=endpoint) from exc
 
-        second_error = self._probe_json_version(endpoint, visible=visible)
+        second_error, _second_zombie = self._probe_endpoint(endpoint, visible=visible)
         if second_error is not None:
             message = (
                 "Necesito abrir/login Chrome para esta tarea de navegador. "
@@ -114,37 +118,90 @@ class BrowserCapability:
         )
         return endpoint
 
-    def _probe_json_version(self, endpoint: str, *, visible: bool = True) -> str | None:
-        url = f"{endpoint}/json/version"
-        try:
-            response = self._urlopen(url, timeout=self._probe_timeout)
-            if hasattr(response, "__enter__"):
-                with response as opened:
-                    self._read_version_response(opened, visible=visible)
-            else:
-                try:
-                    self._read_version_response(response, visible=visible)
-                finally:
-                    close = getattr(response, "close", None)
-                    if callable(close):
-                        close()
-            return None
-        except Exception as exc:
-            return _error_message(exc)
+    def _probe_endpoint(self, endpoint: str, *, visible: bool = True) -> tuple[str | None, bool]:
+        """Full CDP health probe: /json/version plus a disposable-tab lifecycle.
 
-    @staticmethod
-    def _read_version_response(response: Any, *, visible: bool = True) -> None:
-        status = getattr(response, "status", getattr(response, "code", None))
-        if status is not None and int(status) >= 400:
-            raise RuntimeError(f"HTTP {status}")
-        raw = response.read(8192)
-        if raw:
-            data = json.loads(raw.decode("utf-8"))
-            if visible:
+        A zombie Chrome can keep answering /json/version while being unable to
+        open new tabs ("Failed to open new tab - no browser is open"), so a
+        healthy verdict requires actually creating (and closing) an
+        about:blank target.
+
+        Returns ``(error, is_zombie)``: ``is_zombie`` is True only for the
+        positively-classified zombie case (version OK, tab create failed) — the
+        caller uses it to force a ManagedChrome restart instead of letting the
+        /json/version-based reuse path reattach to the same broken Chrome.
+        """
+        error = self._probe_json_version(endpoint, visible=visible)
+        if error is not None:
+            return error, False
+        zombie_error = self._probe_target_lifecycle(endpoint)
+        if zombie_error is None:
+            return None, False
+        self._emit(
+            "browser_capability_probe_zombie",
+            {"endpoint": endpoint, "error": zombie_error[:200]},
+        )
+        return (
+            f"CDP responde /json/version pero no puede crear pestañas: {zombie_error}",
+            True,
+        )
+
+    def _probe_json_version(self, endpoint: str, *, visible: bool = True) -> str | None:
+        try:
+            data = self._request_json(f"{endpoint}/json/version")
+            if data is not None and visible:
                 browser = str(data.get("Browser") or "")
                 user_agent = str(data.get("User-Agent") or "")
                 if "HeadlessChrome" in browser or "HeadlessChrome" in user_agent:
                     raise RuntimeError("Chrome CDP is headless; visible Chrome required")
+            return None
+        except Exception as exc:
+            return _error_message(exc)
+
+    def _probe_target_lifecycle(self, endpoint: str) -> str | None:
+        """Create and close a disposable about:blank tab over the CDP HTTP API."""
+        target_id: str | None = None
+        try:
+            data = self._request_json(f"{endpoint}/json/new?about:blank", method="PUT")
+            target_id = str((data or {}).get("id") or "") or None
+            if target_id is None:
+                return "CDP /json/new no devolvio target id"
+            return None
+        except Exception as exc:
+            return _error_message(exc)
+        finally:
+            # Best-effort: never leave the probe tab behind, but a close failure
+            # must not turn a create-success into an unhealthy verdict.
+            if target_id is not None:
+                try:
+                    # /json/close answers plain text ("Target is closing"), not
+                    # JSON — any 2xx/3xx response means the close was accepted.
+                    self._request_json(f"{endpoint}/json/close/{target_id}", parse_json=False)
+                except Exception:
+                    logger.debug("CDP probe tab close failed: %s", target_id, exc_info=True)
+
+    def _request_json(self, url: str, *, method: str = "GET", parse_json: bool = True) -> Any:
+        request = urllib.request.Request(url, method=method)
+        response = self._urlopen(request, timeout=self._probe_timeout)
+        if hasattr(response, "__enter__"):
+            with response as opened:
+                return self._read_json_response(opened, parse_json=parse_json)
+        try:
+            return self._read_json_response(response, parse_json=parse_json)
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+
+    @staticmethod
+    def _read_json_response(response: Any, *, parse_json: bool = True) -> Any:
+        status = getattr(response, "status", getattr(response, "code", None))
+        if status is not None and int(status) >= 400:
+            raise RuntimeError(f"HTTP {status}")
+        raw = response.read(8192)
+        if not raw or not parse_json:
+            return None
+        return json.loads(raw.decode("utf-8"))
 
     def _fail(
         self,
