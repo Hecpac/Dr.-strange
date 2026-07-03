@@ -465,5 +465,137 @@ class DeliverableDispatchTests(unittest.TestCase):
         self.assertIn("directorio de trabajo", DELIVERABLES_TAIL_INSTRUCTION)
 
 
+class ReviewFixTests(unittest.TestCase):
+    """Locks de los 5 hallazgos del review adversarial del PR #187."""
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ, {"TELEGRAM_ALLOWED_USER_ID": "777"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_publish_organic_tail_does_not_dispatch(self) -> None:
+        # #1 MUST-FIX: un publish cuyo worker escribe orgánicamente un bloque
+        # DELIVERABLES (sin contrato ni cwd) debe cerrar completed — el
+        # dispatch está gateado a mode=ops.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            delivery = _RecordingDelivery()
+            coordinator = _DeliverCoordinator(
+                root / "scratch",
+                impl_content=IMPL_NO_TAIL + "DELIVERABLES:\n- borrador_post.md\n",
+                files_to_create=(),
+            )
+            handler, _memory, observe, _stored = _mk_handler(root, coordinator, delivery)
+            ack = handler.start_autonomous_task(
+                "tg-777", "prepara el contenido del anuncio", mode="publish"
+            )
+            task_id = ack.split("`", 2)[1]
+            self.assertTrue(handler.wait_for_task(task_id, timeout=10))
+
+            self.assertEqual(delivery.calls, [])
+            events = observe.recent_events(limit=200)
+            types = [e["event_type"] for e in events]
+            self.assertIn("autonomous_task_completed", types)
+            self.assertNotIn("autonomous_task_deliverable_dispatch", types)
+
+    def test_owner_env_missing_fails_closed(self) -> None:
+        # #3: sin TELEGRAM_ALLOWED_USER_ID no hay destino autorizado — el
+        # cross-check jamás se salta (fail-closed, no fail-open).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            delivery = _RecordingDelivery()
+            handler, _memory, observe, _stored = _mk_handler(
+                root, _DeliverCoordinator(root / "scratch"), delivery
+            )
+            with mock.patch.dict(os.environ):
+                os.environ.pop("TELEGRAM_ALLOWED_USER_ID", None)
+                _run_ops_task(handler, "tg-777", OBJECTIVE)
+
+            self.assertEqual(delivery.calls, [])
+            failed = next(
+                e
+                for e in observe.recent_events(limit=200)
+                if e["event_type"] == "autonomous_task_failed"
+            )
+            self.assertIn("destino_no_autorizado", failed["payload"]["error"])
+
+    def test_cap_overflow_sends_nothing(self) -> None:
+        # #4: cap violado ⇒ fail-closed ANTES de cualquier envío (0 efectos
+        # externos) y evento de auditoría por CADA archivo declarado.
+        names = tuple(f"informe_{i}.html" for i in range(6))
+        tail = "DELIVERABLES:\n" + "".join(f"- {n}\n" for n in names)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            delivery = _RecordingDelivery()
+            coordinator = _DeliverCoordinator(
+                root / "scratch", impl_content=IMPL_NO_TAIL + tail, files_to_create=names
+            )
+            handler, _memory, observe, _stored = _mk_handler(root, coordinator, delivery)
+            _run_ops_task(handler, "tg-777", OBJECTIVE)
+
+            self.assertEqual(delivery.calls, [])
+            events = observe.recent_events(limit=300)
+            failed = next(e for e in events if e["event_type"] == "autonomous_task_failed")
+            self.assertIn("cap_archivos_excedido", failed["payload"]["error"])
+            dispatch_events = [
+                e for e in events if e["event_type"] == "autonomous_task_deliverable_dispatch"
+            ]
+            self.assertEqual(len(dispatch_events), 6)
+            self.assertFalse(any(e["payload"]["ok"] for e in dispatch_events))
+
+    def test_nul_name_rejected_and_delivery_record_survives(self) -> None:
+        # #2: un nombre con NUL no revienta el runner con ValueError — se
+        # rechaza como nombre_invalido y el registro de deliveries (incluido
+        # el message_id del archivo que SÍ se envió) sobrevive al checkpoint.
+        tail = "DELIVERABLES:\n- informe_1.html\n- mal\x00o.html\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            delivery = _RecordingDelivery()
+            coordinator = _DeliverCoordinator(
+                root / "scratch",
+                impl_content=IMPL_NO_TAIL + tail,
+                files_to_create=("informe_1.html",),
+            )
+            handler, memory, observe, _stored = _mk_handler(root, coordinator, delivery)
+            _run_ops_task(handler, "tg-777", OBJECTIVE)
+
+            self.assertEqual(len(delivery.calls), 1)
+            events = observe.recent_events(limit=200)
+            types = [e["event_type"] for e in events]
+            self.assertNotIn("autonomous_task_completed", types)
+            failed = next(e for e in events if e["event_type"] == "autonomous_task_failed")
+            self.assertIn("nombre_invalido", failed["payload"]["error"])
+            deliveries = (memory.get_session_state("tg-777").get("last_checkpoint") or {}).get(
+                "deliveries"
+            ) or []
+            self.assertEqual(len(deliveries), 2)
+            sent_ok = [d for d in deliveries if d.get("ok")]
+            self.assertEqual(len(sent_ok), 1)
+            self.assertTrue(sent_ok[0].get("message_id"))
+
+    def test_non_tg_missing_file_is_honest(self) -> None:
+        # #5: el camino no-tg valida igual — un archivo declarado inexistente
+        # jamás se registra ok:True (claim confabulado) y degrada honesto.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            delivery = _RecordingDelivery()
+            coordinator = _DeliverCoordinator(root / "scratch", files_to_create=())
+            handler, memory, observe, _stored = _mk_handler(root, coordinator, delivery)
+            _run_ops_task(handler, "web-1", OBJECTIVE)
+
+            self.assertEqual(delivery.calls, [])
+            failed = next(
+                e
+                for e in observe.recent_events(limit=200)
+                if e["event_type"] == "autonomous_task_failed"
+            )
+            self.assertIn("archivo_no_encontrado", failed["payload"]["error"])
+            deliveries = (memory.get_session_state("web-1").get("last_checkpoint") or {}).get(
+                "deliveries"
+            ) or []
+            self.assertTrue(deliveries)
+            self.assertFalse(any(d.get("ok") for d in deliveries))
+
+
 if __name__ == "__main__":
     unittest.main()

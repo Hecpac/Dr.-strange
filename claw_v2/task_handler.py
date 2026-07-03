@@ -1837,7 +1837,11 @@ class TaskHandler:
             # después de verification=passed y después del governor — nunca la
             # fase implementation (F3.1 intacto). Un fallo de envío degrada a
             # terminal failed honesto y JAMÁS re-conduce la tarea.
-            if terminal_status == "succeeded" and completed_checkpoint.get("deliverables"):
+            if (
+                terminal_status == "succeeded"
+                and mode == "ops"
+                and completed_checkpoint.get("deliverables")
+            ):
                 completed_checkpoint, response, _dispatch_ok = self._dispatch_deliverables(
                     session_id=session_id,
                     task_id=task_id,
@@ -2214,47 +2218,105 @@ class TaskHandler:
         """Envío daemon-side de los entregables declarados (slice #2, ruta A).
 
         Los nombres declarados vienen de texto del LLM: containment estricto
-        (nombre simple, resolución dentro del directorio de entregables,
-        existencia, cap de tamaño y de cantidad). Destino restringido por
-        código al chat de origen del dueño; los archivos fallidos quedan en
-        scratch y la muerte es honesta con detalle por archivo.
+        (nombre simple sin separadores ni chars de control, resolución dentro
+        del directorio de entregables, existencia, caps de tamaño y cantidad
+        — el cap violado falla ANTES de cualquier envío). Destino restringido
+        por código al chat del dueño, cross-check FAIL-CLOSED contra
+        TELEGRAM_ALLOWED_USER_ID (sin owner configurado no hay destino
+        autorizado). Los archivos fallidos quedan en scratch y la muerte es
+        honesta con detalle por archivo.
         """
         declared = [str(item) for item in (checkpoint.get("deliverables") or [])]
-        overflow = declared[_MAX_DELIVERABLE_FILES:]
-        declared = declared[:_MAX_DELIVERABLE_FILES]
         base = self._deliverables_base(task_id)
-        if not session_id.startswith("tg-"):
-            listing = ", ".join(name[:200] for name in declared)
-            where = f" en {base}" if base is not None else ""
-            checkpoint = {
+
+        def _emit_entry(entry: dict[str, Any]) -> None:
+            self._emit(
+                "autonomous_task_deliverable_dispatch",
+                {
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "file": entry["file"],
+                    "ok": entry["ok"],
+                    **({"message_id": entry.get("message_id")} if entry["ok"] else {}),
+                    **({"error": entry.get("error", "")} if not entry["ok"] else {}),
+                },
+            )
+
+        def _downgrade(results: list[dict[str, Any]]) -> tuple[dict[str, Any], str, bool]:
+            failed_entries = [r for r in results if not r.get("ok")]
+            detail = "; ".join(
+                f"{r['file']}: {r.get('error', 'send_failed')}" for r in failed_entries
+            )
+            downgraded = {
                 **checkpoint,
-                "deliveries": [
-                    {"file": name[:200], "ok": True, "method": "local_path"} for name in declared
-                ],
+                "deliveries": results,
+                "verification_status": "failed",
+                "reason": "deliverable_send_failed",
+                "error": f"deliverable_send_failed: {detail}"[:500],
             }
+            return downgraded, response, False
+
+        if len(declared) > _MAX_DELIVERABLE_FILES:
+            # Fail-closed ANTES de cualquier efecto externo: cap violado ⇒ 0 envíos.
+            results = [
+                {"file": name[:200], "ok": False, "error": "cap_archivos_excedido"}
+                for name in declared
+            ]
+            for entry in results:
+                _emit_entry(entry)
+            return _downgrade(results)
+
+        def _validate(name: str) -> tuple[Path | None, str | None]:
+            if (
+                any(ord(ch) < 32 for ch in name)
+                or "/" in name
+                or "\\" in name
+                or name.startswith(".")
+            ):
+                return None, "nombre_invalido"
+            if base is None:
+                return None, "deliverables_dir_unavailable"
+            try:
+                resolved = (base / name).resolve()
+                if resolved.parent != base.resolve() or not resolved.is_file():
+                    return None, "archivo_no_encontrado_o_fuera_del_directorio"
+                if resolved.stat().st_size > _MAX_DELIVERABLE_BYTES:
+                    return None, "excede_45mb"
+            except (OSError, ValueError):
+                return None, "archivo_no_encontrado_o_fuera_del_directorio"
+            return resolved, None
+
+        if not session_id.startswith("tg-"):
+            # Sin envío fuera de Telegram — pero el listado registra SOLO lo
+            # validado: un ok:True sin archivo real sería un claim confabulado.
+            results = []
+            for name in declared:
+                _resolved, error = _validate(name)
+                entry: dict[str, Any] = {"file": name[:200], "ok": error is None}
+                if error is None:
+                    entry["method"] = "local_path"
+                else:
+                    entry["error"] = error
+                results.append(entry)
+                _emit_entry(entry)
+            if any(not r["ok"] for r in results):
+                return _downgrade(results)
+            listing = ", ".join(r["file"] for r in results)
+            where = f" en {base}" if base is not None else ""
+            checkpoint = {**checkpoint, "deliveries": results}
             return checkpoint, f"{response}\n\nEntregables{where}: {listing}", True
+
         chat_id = session_id.removeprefix("tg-")
         allowed = (os.getenv("TELEGRAM_ALLOWED_USER_ID") or "").strip()
-        results: list[dict[str, Any]] = []
+        results = []
         for name in declared:
-            entry: dict[str, Any] = {"file": name[:200], "ok": False}
-            if allowed and chat_id != allowed:
+            entry = {"file": name[:200], "ok": False}
+            if not allowed or chat_id != allowed:
                 entry["error"] = "destino_no_autorizado"
-            elif base is None:
-                entry["error"] = "deliverables_dir_unavailable"
-            elif "/" in name or "\\" in name or name.startswith("."):
-                entry["error"] = "nombre_invalido"
             else:
-                resolved: Path | None = None
-                try:
-                    resolved = (base / name).resolve()
-                    contained = resolved.parent == base.resolve() and resolved.is_file()
-                except OSError:
-                    contained = False
-                if not contained or resolved is None:
-                    entry["error"] = "archivo_no_encontrado_o_fuera_del_directorio"
-                elif resolved.stat().st_size > _MAX_DELIVERABLE_BYTES:
-                    entry["error"] = "excede_45mb"
+                resolved, error = _validate(name)
+                if error is not None or resolved is None:
+                    entry["error"] = error or "archivo_no_encontrado_o_fuera_del_directorio"
                 else:
                     try:
                         sent = self._deliver_file(resolved, chat_id=chat_id, caption=name)
@@ -2267,29 +2329,10 @@ class TaskHandler:
                     else:
                         entry["error"] = str(sent.get("error") or "send_failed")[:300]
             results.append(entry)
-            self._emit(
-                "autonomous_task_deliverable_dispatch",
-                {
-                    "session_id": session_id,
-                    "task_id": task_id,
-                    "file": entry["file"],
-                    "ok": entry["ok"],
-                    **({"message_id": entry.get("message_id")} if entry["ok"] else {}),
-                    **({"error": entry.get("error", "")} if not entry["ok"] else {}),
-                },
-            )
-        for name in overflow:
-            results.append({"file": name[:200], "ok": False, "error": "cap_archivos_excedido"})
+            _emit_entry(entry)
+        if any(not r["ok"] for r in results):
+            return _downgrade(results)
         checkpoint = {**checkpoint, "deliveries": results}
-        failed_entries = [r for r in results if not r.get("ok")]
-        if failed_entries:
-            detail = "; ".join(
-                f"{r['file']}: {r.get('error', 'send_failed')}" for r in failed_entries
-            )
-            checkpoint["verification_status"] = "failed"
-            checkpoint["reason"] = "deliverable_send_failed"
-            checkpoint["error"] = f"deliverable_send_failed: {detail}"[:500]
-            return checkpoint, response, False
         sent_line = ", ".join(f"{r['file']} (message_id {r.get('message_id')})" for r in results)
         return checkpoint, f"{response}\n\nEntregado por Telegram: {sent_line}", True
 

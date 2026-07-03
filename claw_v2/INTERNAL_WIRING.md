@@ -1228,14 +1228,26 @@ invariants:
           send failure degrades to an honest terminal failed
           (deliverable_send_failed with per-file detail; artifacts stay in
           scratch) and NEVER arms a redrive — a re-run cannot fix the network
-          and would only re-trip F3.1. Destination is code-restricted to the
-          origin session's owner chat (tg- suffix, cross-checked against
-          TELEGRAM_ALLOWED_USER_ID); non-tg sessions get the local paths
-          listed, no send. Declared names are untrusted LLM text and pass
-          strict containment: plain filename only, resolution must stay inside
-          the deliverables dir (symlink escape rejected), file must exist,
-          45MB and 5-file caps. Every attempt emits
-          autonomous_task_deliverable_dispatch {file, ok, message_id|error}.
+          and would only re-trip F3.1. The dispatch itself is gated to
+          mode=ops (review #187 MUST-FIX: an organic DELIVERABLES-shaped
+          bullet list in a publish/coding worker's output must never kill a
+          passed task). Destination is code-restricted to the origin
+          session's owner chat (tg- suffix), cross-checked FAIL-CLOSED
+          against TELEGRAM_ALLOWED_USER_ID — an unset owner var refuses the
+          send (destino_no_autorizado), never skips the guard. Non-tg
+          sessions get no send but the SAME per-name validation before
+          listing local paths (an ok:True for a nonexistent file would be a
+          confabulated-artifact claim). Declared names are untrusted LLM
+          text and pass strict containment: plain filename only (no
+          separators, no dot-prefix, no control chars — NUL included),
+          resolution must stay inside the deliverables dir (symlink escape
+          rejected; resolve/stat wrapped against OSError AND ValueError so a
+          hostile name can never ride the generic exception path and wipe
+          the recorded deliveries), file must exist, 45MB size cap, and the
+          5-file cap fails CLOSED BEFORE any send (declaring more than 5
+          sends nothing). Every attempt — including cap-overflow and non-tg
+          validation — emits autonomous_task_deliverable_dispatch
+          {file, ok, message_id|error}.
           Known window (owner decision 2026-07-02, v1): delivery results ride
           the checkpoint before the terminal write, so a crash after send but
           before record can double-send on re-run ("rather double-notify than
@@ -1250,6 +1262,7 @@ invariants:
       - tests/test_task_deliverables.py::WorkerTaskCwdTests (cwd viaja al router solo si está)
       - tests/test_task_deliverables.py::OpsDeliverablesWiringTests (cwd+convención+git-init solo mode=ops; research/publish intactos)
       - tests/test_task_deliverables.py::DeliverableDispatchTests (envío ok registra deliveries+message_id y notifica; fallo ⇒ terminal honesto SIN redrive; traversal/symlink/missing rechazados sin enviar; owner-only; no-tail byte-idéntico; sesión no-tg lista paths)
+      - tests/test_task_deliverables.py::ReviewFixTests (locks del review #187 — publish con tail orgánico cierra completed; owner var ausente ⇒ fail-closed; cap violado ⇒ 0 envíos con evento por archivo; NUL ⇒ nombre_invalido con registro de deliveries intacto; no-tg missing ⇒ honesto)
     why: the first organic post-B2 ops-network delegation (send 2 HTML to
          Telegram, task 1783021694523108000) put sendDocument INSIDE
          implementation - the network-blocked worker failed, the redrive was
