@@ -626,6 +626,11 @@ class TaskHandler:
             goal_id=goal_id,
             task_contract=task_contract,
             verify=verify,
+            # #2b: persiste el flag DURABLE en el ledger para que sobreviva a un
+            # resume (el rebuild de active_task en _resume_autonomous_record no
+            # lo lleva; sin esto, un verification-defer + watchdog re-corre el
+            # task sin el flag ⇒ dispatch silenciosamente saltado).
+            deliver_to_owner=bool((delegation_metadata or {}).get("deliver_to_owner")),
         )
         claim_id = self._p0_record_task_claim(
             goal_id=goal_id,
@@ -2782,6 +2787,13 @@ class TaskHandler:
             active_object["active_task"]["execution_mode"] = execution_mode
         if goal_id:
             active_object["active_task"]["goal_id"] = goal_id
+        # #2b: restaura el flag deliver_to_owner desde el ledger metadata (donde
+        # start_autonomous_task lo persistió durable) — el rebuild del template
+        # de active_task lo omitía, y _run_autonomous_task solo llega vía este
+        # resume o un start fresco: sin el restore, el dispatch daemon-side no
+        # corre en la pierna resumida y los archivos quedan sin enviar.
+        if metadata.get("deliver_to_owner"):
+            active_object["active_task"]["delegation_metadata"] = {"deliver_to_owner": True}
         self._update_session_state(
             record.session_id,
             mode=mode,
@@ -3583,6 +3595,7 @@ class TaskHandler:
         goal_id: str | None = None,
         task_contract: dict[str, Any] | None = None,
         verify: str | None = None,
+        deliver_to_owner: bool = False,
     ) -> None:
         if self.task_ledger is None:
             return
@@ -3603,6 +3616,7 @@ class TaskHandler:
                 **(task_contract or {}),
                 **({"goal_id": goal_id} if goal_id else {}),
                 **({"verify": verify} if verify else {}),
+                **({"deliver_to_owner": True} if deliver_to_owner else {}),
             },
             artifacts=self._initial_task_artifacts(
                 task_id=task_id,

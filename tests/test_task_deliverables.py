@@ -739,6 +739,58 @@ class DeliverToOwnerGateTests(unittest.TestCase):
             self.assertNotIn("autonomous_task_deliverable_dispatch", types)
 
 
+class DeliverToOwnerResumeSurvivalTests(unittest.TestCase):
+    """#2b review #188 MUST-FIX: el flag sobrevive a un resume.
+
+    _resume_autonomous_record reconstruye active_task desde un template fijo que
+    NO lleva delegation_metadata; un verification-defer + el watchdog re-corren
+    el task por ahí. Sin persistencia durable + restore, el dispatch se salta en
+    la pierna resumida y los archivos quedan sin enviar con terminal succeeded.
+    """
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ, {"TELEGRAM_ALLOWED_USER_ID": "777"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_flag_persisted_to_ledger_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            handler, _memory, _observe, _stored = _mk_handler(
+                root, _DeliverCoordinator(root / "scratch"), _RecordingDelivery()
+            )
+            task_id = _run_ops_task(handler, "tg-777", OBJECTIVE, deliver_to_owner=True)
+            record = handler.task_ledger.get(task_id)
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertTrue((record.metadata or {}).get("deliver_to_owner"))
+
+    def test_flag_survives_resume_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            handler, memory, _observe, _stored = _mk_handler(
+                root, _DeliverCoordinator(root / "scratch"), _RecordingDelivery()
+            )
+            task_id = _run_ops_task(handler, "tg-777", OBJECTIVE, deliver_to_owner=True)
+
+            # Simula el estado post-watchdog: el rebuild de active_task perdió
+            # delegation_metadata (el bug que el fix corrige).
+            state = memory.get_session_state("tg-777")
+            active_object = dict(state.get("active_object") or {})
+            active_task = dict(active_object.get("active_task") or {})
+            active_task.pop("delegation_metadata", None)
+            active_object["active_task"] = active_task
+            memory.update_session_state("tg-777", active_object=active_object)
+            self.assertFalse(handler._task_delivers_to_owner("tg-777", task_id))
+
+            # El resume debe RESTAURAR el flag desde el ledger metadata.
+            record = handler.task_ledger.get(task_id)
+            assert record is not None
+            handler._resume_autonomous_record(record, reason="test_resume")
+            handler.wait_for_task(task_id, timeout=10)
+            self.assertTrue(handler._task_delivers_to_owner("tg-777", task_id))
+
+
 class SmokeNegativeContainmentTests(unittest.TestCase):
     """#2b: la ruta absoluta del smoke negativo declarada ⇒ rechazada por containment."""
 

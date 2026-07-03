@@ -11,7 +11,7 @@
 describes_commit: "slice #2b deliver_to_owner (par #1→#2, 2026-07-02): closes #2's arc by separating produce from deliver at DELEGATION. delegate_task gains a deliver_to_owner boolean (anthropic_options schema + payload); the brain sets it (DELEGATION_CONTRACT, bilingual anchors) and writes a send-free objective; the flag rides delegation_metadata → active_task; TaskHandler._task_delivers_to_owner gates BOTH the cwd wiring and the daemon-side dispatch — without the flag a mode=ops task is byte-identical to pre-#2. This strips the send from the objective so synthesis never plans a sendDocument Step (the #2-smoke failure mode). Reinforced DELIVERABLES_TAIL_INSTRUCTION forbids in-band send + absolute paths. Extends §1 invariant deliverable_dispatch_daemon_side. Predecessor: #2 deliverable_dispatch (doc_version 2.57) in main 2e5983b"
 doc_version: 2.58
 last_verified: 2026-07-02
-verification_method: "TDD red-first: 6 new #2b tests written before code (schema/contract/gate failing), then 35/35 green in test_task_deliverables. Adjacent green: test_brain_core + test_coordinator + test_architecture_invariants 220 passed + 26 subtests; test_bot 169 passed + 3 subtests (brain delegation handler touched). ruff clean; surgical diff (3 task_handler hunks all slice zones after reverting ruff's 3 ajeno reformats). Full suite pending (running). #2b CLOSING SMOKE PENDING deploy — see live_smoke_status: the original incident mission must close succeeded with real sendDocument ok+message_id by event-id. Unit-locked, NOT yet live-proven end-to-end."
+verification_method: "TDD red-first: 6 #2b tests written before code, then adversarial review #188 found a MUST-FIX (flag dropped on resume) — fixed with durable ledger persistence + _resume_autonomous_record restore, test-locked by DeliverToOwnerResumeSurvivalTests (both fail without the fix: the intermediate assertFalse confirms the drop, the post-resume assertTrue the restore). 39/39 green in test_task_deliverables; test_task_redrive (exercises resume) + adjacent green; test_anthropic payload updated. Full suite re-run after the resume fix. #2b CLOSING SMOKE PENDING deploy — see live_smoke_status: the original incident mission must close succeeded with real sendDocument ok+message_id by event-id, AND must be verified specifically across a resume/restart (a single clean-pass smoke does not exercise the resume branch). Unit-locked, NOT yet live-proven end-to-end."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1221,9 +1221,22 @@ invariants:
           writes the objective to describe ONLY producing the files. Both the
           cwd wiring and the daemon-side dispatch are GATED on
           TaskHandler._task_delivers_to_owner (reads
-          active_task.delegation_metadata.deliver_to_owner, persisted before
-          enqueue) — WITHOUT the flag a mode=ops task is byte-identical to
-          pre-#2 (no cwd, no git init, no DELIVERABLES convention, no dispatch).
+          active_task.delegation_metadata.deliver_to_owner) — WITHOUT the flag a
+          mode=ops task is byte-identical to pre-#2 (no cwd, no git init, no
+          DELIVERABLES convention, no dispatch). The flag is persisted DURABLY
+          in the ledger metadata (start_autonomous_task → _record_ledger_task_
+          started) and RESTORED on resume (_resume_autonomous_record rebuilds
+          active_task from a fixed template that omits delegation_metadata;
+          review #188 MUST-FIX). Without that persistence a verification-defer
+          (which ends the task thread leaving ledger status=running) + the
+          lifecycle watchdog re-runs the task through _resume_autonomous_record
+          with the flag dropped ⇒ the resumed succeeded leg silently skips the
+          dispatch and files are never delivered — the exact "dispatch
+          unreachable" failure #2b exists to prevent, on the multi-round path
+          that is the common case (the #2 smoke failed because the verifier
+          forced rework). _run_autonomous_task is reachable only via a fresh
+          start or this resume, so the restore is load-bearing for every
+          re-execution.
           This is what closes the arc: #2's smoke came back NEGATIVE because the
           send lived in the objective ("envíamelos") → synthesis planned a
           sendDocument Step → the network-blocked worker failed it → verifier
@@ -1287,6 +1300,7 @@ invariants:
       - tests/test_task_deliverables.py::DeliverToOwnerGateTests (#2b — con flag despacha; sin flag jamás despacha aunque haya tail orgánico)
       - tests/test_task_deliverables.py::OpsDeliverablesWiringTests::test_ops_without_flag_is_byte_identical_no_cwd (#2b — sin flag byte-idéntico a pre-#2)
       - tests/test_task_deliverables.py::SmokeNegativeContainmentTests (#2b — la ruta absoluta del smoke negativo declarada ⇒ nombre_invalido, 0 envíos)
+      - tests/test_task_deliverables.py::DeliverToOwnerResumeSurvivalTests (#2b review #188 MUST-FIX — el flag se persiste al ledger metadata y se restaura en _resume_autonomous_record; sin esto el resume lo pierde y el dispatch se salta)
     why: the first organic post-B2 ops-network delegation (send 2 HTML to
          Telegram, task 1783021694523108000) put sendDocument INSIDE
          implementation - the network-blocked worker failed, the redrive was
