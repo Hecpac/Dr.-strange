@@ -23,6 +23,7 @@ from claw_v2.artifacts import (
 from claw_v2.action_events import ActionResult, ProposedAction, emit_event
 from claw_v2.automation_outcome import AutomationOutcome
 from claw_v2.bot_helpers import (
+    DELIVERABLES_TAIL_INSTRUCTION,
     _build_coordinator_tasks,
     _coordinator_checkpoint,
     normalize_blocker_ident,
@@ -47,6 +48,7 @@ from claw_v2.f2_recovery import F2RecoveryPlan, F2RecoveryStatus, plan_f2_recove
 from claw_v2.goal_contract import create_goal
 from claw_v2.maintenance import job_claim_block_reason
 from claw_v2.model_registry import model_overrides_from_state
+from claw_v2.subprocess_runner import run_subprocess_bounded
 from claw_v2.truncation import truncation_marker
 from claw_v2.verification import (
     DimensionRawResponse,
@@ -311,6 +313,10 @@ def _evidence_block(content: str, *, attempt: int, task_id: str) -> str:
     )
 
 
+_MAX_DELIVERABLE_FILES = 5
+_MAX_DELIVERABLE_BYTES = 45 * 1024 * 1024  # margen bajo el cap 50MB del Bot API
+
+
 @dataclass(frozen=True, slots=True)
 class AutonomousTaskBootstrapResult:
     """Structured outcome of ``TaskHandler.ensure_autonomous_task_enqueued``.
@@ -354,6 +360,7 @@ class TaskHandler:
         telemetry_root: Path | str | None = None,
         max_autonomous_workers: int = 4,
         redrive_budget_frozen: Callable[[], bool] | None = None,
+        file_delivery: Callable[..., Any] | None = None,
     ) -> None:
         self.approvals = approvals
         self.coordinator = coordinator
@@ -378,6 +385,7 @@ class TaskHandler:
         )
         self._max_autonomous_workers = max(1, int(max_autonomous_workers))
         self._redrive_budget_frozen = redrive_budget_frozen
+        self._file_delivery = file_delivery
         self._autonomous_slots = threading.BoundedSemaphore(self._max_autonomous_workers)
         self._task_threads: dict[str, threading.Thread] = {}
         self._cancelled_tasks: set[str] = set()
@@ -1031,6 +1039,18 @@ class TaskHandler:
         research_tasks, implementation_tasks, verification_tasks = _build_coordinator_tasks(
             mode, objective
         )
+        # Slice #2: el worker ops corre anclado al directorio de entregables
+        # del task (workspace-write solo escribe bajo su working root) y recibe
+        # el contrato del tail DELIVERABLES. Solo mode=ops — la clase de misión
+        # del incidente; publish/browse/coding quedan intactos.
+        if mode == "ops" and implementation_tasks:
+            deliverables_cwd = self._prepare_deliverables_dir(task_id)
+            if deliverables_cwd is not None:
+                for impl_task in implementation_tasks:
+                    impl_task.cwd = str(deliverables_cwd)
+                    impl_task.instruction = (
+                        f"{impl_task.instruction}\n{DELIVERABLES_TAIL_INSTRUCTION}"
+                    )
         # F3.1 (2026-06-12): a resumed task loads completed-phase artifacts
         # from scratch instead of re-running coordinator.run() from zero
         # (re-running implementation duplicated external side effects).
@@ -1813,6 +1833,23 @@ class TaskHandler:
                             "deferrals": deferrals - 1,
                         },
                     )
+            # Slice #2 (ruta A): los entregables declarados los envía el DAEMON
+            # después de verification=passed y después del governor — nunca la
+            # fase implementation (F3.1 intacto). Un fallo de envío degrada a
+            # terminal failed honesto y JAMÁS re-conduce la tarea.
+            if terminal_status == "succeeded" and completed_checkpoint.get("deliverables"):
+                completed_checkpoint, response, _dispatch_ok = self._dispatch_deliverables(
+                    session_id=session_id,
+                    task_id=task_id,
+                    checkpoint=completed_checkpoint,
+                    response=response,
+                )
+                if not _dispatch_ok:
+                    terminal_status = "failed"
+                    verification_status = "failed"
+                    checkpoint_error = str(
+                        completed_checkpoint.get("error") or "deliverable_send_failed"
+                    )
             # AM-STALEMSG (2026-06-12): the user-facing response used to be
             # formatted and stored BEFORE the verification gates ran, so a
             # gate-downgraded task notified failure with success-flavored
@@ -2128,6 +2165,133 @@ class TaskHandler:
                         self._autonomous_slots.release()
                     except ValueError:
                         logger.warning("autonomous task slot release overflow for %s", task_id)
+
+    def _deliverables_base(self, task_id: str) -> Path | None:
+        scratch_root = getattr(self.coordinator, "scratch_root", None)
+        if not scratch_root:
+            return None
+        return Path(scratch_root) / str(task_id) / "deliverables"
+
+    def _prepare_deliverables_dir(self, task_id: str) -> Path | None:
+        """Crea <scratch>/<task_id>/deliverables como cwd del worker ops.
+
+        El `git init` es el trust-marker del codex CLI (probe 2026-07-02: sin
+        repo git en el cwd, `codex exec` rehúsa arrancar; workspace-write solo
+        escribe bajo su working root). Best-effort: cualquier fallo devuelve
+        None y la tarea corre como hoy, sin contrato de entregables.
+        """
+        base = self._deliverables_base(task_id)
+        if base is None:
+            return None
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            if not (base / ".git").exists():
+                proc = run_subprocess_bounded(["git", "init", "-q"], cwd=base, timeout_s=15.0)
+                if proc.returncode != 0:
+                    return None
+        except Exception:
+            logger.debug("deliverables dir prep failed for %s", task_id, exc_info=True)
+            return None
+        return base
+
+    def _deliver_file(self, path: Path, *, chat_id: str, caption: str) -> dict[str, Any]:
+        deliverer = self._file_delivery
+        if deliverer is None:
+            from claw_v2.notebooklm_delivery import NotebookLMDeliveryService
+
+            deliverer = NotebookLMDeliveryService().send_to_telegram
+        result = deliverer(path, chat_id=chat_id, caption=caption)
+        return result.to_dict() if hasattr(result, "to_dict") else dict(result)
+
+    def _dispatch_deliverables(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        checkpoint: dict[str, Any],
+        response: str,
+    ) -> tuple[dict[str, Any], str, bool]:
+        """Envío daemon-side de los entregables declarados (slice #2, ruta A).
+
+        Los nombres declarados vienen de texto del LLM: containment estricto
+        (nombre simple, resolución dentro del directorio de entregables,
+        existencia, cap de tamaño y de cantidad). Destino restringido por
+        código al chat de origen del dueño; los archivos fallidos quedan en
+        scratch y la muerte es honesta con detalle por archivo.
+        """
+        declared = [str(item) for item in (checkpoint.get("deliverables") or [])]
+        overflow = declared[_MAX_DELIVERABLE_FILES:]
+        declared = declared[:_MAX_DELIVERABLE_FILES]
+        base = self._deliverables_base(task_id)
+        if not session_id.startswith("tg-"):
+            listing = ", ".join(name[:200] for name in declared)
+            where = f" en {base}" if base is not None else ""
+            checkpoint = {
+                **checkpoint,
+                "deliveries": [
+                    {"file": name[:200], "ok": True, "method": "local_path"} for name in declared
+                ],
+            }
+            return checkpoint, f"{response}\n\nEntregables{where}: {listing}", True
+        chat_id = session_id.removeprefix("tg-")
+        allowed = (os.getenv("TELEGRAM_ALLOWED_USER_ID") or "").strip()
+        results: list[dict[str, Any]] = []
+        for name in declared:
+            entry: dict[str, Any] = {"file": name[:200], "ok": False}
+            if allowed and chat_id != allowed:
+                entry["error"] = "destino_no_autorizado"
+            elif base is None:
+                entry["error"] = "deliverables_dir_unavailable"
+            elif "/" in name or "\\" in name or name.startswith("."):
+                entry["error"] = "nombre_invalido"
+            else:
+                resolved: Path | None = None
+                try:
+                    resolved = (base / name).resolve()
+                    contained = resolved.parent == base.resolve() and resolved.is_file()
+                except OSError:
+                    contained = False
+                if not contained or resolved is None:
+                    entry["error"] = "archivo_no_encontrado_o_fuera_del_directorio"
+                elif resolved.stat().st_size > _MAX_DELIVERABLE_BYTES:
+                    entry["error"] = "excede_45mb"
+                else:
+                    try:
+                        sent = self._deliver_file(resolved, chat_id=chat_id, caption=name)
+                    except Exception as exc:
+                        sent = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+                    entry["ok"] = bool(sent.get("ok"))
+                    entry["method"] = str(sent.get("method") or "")
+                    if entry["ok"]:
+                        entry["message_id"] = sent.get("telegram_message_id")
+                    else:
+                        entry["error"] = str(sent.get("error") or "send_failed")[:300]
+            results.append(entry)
+            self._emit(
+                "autonomous_task_deliverable_dispatch",
+                {
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "file": entry["file"],
+                    "ok": entry["ok"],
+                    **({"message_id": entry.get("message_id")} if entry["ok"] else {}),
+                    **({"error": entry.get("error", "")} if not entry["ok"] else {}),
+                },
+            )
+        for name in overflow:
+            results.append({"file": name[:200], "ok": False, "error": "cap_archivos_excedido"})
+        checkpoint = {**checkpoint, "deliveries": results}
+        failed_entries = [r for r in results if not r.get("ok")]
+        if failed_entries:
+            detail = "; ".join(
+                f"{r['file']}: {r.get('error', 'send_failed')}" for r in failed_entries
+            )
+            checkpoint["verification_status"] = "failed"
+            checkpoint["reason"] = "deliverable_send_failed"
+            checkpoint["error"] = f"deliverable_send_failed: {detail}"[:500]
+            return checkpoint, response, False
+        sent_line = ", ".join(f"{r['file']} (message_id {r.get('message_id')})" for r in results)
+        return checkpoint, f"{response}\n\nEntregado por Telegram: {sent_line}", True
 
     def _precheck_worktree(self, *, task_id: str, mode: str) -> None:
         if mode != "coding" or self._workspace_root is None:

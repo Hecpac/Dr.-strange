@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "#1 redrive_feasibility_gate (incidente 2026-07-02 task 1783021694523108000): new CoordinatorService.synthesis_redrive_would_block(task_id) stats the implementation.started marker; _maybe_start_redrive fails closed with action=fail_closed_infeasible (no arm, no attempt consumed, marker untouched) when present, positioned after the knob check and before deferral/attempts/dedup/budget. Rationale: a synthesis-restart redrive never reloads implementation (_phase_resumable: synthesis<implementation) so a present marker deterministically trips implementation_rerun_blocked — arming burned 6.5 min then died mute. New §1 invariant redrive_feasibility_gate. Predecessor: B2.1 shadow_delegation_gap_observational (doc_version 2.53) in main"
-doc_version: 2.55
+describes_commit: "slice #2 deliverable_dispatch_daemon_side (par #1→#2, 2026-07-02): mode=ops implementation workers run with cwd=<scratch>/<task_id>/deliverables (WorkerTask gains cwd → _execute_worker → router.ask; runner pre-creates the dir with `git init` as the codex trust marker) and declare produced files via the fail-closed DELIVERABLES tail (bot_helpers.parse_deliverables_tail, read only from implementation output in _coordinator_checkpoint). The DAEMON sends them to the origin owner chat AFTER verification=passed and AFTER the redrive governor (TaskHandler._dispatch_deliverables, injectable file_delivery defaulting to NotebookLMDeliveryService): send failure ⇒ honest terminal failed deliverable_send_failed, never a redrive; strict containment on declared names; per-file autonomous_task_deliverable_dispatch events. New §1 invariant deliverable_dispatch_daemon_side. Predecessor: #1 redrive_feasibility_gate (doc_version 2.55) in main"
+doc_version: 2.56
 last_verified: 2026-07-02
-verification_method: "TDD red-first: tests/test_task_redrive.py::RedriveInfeasibleMarkerTests — marker-present case watched fail ('redrive' != 'fail_closed_infeasible') without the gate, then green; marker-absent no-regression case green from the start. Full redrive suite + architecture_invariants green (89 passed, 25 subtests); coordinator + task_handler suites green (134 passed). ruff clean on added lines (pre-existing F541 at coordinator.py:949 and file-level format drift untouched — surgical). Live smoke pending deploy to ~/srv/claw-daemon: re-exercise an ops-network delegation whose pass-1 starts implementation, confirm the redrive fails closed with fail_closed_infeasible at the FIRST arming (no γ burn, no mute) and the owner gets the honest terminal — verbatim event-id evidence"
+verification_method: "TDD red-first: tests/test_task_deliverables.py written before the code (import error watched), then 22/22 green — parser fail-closed, checkpoint solo-implementation, cwd plumbing, ops-only wiring, dispatch ok/fail/containment/owner-guard/non-tg/no-tail cases. Adjacent suites green (test_task_redrive + test_coordinator + test_architecture_invariants: 169 passed, 29 subtests). ruff check+format clean on touched files. Sandbox probes 2026-07-02: codex workspace-write cannot write ~/.claw from the daemon cwd (Operation not permitted); codex exec refuses non-git cwd (trust check); git-init'd scratch cwd ⇒ CWD_WRITE=succeeded. Live smoke pending deploy: ops mission 'genera 2 HTML y envíamelos' must close completed with real sendDocument ok+message_id evidence by event-id"
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1210,6 +1210,57 @@ invariants:
          and would misfire on a second arming). Read-only post-mortem
          2026-07-02; signal (ii) connectivity-class fail-fast is a separate
          open slice, not bundled here.
+
+  deliverable_dispatch_daemon_side:  # slice #2 (par #1→#2, 2026-07-02)
+    rule: Network delivery of task artifacts NEVER runs inside the coordinator's
+          implementation phase. The mode=ops implementation worker produces
+          files LOCALLY in <scratch>/<task_id>/deliverables/ — its cwd, which
+          the runner pre-creates with `git init` as the codex CLI trust marker
+          (probe 2026-07-02: codex exec refuses a non-git cwd, and
+          workspace-write only writes under its working root; prep is
+          best-effort — any failure means the task runs exactly as today) —
+          and declares them via the fail-closed DELIVERABLES tail
+          (parse_deliverables_tail: header absent or item-less ⇒ None ⇒
+          nothing is sent). The tail is read ONLY from implementation output,
+          never from the advisory verifier. The DAEMON sends AFTER
+          verification=passed and AFTER the redrive governor
+          (_dispatch_deliverables in _run_autonomous_task's terminal zone): a
+          send failure degrades to an honest terminal failed
+          (deliverable_send_failed with per-file detail; artifacts stay in
+          scratch) and NEVER arms a redrive — a re-run cannot fix the network
+          and would only re-trip F3.1. Destination is code-restricted to the
+          origin session's owner chat (tg- suffix, cross-checked against
+          TELEGRAM_ALLOWED_USER_ID); non-tg sessions get the local paths
+          listed, no send. Declared names are untrusted LLM text and pass
+          strict containment: plain filename only, resolution must stay inside
+          the deliverables dir (symlink escape rejected), file must exist,
+          45MB and 5-file caps. Every attempt emits
+          autonomous_task_deliverable_dispatch {file, ok, message_id|error}.
+          Known window (owner decision 2026-07-02, v1): delivery results ride
+          the checkpoint before the terminal write, so a crash after send but
+          before record can double-send on re-run ("rather double-notify than
+          lose the promise"); the durable intent-record executor
+          (F2ExternalEffectExecutor) is the NAMED v2 if the window hurts.
+          Publish/browse/coding modes are untouched; a generic LLM-invocable
+          send tool (arbitrary chat_id) stays a Tier-3/approval design, NOT
+          this edge.
+    enforced_by:
+      - tests/test_task_deliverables.py::ParseDeliverablesTailTests (fail-closed, raw names)
+      - tests/test_task_deliverables.py::CheckpointDeliverablesTests (solo implementation declara; verifier ignorado)
+      - tests/test_task_deliverables.py::WorkerTaskCwdTests (cwd viaja al router solo si está)
+      - tests/test_task_deliverables.py::OpsDeliverablesWiringTests (cwd+convención+git-init solo mode=ops; research/publish intactos)
+      - tests/test_task_deliverables.py::DeliverableDispatchTests (envío ok registra deliveries+message_id y notifica; fallo ⇒ terminal honesto SIN redrive; traversal/symlink/missing rechazados sin enviar; owner-only; no-tail byte-idéntico; sesión no-tg lista paths)
+    why: the first organic post-B2 ops-network delegation (send 2 HTML to
+         Telegram, task 1783021694523108000) put sendDocument INSIDE
+         implementation - the network-blocked worker failed, the redrive was
+         structurally infeasible (redrive_feasibility_gate above), and the
+         mission class had no path to completion. Slice #2 of the authorized
+         #1→#2 pair restructures the network action so it never NEEDS a
+         redrive - worker produces locally, daemon sends outside the phase.
+         Owner decisions (2026-07-02): tail contract + scratch dir;
+         owner-chat delivery = notification class (no approval - live
+         precedent: NLM _deliver_outputs, stop_notifier); v1 idempotency =
+         checkpoint-before-terminal with the double-send window accepted.
 
   evidence_pre_step_contained:
     rule: γ's evidence gathering is a PRE-STEP of the re-enqueued durable
