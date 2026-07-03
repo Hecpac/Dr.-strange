@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice #2b fix (a) (2026-07-03): worker cwd propagated end-to-end. The #2b closing smoke proved the deliverables cwd never reached the codex child: _with_phase_timeout and _inject_context (coordinator.py) rebuilt WorkerTask dropping cwd, and codex.py's exec subprocess.run passed no cwd= so subcommand relative writes resolved against the daemon process cwd. 3-point plumbing fix: cwd=task.cwd/t.cwd in both constructors + cwd=request.cwd (None ⇒ inheritance, byte-identical) in the exec subprocess.run — preflight subprocess untouched, no timeout/lane/policy/parser/governor changes. Establishes worker_cwd_propagated_end_to_end inside §1 invariant deliverable_dispatch_daemon_side. Live CLI probe resolved recon UNKNOWN 7 (codex does not chdir to -C; process cwd binds subcommand writes) and ASSUMED 8 (workspace-write sandbox permits the aligned write). Full-arc closing smoke pends separate owner authorization. Predecessor: #2b follow-up (b) (doc_version 2.61) in main 5c29201"
-doc_version: 2.63
+describes_commit: "slice under-delegación C+A (2026-07-03): the 2026-07-03 arc-closing day exposed that send-to-owner missions were being routed AROUND the (now working) deliver_to_owner arc by the brain itself — 4 live brain_fallback bypasses (3 failed, one ad-hoc in-band Telegram send with the runtime token), ZERO shadow events, and the bypass was contract-compliant because neither the contract nor the shadow covered the class. (C) DELEGATION_CONTRACT bright line gains the send-to-owner category (delegate mode=ops deliver_to_owner=true; never build-and-send in-band; a previous failure of the delegated path does NOT authorize doing it inline). (A) shadow_delegation_gap gains reason=deliver_inline via _looks_like_send_to_owner_ask (reflexive send anchors), narrowing the action-with-tools-legitimate exclusion — still OBSERVATIONAL, invariant intact. Enforcement (PreToolUse deny of in-band owner sends) stays a named future decision with honest detection limits (the live send hid behind `python3 _send_html.py`). Predecessor: #2b fix (a) (doc_version 2.63) in main 76d857d"
+doc_version: 2.64
 last_verified: 2026-07-03
-verification_method: "TDD red-first: CwdPropagationThroughCoordinatorTests (through coordinator.run(), both constructors) and CwdEndToEndThroughTaskHandlerTests (full TaskHandler path with the flag) — positives failed pre-fix reproducing the smoke failure, green post; negatives lock the no-flag byte-identity. Suites: full 4203 passed + 550 subtests; test_task_deliverables 43; test_codex_adapter locks the root-cause kwarg. ISOLATED live probe (real codex CLI 0.142.4): -C+cwd= aligned ⇒ subcommand relative write landed IN the target — recon UNKNOWN 7 and ASSUMED 8 RESOLVED. FULL-ARC CLOSING SMOKE RAN AND PASSED (owner-authorized, 2026-07-03, deploy 5d9c391 pid 77368): organic deliver_to_owner delegation → files produced IN the deliverables dir (cwd no-regression live) → verifier passed → deliverable dispatch ok:true message_ids 14682/14683 (first in arc history) → terminal succeeded; 0 redrives, stderr delta 0. See live_smoke_status for the two named caveats (under-delegation by session memory with the brain's inline-send bypass as open policy question; redrive/γ layers not exercised this pass)."
+verification_method: "TDD red-first: 4 new tests failed pre-implementation (2 detector, 1 integration deliver_inline via handle_text end-to-end with the LIVE bypass fixture, 1 contract anchors), green post; test_deliver_ask_delegated_emits_no_gap green on BOTH sides (delegating the same mission never gaps — no behavior change there). Existing exclusion preserved: test_action_request_answered_inline_with_tools_no_gap still green (action ask without send anchors stays legitimate-inline). Suites: test_shadow_delegation_gap 15, test_task_deliverables 44. Live smoke pends merge+deploy (expected: a send-to-owner ask worked inline emits shadow_delegation_gap reason=deliver_inline in observe_stream; contract change is prompt-level — its behavioral effect is measured by the same shadow series it feeds)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1587,8 +1587,8 @@ invariants:
           ONLY — it never blocks a turn, never re-prompts, never makes an
           extra LLM call, and never alters the user-visible text; its only
           output is the `shadow_delegation_gap` observe event (action=gap
-          with reason=no_action|research_inline, or a single action=disabled
-          when CLAW_SHADOW_DELEGATION_GAP=0). It consumes
+          with reason=no_action|research_inline|deliver_inline, or a single
+          action=disabled when CLAW_SHADOW_DELEGATION_GAP=0). It consumes
           _looks_like_operator_action_request, _user_authorized_knowledge_answer
           and _user_authoritatively_marked_done READ-ONLY (no refactor), adds
           its own _looks_like_research_deliverable_ask (research verb AND
@@ -1597,14 +1597,51 @@ invariants:
           at the _flush_dispatch_decision call site): continuation shortcuts,
           slash commands, internal prompts and meta turns (P0-1 ContextVar)
           never count as inaction. A turn whose trace or tool_calls show
-          delegate_task never emits a gap. Promotion to any enforcement is a
-          future explicit decision, not a config drift.
+          delegate_task never emits a gap. reason=deliver_inline (slice
+          under-delegación 2026-07-03) narrows the "action ask handled inline
+          WITH tools — legitimate" exclusion: a send-to-owner ask
+          (_looks_like_send_to_owner_ask — REFLEXIVE send anchors
+          envíame/mándame/pásame with courtesy/infinitive-clitic and reenvío
+          forms (enviarme/mandarme/pasarme/reenvíame) and "send me", the
+          DELEGATION_CONTRACT deliver_to_owner anchors; "envía un
+          tweet"/"sube el archivo"/prepárame/demándame stay out) worked
+          inline with tools and without delegate_task is a counted gap.
+          send_ask opts into the eligibility gate BY ITSELF (review MUST-FIX:
+          a bare follow-up send like "Ahora mándamelo" matches no operator
+          action term — without send_ask in the gate the class the slice
+          exists to count was unreachable); a tool-less send ask emits the
+          existing no_action reason with action_request=False — honest
+          telemetry, no new class. Named detection limits (blockers for any
+          future promotion, acceptable while observational): the English
+          window `send…to me` can overcount third-party sends with a trailing
+          "to me" clause, and an in-band send hidden behind a script file
+          (`python3 _send_html.py`, the live 2026-07-03 case) is invisible to
+          any command-text detector — enforcement would need Write-content
+          scanning, a separate design. Why: the 2026-07-03 bypasses (4 live
+          brain_fallback cases, 3 failed, including an ad-hoc in-band
+          Telegram send with the runtime token) emitted ZERO shadow events —
+          the class was invisible exactly where the arc's machinery was being
+          avoided. The companion contract fix adds the same class to the
+          DELEGATION_CONTRACT bright line (scoped to files the worker must
+          PRODUCE — conversation-content one-liners stay inline, guarding
+          against over-delegation) with the session-memory antidote ("a
+          previous failure of the delegated path does NOT authorize doing it
+          inline") and a Stays-inline mirror sentence (producing files the
+          user asked to be SENT is not inline even though file writes are).
+          Promotion to any enforcement is a future explicit decision, not a
+          config drift.
     enforced_by:
       - tests/test_shadow_delegation_gap.py (11 tests — baseline fixtures
         msgs 3214/3216/3218/3239 → gap, 3323 single-URL → no gap, delegated
         turn → no gap, S-α knowledge reply → no gap, meta → no gap,
         eligible=False → no emit, knob=0 → disabled once, response delivered
         intact)
+      - tests/test_shadow_delegation_gap.py::test_deliver_ask_inline_with_tools_emits_deliver_inline (slice under-delegación — el bypass vivo de 2026-07-03 emite gap deliver_inline, respuesta intacta)
+      - tests/test_shadow_delegation_gap.py::test_send_to_owner_detector_matches_live_bypass_asks + test_send_to_owner_detector_rejects_non_owner_sends (anclas reflexivas; publicar/subir fuera)
+      - tests/test_shadow_delegation_gap.py::test_deliver_ask_delegated_emits_no_gap (delegar la misma misión ⇒ sin gap)
+      - tests/test_shadow_delegation_gap.py::test_bare_clitic_send_ask_inline_with_tools_emits_deliver_inline (review MUST-FIX — el follow-up send desnudo entra al gate por send_ask)
+      - tests/test_shadow_delegation_gap.py::test_research_ask_with_send_anchor_keeps_research_inline_precedence (research+send ⇒ la clase vieja gana; lock del orden)
+      - tests/test_task_deliverables.py::DeliverToOwnerContractTests::test_contract_bright_line_covers_send_to_owner_missions (la categoría send-to-owner está en la bright-line + prohibición in-band + antídoto de memoria — anclas, no fraseo)
     why: F4-B2 opción c escalonada (authorized 2026-07-02): the shadow
          measures the delegation gap after the B2.0 contract fix so
          shadow→enforcement is decided by Hector with data. reason

@@ -849,6 +849,22 @@ class DeliverToOwnerContractTests(unittest.TestCase):
         # La instrucción de NO incluir pasos de envío en el objective.
         self.assertIn("do not put any send", low)
 
+    def test_contract_bright_line_covers_send_to_owner_missions(self) -> None:
+        # Slice under-delegación (C): la clase "el usuario pidió que le ENVÍEN
+        # archivos" es bright-line de delegación — el bypass de 2026-07-03 era
+        # contrato-compliant porque esta categoría no existía. Anclas
+        # estructurales, no fraseo exacto.
+        from claw_v2.brain import DELEGATION_CONTRACT
+
+        bright_line, _, _ = DELEGATION_CONTRACT.partition("Stays inline")
+        self.assertIn("deliver_to_owner=true", bright_line)
+        low = DELEGATION_CONTRACT.lower()
+        # Prohibición explícita del envío in-band al dueño desde el turno.
+        self.assertIn("in-band", low)
+        # Antídoto de memoria de sesión: un fallo previo del carril delegado
+        # no autoriza hacerlo inline.
+        self.assertIn("does not authorize", low)
+
 
 class DeliverToOwnerGateTests(unittest.TestCase):
     """#2b: el gate del dispatch (y del wiring cwd) exige el flag."""
