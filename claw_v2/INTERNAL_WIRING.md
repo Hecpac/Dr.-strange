@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice #2 deliverable_dispatch_daemon_side (par #1→#2, 2026-07-02): mode=ops implementation workers run with cwd=<scratch>/<task_id>/deliverables (WorkerTask gains cwd → _execute_worker → router.ask; runner pre-creates the dir with `git init` as the codex trust marker) and declare produced files via the fail-closed DELIVERABLES tail (bot_helpers.parse_deliverables_tail, read only from implementation output in _coordinator_checkpoint). The DAEMON sends them to the origin owner chat AFTER verification=passed and AFTER the redrive governor (TaskHandler._dispatch_deliverables, injectable file_delivery defaulting to NotebookLMDeliveryService): send failure ⇒ honest terminal failed deliverable_send_failed, never a redrive; strict containment on declared names; per-file autonomous_task_deliverable_dispatch events. New §1 invariant deliverable_dispatch_daemon_side. Predecessor: #1 redrive_feasibility_gate (doc_version 2.55) in main"
-doc_version: 2.57
+describes_commit: "slice #2b deliver_to_owner (par #1→#2, 2026-07-02): closes #2's arc by separating produce from deliver at DELEGATION. delegate_task gains a deliver_to_owner boolean (anthropic_options schema + payload); the brain sets it (DELEGATION_CONTRACT, bilingual anchors) and writes a send-free objective; the flag rides delegation_metadata → active_task; TaskHandler._task_delivers_to_owner gates BOTH the cwd wiring and the daemon-side dispatch — without the flag a mode=ops task is byte-identical to pre-#2. This strips the send from the objective so synthesis never plans a sendDocument Step (the #2-smoke failure mode). Reinforced DELIVERABLES_TAIL_INSTRUCTION forbids in-band send + absolute paths. Extends §1 invariant deliverable_dispatch_daemon_side. Predecessor: #2 deliverable_dispatch (doc_version 2.57) in main 2e5983b"
+doc_version: 2.58
 last_verified: 2026-07-02
-verification_method: "TDD red-first: tests/test_task_deliverables.py written before the code (import error watched), then 27/27 green (22 base + 5 ReviewFixTests locking the #187 adversarial review). Adjacent suites green (test_task_redrive + test_coordinator + test_architecture_invariants + test_bot_helpers: 148+169 passed, 29+31 subtests). Full suite 4181 passed + 550 subtests (1 order-flake ajeno). ruff check+format clean. Merged #187 → main 336ad9a, deployed ff-only ~/srv/claw-daemon pid 15169, clean boot (agent_startup_context 440321 code_version 336ad9a). LIVE SMOKE RAN AND CAME BACK NEGATIVE — see deliverable_dispatch_daemon_side.live_smoke_status: the daemon-side dispatch is unreachable for a real ops-network mission because the send still lives inside the coordinator (synthesis plans sendDocument, worker fails it in-sandbox, verifier blocks evidencia_externa, terminal blocked, succeeded-gate never met). The unit/adjacent coverage is real but the END-TO-END ARC IS NOT LIVE-PROVEN; the fix is upstream (owner design call). Code is inert-safe as deployed."
+verification_method: "TDD red-first: 6 new #2b tests written before code (schema/contract/gate failing), then 35/35 green in test_task_deliverables. Adjacent green: test_brain_core + test_coordinator + test_architecture_invariants 220 passed + 26 subtests; test_bot 169 passed + 3 subtests (brain delegation handler touched). ruff clean; surgical diff (3 task_handler hunks all slice zones after reverting ruff's 3 ajeno reformats). Full suite pending (running). #2b CLOSING SMOKE PENDING deploy — see live_smoke_status: the original incident mission must close succeeded with real sendDocument ok+message_id by event-id. Unit-locked, NOT yet live-proven end-to-end."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1211,27 +1211,46 @@ invariants:
          2026-07-02; signal (ii) connectivity-class fail-fast is a separate
          open slice, not bundled here.
 
-  deliverable_dispatch_daemon_side:  # slice #2 (par #1→#2, 2026-07-02)
+  deliverable_dispatch_daemon_side:  # slice #2 + #2b (par #1→#2, 2026-07-02)
     rule: Network delivery of task artifacts NEVER runs inside the coordinator's
-          implementation phase. The mode=ops implementation worker produces
-          files LOCALLY in <scratch>/<task_id>/deliverables/ — its cwd, which
-          the runner pre-creates with `git init` as the codex CLI trust marker
-          (probe 2026-07-02: codex exec refuses a non-git cwd, and
-          workspace-write only writes under its working root; prep is
-          best-effort — any failure means the task runs exactly as today) —
-          and declares them via the fail-closed DELIVERABLES tail
-          (parse_deliverables_tail: header absent or item-less ⇒ None ⇒
-          nothing is sent). The tail is read ONLY from implementation output,
-          never from the advisory verifier. The DAEMON sends AFTER
-          verification=passed and AFTER the redrive governor
+          implementation phase. The delivery intent is separated from the
+          coordinator objective at DELEGATION time (#2b): delegate_task carries
+          a deliver_to_owner boolean; when the user asked to be SENT the files
+          the brain sets it true (DELEGATION_CONTRACT instructs this, bilingual
+          anchors envíame/mándame/pásame + "do NOT put any send step") AND
+          writes the objective to describe ONLY producing the files. Both the
+          cwd wiring and the daemon-side dispatch are GATED on
+          TaskHandler._task_delivers_to_owner (reads
+          active_task.delegation_metadata.deliver_to_owner, persisted before
+          enqueue) — WITHOUT the flag a mode=ops task is byte-identical to
+          pre-#2 (no cwd, no git init, no DELIVERABLES convention, no dispatch).
+          This is what closes the arc: #2's smoke came back NEGATIVE because the
+          send lived in the objective ("envíamelos") → synthesis planned a
+          sendDocument Step → the network-blocked worker failed it → verifier
+          blocked evidencia_externa → terminal blocked → dispatch unreached.
+          #2b strips the send from the objective so synthesis never plans it and
+          the verifier never demands it. The gated mode=ops implementation
+          worker produces files LOCALLY in <scratch>/<task_id>/deliverables/ —
+          its cwd, which the runner pre-creates with `git init` as the codex CLI
+          trust marker (probe 2026-07-02: codex exec refuses a non-git cwd, and
+          workspace-write only writes under its working root, and the -C IS
+          passed — codex.py; the #2 smoke's absolute-path writes were the model
+          overriding cwd because the dirty objective oriented it to the
+          workspace, NOT a plumbing gap; prep is best-effort — any failure means
+          the task runs exactly as today) — and declares them via the
+          fail-closed DELIVERABLES tail (parse_deliverables_tail: header absent
+          or item-less ⇒ None ⇒ nothing is sent). The tail is read ONLY from
+          implementation output, never from the advisory verifier. The DAEMON
+          sends AFTER verification=passed and AFTER the redrive governor
           (_dispatch_deliverables in _run_autonomous_task's terminal zone): a
           send failure degrades to an honest terminal failed
           (deliverable_send_failed with per-file detail; artifacts stay in
           scratch) and NEVER arms a redrive — a re-run cannot fix the network
-          and would only re-trip F3.1. The dispatch itself is gated to
-          mode=ops (review #187 MUST-FIX: an organic DELIVERABLES-shaped
-          bullet list in a publish/coding worker's output must never kill a
-          passed task). Destination is code-restricted to the origin
+          and would only re-trip F3.1. The dispatch is gated on deliver_to_owner
+          AND mode=ops AND the tail (review #187 MUST-FIX: an organic
+          DELIVERABLES-shaped bullet list in a publish/coding worker's output
+          must never kill a passed task; #2b's flag gate makes an unflagged ops
+          task with an organic tail a no-op too). Destination is code-restricted to the origin
           session's owner chat (tg- suffix), cross-checked FAIL-CLOSED
           against TELEGRAM_ALLOWED_USER_ID — an unset owner var refuses the
           send (destino_no_autorizado), never skips the guard. Non-tg
@@ -1263,6 +1282,11 @@ invariants:
       - tests/test_task_deliverables.py::OpsDeliverablesWiringTests (cwd+convención+git-init solo mode=ops; research/publish intactos)
       - tests/test_task_deliverables.py::DeliverableDispatchTests (envío ok registra deliveries+message_id y notifica; fallo ⇒ terminal honesto SIN redrive; traversal/symlink/missing rechazados sin enviar; owner-only; no-tail byte-idéntico; sesión no-tg lista paths)
       - tests/test_task_deliverables.py::ReviewFixTests (locks del review #187 — publish con tail orgánico cierra completed; owner var ausente ⇒ fail-closed; cap violado ⇒ 0 envíos con evento por archivo; NUL ⇒ nombre_invalido con registro de deliveries intacto; no-tg missing ⇒ honesto)
+      - tests/test_task_deliverables.py::DeliverToOwnerSchemaTests (#2b — delegate_task schema lleva el bool; el flag propaga al payload; default false)
+      - tests/test_task_deliverables.py::DeliverToOwnerContractTests (#2b — DELEGATION_CONTRACT instruye produce-sin-envío, anclas bilingües)
+      - tests/test_task_deliverables.py::DeliverToOwnerGateTests (#2b — con flag despacha; sin flag jamás despacha aunque haya tail orgánico)
+      - tests/test_task_deliverables.py::OpsDeliverablesWiringTests::test_ops_without_flag_is_byte_identical_no_cwd (#2b — sin flag byte-idéntico a pre-#2)
+      - tests/test_task_deliverables.py::SmokeNegativeContainmentTests (#2b — la ruta absoluta del smoke negativo declarada ⇒ nombre_invalido, 0 envíos)
     why: the first organic post-B2 ops-network delegation (send 2 HTML to
          Telegram, task 1783021694523108000) put sendDocument INSIDE
          implementation - the network-blocked worker failed, the redrive was
@@ -1274,35 +1298,27 @@ invariants:
          owner-chat delivery = notification class (no approval - live
          precedent: NLM _deliver_outputs, stop_notifier); v1 idempotency =
          checkpoint-before-terminal with the double-send window accepted.
-    live_smoke_status: NEGATIVE — arc NON-FUNCTIONAL end-to-end as built
-      (smoke 2026-07-02, deploy 336ad9a pid 15169, task
-      tg-574707975:1783038849476874000). The daemon-side dispatch is correct,
-      hardened and test-locked, but it is UNREACHABLE for a real ops-network
-      mission because the SEND still lives inside the coordinator. Chain
-      (verbatim, event 440656 + scratch): brain objective carries "envíamelos
-      por Telegram" → _synthesize plans a `sendDocument` Step → the ops worker
-      executes it → fails (`.env not found` / DNS blocked in the codex
-      sandbox — the ORIGINAL incident reproduced) → verifier blocks
-      evidencia_externa (env-telegram-token-faltante, status pending) → with
-      #1's consequence an ops task never redrives → terminal blocked → the
-      succeeded-gated _dispatch_deliverables NEVER RUNS (0
-      autonomous_task_deliverable_dispatch events). The tail contract solved
-      how the worker DECLARES outputs; nothing stripped the delivery intent
-      from the objective, so synthesis still plans it and the verifier still
-      demands it. FIX IS UPSTREAM (owner design call, NOT an instruction
-      tweak — "tell the worker not to send" cannot pass because synthesis and
-      the verifier still reference the send): the delivery intent must leave
-      the coordinator objective (candidates: a delegate_task deliver-target
-      arg separating produce-vs-deliver — the option deferred in the recon; or
-      a daemon-side objective transform that strips the send before the
-      coordinator sees it). SECOND, separate obstacle: the worker wrote to the
-      daemon workspace root via ABSOLUTE paths, not to cwd=<scratch>/…/
-      deliverables (deliverables/ held only .git) — the cwd did NOT bind the
-      worker's writes; whether codex received the -C or the model overrode it
-      with absolute paths is UNVERIFIED. The deployed code is inert-safe (it
-      only acts on mode=ops + tail + succeeded, never reached here, so today's
-      failure equals the pre-slice failure), but the arc does not close until
-      the upstream send-stripping layer lands.
+    live_smoke_status: #2 smoke was NEGATIVE (2026-07-02, deploy 336ad9a, task
+      tg-574707975:1783038849476874000): dispatch UNREACHABLE because the send
+      lived in the objective ("envíamelos") → synthesis planned a sendDocument
+      Step → network-blocked worker failed it → verifier blocked
+      evidencia_externa → terminal blocked → succeeded-gate never met (0
+      dispatch events). #2b is the authorized upstream fix (option a,
+      deliver_to_owner — the objective-transform option b was VETOED for
+      bilingual-parse fragility): the flag separates produce from deliver at
+      delegation, so the objective describes only production and synthesis never
+      plans the send. cwd UNKNOWN from #2 RESOLVED here: codex.py DOES pass -C;
+      the #2 absolute-path writes were the model overriding cwd under a dirty
+      objective, not a plumbing gap — #2b's clean objective + reinforced tail
+      instruction ("no ejecutes envío; sin rutas absolutas") aim the writes at
+      the cwd, and the absolute-path case is now test-locked to fail closed
+      (SmokeNegativeContainmentTests, using the #2 smoke's literal path).
+      #2b CLOSING SMOKE PENDING deploy: the original incident mission ("crea 2
+      HTML y envíamelos") must delegate with deliver_to_owner=true + a
+      send-free objective → worker produces & declares → verifier passes WITHOUT
+      demanding a send → terminal succeeded → daemon dispatch sends both docs →
+      ok+message_id per file by event-id. Until that runs green, the end-to-end
+      arc is unit-locked but NOT live-proven.
 
   evidence_pre_step_contained:
     rule: γ's evidence gathering is a PRE-STEP of the re-enqueued durable

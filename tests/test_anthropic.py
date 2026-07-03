@@ -573,7 +573,15 @@ class DelegationMcpServerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Tarea autónoma iniciada", result["content"][0]["text"])
             self.assertEqual(
                 calls,
-                [{"objective": "Publica el grid", "mode": "publish", "reason": "long job"}],
+                [
+                    {
+                        "objective": "Publica el grid",
+                        "mode": "publish",
+                        "reason": "long job",
+                        # #2b: el payload lleva el flag deliver_to_owner (default false).
+                        "deliver_to_owner": False,
+                    }
+                ],
             )
 
             blank = await delegate.handler({"objective": "   "})

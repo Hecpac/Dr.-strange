@@ -322,6 +322,7 @@ How to call it:
 - `objective`: one imperative, self-contained instruction (the task runs with no memory of this conversation).
 - `mode`: `ops` (desktop/terminal automation), `publish` (social/content publishing), `browse` (web navigation/extraction), `research` (multi-source research with a deliverable), or `coding`.
 - `reason`: one line.
+- `deliver_to_owner`: set `true` (with `mode=ops`) ONLY when the user asked you to SEND them the produced files — "envíame / mándame / pásame los archivos / el reporte / los HTML". When true, write the objective to describe ONLY producing the files (create them in the task's working directory with plain filenames, no subdirectories, no absolute paths) and stop there — do NOT put any send/upload/Telegram step in the objective. The system delivers the declared files to you after the work verifies; a worker that tries to send them itself has no network and will fail. Leave it `false` (or omit) for everything else.
 - Weave the returned acknowledgement (it carries the task id) into your <response> so the user knows the task is running and the result will arrive when it finishes. After delegating, do NOT also run the work inline, and do not delegate the same objective twice.
 
 {BROWSER_DELEGATION_RULE}"""

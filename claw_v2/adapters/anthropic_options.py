@@ -71,6 +71,16 @@ def build_delegation_mcp_server(sdk: Any, request: LLMRequest) -> Any:
                     "type": "string",
                     "description": "One line on why this work is being delegated.",
                 },
+                "deliver_to_owner": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true ONLY when the user asked to be SENT the produced "
+                        "files/results (enviar/mandar/pasar los archivos o el reporte). "
+                        "When true, the objective must describe ONLY producing the files "
+                        "in the task working directory and naming them — NO send/upload "
+                        "step: the system delivers them to the owner after verification."
+                    ),
+                },
             },
             "required": ["objective"],
         },
@@ -92,6 +102,7 @@ def build_delegation_mcp_server(sdk: Any, request: LLMRequest) -> Any:
             "objective": objective.strip(),
             "mode": mode,
             "reason": str(args.get("reason") or "")[:300],
+            "deliver_to_owner": bool(args.get("deliver_to_owner") or False),
         }
         try:
             result = await asyncio.to_thread(handler, payload)

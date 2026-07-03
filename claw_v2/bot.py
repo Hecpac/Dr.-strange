@@ -2156,6 +2156,7 @@ class BotService:
             if mode == "chat":
                 mode = "ops"
             reason = str(args.get("reason") or "")[:300]
+            deliver_to_owner = bool(args.get("deliver_to_owner") or False)
             if observe is not None:
                 try:
                     observe.emit(
@@ -2165,6 +2166,7 @@ class BotService:
                             "mode": mode,
                             "reason": reason,
                             "objective_preview": objective[:200],
+                            "deliver_to_owner": deliver_to_owner,
                         },
                     )
                 except Exception:
@@ -2174,7 +2176,11 @@ class BotService:
                 objective,
                 mode=mode,
                 source_text=objective,
-                delegation_metadata={"origin": "brain_delegate_tool", "reason": reason},
+                delegation_metadata={
+                    "origin": "brain_delegate_tool",
+                    "reason": reason,
+                    "deliver_to_owner": deliver_to_owner,
+                },
             )
             return {"ok": True, "ack": ack, "mode": mode}
 
