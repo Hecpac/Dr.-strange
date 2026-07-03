@@ -1369,6 +1369,18 @@ class BrowserUseGuardTests(unittest.TestCase):
         self.assertNotIn("document.title", repr(audits[-1]))
 
 
+class _ReadyInteractiveCapability:
+    """Fake CDP preflight so interactive-session tests never touch real Chrome."""
+
+    def __init__(self, endpoint: str = "http://127.0.0.1:9250") -> None:
+        self.endpoint = endpoint
+        self.calls: list[tuple[int, str]] = []
+
+    def ensure_ready(self, *, port: int = 9250, profile_dir: str) -> str:
+        self.calls.append((port, profile_dir))
+        return self.endpoint
+
+
 class ComputerHandlerSessionArtifactTests(unittest.TestCase):
     def test_run_browser_use_task_binds_artifact_to_session(self) -> None:
         # The artifact is read from the session (set inside the worker thread),
@@ -1411,7 +1423,11 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
                 )
 
         config = types.SimpleNamespace(computer_auto_approve=True, sensitive_urls=["robinhood.com"])
-        handler = ComputerHandler(browser_use=FakeBrowserUse(), config=config)
+        handler = ComputerHandler(
+            browser_use=FakeBrowserUse(),
+            config=config,
+            browser_capability=_ReadyInteractiveCapability(),
+        )
         session = types.SimpleNamespace(
             task="open a normal website then continue",
             current_url="https://example.com",
@@ -1484,7 +1500,12 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
                 },
                 screenshot_path=None,
             )
-            handler = ComputerHandler(browser_use=fake, approvals=approvals, config=None)
+            handler = ComputerHandler(
+                browser_use=fake,
+                approvals=approvals,
+                config=None,
+                browser_capability=_ReadyInteractiveCapability(),
+            )
             handler._sessions["s1"] = session
             approvals.approve(pending.approval_id, pending.token)
 
@@ -1708,6 +1729,91 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
         approvals.create.assert_called_once()
         self.assertNotIn("aprobación segura", result)
         self.assertFalse(any(e[0] == "computer_approval_blocked_no_screenshot" for e in events))
+
+
+class InteractiveBrowserPreflightTests(unittest.TestCase):
+    """PR 1 (browser lane hardening): the interactive browser_use route must
+    run the same CDP preflight as the delegated route BEFORE spending LLM."""
+
+    class _FakeBrowserUse:
+        last_artifact_path = None
+
+        def __init__(self, order: list[str]) -> None:
+            self._order = order
+            self.cdp_url = "http://localhost:9250"
+
+        async def run_task(self, task, **kwargs):
+            self._order.append("run_task")
+            return "hecho"
+
+    def _session(self, task: str = "abre chatgpt.com y lee el titular"):
+        import types
+
+        return types.SimpleNamespace(
+            task=task,
+            current_url=None,
+            status="running",
+            pending_action={"action": "browser_use_task", "backend": "browser_use", "task": task},
+            screenshot_path=None,
+        )
+
+    def test_interactive_route_runs_preflight_before_llm(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        order: list[str] = []
+
+        class OrderedCapability(_ReadyInteractiveCapability):
+            def ensure_ready(self, *, port: int = 9250, profile_dir: str) -> str:
+                order.append("ensure_ready")
+                return super().ensure_ready(port=port, profile_dir=profile_dir)
+
+        capability = OrderedCapability(endpoint="http://127.0.0.1:9251")
+        fake = self._FakeBrowserUse(order)
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=types.SimpleNamespace(computer_auto_approve=True, sensitive_urls=[]),
+            browser_capability=capability,
+        )
+
+        result = handler._run_browser_use_session(self._session())
+
+        self.assertEqual(result, "hecho")
+        self.assertEqual(order, ["ensure_ready", "run_task"])
+        self.assertEqual(capability.calls, [(9250, "~/.claw/chrome-profile")])
+        # The session must run against the endpoint the preflight proved.
+        self.assertEqual(fake.cdp_url, "http://127.0.0.1:9251")
+
+    def test_interactive_preflight_failure_short_circuits_without_llm(self) -> None:
+        import types
+
+        from claw_v2.browser_capability import BrowserCapabilityError
+        from claw_v2.computer_handler import ComputerHandler
+
+        order: list[str] = []
+
+        class DeadCapability:
+            def ensure_ready(self, *, port: int = 9250, profile_dir: str) -> str:
+                raise BrowserCapabilityError(
+                    "CDP responde /json/version pero no puede crear pestañas",
+                    endpoint="http://127.0.0.1:9250",
+                )
+
+        fake = self._FakeBrowserUse(order)
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=types.SimpleNamespace(computer_auto_approve=True, sensitive_urls=[]),
+            browser_capability=DeadCapability(),
+        )
+        session = self._session()
+
+        result = handler._run_browser_use_session(session)
+
+        self.assertIn("No pude conectar al navegador (CDP)", result)
+        self.assertEqual(order, [])  # browser_use never ran: no LLM spent
+        self.assertEqual(session.status, "done")
+        self.assertIsNone(session.pending_action)
 
 
 class DelegatedBrowserTaskTests(unittest.TestCase):

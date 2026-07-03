@@ -5032,6 +5032,10 @@ class BotTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 browser_use = StubBrowserUse()
                 runtime.bot.browser_use = browser_use
+                # Fake CDP preflight: never touch real Chrome from unit tests.
+                runtime.bot._computer_handler.browser_capability = MagicMock(
+                    ensure_ready=MagicMock(return_value="http://127.0.0.1:9250")
+                )
                 runtime.bot.computer = MagicMock()
                 runtime.bot.computer.codex_backend = object()
                 runtime.bot.computer.capture_screenshot.return_value = {
@@ -5091,6 +5095,10 @@ class BotTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 browser_use = StubBrowserUse()
                 runtime.bot.browser_use = browser_use
+                # Fake CDP preflight: never touch real Chrome from unit tests.
+                runtime.bot._computer_handler.browser_capability = MagicMock(
+                    ensure_ready=MagicMock(return_value="http://127.0.0.1:9250")
+                )
                 runtime.bot.computer = MagicMock()
                 runtime.bot.computer.codex_backend = object()
 
@@ -5132,6 +5140,10 @@ class BotTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 browser_use = StubBrowserUse()
                 runtime.bot.browser_use = browser_use
+                # Fake CDP preflight: never touch real Chrome from unit tests.
+                runtime.bot._computer_handler.browser_capability = MagicMock(
+                    ensure_ready=MagicMock(return_value="http://127.0.0.1:9250")
+                )
                 runtime.bot.computer = MagicMock()
                 runtime.bot.computer.codex_backend = object()
                 runtime.memory.update_session_state(
@@ -5182,6 +5194,10 @@ class BotTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 runtime.bot.browser_use = TimeoutBrowserUse()
+                # Fake CDP preflight: never touch real Chrome from unit tests.
+                runtime.bot._computer_handler.browser_capability = MagicMock(
+                    ensure_ready=MagicMock(return_value="http://127.0.0.1:9250")
+                )
                 runtime.bot.computer = MagicMock()
                 runtime.bot.computer.codex_backend = object()
                 runtime.bot.computer.capture_screenshot.return_value = {
@@ -5236,6 +5252,10 @@ class BotTests(unittest.TestCase):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
                 browser_use = NoResultBrowserUse()
                 runtime.bot.browser_use = browser_use
+                # Fake CDP preflight: never touch real Chrome from unit tests.
+                runtime.bot._computer_handler.browser_capability = MagicMock(
+                    ensure_ready=MagicMock(return_value="http://127.0.0.1:9250")
+                )
                 runtime.bot.computer = MagicMock()
                 runtime.bot.computer.codex_backend = object()
                 runtime.bot.computer.capture_screenshot.return_value = {
