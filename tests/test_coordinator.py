@@ -676,6 +676,153 @@ class FullRunTests(unittest.TestCase):
         self.assertIn("verification", result.phase_results)
         self.assertFalse(result.audit.get("critical_worker_error", False))
 
+    def test_embedded_marker_quote_in_implementation_does_not_kill_run(self) -> None:
+        # Slice critical-echo (2026-07-03, evento vivo 461162): la synthesis
+        # planificó "confirmar que no aparece la cadena…", el worker obedeció
+        # (rg + check de ausencia) citando el centinela EMBEBIDO en su reporte
+        # — y el detector mató un run cuyo entregable estaba perfecto en el
+        # deliverables dir. Una cita/echo va embebida mid-línea; solo una
+        # declaración line-initial es un fallo crítico real.
+        svc, router, _observe, _ = _make_service()
+
+        def fake_ask(prompt, **kwargs):
+            if kwargs.get("lane") == "worker":
+                return MagicMock(
+                    content=(
+                        "## Actions\n"
+                        '`rg -n "CRITICAL ERROR EN WORKER" .`\n'
+                        "`apply_patch` creó `resumen_entregas.md`\n"
+                        "## Verify\n"
+                        "check: cadena `CRITICAL ERROR EN WORKER` ausente\n"
+                        "result: ok\n"
+                        "## Evidence\n- none\n"
+                    )
+                )
+            if kwargs.get("lane") == "verifier":
+                return MagicMock(content="Verification Status: passed")
+            return MagicMock(content="**Step 1 [rook]:** Crear el archivo y validarlo.")
+
+        router.ask.side_effect = fake_ask
+        research = [WorkerTask(name="r1", instruction="find")]
+        impl = [WorkerTask(name="i1", instruction="build", lane="worker")]
+        verify = [WorkerTask(name="v1", instruction="check", lane="verifier")]
+
+        result = svc.run("echo-impl-task", "objective", research, impl, verify)
+
+        self.assertFalse(
+            (result.error or "").startswith("critical_worker_error"),
+            f"embedded marker quote must not trigger critical: {result.error!r}",
+        )
+        self.assertIn("verification", result.phase_results)
+        self.assertFalse(result.audit.get("critical_worker_error", False))
+
+    def test_line_initial_marker_on_later_line_still_kills_implementation(self) -> None:
+        # El positivo que el ancla MULTILINE debe conservar: una declaración
+        # de auxilio que abre línea (aunque no sea la primera del reporte)
+        # sigue siendo fallo crítico real → self-healing.
+        svc, router, _observe, _ = _make_service()
+
+        def fake_ask(prompt, **kwargs):
+            if kwargs.get("lane") == "worker":
+                return MagicMock(
+                    content=(
+                        "## Actions\nintenté crear el archivo 3 veces\n"
+                        "CRITICAL ERROR EN WORKER\n"
+                        "RuntimeError: disco de scratch inaccesible\n"
+                    )
+                )
+            return MagicMock(content="**Step 1 [rook]:** Crear el archivo.")
+
+        router.ask.side_effect = fake_ask
+        research = [WorkerTask(name="r1", instruction="find")]
+        impl = [WorkerTask(name="i1", instruction="build", lane="worker")]
+
+        result = svc.run("declared-critical-task", "objective", research, impl, None)
+
+        self.assertEqual(result.error, "critical_worker_error:i1")
+        self.assertTrue(result.audit["critical_worker_error"])
+
+    def test_standing_synthesis_prompt_does_not_spell_the_marker(self) -> None:
+        # Ángulo B: la regla standing del prompt de synthesis ya no deletrea
+        # el literal — así un plan no puede filtrarlo a los workers (la vía
+        # de contaminación del evento 461130). El replan crítico SÍ puede
+        # llevarlo como DATA (raw_error del audit) — test previo lo cubre.
+        svc, router, _observe, _ = _make_service()
+        prompts: list[str] = []
+
+        def fake_ask(prompt, **kwargs):
+            prompts.append(str(prompt))
+            if kwargs.get("lane") == "worker":
+                return MagicMock(content="## Actions\nhecho\n## Verify\nok\n## Evidence\n- none\n")
+            return MagicMock(content="**Step 1 [rook]:** Hacer el trabajo.")
+
+        router.ask.side_effect = fake_ask
+        research = [WorkerTask(name="r1", instruction="find")]
+        impl = [WorkerTask(name="i1", instruction="build", lane="worker")]
+
+        svc.run("clean-prompt-task", "objective", research, impl, None)
+
+        synthesis_prompts = [p for p in prompts if "Síntesis y Orquestación" in p]
+        self.assertTrue(synthesis_prompts)
+        for prompt in synthesis_prompts:
+            self.assertNotIn("CRITICAL ERROR EN WORKER", prompt)
+
+
+class CriticalMarkerDetectorTests(unittest.TestCase):
+    """Unidad del choke point _has_critical_worker_error (ancla line-initial)."""
+
+    def _result(self, content: str = "", error: str | None = None):
+        from claw_v2.coordinator import WorkerResult
+
+        return WorkerResult(task_name="t", content=content, duration_seconds=0.1, error=error)
+
+    def test_line_initial_declaration_matches(self) -> None:
+        from claw_v2.coordinator import _has_critical_worker_error
+
+        self.assertTrue(
+            _has_critical_worker_error(self._result("CRITICAL ERROR EN WORKER\ndetalle"))
+        )
+        self.assertTrue(_has_critical_worker_error(self._result("CRITICAL ERROR EN WORKER\nx")))
+        self.assertTrue(
+            _has_critical_worker_error(self._result("línea previa\nCRITICAL ERROR EN WORKER"))
+        )
+        self.assertTrue(
+            _has_critical_worker_error(self._result("  CRITICAL ERROR EN WORKER: disco lleno"))
+        )
+        self.assertTrue(
+            _has_critical_worker_error(self._result("ok", error="CRITICAL ERROR EN WORKER"))
+        )
+
+    def test_embedded_quote_does_not_match(self) -> None:
+        from claw_v2.coordinator import _has_critical_worker_error
+
+        self.assertFalse(
+            _has_critical_worker_error(self._result('`rg -n "CRITICAL ERROR EN WORKER" .`'))
+        )
+        self.assertFalse(
+            _has_critical_worker_error(
+                self._result("check: cadena `CRITICAL ERROR EN WORKER` ausente")
+            )
+        )
+        self.assertFalse(
+            _has_critical_worker_error(
+                self._result("el reporte previo mencionaba CRITICAL ERROR EN WORKER y se resolvió")
+            )
+        )
+
+    def test_fence_wrapped_marker_is_a_named_residual_and_still_matches(self) -> None:
+        # Review SHOULD-FIX #2: residual INTENCIONAL pineado — una cita
+        # line-initial (marker dentro de un fence, p.ej. pegado desde el
+        # raw_error del audit en el camino self-healing) SIGUE matando. El
+        # ancla no distingue cita-que-abre-línea de declaración; el invariante
+        # WIRING lo nombra para que la tercera vida de este bug llegue con
+        # recon nombrado, no como sorpresa.
+        from claw_v2.coordinator import _has_critical_worker_error
+
+        self.assertTrue(
+            _has_critical_worker_error(self._result("```\nCRITICAL ERROR EN WORKER\n```"))
+        )
+
 
 class F6FanOutFanInContractTests(unittest.TestCase):
     def _metadata_list(self, report: Any, key: str) -> list[dict[str, Any]]:
