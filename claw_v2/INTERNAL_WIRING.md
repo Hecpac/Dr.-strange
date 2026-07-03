@@ -9,9 +9,9 @@
 
 ```yaml
 describes_commit: "slice #2b fix (a) (2026-07-03): worker cwd propagated end-to-end. The #2b closing smoke proved the deliverables cwd never reached the codex child: _with_phase_timeout and _inject_context (coordinator.py) rebuilt WorkerTask dropping cwd, and codex.py's exec subprocess.run passed no cwd= so subcommand relative writes resolved against the daemon process cwd. 3-point plumbing fix: cwd=task.cwd/t.cwd in both constructors + cwd=request.cwd (None ⇒ inheritance, byte-identical) in the exec subprocess.run — preflight subprocess untouched, no timeout/lane/policy/parser/governor changes. Establishes worker_cwd_propagated_end_to_end inside §1 invariant deliverable_dispatch_daemon_side. Live CLI probe resolved recon UNKNOWN 7 (codex does not chdir to -C; process cwd binds subcommand writes) and ASSUMED 8 (workspace-write sandbox permits the aligned write). Full-arc closing smoke pends separate owner authorization. Predecessor: #2b follow-up (b) (doc_version 2.61) in main 5c29201"
-doc_version: 2.62
+doc_version: 2.63
 last_verified: 2026-07-03
-verification_method: "TDD red-first: CwdPropagationThroughCoordinatorTests (through coordinator.run(), both constructors) and CwdEndToEndThroughTaskHandlerTests (full TaskHandler path with the flag) — positives failed pre-fix reproducing the smoke failure, green post; negatives lock the no-flag byte-identity. Adjacent suites green: test_task_deliverables 43, test_codex_adapter + test_coordinator[x3] + test_llm + test_architecture_invariants 206 + 28 subtests. ISOLATED live probe (scratchpad, real codex CLI 0.142.4, replicating the fixed adapter exactly): -C+cwd= aligned ⇒ `python3 -c` relative write from a subcommand landed IN the target dir, no leak to the launch cwd, workspace-write sandbox permitted it — recon UNKNOWN 7 and ASSUMED 8 RESOLVED. Full-arc closing smoke (deploy + Telegram dispatch ok:true) NOT run — requires separate owner authorization. Prior context: follow-up (b) LIVE-RESOLVED in the 2026-07-03 smoke (see live_smoke_status)."
+verification_method: "TDD red-first: CwdPropagationThroughCoordinatorTests (through coordinator.run(), both constructors) and CwdEndToEndThroughTaskHandlerTests (full TaskHandler path with the flag) — positives failed pre-fix reproducing the smoke failure, green post; negatives lock the no-flag byte-identity. Suites: full 4203 passed + 550 subtests; test_task_deliverables 43; test_codex_adapter locks the root-cause kwarg. ISOLATED live probe (real codex CLI 0.142.4): -C+cwd= aligned ⇒ subcommand relative write landed IN the target — recon UNKNOWN 7 and ASSUMED 8 RESOLVED. FULL-ARC CLOSING SMOKE RAN AND PASSED (owner-authorized, 2026-07-03, deploy 5d9c391 pid 77368): organic deliver_to_owner delegation → files produced IN the deliverables dir (cwd no-regression live) → verifier passed → deliverable dispatch ok:true message_ids 14682/14683 (first in arc history) → terminal succeeded; 0 redrives, stderr delta 0. See live_smoke_status for the two named caveats (under-delegation by session memory with the brain's inline-send bypass as open policy question; redrive/γ layers not exercised this pass)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1425,6 +1425,25 @@ invariants:
       no leak, sandbox permits). ISOLATED smoke only — the full-arc closing
       smoke (deploy + Telegram, expected: succeeded + dispatch ok:true +
       files delivered) REQUIRES separate owner authorization and has NOT run.
+      ARC CLOSED END-TO-END (authorized closing smoke 2026-07-03, deploy
+      5d9c391 pid 77368, task tg-574707975:1783080790563487000): organic
+      delegation with deliver_to_owner=true (event 458864) → worker produced
+      BOTH files IN <scratch>/<task>/deliverables/ next to the .git trust
+      marker, zero workspace-root litter (fix (a) no-regression live) →
+      verifier passed/CLASE_BLOCKER ninguna, quality note filed under
+      "Siguiente paso: Ninguno requerido; entregable listo para envío por el
+      sistema" (fix (b) holding) → autonomous_task_deliverable_dispatch
+      ok:true for saludo.html (message_id 14682) and fecha.html (14683),
+      events 459007/459008 — the FIRST ok:true dispatches in the arc's
+      history → terminal succeeded (459010/459011). Coordinator 146.6s,
+      0 redrives, stderr delta 0. CAVEATS, honestly named: (1) the delegation
+      was EXPLICITLY requested — the same session's 4 prior organic attempts
+      that day were routed around the arc by the brain (brain_fallback inline,
+      3 of them failed; its stated reason: "that path has failed all day"),
+      and its ack promises to bypass again if the arc fails: under-delegation
+      by session memory is now the named residual (F4-B2 territory), with the
+      brain's inline token-send as the open policy question; (2) single-pass
+      arc — redrive/γ layers not exercised this smoke (test-locked only).
 
   evidence_pre_step_contained:
     rule: γ's evidence gathering is a PRE-STEP of the re-enqueued durable
