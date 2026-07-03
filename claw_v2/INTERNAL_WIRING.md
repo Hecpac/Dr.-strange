@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice #2b follow-up (b) (2026-07-02/03): verifier deliver-aware tail. The SAME gated block that wires the ops+deliver_to_owner worker (cwd + DELIVERABLES tail) now also appends DELIVERABLES_VERIFIER_TAIL_INSTRUCTION to the verification tasks, reframing the verifier's evidence demand: the system sends the declared files after the verdict and the daemon validates existence at dispatch — raw attached content must not be demanded as an evidencia_externa blocker (that class is a deterministic arc killer under ops+deliver: γ infeasible via implementation.started marker, live event 443818; dispatch requires succeeded). Prompt-level only: no lane gains tools, parser/router untouched, without the flag byte-identical to pre-#2b. Extends §1 invariant deliverable_dispatch_daemon_side. OPEN owner decision: deterministic degrade evidencia_externa→formato under the flag (recon UNKNOWN 8). Predecessor: #2b deliver_to_owner (doc_version 2.59) in main 58b5b5f"
-doc_version: 2.61
+describes_commit: "slice #2b fix (a) (2026-07-03): worker cwd propagated end-to-end. The #2b closing smoke proved the deliverables cwd never reached the codex child: _with_phase_timeout and _inject_context (coordinator.py) rebuilt WorkerTask dropping cwd, and codex.py's exec subprocess.run passed no cwd= so subcommand relative writes resolved against the daemon process cwd. 3-point plumbing fix: cwd=task.cwd/t.cwd in both constructors + cwd=request.cwd (None ⇒ inheritance, byte-identical) in the exec subprocess.run — preflight subprocess untouched, no timeout/lane/policy/parser/governor changes. Establishes worker_cwd_propagated_end_to_end inside §1 invariant deliverable_dispatch_daemon_side. Live CLI probe resolved recon UNKNOWN 7 (codex does not chdir to -C; process cwd binds subcommand writes) and ASSUMED 8 (workspace-write sandbox permits the aligned write). Full-arc closing smoke pends separate owner authorization. Predecessor: #2b follow-up (b) (doc_version 2.61) in main 5c29201"
+doc_version: 2.62
 last_verified: 2026-07-03
-verification_method: "TDD red-first: 2 structural tests in OpsDeliverablesWiringTests (tail present with flag / absent without — constant identity, wording not locked) failed pre-wiring, green post. Full suite on the feature branch 4199 passed + 1 skipped + 550 subtests (CLAW_EXPECTED_BRANCH set; test_daemon_branch_integrity.py run apart 19/19 — documented gotcha). Adversarial multi-angle review (substitute for the headless-unable ultrareview hook): APPROVE, 0 MUST-FIX in-diff; named out-of-diff finding = coordinator.py cwd drop (see live_smoke_status). Merged PR #189 → main 2e0a32e, deployed ff-only pid 5957, clean boot (agent_startup_context 446234 code_version 2e0a32e git_dirty false, stderr delta 0). CLOSING SMOKE RAN (see live_smoke_status): follow-up (b) LIVE-RESOLVED — verifier passed first-pass citing the tail's framing back, zero redrive decisions, dispatch layer reached for the first time; arc still open SOLELY on follow-up (a) cwd (dispatch failed honest: archivo_no_encontrado on both files, worker wrote to workspace root). Prompt-level compliance risk (UNKNOWN 8) did not materialize this pass but stays a named residual until the deterministic belt is decided."
+verification_method: "TDD red-first: CwdPropagationThroughCoordinatorTests (through coordinator.run(), both constructors) and CwdEndToEndThroughTaskHandlerTests (full TaskHandler path with the flag) — positives failed pre-fix reproducing the smoke failure, green post; negatives lock the no-flag byte-identity. Adjacent suites green: test_task_deliverables 43, test_codex_adapter + test_coordinator[x3] + test_llm + test_architecture_invariants 206 + 28 subtests. ISOLATED live probe (scratchpad, real codex CLI 0.142.4, replicating the fixed adapter exactly): -C+cwd= aligned ⇒ `python3 -c` relative write from a subcommand landed IN the target dir, no leak to the launch cwd, workspace-write sandbox permitted it — recon UNKNOWN 7 and ASSUMED 8 RESOLVED. Full-arc closing smoke (deploy + Telegram dispatch ok:true) NOT run — requires separate owner authorization. Prior context: follow-up (b) LIVE-RESOLVED in the 2026-07-03 smoke (see live_smoke_status)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1247,18 +1247,25 @@ invariants:
           <scratch>/<task_id>/deliverables/ — its cwd, which the runner
           pre-creates with `git init` as the codex CLI trust marker (codex exec
           refuses a non-git cwd) and passes to codex via -C (WorkerTask.cwd →
-          router.ask → codex.py). KNOWN GAP (#2b closing smoke 2026-07-03): in
-          practice the worker STILL wrote to the daemon workspace root, not the
-          -C dir. A discriminating probe shows -C DOES relocate a direct
-          "write foo in your cwd" to the target — but the live worker drove a
-          `python3 <<PY` heredoc, and codex.py's subprocess.run passes NO
-          cwd= (codex.py ~100), so the codex child inherits the daemon process
-          cwd (~/srv/claw-daemon, set by restart.sh) and a subcommand's relative
-          writes can resolve there instead of the -C root. Whether adding
-          cwd=request.cwd to that subprocess.run binds subcommand writes is
-          UNVERIFIED — it is a NAMED follow-up with adapter-wide blast radius
-          (the codex subprocess.run serves research/verifier/all worker lanes),
-          not an inline #2b patch. prep is best-effort — any failure means the
+          router.ask → codex.py). worker_cwd_propagated_end_to_end (fix (a),
+          resolves the #2b closing-smoke KNOWN GAP): the cwd survives the WHOLE
+          chain — _with_phase_timeout and _inject_context rebuild WorkerTask
+          WITH cwd=task.cwd/t.cwd (they used to drop it, which is why the live
+          worker wrote saludo.html/fecha.html to the daemon workspace root
+          while the -C dir held only .git; the old WorkerTaskCwdTests missed
+          it by calling _execute_worker directly, bypassing both constructors)
+          — and codex.py's exec subprocess.run passes cwd=request.cwd (None ⇒
+          inheritance, byte-identical to before for every cwd-less call; the
+          preflight subprocess.run is deliberately untouched). The codex CLI
+          does NOT chdir to -C internally: a `python3 -c` relative write from a
+          subcommand resolves against the PROCESS cwd (live probe 2026-07-03:
+          -C+cwd= aligned ⇒ probe_rel.txt lands in the target, no leak to the
+          launch cwd, sandbox workspace-write permits it — UNKNOWN 7/ASSUMED 8
+          of the fix-(a) recon both resolved). Locked by tests that traverse
+          coordinator.run() end-to-end (CwdPropagationThroughCoordinatorTests)
+          and the full TaskHandler path with the flag
+          (CwdEndToEndThroughTaskHandlerTests), positive AND negative. prep is
+          best-effort — any failure means the
           task runs exactly as today) — and declares them via the
           fail-closed DELIVERABLES tail (parse_deliverables_tail: header absent
           or item-less ⇒ None ⇒ nothing is sent). The tail is read ONLY from
@@ -1338,6 +1345,8 @@ invariants:
       - tests/test_task_deliverables.py::DeliverToOwnerResumeSurvivalTests (#2b review #188 MUST-FIX — el flag se persiste al ledger metadata y se restaura en _resume_autonomous_record; sin esto el resume lo pierde y el dispatch se salta)
       - tests/test_task_deliverables.py::OpsDeliverablesWiringTests::test_ops_deliver_verifier_gets_deliver_aware_tail (follow-up (b) — con flag el verifier lleva DELIVERABLES_VERIFIER_TAIL_INSTRUCTION; estructural, no lockea fraseo)
       - tests/test_task_deliverables.py::OpsDeliverablesWiringTests::test_ops_without_flag_verifier_untouched (follow-up (b) — sin flag la instrucción del verifier es byte-idéntica a pre-#2b)
+      - tests/test_task_deliverables.py::CwdPropagationThroughCoordinatorTests (fix (a) — el cwd sobrevive coordinator.run() entero, ambos constructores; negativo: sin cwd ninguna llamada lleva el kwarg)
+      - tests/test_task_deliverables.py::CwdEndToEndThroughTaskHandlerTests (fix (a) — full-stack: flag ⇒ kwargs[cwd]=deliverables dir en la llamada de implementation; sin flag ⇒ cero cwd en el router)
     why: the first organic post-B2 ops-network delegation (send 2 HTML to
          Telegram, task 1783021694523108000) put sendDocument INSIDE
          implementation - the network-blocked worker failed, the redrive was
@@ -1408,6 +1417,14 @@ invariants:
       directly, bypassing the wrapping. Fix for (a) = propagate cwd=t.cwd in
       both constructors + cwd=request.cwd in the codex adapter subprocess.run,
       with a test that traverses coordinator.run().
+      FIX (a) IMPLEMENTED (this slice, worker_cwd_propagated_end_to_end in
+      rule above): 3-point plumbing (cwd in both constructors + cwd= in the
+      codex exec subprocess.run), red-first tests through coordinator.run()
+      and the full TaskHandler path, live CLI probe resolves UNKNOWN 7 and
+      ASSUMED 8 (-C+cwd aligned ⇒ subcommand relative write lands in target,
+      no leak, sandbox permits). ISOLATED smoke only — the full-arc closing
+      smoke (deploy + Telegram, expected: succeeded + dispatch ok:true +
+      files delivered) REQUIRES separate owner authorization and has NOT run.
 
   evidence_pre_step_contained:
     rule: γ's evidence gathering is a PRE-STEP of the re-enqueued durable
