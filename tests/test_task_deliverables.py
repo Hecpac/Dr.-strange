@@ -151,6 +151,123 @@ class WorkerTaskCwdTests(unittest.TestCase):
             self.assertNotIn("cwd", recorder.calls[0])
 
 
+class _CwdAskRecorder:
+    """Recorder que captura la instrucción ADEMÁS de los kwargs — necesario
+    para identificar la llamada de implementation dentro de run()."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def ask(self, instruction, **kwargs):
+        self.calls.append({"instruction": str(instruction), **kwargs})
+        from claw_v2.types import LLMResponse
+
+        return LLMResponse(
+            content="ok",
+            lane=kwargs.get("lane", "worker"),
+            provider="codex",
+            model="m",
+        )
+
+
+class CwdPropagationThroughCoordinatorTests(unittest.TestCase):
+    """Fix (a) #2b: WorkerTaskCwdTests llama _execute_worker DIRECTO y se
+    salta _with_phase_timeout/_inject_context (coordinator.run:540-541), que
+    reconstruyen WorkerTask — exactamente donde el cwd se perdía (smoke
+    2026-07-03: archivos en workspace root, no en el -C dir). Estos tests
+    atraviesan coordinator.run() de verdad."""
+
+    def test_run_propagates_impl_cwd_to_router(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = _CwdAskRecorder()
+            svc = CoordinatorService(
+                router=recorder, observe=_ObsNoop(), scratch_root=Path(tmpdir) / "scratch"
+            )
+            svc.run(
+                "t-cwd",
+                "obj",
+                [WorkerTask(name="scope", instruction="research it", lane="research")],
+                implementation_tasks=[
+                    WorkerTask(
+                        name="impl",
+                        instruction="IMPL-MARKER do the work",
+                        lane="worker",
+                        cwd=tmpdir,
+                    )
+                ],
+                verification_tasks=[
+                    WorkerTask(name="verify", instruction="verify it", lane="verifier")
+                ],
+            )
+            impl_calls = [c for c in recorder.calls if "IMPL-MARKER" in c["instruction"]]
+            self.assertTrue(impl_calls)
+            self.assertEqual(impl_calls[0].get("cwd"), tmpdir)
+
+    def test_run_without_cwd_omits_kwarg_everywhere(self) -> None:
+        # Negativo del invariante #2b: sin cwd en el task, NINGUNA llamada
+        # del run() lleva el kwarg — herencia byte-idéntica a hoy.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            recorder = _CwdAskRecorder()
+            svc = CoordinatorService(
+                router=recorder, observe=_ObsNoop(), scratch_root=Path(tmpdir) / "scratch"
+            )
+            svc.run(
+                "t-nocwd",
+                "obj",
+                [WorkerTask(name="scope", instruction="research it", lane="research")],
+                implementation_tasks=[
+                    WorkerTask(name="impl", instruction="IMPL-MARKER", lane="worker")
+                ],
+                verification_tasks=[
+                    WorkerTask(name="verify", instruction="verify it", lane="verifier")
+                ],
+            )
+            self.assertTrue(recorder.calls)
+            self.assertFalse(any("cwd" in c for c in recorder.calls))
+
+
+class CwdEndToEndThroughTaskHandlerTests(unittest.TestCase):
+    """Full-stack: flag deliver_to_owner → TaskHandler prepara el deliverables
+    dir → coordinator.run() REAL → el cwd llega a la llamada del router de la
+    fase implementation (la que lleva el tail DELIVERABLES)."""
+
+    def test_flag_cwd_reaches_router_end_to_end(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            recorder = _CwdAskRecorder()
+            coordinator = CoordinatorService(
+                router=recorder, observe=_ObsNoop(), scratch_root=root / "scratch"
+            )
+            handler, _memory, _observe, _stored = _mk_handler(
+                root, coordinator, _RecordingDelivery()
+            )
+            task_id = _run_ops_task(handler, "tg-1", OBJECTIVE)
+
+            expected_cwd = str(root / "scratch" / task_id / "deliverables")
+            cwd_calls = [c for c in recorder.calls if c.get("cwd") == expected_cwd]
+            self.assertTrue(
+                cwd_calls,
+                f"ninguna llamada del router llevó cwd={expected_cwd}; "
+                f"cwds vistos: {[c.get('cwd') for c in recorder.calls]}",
+            )
+            self.assertIn("DELIVERABLES:", cwd_calls[0]["instruction"])
+
+    def test_without_flag_no_cwd_reaches_router(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            recorder = _CwdAskRecorder()
+            coordinator = CoordinatorService(
+                router=recorder, observe=_ObsNoop(), scratch_root=root / "scratch"
+            )
+            handler, _memory, _observe, _stored = _mk_handler(
+                root, coordinator, _RecordingDelivery()
+            )
+            _run_ops_task(handler, "tg-1", OBJECTIVE, deliver_to_owner=False)
+
+            self.assertTrue(recorder.calls)
+            self.assertFalse(any("cwd" in c for c in recorder.calls))
+
+
 class _DeliverCoordinator:
     """Fake coordinator: crea los archivos del worker en deliverables/ y
     devuelve implementation+verification con el contenido parametrizado."""

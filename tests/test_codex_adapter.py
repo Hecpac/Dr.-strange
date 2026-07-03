@@ -164,6 +164,9 @@ class CodexAdapterTests(unittest.TestCase):
         cmd = call_kwargs[0][0]
         self.assertIn("-C", cmd)
         self.assertIn("/tmp", cmd)
+        # Fix (a) #2b: el kwarg cwd= del subprocess es la causa raíz del smoke
+        # (sin él, los subcomandos del worker heredan el cwd del daemon).
+        self.assertEqual(call_kwargs.kwargs.get("cwd"), "/tmp")
 
     def test_tool_capable_is_true(self) -> None:
         self.assertTrue(CodexAdapter.tool_capable)
@@ -215,6 +218,8 @@ class CodexAdapterTests(unittest.TestCase):
                 adapter.complete(request)
         cmd = mock_run.call_args[0][0]
         self.assertNotIn("-C", cmd)
+        # Byte-identidad sin cwd: None ⇒ herencia idéntica a pre-fix (a).
+        self.assertIsNone(mock_run.call_args.kwargs.get("cwd"))
 
     def test_preflight_checks_version_and_login_status_before_exec(self) -> None:
         adapter = CodexAdapter(cli_path="codex")

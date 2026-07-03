@@ -103,6 +103,10 @@ class CodexAdapter(ProviderAdapter):
                     capture_output=True,
                     text=True,
                     timeout=request.timeout,
+                    # Fix (a) #2b: sin cwd= el hijo hereda el cwd del daemon y
+                    # los subcomandos del worker (heredocs) escriben ahí, no en
+                    # el -C dir (smoke 2026-07-03). None = herencia idéntica.
+                    cwd=request.cwd if request.cwd else None,
                 )
             except FileNotFoundError as exc:
                 raise AdapterUnavailableError(f"Codex CLI not found at '{self.cli_path}'.") from exc

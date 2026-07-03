@@ -1276,6 +1276,7 @@ class CoordinatorService:
                 lane=t.lane,
                 assigned_agent=t.assigned_agent,
                 timeout_seconds=t.timeout_seconds,
+                cwd=t.cwd,
             )
             for t in tasks
         ]
@@ -1292,6 +1293,7 @@ class CoordinatorService:
                 timeout_seconds=task.timeout_seconds
                 if task.timeout_seconds is not None
                 else timeout_seconds,
+                cwd=task.cwd,
             )
             for task in tasks
         ]
