@@ -854,6 +854,8 @@ class BrowserUseService:
         task_id: str | None = None,
         browser_context_id: str | None = None,
         policy_audit_callback: Callable[[dict[str, Any]], None] | None = None,
+        llm_timeout: int | None = None,
+        max_failures: int | None = None,
     ) -> str:
         with _preserve_browser_use_import_env():
             from browser_use import Agent, BrowserSession
@@ -891,6 +893,14 @@ class BrowserUseService:
         else:
             policy_state = {}
             _should_stop = None
+        # Explicit per-step LLM budget (fail-fast under sustained saturation).
+        # None keeps the browser_use package defaults (llm_timeout=90s for
+        # claude models, max_failures=5) for callers that don't budget.
+        agent_kwargs: dict[str, Any] = {}
+        if llm_timeout is not None:
+            agent_kwargs["llm_timeout"] = int(llm_timeout)
+        if max_failures is not None:
+            agent_kwargs["max_failures"] = int(max_failures)
         agent = Agent(
             task=task,
             llm=llm,
@@ -901,6 +911,7 @@ class BrowserUseService:
             use_vision=use_vision,
             save_conversation_path=save_conversation,
             register_should_stop_callback=_should_stop,
+            **agent_kwargs,
         )
         artifact_path: Path | None = None
         oauth_claude = str(model).lower().startswith("claude")

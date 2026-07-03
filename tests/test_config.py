@@ -891,5 +891,59 @@ class BrowserUseTimeoutConfigTests(unittest.TestCase):
                 AppConfig.from_env().validate()
 
 
+class BrowserUseLlmBudgetConfigTests(unittest.TestCase):
+    """PR 2 (browser lane hardening): explicit browser_use per-step LLM budget."""
+
+    def test_defaults(self) -> None:
+        home = str(Path.home())
+        with patch.dict(os.environ, {"HOME": home}, clear=True):
+            config = AppConfig.from_env()
+        self.assertEqual(config.computer_browser_use_llm_timeout_seconds, 60)
+        self.assertEqual(config.computer_browser_use_max_failures, 3)
+
+    def test_env_overrides(self) -> None:
+        home = str(Path.home())
+        with patch.dict(
+            os.environ,
+            {
+                "HOME": home,
+                "CLAW_BROWSER_USE_LLM_TIMEOUT": "45",
+                "CLAW_BROWSER_USE_MAX_FAILURES": "2",
+            },
+            clear=True,
+        ):
+            config = AppConfig.from_env()
+        self.assertEqual(config.computer_browser_use_llm_timeout_seconds, 45)
+        self.assertEqual(config.computer_browser_use_max_failures, 2)
+
+    def test_non_integer_env_falls_back_to_default(self) -> None:
+        home = str(Path.home())
+        with patch.dict(
+            os.environ,
+            {
+                "HOME": home,
+                "CLAW_BROWSER_USE_LLM_TIMEOUT": "rapido",
+                "CLAW_BROWSER_USE_MAX_FAILURES": "muchos",
+            },
+            clear=True,
+        ):
+            config = AppConfig.from_env()
+        self.assertEqual(config.computer_browser_use_llm_timeout_seconds, 60)
+        self.assertEqual(config.computer_browser_use_max_failures, 3)
+
+    def test_nonpositive_values_rejected(self) -> None:
+        home = str(Path.home())
+        with patch.dict(
+            os.environ, {"HOME": home, "CLAW_BROWSER_USE_LLM_TIMEOUT": "0"}, clear=True
+        ):
+            with self.assertRaises(ValueError):
+                AppConfig.from_env().validate()
+        with patch.dict(
+            os.environ, {"HOME": home, "CLAW_BROWSER_USE_MAX_FAILURES": "-1"}, clear=True
+        ):
+            with self.assertRaises(ValueError):
+                AppConfig.from_env().validate()
+
+
 if __name__ == "__main__":
     unittest.main()

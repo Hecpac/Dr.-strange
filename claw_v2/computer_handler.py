@@ -46,6 +46,10 @@ BROWSER_USE_TIMEOUT_SECONDS = 180
 # Extra wall-clock the worker-thread future is allowed beyond the agent timeout,
 # to cover the bounded post-task screenshot capture plus browser cleanup.
 BROWSER_USE_TASK_GRACE_SECONDS = 60
+# Explicit per-step LLM budget passed to browser_use.Agent (fail-fast under
+# sustained LLM saturation; package defaults are 90s / 5 failures).
+BROWSER_USE_LLM_TIMEOUT_SECONDS = 60
+BROWSER_USE_MAX_FAILURES = 3
 _LOGIN_WALL_CONTENT_PROBE_CHARS = 4096
 _BROWSER_CONTENT_PREVIEW_SOURCE_CHARS = 4096
 _BROWSER_CONTENT_PREVIEW_CHARS = 240
@@ -595,6 +599,22 @@ class ComputerHandler:
             configured = 0
         return configured if configured > 0 else BROWSER_USE_TIMEOUT_SECONDS
 
+    def _browser_use_llm_timeout(self) -> int:
+        configured = getattr(self.config, "computer_browser_use_llm_timeout_seconds", 0)
+        try:
+            configured = int(configured)
+        except (TypeError, ValueError):
+            configured = 0
+        return configured if configured > 0 else BROWSER_USE_LLM_TIMEOUT_SECONDS
+
+    def _browser_use_max_failures(self) -> int:
+        configured = getattr(self.config, "computer_browser_use_max_failures", 0)
+        try:
+            configured = int(configured)
+        except (TypeError, ValueError):
+            configured = 0
+        return configured if configured > 0 else BROWSER_USE_MAX_FAILURES
+
     def _browser_task_is_sensitive(self, task: str | None, current_url: str | None) -> bool:
         """Best-effort: a browser_use task is sensitive if it starts on a
         sensitive URL or its instruction names a sensitive domain (by brand).
@@ -1071,6 +1091,8 @@ class ComputerHandler:
                         "browser_policy_decision", payload
                     ),
                     max_actions_per_step=1,
+                    llm_timeout=self._browser_use_llm_timeout(),
+                    max_failures=self._browser_use_max_failures(),
                 )
             except asyncio.TimeoutError as exc:
                 raise RuntimeError(timeout_message) from exc
