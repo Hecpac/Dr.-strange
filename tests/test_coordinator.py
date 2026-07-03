@@ -51,6 +51,22 @@ class RunEvidenceWorkerTests(unittest.TestCase):
         # nunca dentro de un directorio de fase (quedaría congelada entre re-drives)
         self.assertFalse((tmpdir / "t-ev" / "research").exists())
 
+    def test_evidence_worker_uses_dedicated_evidence_role(self) -> None:
+        # 2026-07-03: gather_evidence gets role coordinator_evidence so it can
+        # run on a different model (e.g. Sonnet 5) from code workers, while
+        # staying in lane worker (sandbox, retry, tools). A code worker task
+        # keeps coordinator_worker — the model split is role-scoped.
+        svc, router, _observe, _tmpdir = _make_service()
+        router.ask.return_value = MagicMock(content="evidence")
+        svc.run_evidence_worker(task_id="t-ev", instruction="junta la evidencia")
+        self.assertEqual(router.ask.call_args.kwargs["role"], "coordinator_evidence")
+        self.assertEqual(
+            svc._role_for_worker_task(
+                WorkerTask(name="impl", instruction="x", lane="worker")
+            ),
+            "coordinator_worker",
+        )
+
     def test_adapter_error_returns_error_result_and_persists_note(self) -> None:
         from claw_v2.adapters.base import AdapterError
 

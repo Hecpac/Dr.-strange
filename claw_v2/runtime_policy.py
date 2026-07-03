@@ -740,6 +740,15 @@ def _path_candidate_token(token: str) -> str | None:
         if "=" not in token:
             return None
         candidate = token.split("=", 1)[1]
+    # curl/wget file-upload sigil: the path rides after an `@` inside a
+    # `field=@path` token (`curl -F file=@path`, `--form name=@path`,
+    # `--data name=@path`). The field name on the left of `=` is not a path
+    # prefix, so the `=`-guard below would drop the whole token and the secret
+    # path would never reach the denylist (2026-07-03 audit CRITICAL-1).
+    if "@" in candidate:
+        after_at = candidate.rsplit("@", 1)[1]
+        if after_at.startswith(("/", ".", "~")):
+            return after_at
     if "=" in candidate and not candidate.startswith(("/", ".", "~")):
         return None
     return candidate

