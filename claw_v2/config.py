@@ -492,6 +492,8 @@ class AppConfig:
     computer_display_width: int
     computer_display_height: int
     computer_browser_use_timeout_seconds: int
+    computer_browser_use_llm_timeout_seconds: int
+    computer_browser_use_max_failures: int
     ollama_host: str
     sensitive_urls: list[str]
     codex_cli_path: str
@@ -754,6 +756,12 @@ class AppConfig:
             # generation) one vision step at a time; the old hardcoded 180s
             # caps long renders mid-task. Configurable, default 7 min.
             computer_browser_use_timeout_seconds=_env_int("CLAW_BROWSER_USE_TIMEOUT", 420),
+            # Explicit per-step LLM budget for browser_use: fail fast under
+            # sustained LLM saturation instead of the package defaults
+            # (llm_timeout=90s, max_failures=5), which can burn ~450s of the
+            # task budget on consecutive hangs before giving up.
+            computer_browser_use_llm_timeout_seconds=_env_int("CLAW_BROWSER_USE_LLM_TIMEOUT", 60),
+            computer_browser_use_max_failures=_env_int("CLAW_BROWSER_USE_MAX_FAILURES", 3),
             ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
             sensitive_urls=[
                 u
@@ -913,6 +921,10 @@ class AppConfig:
             raise ValueError("computer_use_backend must be 'openai' or 'codex'.")
         if self.computer_browser_use_timeout_seconds <= 0:
             raise ValueError("computer_browser_use_timeout_seconds must be positive.")
+        if self.computer_browser_use_llm_timeout_seconds <= 0:
+            raise ValueError("computer_browser_use_llm_timeout_seconds must be positive.")
+        if self.computer_browser_use_max_failures <= 0:
+            raise ValueError("computer_browser_use_max_failures must be positive.")
         if not 0 <= self.morning_brief_hour <= 23:
             raise ValueError("morning_brief_hour must be between 0 and 23.")
         if not 0 <= self.evening_brief_hour <= 23:

@@ -660,6 +660,70 @@ class BrowserUseModelTests(unittest.TestCase):
         self.assertEqual(self._capture_model(explicit="gpt-5.5"), "gpt-5.5")
 
 
+class BrowserUseLlmBudgetTests(unittest.TestCase):
+    """PR 2 (browser lane hardening): run_task must forward an explicit
+    per-step LLM budget (llm_timeout / max_failures) into browser_use.Agent,
+    and leave the package defaults untouched when no budget is given."""
+
+    def _capture_agent_kwargs(self, **run_kwargs) -> dict:
+        import asyncio
+        import sys
+        import types
+
+        from claw_v2.computer import BrowserUseService
+
+        captured: dict = {}
+
+        class FakeChatLLM:
+            def __init__(self, **kwargs):
+                pass
+
+        class FakeBrowserSession:
+            def __init__(self, **kwargs):
+                pass
+
+            async def stop(self):
+                pass
+
+        class FakeResult:
+            def final_result(self):
+                return "ok"
+
+            def last_action(self):
+                return None
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            async def run(self):
+                return FakeResult()
+
+        module = types.SimpleNamespace(
+            Agent=FakeAgent,
+            BrowserSession=FakeBrowserSession,
+            ChatOpenAI=FakeChatLLM,
+            ChatAnthropic=FakeChatLLM,
+        )
+        with (
+            patch.dict(sys.modules, {"browser_use": module}),
+            patch("claw_v2.computer._resolve_claude_oauth_token", return_value="tok"),
+        ):
+            svc = BrowserUseService()
+            asyncio.run(svc.run_task("t", **run_kwargs))
+        return captured
+
+    def test_llm_timeout_and_max_failures_passed_to_agent(self) -> None:
+        captured = self._capture_agent_kwargs(llm_timeout=60, max_failures=3)
+        self.assertEqual(captured["llm_timeout"], 60)
+        self.assertEqual(captured["max_failures"], 3)
+
+    def test_omitted_budget_keeps_package_defaults(self) -> None:
+        captured = self._capture_agent_kwargs()
+        self.assertNotIn("llm_timeout", captured)
+        self.assertNotIn("max_failures", captured)
+
+
 class _ComputerHandlerConfigTest(unittest.TestCase):
     def _handler(self, config):
         from claw_v2.computer_handler import ComputerHandler
@@ -1739,6 +1803,87 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
         self.assertFalse(kwargs["allow_high_risk_actions"])
         self.assertIsNone(kwargs["allowed_high_risk_actions"])
         self.assertIsNone(kwargs["prohibited_domains"])
+
+    def test_delegated_browser_use_receives_default_llm_budget(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict]] = []
+                self.cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                self.calls.append((task, dict(kwargs)))
+                return "feed capturado"
+
+        fake = FakeBrowserUse()
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+            ),
+            browser_capability=self._ReadyBrowserCapability(),
+        )
+
+        out = handler.run_delegated_browser_task(
+            "Revisa https://example.com y resume el contenido",
+            task_id="t-budget",
+            mode="browse",
+        )
+
+        self.assertEqual(out, "feed capturado")
+        kwargs = fake.calls[0][1]
+        # Explicit fail-fast budget, NOT the browser_use package defaults (90/5).
+        self.assertEqual(kwargs["llm_timeout"], 60)
+        self.assertEqual(kwargs["max_failures"], 3)
+
+    def test_browser_use_task_forwards_configured_llm_budget(self) -> None:
+        """Config overrides reach run_task at the single convergence point
+        (_run_browser_use_task), which both the delegated and interactive
+        routes call."""
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeBrowserUse:
+            last_artifact_path = None
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict]] = []
+                self.cdp_url = "http://localhost:9250"
+
+            async def run_task(self, task, **kwargs):
+                self.calls.append((task, dict(kwargs)))
+                return "listo"
+
+        fake = FakeBrowserUse()
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=types.SimpleNamespace(
+                computer_auto_approve=True,
+                sensitive_urls=[],
+                computer_browser_use_timeout_seconds=0,
+                computer_browser_use_llm_timeout_seconds=45,
+                computer_browser_use_max_failures=2,
+            ),
+        )
+        session = types.SimpleNamespace(
+            task="lee https://example.com",
+            screenshot_path=None,
+        )
+
+        out = handler._run_browser_use_task(session, approved_domains=["example.com"])
+
+        self.assertEqual(out, "listo")
+        kwargs = fake.calls[0][1]
+        self.assertEqual(kwargs["llm_timeout"], 45)
+        self.assertEqual(kwargs["max_failures"], 2)
 
     def test_delegated_browser_use_without_domain_grant_fails_closed(self) -> None:
         import types
