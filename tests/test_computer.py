@@ -1815,6 +1815,55 @@ class InteractiveBrowserPreflightTests(unittest.TestCase):
         self.assertEqual(session.status, "done")
         self.assertIsNone(session.pending_action)
 
+    def test_interactive_preflight_serializes_on_cdp_profile_lock(self) -> None:
+        """The interactive preflight must hold the SAME per-profile lock the
+        delegated route uses, so it can never force-restart the managed Chrome
+        mid-run of a delegated task on the same profile (CodeRabbit Major)."""
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        order: list[str] = []
+        lock_keys: list[str] = []
+
+        class OrderedCapability(_ReadyInteractiveCapability):
+            def ensure_ready(self, *, port: int = 9250, profile_dir: str) -> str:
+                order.append("ensure_ready")
+                return super().ensure_ready(port=port, profile_dir=profile_dir)
+
+        fake = self._FakeBrowserUse(order)
+        handler = ComputerHandler(
+            browser_use=fake,
+            config=types.SimpleNamespace(computer_auto_approve=True, sensitive_urls=[]),
+            browser_capability=OrderedCapability(),
+        )
+        real_lock_factory = handler._cdp_profile_lock
+
+        class RecordingLock:
+            def __init__(self, inner) -> None:
+                self._inner = inner
+
+            def __enter__(self):
+                order.append("lock_enter")
+                return self._inner.__enter__()
+
+            def __exit__(self, *args):
+                order.append("lock_exit")
+                return self._inner.__exit__(*args)
+
+        def recording_factory(profile: str):
+            lock_keys.append(profile)
+            return RecordingLock(real_lock_factory(profile))
+
+        handler._cdp_profile_lock = recording_factory  # type: ignore[method-assign]
+
+        result = handler._run_browser_use_session(self._session())
+
+        self.assertEqual(result, "hecho")
+        # Same key format the delegated route uses -> same underlying lock.
+        self.assertEqual(lock_keys, ["http://127.0.0.1:9250"])
+        self.assertEqual(order[:3], ["lock_enter", "ensure_ready", "lock_exit"])
+
 
 class DelegatedBrowserTaskTests(unittest.TestCase):
     """Option (b), 2026-06-13: ComputerHandler.run_delegated_browser_task is the

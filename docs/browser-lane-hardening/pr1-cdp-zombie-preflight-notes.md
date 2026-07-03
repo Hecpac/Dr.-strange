@@ -60,9 +60,9 @@ gastaba LLM contra el `cdp_url` congelado al boot.
   (`preflight_started/ok/failed` con `stage`) se conservan.
 - Ambos probes comparten `_request_json()` (timeout corto y acotado:
   `probe_timeout=2.0s` existente; sin timeouts nuevos).
-- `_read_version_response` se reemplazó por `_probe_json_version` sobre
-  `_request_json` — mismo comportamiento (status ≥ 400 falla, headless
-  rechazado cuando `visible=True`).
+- `_probe_endpoint()` usa `_request_json()` / `_read_json_response()` para
+  version + tab lifecycle — mismo comportamiento del probe de versión
+  (status ≥ 400 falla, headless rechazado cuando `visible=True`).
 
 ### `claw_v2/computer_handler.py`
 
