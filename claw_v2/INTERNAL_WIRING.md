@@ -9,9 +9,9 @@
 
 ```yaml
 describes_commit: "slice #2b deliver_to_owner (par #1→#2, 2026-07-02): closes #2's arc by separating produce from deliver at DELEGATION. delegate_task gains a deliver_to_owner boolean (anthropic_options schema + payload); the brain sets it (DELEGATION_CONTRACT, bilingual anchors) and writes a send-free objective; the flag rides delegation_metadata → active_task; TaskHandler._task_delivers_to_owner gates BOTH the cwd wiring and the daemon-side dispatch — without the flag a mode=ops task is byte-identical to pre-#2. This strips the send from the objective so synthesis never plans a sendDocument Step (the #2-smoke failure mode). Reinforced DELIVERABLES_TAIL_INSTRUCTION forbids in-band send + absolute paths. Extends §1 invariant deliverable_dispatch_daemon_side. Predecessor: #2 deliverable_dispatch (doc_version 2.57) in main 2e5983b"
-doc_version: 2.58
-last_verified: 2026-07-02
-verification_method: "TDD red-first: 6 #2b tests written before code, then adversarial review #188 found a MUST-FIX (flag dropped on resume) — fixed with durable ledger persistence + _resume_autonomous_record restore, test-locked by DeliverToOwnerResumeSurvivalTests (both fail without the fix: the intermediate assertFalse confirms the drop, the post-resume assertTrue the restore). 39/39 green in test_task_deliverables; test_task_redrive (exercises resume) + adjacent green; test_anthropic payload updated. Full suite re-run after the resume fix. #2b CLOSING SMOKE PENDING deploy — see live_smoke_status: the original incident mission must close succeeded with real sendDocument ok+message_id by event-id, AND must be verified specifically across a resume/restart (a single clean-pass smoke does not exercise the resume branch). Unit-locked, NOT yet live-proven end-to-end."
+doc_version: 2.59
+last_verified: 2026-07-03
+verification_method: "TDD red-first: 6 #2b tests + review #188 MUST-FIX (flag dropped on resume) fixed + test-locked (DeliverToOwnerResumeSurvivalTests). Full suite 4197 passed + 550 subtests. Merged #188 → main 38e7651, deployed ff-only pid 14893, clean boot. #2b CLOSING SMOKE RAN AND CAME BACK PARTIAL (see live_smoke_status): root cause (in-band send) is verifiably DEAD — brain set the flag organically, verifier validates no-red + flat-paths and no longer cites .env/DNS — but the ACCEPTANCE CRITERION (succeeded→dispatch→message_id) was NOT met: terminal blocked on two newly-unmasked obstacles, (a) worker wrote to the daemon workspace root not the -C dir (cwd mechanism a named adapter-wide follow-up, UNVERIFIED), (b) verifier evidence-escalation now LIVE-CONFIRMED (demands raw file contents; ops can't redrive). #2b's own mechanism works; the end-to-end arc is unit-locked but NOT live-proven — slice-gate does NOT pass. Code inert-safe as deployed."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1243,14 +1243,23 @@ invariants:
           blocked evidencia_externa → terminal blocked → dispatch unreached.
           #2b strips the send from the objective so synthesis never plans it and
           the verifier never demands it. The gated mode=ops implementation
-          worker produces files LOCALLY in <scratch>/<task_id>/deliverables/ —
-          its cwd, which the runner pre-creates with `git init` as the codex CLI
-          trust marker (probe 2026-07-02: codex exec refuses a non-git cwd, and
-          workspace-write only writes under its working root, and the -C IS
-          passed — codex.py; the #2 smoke's absolute-path writes were the model
-          overriding cwd because the dirty objective oriented it to the
-          workspace, NOT a plumbing gap; prep is best-effort — any failure means
-          the task runs exactly as today) — and declares them via the
+          worker is MEANT to produce files LOCALLY in
+          <scratch>/<task_id>/deliverables/ — its cwd, which the runner
+          pre-creates with `git init` as the codex CLI trust marker (codex exec
+          refuses a non-git cwd) and passes to codex via -C (WorkerTask.cwd →
+          router.ask → codex.py). KNOWN GAP (#2b closing smoke 2026-07-03): in
+          practice the worker STILL wrote to the daemon workspace root, not the
+          -C dir. A discriminating probe shows -C DOES relocate a direct
+          "write foo in your cwd" to the target — but the live worker drove a
+          `python3 <<PY` heredoc, and codex.py's subprocess.run passes NO
+          cwd= (codex.py ~100), so the codex child inherits the daemon process
+          cwd (~/srv/claw-daemon, set by restart.sh) and a subcommand's relative
+          writes can resolve there instead of the -C root. Whether adding
+          cwd=request.cwd to that subprocess.run binds subcommand writes is
+          UNVERIFIED — it is a NAMED follow-up with adapter-wide blast radius
+          (the codex subprocess.run serves research/verifier/all worker lanes),
+          not an inline #2b patch. prep is best-effort — any failure means the
+          task runs exactly as today) — and declares them via the
           fail-closed DELIVERABLES tail (parse_deliverables_tail: header absent
           or item-less ⇒ None ⇒ nothing is sent). The tail is read ONLY from
           implementation output, never from the advisory verifier. The DAEMON
@@ -1312,27 +1321,32 @@ invariants:
          owner-chat delivery = notification class (no approval - live
          precedent: NLM _deliver_outputs, stop_notifier); v1 idempotency =
          checkpoint-before-terminal with the double-send window accepted.
-    live_smoke_status: #2 smoke was NEGATIVE (2026-07-02, deploy 336ad9a, task
-      tg-574707975:1783038849476874000): dispatch UNREACHABLE because the send
-      lived in the objective ("envíamelos") → synthesis planned a sendDocument
-      Step → network-blocked worker failed it → verifier blocked
-      evidencia_externa → terminal blocked → succeeded-gate never met (0
-      dispatch events). #2b is the authorized upstream fix (option a,
-      deliver_to_owner — the objective-transform option b was VETOED for
-      bilingual-parse fragility): the flag separates produce from deliver at
-      delegation, so the objective describes only production and synthesis never
-      plans the send. cwd UNKNOWN from #2 RESOLVED here: codex.py DOES pass -C;
-      the #2 absolute-path writes were the model overriding cwd under a dirty
-      objective, not a plumbing gap — #2b's clean objective + reinforced tail
-      instruction ("no ejecutes envío; sin rutas absolutas") aim the writes at
-      the cwd, and the absolute-path case is now test-locked to fail closed
-      (SmokeNegativeContainmentTests, using the #2 smoke's literal path).
-      #2b CLOSING SMOKE PENDING deploy: the original incident mission ("crea 2
-      HTML y envíamelos") must delegate with deliver_to_owner=true + a
-      send-free objective → worker produces & declares → verifier passes WITHOUT
-      demanding a send → terminal succeeded → daemon dispatch sends both docs →
-      ok+message_id per file by event-id. Until that runs green, the end-to-end
-      arc is unit-locked but NOT live-proven.
+    live_smoke_status: #2b smoke PARTIAL (2026-07-03, deploy 38e7651 pid 14893,
+      task tg-574707975:1783046117498721000). ROOT CAUSE KILLED, ACCEPTANCE NOT
+      MET, arc still open on two downstream obstacles. What #2b proved live: the
+      brain set deliver_to_owner=1 organically (event 443718) and wrote a
+      send-free objective; the in-band send is VERIFIABLY DEAD — the verifier
+      itself now validates "cumplimiento de restricciones (no red/POST)" and
+      "rutas planas correctas", and NO LONGER mentions .env/DNS (the #2 failure
+      mode is gone). But the acceptance criterion (succeeded → dispatch →
+      ok+message_id per file) did NOT happen: terminal blocked (event 443821),
+      0 dispatch events. Two obstacles, in series, that the send-failure
+      previously masked: (a) CWD — the worker wrote saludo.html/fecha.html to
+      the daemon workspace root, not the -C deliverables dir (which held only
+      .git); see the KNOWN GAP in rule above — candidate fix cwd=request.cwd in
+      codex subprocess.run, adapter-wide, UNVERIFIED, a named follow-up.
+      (b) VERIFIER EVIDENCE-ESCALATION — now LIVE-CONFIRMED for the first time
+      (was only test-locked-hypothetical): the verifier blocked
+      evidencia_externa demanding the raw file CONTENTS as attached evidence
+      (slug adjuntar-contenido-html-y-logs); with #1's consequence ops never
+      redrives → terminal blocked → succeeded-gate never met. Design question
+      for the follow-up: under deliver_to_owner the daemon sends the file
+      regardless, so the verifier demanding the file content as "evidence" is
+      partly redundant with the deliverable itself. This is the already-named
+      "escalada de demandas del verifier" residual, now the load-bearing
+      blocker. #2b's own mechanism (flag + send-free objective) works; the arc
+      does not close until (a) and (b) land. Unit-locked, NOT live-proven
+      end-to-end.
 
   evidence_pre_step_contained:
     rule: γ's evidence gathering is a PRE-STEP of the re-enqueued durable
