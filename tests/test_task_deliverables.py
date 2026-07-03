@@ -237,8 +237,13 @@ def _mk_handler(root: Path, coordinator, delivery):
     return handler, memory, observe, stored
 
 
-def _run_ops_task(handler, session_id: str, objective: str) -> str:
-    ack = handler.start_autonomous_task(session_id, objective, mode="ops")
+def _run_ops_task(
+    handler, session_id: str, objective: str, *, deliver_to_owner: bool = True
+) -> str:
+    # #2b: el dispatch daemon-side solo corre con deliver_to_owner=true (el flag
+    # de la delegación). Las misiones de entrega lo pasan; los negativos no.
+    md = {"origin": "brain_delegate_tool", "deliver_to_owner": True} if deliver_to_owner else None
+    ack = handler.start_autonomous_task(session_id, objective, mode="ops", delegation_metadata=md)
     task_id = ack.split("`", 2)[1]
     assert handler.wait_for_task(task_id, timeout=10)
     return task_id
@@ -264,6 +269,23 @@ class OpsDeliverablesWiringTests(unittest.TestCase):
             self.assertIn("DELIVERABLES:", impl_tasks[0].instruction)
             # git init = trust-marker del codex CLI (probe 2026-07-02).
             self.assertTrue((expected_cwd / ".git").exists())
+
+    def test_ops_without_flag_is_byte_identical_no_cwd(self) -> None:
+        # #2b: un ops SIN deliver_to_owner es byte-idéntico a pre-#2 — sin cwd,
+        # sin git init, sin convención DELIVERABLES inyectada.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coordinator = _DeliverCoordinator(root / "scratch", impl_content=IMPL_NO_TAIL)
+            handler, _memory, _observe, _stored = _mk_handler(
+                root, coordinator, _RecordingDelivery()
+            )
+            task_id = _run_ops_task(handler, "tg-1", OBJECTIVE, deliver_to_owner=False)
+
+            impl_tasks = coordinator.calls[0].get("implementation_tasks") or []
+            self.assertTrue(impl_tasks)
+            self.assertIsNone(impl_tasks[0].cwd)
+            self.assertNotIn("DELIVERABLES:", impl_tasks[0].instruction)
+            self.assertFalse((root / "scratch" / task_id / "deliverables" / ".git").exists())
 
     def test_research_mode_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -462,7 +484,11 @@ class DeliverableDispatchTests(unittest.TestCase):
 
     def test_instruction_constant_mentions_tail_and_cwd(self) -> None:
         self.assertIn("DELIVERABLES:", DELIVERABLES_TAIL_INSTRUCTION)
-        self.assertIn("directorio de trabajo", DELIVERABLES_TAIL_INSTRUCTION)
+        self.assertIn("directorio de trabajo", DELIVERABLES_TAIL_INSTRUCTION.lower())
+        # #2b: prohíbe envío in-band y rutas absolutas (causa del smoke negativo).
+        low = DELIVERABLES_TAIL_INSTRUCTION.lower()
+        self.assertIn("no ejecutes", low)
+        self.assertIn("absolutas", low)
 
 
 class ReviewFixTests(unittest.TestCase):
@@ -595,6 +621,206 @@ class ReviewFixTests(unittest.TestCase):
             ) or []
             self.assertTrue(deliveries)
             self.assertFalse(any(d.get("ok") for d in deliveries))
+
+
+class _FakeSDK:
+    """Captura el schema y el handler que build_delegation_mcp_server registra."""
+
+    def __init__(self) -> None:
+        self.tools: dict = {}
+
+    def tool(self, name, description, schema):
+        def deco(fn):
+            self.tools[name] = {"description": description, "schema": schema, "fn": fn}
+            return fn
+
+        return deco
+
+    def create_sdk_mcp_server(self, **kwargs):
+        return kwargs
+
+
+class DeliverToOwnerSchemaTests(unittest.TestCase):
+    """#2b: el flag deliver_to_owner en el schema de delegate_task + su propagación."""
+
+    def _build(self, captured: list):
+        from types import SimpleNamespace
+
+        from claw_v2.adapters.anthropic_options import build_delegation_mcp_server
+
+        def handler(payload: dict) -> dict:
+            captured.append(payload)
+            return {"ack": "Tarea iniciada `t1`"}
+
+        # build_delegation_mcp_server solo lee request.delegation_handler.
+        req = SimpleNamespace(delegation_handler=handler)
+        sdk = _FakeSDK()
+        build_delegation_mcp_server(sdk, req)
+        return sdk
+
+    def test_schema_has_deliver_to_owner_boolean(self) -> None:
+        sdk = self._build([])
+        props = sdk.tools["delegate_task"]["schema"]["properties"]
+        self.assertIn("deliver_to_owner", props)
+        self.assertEqual(props["deliver_to_owner"]["type"], "boolean")
+
+    def test_flag_propagates_to_handler_payload(self) -> None:
+        import asyncio
+
+        captured: list = []
+        sdk = self._build(captured)
+        fn = sdk.tools["delegate_task"]["fn"]
+        asyncio.new_event_loop().run_until_complete(
+            fn({"objective": "crea 2 HTML", "mode": "ops", "deliver_to_owner": True})
+        )
+        self.assertEqual(len(captured), 1)
+        self.assertIs(captured[0]["deliver_to_owner"], True)
+
+    def test_flag_defaults_false_when_absent(self) -> None:
+        import asyncio
+
+        captured: list = []
+        sdk = self._build(captured)
+        fn = sdk.tools["delegate_task"]["fn"]
+        asyncio.new_event_loop().run_until_complete(fn({"objective": "solo investiga"}))
+        self.assertIs(captured[0]["deliver_to_owner"], False)
+
+
+class DeliverToOwnerContractTests(unittest.TestCase):
+    """#2b: el DELEGATION_CONTRACT instruye produce-sin-envío (anclas bilingües B2.0)."""
+
+    def test_contract_mentions_deliver_to_owner_and_no_send(self) -> None:
+        from claw_v2.brain import DELEGATION_CONTRACT
+
+        self.assertIn("deliver_to_owner", DELEGATION_CONTRACT)
+        low = DELEGATION_CONTRACT.lower()
+        # Ancla bilingüe del verbo de entrega (envíame / mándame / pásame).
+        self.assertTrue(any(tok in low for tok in ("enví", "mánda", "pásame")))
+        # La instrucción de NO incluir pasos de envío en el objective.
+        self.assertIn("do not put any send", low)
+
+
+class DeliverToOwnerGateTests(unittest.TestCase):
+    """#2b: el gate del dispatch (y del wiring cwd) exige el flag."""
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ, {"TELEGRAM_ALLOWED_USER_ID": "777"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_flag_present_dispatches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            delivery = _RecordingDelivery()
+            handler, _memory, observe, _stored = _mk_handler(
+                root, _DeliverCoordinator(root / "scratch"), delivery
+            )
+            _run_ops_task(handler, "tg-777", OBJECTIVE, deliver_to_owner=True)
+            self.assertEqual(len(delivery.calls), 2)
+            types = [e["event_type"] for e in observe.recent_events(limit=200)]
+            self.assertIn("autonomous_task_completed", types)
+
+    def test_no_flag_never_dispatches_even_with_organic_tail(self) -> None:
+        # Un ops SIN flag cuyo worker igualmente emite un tail DELIVERABLES
+        # orgánico: el gate lo ignora (0 envíos), completa normal.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            delivery = _RecordingDelivery()
+            # Sin flag el wiring no corre, pero el fake escribe el tail igual;
+            # el checkpoint NO lo lleva porque el gate del wiring no inyectó cwd.
+            # Aun si lo llevara, el dispatch exige el flag.
+            handler, _memory, observe, _stored = _mk_handler(
+                root, _DeliverCoordinator(root / "scratch"), delivery
+            )
+            _run_ops_task(handler, "tg-777", OBJECTIVE, deliver_to_owner=False)
+            self.assertEqual(delivery.calls, [])
+            types = [e["event_type"] for e in observe.recent_events(limit=200)]
+            self.assertIn("autonomous_task_completed", types)
+            self.assertNotIn("autonomous_task_deliverable_dispatch", types)
+
+
+class DeliverToOwnerResumeSurvivalTests(unittest.TestCase):
+    """#2b review #188 MUST-FIX: el flag sobrevive a un resume.
+
+    _resume_autonomous_record reconstruye active_task desde un template fijo que
+    NO lleva delegation_metadata; un verification-defer + el watchdog re-corren
+    el task por ahí. Sin persistencia durable + restore, el dispatch se salta en
+    la pierna resumida y los archivos quedan sin enviar con terminal succeeded.
+    """
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ, {"TELEGRAM_ALLOWED_USER_ID": "777"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_flag_persisted_to_ledger_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            handler, _memory, _observe, _stored = _mk_handler(
+                root, _DeliverCoordinator(root / "scratch"), _RecordingDelivery()
+            )
+            task_id = _run_ops_task(handler, "tg-777", OBJECTIVE, deliver_to_owner=True)
+            record = handler.task_ledger.get(task_id)
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertTrue((record.metadata or {}).get("deliver_to_owner"))
+
+    def test_flag_survives_resume_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            handler, memory, _observe, _stored = _mk_handler(
+                root, _DeliverCoordinator(root / "scratch"), _RecordingDelivery()
+            )
+            task_id = _run_ops_task(handler, "tg-777", OBJECTIVE, deliver_to_owner=True)
+
+            # Simula el estado post-watchdog: el rebuild de active_task perdió
+            # delegation_metadata (el bug que el fix corrige).
+            state = memory.get_session_state("tg-777")
+            active_object = dict(state.get("active_object") or {})
+            active_task = dict(active_object.get("active_task") or {})
+            active_task.pop("delegation_metadata", None)
+            active_object["active_task"] = active_task
+            memory.update_session_state("tg-777", active_object=active_object)
+            self.assertFalse(handler._task_delivers_to_owner("tg-777", task_id))
+
+            # El resume debe RESTAURAR el flag desde el ledger metadata.
+            record = handler.task_ledger.get(task_id)
+            assert record is not None
+            handler._resume_autonomous_record(record, reason="test_resume")
+            handler.wait_for_task(task_id, timeout=10)
+            self.assertTrue(handler._task_delivers_to_owner("tg-777", task_id))
+
+
+class SmokeNegativeContainmentTests(unittest.TestCase):
+    """#2b: la ruta absoluta del smoke negativo declarada ⇒ rechazada por containment."""
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ, {"TELEGRAM_ALLOWED_USER_ID": "777"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_absolute_path_from_smoke_rejected(self) -> None:
+        # Fixture literal del smoke negativo 2026-07-02: el worker escribió aquí.
+        abs_name = "/Users/hector/srv/claw-daemon/resumen_claw.html"
+        self.assertIsNotNone(parse_deliverables_tail(f"DELIVERABLES:\n- {abs_name}\n"))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            delivery = _RecordingDelivery()
+            coordinator = _DeliverCoordinator(
+                root / "scratch",
+                impl_content=IMPL_NO_TAIL + f"DELIVERABLES:\n- {abs_name}\n",
+                files_to_create=(),
+            )
+            handler, _memory, observe, _stored = _mk_handler(root, coordinator, delivery)
+            _run_ops_task(handler, "tg-777", OBJECTIVE, deliver_to_owner=True)
+
+            self.assertEqual(delivery.calls, [])
+            failed = next(
+                e
+                for e in observe.recent_events(limit=200)
+                if e["event_type"] == "autonomous_task_failed"
+            )
+            self.assertIn("nombre_invalido", failed["payload"]["error"])
 
 
 if __name__ == "__main__":

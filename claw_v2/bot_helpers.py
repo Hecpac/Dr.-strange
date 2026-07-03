@@ -2359,13 +2359,15 @@ def normalize_blocker_ident(clase: str, slug: str) -> str:
 
 
 DELIVERABLES_TAIL_INSTRUCTION = (
-    "Si la operación produce archivos que el dueño debe recibir, créalos en tu "
-    "directorio de trabajo actual (es el directorio de entregables de esta tarea; "
-    "nombres simples, sin subdirectorios) y cierra tu respuesta con el bloque:\n"
+    "ENTREGA: el sistema envía los archivos al dueño después de verificar — NO "
+    "ejecutes tú ningún envío, subida ni llamada de red (no tienes red y fallaría). "
+    "Tu único trabajo con los archivos es crearlos EN TU DIRECTORIO DE TRABAJO "
+    "ACTUAL (pwd) con nombres simples: sin subdirectorios, sin rutas absolutas, "
+    "sin `artifacts/` ni rutas al workspace. Cierra tu respuesta con el bloque:\n"
     "DELIVERABLES:\n"
     "- <nombre-de-archivo.ext>\n"
-    "Una línea por archivo, solo el nombre. Sin archivos que entregar, omite el "
-    "bloque por completo."
+    "Una línea por archivo, solo el nombre base. Sin archivos que entregar, omite "
+    "el bloque por completo."
 )
 
 _DELIVERABLES_HEADER_RE = re.compile(r"^\s*DELIVERABLES:\s*$", re.IGNORECASE | re.MULTILINE)
