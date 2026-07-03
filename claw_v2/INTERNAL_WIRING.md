@@ -9,9 +9,9 @@
 
 ```yaml
 describes_commit: "slice #2b follow-up (b) (2026-07-02/03): verifier deliver-aware tail. The SAME gated block that wires the ops+deliver_to_owner worker (cwd + DELIVERABLES tail) now also appends DELIVERABLES_VERIFIER_TAIL_INSTRUCTION to the verification tasks, reframing the verifier's evidence demand: the system sends the declared files after the verdict and the daemon validates existence at dispatch — raw attached content must not be demanded as an evidencia_externa blocker (that class is a deterministic arc killer under ops+deliver: γ infeasible via implementation.started marker, live event 443818; dispatch requires succeeded). Prompt-level only: no lane gains tools, parser/router untouched, without the flag byte-identical to pre-#2b. Extends §1 invariant deliverable_dispatch_daemon_side. OPEN owner decision: deterministic degrade evidencia_externa→formato under the flag (recon UNKNOWN 8). Predecessor: #2b deliver_to_owner (doc_version 2.59) in main 58b5b5f"
-doc_version: 2.60
+doc_version: 2.61
 last_verified: 2026-07-03
-verification_method: "TDD red-first: 2 structural tests in OpsDeliverablesWiringTests (tail present with flag / absent without — constant identity, wording not locked) failed pre-wiring, green post. test_task_deliverables.py 39 passed; test_architecture_invariants.py 39 passed + 22 subtests; test_task_handler.py + test_task_redrive.py 104 passed + 3 subtests. NOT yet live-smoked (worktree slice-2b-followup-b-wip; never against the prod daemon) — live smoke pends merge+deploy; prompt-level compliance by the verifier LLM is the named residual risk (recon UNKNOWN 8). Predecessor context: #2b closing smoke PARTIAL (see live_smoke_status), follow-up (a) cwd still open."
+verification_method: "TDD red-first: 2 structural tests in OpsDeliverablesWiringTests (tail present with flag / absent without — constant identity, wording not locked) failed pre-wiring, green post. Full suite on the feature branch 4199 passed + 1 skipped + 550 subtests (CLAW_EXPECTED_BRANCH set; test_daemon_branch_integrity.py run apart 19/19 — documented gotcha). Adversarial multi-angle review (substitute for the headless-unable ultrareview hook): APPROVE, 0 MUST-FIX in-diff; named out-of-diff finding = coordinator.py cwd drop (see live_smoke_status). Merged PR #189 → main 2e0a32e, deployed ff-only pid 5957, clean boot (agent_startup_context 446234 code_version 2e0a32e git_dirty false, stderr delta 0). CLOSING SMOKE RAN (see live_smoke_status): follow-up (b) LIVE-RESOLVED — verifier passed first-pass citing the tail's framing back, zero redrive decisions, dispatch layer reached for the first time; arc still open SOLELY on follow-up (a) cwd (dispatch failed honest: archivo_no_encontrado on both files, worker wrote to workspace root). Prompt-level compliance risk (UNKNOWN 8) did not materialize this pass but stays a named residual until the deterministic belt is decided."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1379,6 +1379,35 @@ invariants:
       prompt-level it has no deterministic guarantee of verifier compliance
       (recon UNKNOWN 8), the deterministic belt is a named OPEN owner decision.
       Follow-up (a) cwd remains open.
+      FOLLOW-UP (b) LIVE-RESOLVED (closing smoke 2026-07-03, deploy 2e0a32e pid
+      5957, task tg-574707975:1783051967051908000, original mission via
+      /api/chat owner session): the verifier PASSED first-pass — verdict
+      verbatim "No se detectan incumplimientos de formato ni evidencia
+      faltante. Los DELIVERABLES declarados (saludo.html, fecha.html) serán
+      entregados por el sistema tras este veredicto. Verification Status:
+      passed / CLASE_BLOCKER: ninguna" (event 446410; the verdict echoes the
+      new tail's framing back = live proof of receipt AND compliance; a
+      cosmetic doubt was filed as observation, not blocker, exactly as
+      instructed). ZERO redrive decisions in the arc (vs fail_closed_infeasible
+      443818 in the prior smoke) — the evidencia_externa death is dead. Two
+      compounding causes, honestly noted: the brain ALSO hardened the objective
+      organically (required cat+ls+python-validation in worker evidence, session
+      memory of the prior block), so worker-side evidence satisfied demand
+      while the tail reframed it; per-cause attribution not isolated. The
+      DISPATCH LAYER was reached for the FIRST time (events 446419/446420) and
+      failed honestly per design: archivo_no_encontrado_o_fuera_del_directorio
+      on both files — the worker wrote them to the daemon workspace root
+      (~/srv/claw-daemon/, mtime 23:14, quarantined to session scratchpad),
+      NOT the -C deliverables dir = EXACTLY follow-up (a), now the single
+      load-bearing blocker. Coordinator 135.4s, terminal honest failed
+      deliverable_send_failed with per-file detail, stderr delta 0.
+      Root cause of (a) refined by PR #189 review: _inject_context and
+      _with_phase_timeout (coordinator.py) rebuild WorkerTask WITHOUT
+      propagating cwd — impl_task.cwd is dropped before the router; the
+      existing WorkerTaskCwdTests pass because they call _execute_worker
+      directly, bypassing the wrapping. Fix for (a) = propagate cwd=t.cwd in
+      both constructors + cwd=request.cwd in the codex adapter subprocess.run,
+      with a test that traverses coordinator.run().
 
   evidence_pre_step_contained:
     rule: γ's evidence gathering is a PRE-STEP of the re-enqueued durable
