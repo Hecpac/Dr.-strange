@@ -510,6 +510,11 @@ class AppConfig:
     telemetry_root: Path = field(default_factory=lambda: Path.home() / ".claw" / "telemetry")
     verifier_effort: str | None = None
     research_effort: str | None = None
+    # Dedicated model for the coordinator's web-evidence pre-step
+    # (role coordinator_evidence). Unset → mirrors the worker lane, so there is
+    # zero behavior change until the operator opts in via CLAW_EVIDENCE_*.
+    evidence_provider: str | None = None
+    evidence_model: str | None = None
     brain_thinking_tokens: int = 0
     worker_thinking_tokens: int = 0
     worker_heavy_thinking_tokens: int = 0
@@ -618,6 +623,8 @@ class AppConfig:
             verifier_model=os.getenv("VERIFIER_MODEL"),
             research_provider=os.getenv("RESEARCH_PROVIDER", "codex"),
             research_model=os.getenv("RESEARCH_MODEL"),
+            evidence_provider=os.getenv("CLAW_EVIDENCE_PROVIDER"),
+            evidence_model=os.getenv("CLAW_EVIDENCE_MODEL"),
             judge_provider=os.getenv("JUDGE_PROVIDER", "codex"),
             judge_model=os.getenv("JUDGE_MODEL"),
             worker_effort=os.getenv("WORKER_EFFORT", "high"),
@@ -1013,6 +1020,7 @@ class AppConfig:
             "critical_verifier": self.critical_verifier_provider or self.brain_provider,
             "coordinator_worker": self.worker_provider,
             "coordinator_research": self.research_provider or self.brain_provider,
+            "coordinator_evidence": self.evidence_provider or self.worker_provider,
             "coordinator_verification": self.verifier_provider or self.brain_provider,
             "coordinator_implementation": self.worker_heavy_provider,
         }
@@ -1043,6 +1051,8 @@ class AppConfig:
             return self.worker_heavy_model
         if role == "coordinator_worker":
             return self.worker_model
+        if role == "coordinator_evidence":
+            return self.evidence_model or self.worker_model
         provider = self.provider_for_role(role)
         if role == "coordinator_verification":
             if self.verifier_provider and self.verifier_model:
@@ -1102,6 +1112,7 @@ class AppConfig:
             "control_verifier": self.provider_timeout_control_verifier_seconds,
             "critical_verifier": self.provider_timeout_critical_verifier_seconds,
             "coordinator_worker": self.provider_timeout_coordinator_worker_seconds,
+            "coordinator_evidence": self.provider_timeout_coordinator_worker_seconds,
             "coordinator_research": self.provider_timeout_coordinator_research_seconds,
             "coordinator_verification": self.provider_timeout_coordinator_verification_seconds,
             "coordinator_implementation": self.provider_timeout_coordinator_implementation_seconds,

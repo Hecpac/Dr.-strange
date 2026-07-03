@@ -558,6 +558,68 @@ class AppConfigDefaultsTests(unittest.TestCase):
             self.assertEqual(config.model_for_role("coordinator_verification"), "gpt-5.4-mini")
             config.validate()
 
+    def test_coordinator_evidence_role_falls_back_to_worker_without_env(self) -> None:
+        # 2026-07-03: the web-evidence pre-step gets a dedicated role so it can
+        # run on a different model from code workers. With no CLAW_EVIDENCE_*
+        # env set, it must mirror the worker lane exactly — zero behavior change
+        # until the operator opts in.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.helpers import make_config
+
+            config = make_config(Path(tmpdir))
+            self.assertIsNone(config.evidence_provider)
+            self.assertIsNone(config.evidence_model)
+            self.assertEqual(
+                config.provider_for_role("coordinator_evidence"),
+                config.provider_for_role("coordinator_worker"),
+            )
+            self.assertEqual(
+                config.model_for_role("coordinator_evidence"),
+                config.model_for_role("coordinator_worker"),
+            )
+
+    def test_coordinator_evidence_role_uses_env_override(self) -> None:
+        # With CLAW_EVIDENCE_* set, only the evidence role moves — the code
+        # worker role stays on WORKER_MODEL.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from tests.helpers import make_config
+
+            config = make_config(Path(tmpdir))
+            config.evidence_provider = "anthropic"
+            config.evidence_model = "claude-sonnet-5"
+
+            self.assertEqual(config.provider_for_role("coordinator_evidence"), "anthropic")
+            self.assertEqual(config.model_for_role("coordinator_evidence"), "claude-sonnet-5")
+            # coordinator_worker (code) is untouched.
+            self.assertEqual(
+                config.model_for_role("coordinator_worker"), config.worker_model
+            )
+            self.assertNotEqual(config.model_for_role("coordinator_worker"), "claude-sonnet-5")
+            config.validate()
+
+    def test_evidence_model_read_from_env(self) -> None:
+        previous_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            home.mkdir()
+            os.chdir(tmpdir)
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "HOME": str(home),
+                        "CLAW_EVIDENCE_PROVIDER": "anthropic",
+                        "CLAW_EVIDENCE_MODEL": "claude-sonnet-5",
+                    },
+                    clear=True,
+                ):
+                    config = AppConfig.from_env()
+            finally:
+                os.chdir(previous_cwd)
+        self.assertEqual(config.evidence_provider, "anthropic")
+        self.assertEqual(config.evidence_model, "claude-sonnet-5")
+        self.assertEqual(config.model_for_role("coordinator_evidence"), "claude-sonnet-5")
+
     def test_billing_modes_separate_subscription_from_api_costs(self) -> None:
         previous_cwd = Path.cwd()
         with tempfile.TemporaryDirectory() as tmpdir:

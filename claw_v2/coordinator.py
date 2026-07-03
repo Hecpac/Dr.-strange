@@ -1304,6 +1304,11 @@ class CoordinatorService:
         if task.lane == "worker_heavy":
             return "heavy_coding"
         if task.lane == "worker":
+            # The web-evidence pre-step stays in lane worker (sandbox, retry,
+            # tools) but gets its own role so its model can differ from code
+            # workers (e.g. Sonnet 5 for agentic web search via CLAW_EVIDENCE_*).
+            if task.name == "gather_evidence":
+                return "coordinator_evidence"
             return "coordinator_worker"
         if task.lane == "verifier":
             return "coordinator_verification"

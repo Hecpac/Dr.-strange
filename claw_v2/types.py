@@ -14,6 +14,7 @@ ProviderRole = Literal[
     "critical_verifier",
     "coordinator_worker",
     "coordinator_research",
+    "coordinator_evidence",
     "coordinator_verification",
     "coordinator_implementation",
 ]
