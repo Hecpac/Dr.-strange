@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice under-delegación C+A (2026-07-03): the 2026-07-03 arc-closing day exposed that send-to-owner missions were being routed AROUND the (now working) deliver_to_owner arc by the brain itself — 4 live brain_fallback bypasses (3 failed, one ad-hoc in-band Telegram send with the runtime token), ZERO shadow events, and the bypass was contract-compliant because neither the contract nor the shadow covered the class. (C) DELEGATION_CONTRACT bright line gains the send-to-owner category (delegate mode=ops deliver_to_owner=true; never build-and-send in-band; a previous failure of the delegated path does NOT authorize doing it inline). (A) shadow_delegation_gap gains reason=deliver_inline via _looks_like_send_to_owner_ask (reflexive send anchors), narrowing the action-with-tools-legitimate exclusion — still OBSERVATIONAL, invariant intact. Enforcement (PreToolUse deny of in-band owner sends) stays a named future decision with honest detection limits (the live send hid behind `python3 _send_html.py`). Predecessor: #2b fix (a) (doc_version 2.63) in main 76d857d"
-doc_version: 2.64
+describes_commit: "slice critical-echo (2026-07-03): the C+A live smoke's delegated task died critical_worker_error with its deliverable PERFECT in the deliverables dir (event 461162) — the self-referential mission made the synthesis turn its own prompt rule (which SPELLED the sentinel literal) into a plan step about the string, the worker obeyed and quoted it embedded (rg argument + 'cadena ausente' check), and the raw substring detector killed the run. C0-S3 (PR #173) had scoped echo-safety to the terminal verification phase only. Two-point fix at the single choke point: (A) _has_critical_worker_error now matches LINE-INITIAL only (^\\s*MARKER, re.MULTILINE) — embedded quotes never kill, line-initial distress declarations (any line, content or error) still trigger self-healing; (B) the standing synthesis-prompt rule no longer spells the literal and forbids writing it into plan steps. The marker never had a worker-emission contract (born c1049e1 as constant+prompt rule), so every embedded occurrence is quotation by construction. Extends §1 invariant coordinator_verifier_echo_not_critical. Predecessor: slice under-delegación C+A (doc_version 2.64) in main 8ce4a60"
+doc_version: 2.65
 last_verified: 2026-07-03
-verification_method: "TDD red-first: 4 new tests failed pre-implementation (2 detector, 1 integration deliver_inline via handle_text end-to-end with the LIVE bypass fixture, 1 contract anchors), green post; test_deliver_ask_delegated_emits_no_gap green on BOTH sides (delegating the same mission never gaps — no behavior change there). Existing exclusion preserved: test_action_request_answered_inline_with_tools_no_gap still green (action ask without send anchors stays legitimate-inline). Suites: test_shadow_delegation_gap 15, test_task_deliverables 44. Live smoke pends merge+deploy (expected: a send-to-owner ask worked inline emits shadow_delegation_gap reason=deliver_inline in observe_stream; contract change is prompt-level — its behavioral effect is measured by the same shadow series it feeds)."
+verification_method: "TDD red-first: 3 new tests failed pre-fix (the LIVE 461156 fixture killing a healthy run through coordinator.run(); the detector matching embedded quotes; the standing synthesis prompt spelling the literal), green post. Positives locked: line-initial declaration on a LATER line still kills implementation (new), first-line declaration + self-healing replan (pre-existing test, untouched, still green — its prompt assertion now satisfied via audit raw_error DATA, not the rule). C0-S3 verification-phase exclusion test untouched and green. CriticalMarkerDetectorTests unit-lock the choke point. Suites: test_coordinator 85 + test_task_handler/redrive/architecture_invariants 228 total + 29 subtests. Live smoke pends merge+deploy (expected: re-run of the resumen_entregas.md-class mission completes succeeded + dispatch ok:true without the false critical)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1082,16 +1082,53 @@ invariants:
           reviewing findings MUST NOT convert an already-successful run into
           critical_worker_error; a genuine verifier crash surfaces as
           error=str(exc) (no marker) and flows through as a normal result. The
-          sentinel stays armed in research/synthesis/implementation.
+          sentinel stays armed in research/synthesis/implementation — but
+          LINE-INITIAL only (slice critical-echo 2026-07-03): the single choke
+          point _has_critical_worker_error matches ^\s*MARKER (re.MULTILINE),
+          so an EMBEDDED quote/echo (inside backticks, as an rg argument, in a
+          "cadena … ausente" check) never kills a run, while a distress
+          declaration that opens a line (modulo leading whitespace) — first
+          line or any later line, in content or in result.error — still
+          triggers self-healing. NAMED RESIDUAL (intentional, pinned by
+          test_fence_wrapped_marker_is_a_named_residual_and_still_matches): a
+          QUOTE that itself opens a line — e.g. the marker inside a code
+          fence, the likeliest source being audit raw_error DATA pasted back
+          by a self-healing/repair worker — still matches; the anchor cannot
+          tell line-initial quotation from declaration. If this class fires
+          live, that is the named recon, not a surprise. Conversely, a
+          declaration behind a non-whitespace prefix ("ERROR:", "**", "## ")
+          does not match — acceptable: the marker
+          has NO worker-emission contract and never had one (born in c1049e1
+          as constant + synthesis-prompt rule simultaneously; real worker
+          failures surface via result.error / _phase_all_workers_failed), so
+          every embedded occurrence is quotation by construction. The standing
+          synthesis-prompt rule (Aislamiento de Errores) no longer SPELLS the
+          literal — the 461162 live false positive entered exactly there: the
+          self-referential mission made synthesis turn its own rule into
+          "Step 1: confirmar que no aparece la cadena…", the worker obeyed
+          and quoted it, and the raw substring detector killed a run whose
+          deliverable sat perfect in the deliverables dir. The critical-replan
+          prompt may still CONTAIN the marker as data (audit raw_error quoting
+          a genuine declaration) — that is quoted evidence, not the rule.
     enforced_by:
       - tests/test_coordinator.py::FullRunTests::test_verifier_echoing_marker_does_not_fail_terminal_phase
+      - tests/test_coordinator.py::FullRunTests::test_embedded_marker_quote_in_implementation_does_not_kill_run (slice critical-echo — el fixture VIVO de 461156/461162 ya no mata el run)
+      - tests/test_coordinator.py::FullRunTests::test_line_initial_marker_on_later_line_still_kills_implementation (el positivo del ancla: declaración line-initial sigue disparando self-healing)
+      - tests/test_coordinator.py::FullRunTests::test_critical_worker_error_runs_self_healing_synthesis_and_stops (pre-existente — declaración al inicio del reporte intacta)
+      - tests/test_coordinator.py::FullRunTests::test_standing_synthesis_prompt_does_not_spell_the_marker (ángulo B — la regla standing no deletrea el literal)
+      - tests/test_coordinator.py::CriticalMarkerDetectorTests (unidad del choke point: line-initial/error-field matchean; embebido/citado no)
     why: The self-healing-synthesis path exists to abort pending work and
          re-plan a NEXT phase; verification has none. Live false positive
          2026-06-29 00:30 UTC discarded a 1934-char successful synthesis and
          delivered "error crítico" to the user. The fix sat stranded
          uncommitted in the daemon-clone worktree fix-coord-verifier until
          rescued as slice C0-S3 (autonomy remediation plan, PR #173); the
-         worktree was quarantined to ~/srv/quarantine, never rm'd.
+         worktree was quarantined to ~/srv/quarantine, never rm'd. The
+         2026-07-03 recurrence (event 461162, task …1783085530452249000)
+         proved C0-S3's verification-only scope insufficient: the echo class
+         reappeared in the IMPLEMENTATION phase via the synthesis prompt
+         spelling the literal — slice critical-echo anchors the detector and
+         removes the literal from the standing rule.
 
   task_redrive_bounded_and_classified:
     rule: A blocked coordinator verdict — and, mini-δ (C1-Sγ closure,

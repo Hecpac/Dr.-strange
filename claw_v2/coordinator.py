@@ -4,6 +4,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -1170,9 +1171,10 @@ class CoordinatorService:
                 "* **Invariante de Evidencia:** No asumas que un paso intermedio fue exitoso si el reporte "
                 "del subagente omitió los logs de confirmación. Evalúa las lagunas de información como "
                 "riesgos técnicos activos.\n"
-                "* **Aislamiento de Errores:** Si un reporte contiene la cadena `CRITICAL ERROR EN WORKER`, "
-                "detén el pipeline asincrónico inmediatamente y prioriza una subtarea de diagnóstico y "
-                "reparación (Self-Healing).\n\n"
+                "* **Aislamiento de Errores:** Si esta síntesis incluye la sección 'Protocolo de "
+                "Contención Self-Healing', detén el pipeline asincrónico inmediatamente y prioriza una "
+                "subtarea de diagnóstico y reparación (Self-Healing). Nunca escribas la cadena centinela "
+                "de fallo crítico en los pasos del plan ni pidas a los workers buscarla o citarla.\n\n"
                 "**Formato del Plan Maestro:** Genera una secuencia numerada de pasos de ingeniería. "
                 "Cada paso debe estar explícitamente delegado al subagente especializado idóneo de tu registro "
                 "basándote en sus habilidades específicas, utilizando estrictamente este formato:\n"
@@ -2267,8 +2269,17 @@ def _distillation_prompt(text: str, *, limit: int) -> str:
     )
 
 
+# Slice critical-echo (2026-07-03): solo cuenta la declaración LINE-INITIAL.
+# Una cita/echo va embebida mid-línea (dentro de backticks, como argumento de
+# rg, en "cadena X ausente" — falso positivo vivo 461162, que mató un run con
+# el entregable perfecto en el deliverables dir). El centinela jamás tuvo
+# contrato de emisión por workers (nació en c1049e1 como constante + regla del
+# prompt de synthesis): toda aparición embebida es cita, no auxilio.
+_CRITICAL_MARKER_LINE_RE = re.compile(rf"^\s*{re.escape(CRITICAL_WORKER_MARKER)}", re.MULTILINE)
+
+
 def _has_critical_worker_error(result: WorkerResult) -> bool:
-    return CRITICAL_WORKER_MARKER in f"{result.content or ''}\n{result.error or ''}"
+    return bool(_CRITICAL_MARKER_LINE_RE.search(f"{result.content or ''}\n{result.error or ''}"))
 
 
 def _critical_worker_result(results: list[WorkerResult]) -> WorkerResult | None:
