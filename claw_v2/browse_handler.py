@@ -17,6 +17,7 @@ from claw_v2.bot_helpers import (
     _select_navigation_strategy,
     _tweet_fxtwitter_read,
 )
+from claw_v2.network_proxy import DomainAllowlistEnforcer, NetworkPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -442,8 +443,20 @@ class BrowseHandler:
         nested_urls = _nested_url_candidates(fetched_content, skip_urls=(parent_url,), max_urls=3)
         if not nested_urls:
             return fetched_content
+        # SSRF guard (audit #2, 2026-07-03): nested URLs are attacker-controlled
+        # (planted in the fetched page), and this auto-follow fetches them with
+        # the LOCAL browser — so a link to 169.254.169.254 / 127.0.0.1 would
+        # exfiltrate internal network resources. Reject any nested host that
+        # resolves to a non-public IP before fetching. Fresh enforcer per call
+        # (<=3 URLs) so its rate-limiter never false-blocks across browses.
+        ssrf_enforcer = DomainAllowlistEnforcer()
+        ssrf_policy = NetworkPolicy(allowed_domains=[])
         blocks: list[str] = []
         for nested_url in nested_urls:
+            ssrf = ssrf_enforcer.enforce_url(nested_url, policy=ssrf_policy, actor="nested_follow")
+            if not ssrf.allowed:
+                blocks.append(f"[URL anidada bloqueada por seguridad]: {nested_url}\n{ssrf.reason}")
+                continue
             nested_content = self.browse_response(nested_url, session_id=None)
             if (
                 nested_content

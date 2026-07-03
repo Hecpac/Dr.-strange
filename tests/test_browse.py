@@ -427,5 +427,46 @@ class OpenSiteCdpRoutingTests(unittest.TestCase):
             bot._browse_handler.browse_response.assert_not_called()
 
 
+class NestedFollowSsrfGuardTests(unittest.TestCase):
+    """Audit #2 (2026-07-03): the nested auto-follow in _append_nested_url_reviews
+    fetched attacker-planted links with the LOCAL browser and no IP guard, so a
+    link to 169.254.169.254 / 127.0.0.1 in a browsed page exfiltrated internal
+    network resources. Guard: nested URLs resolving to a non-public IP are never
+    fetched. Hermetic — uses literal IPs so no DNS is performed."""
+
+    _PRIVATE = "http://169.254.169.254/latest/meta-data/iam/"
+    _LOOPBACK = "http://127.0.0.1:9250/json/list"
+    _PUBLIC = "http://93.184.216.34/page"
+
+    def _handler(self):
+        bot = _make_bot()
+        handler = bot._browse_handler
+        handler.browse_response = MagicMock(return_value="FETCHED")
+        return handler
+
+    def test_nested_non_public_ip_is_blocked_not_fetched(self) -> None:
+        handler = self._handler()
+        content = f"See {self._PRIVATE} and {self._PUBLIC} and {self._LOOPBACK}"
+        out = handler._append_nested_url_reviews(content, parent_url="http://blog.test/post")
+        fetched = [c.args[0] for c in handler.browse_response.call_args_list]
+        # The public nested URL is still followed…
+        self.assertIn(self._PUBLIC, fetched)
+        # …but neither the link-local (cloud IMDS) nor the loopback (CDP) is fetched.
+        self.assertNotIn(self._PRIVATE, fetched)
+        self.assertNotIn(self._LOOPBACK, fetched)
+        # And the block is surfaced honestly, not silently dropped.
+        self.assertIn("bloqueada por seguridad", out)
+        self.assertIn("169.254.169.254", out)
+
+    def test_all_public_nested_urls_still_followed(self) -> None:
+        handler = self._handler()
+        other_public = "http://8.8.8.8/x"  # genuinely globally-routable
+        content = f"Links: {self._PUBLIC} and {other_public}"
+        handler._append_nested_url_reviews(content, parent_url="http://blog.test/post")
+        fetched = [c.args[0] for c in handler.browse_response.call_args_list]
+        self.assertIn(self._PUBLIC, fetched)
+        self.assertIn(other_public, fetched)
+
+
 if __name__ == "__main__":
     unittest.main()
