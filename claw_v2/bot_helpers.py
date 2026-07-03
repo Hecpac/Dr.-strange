@@ -2358,6 +2358,46 @@ def normalize_blocker_ident(clase: str, slug: str) -> str:
     return f"{clase}:{cleaned or 'sin-slug'}"
 
 
+DELIVERABLES_TAIL_INSTRUCTION = (
+    "Si la operación produce archivos que el dueño debe recibir, créalos en tu "
+    "directorio de trabajo actual (es el directorio de entregables de esta tarea; "
+    "nombres simples, sin subdirectorios) y cierra tu respuesta con el bloque:\n"
+    "DELIVERABLES:\n"
+    "- <nombre-de-archivo.ext>\n"
+    "Una línea por archivo, solo el nombre. Sin archivos que entregar, omite el "
+    "bloque por completo."
+)
+
+_DELIVERABLES_HEADER_RE = re.compile(r"^\s*DELIVERABLES:\s*$", re.IGNORECASE | re.MULTILINE)
+_DELIVERABLES_ITEM_RE = re.compile(r"^-\s*(\S.{0,200}?)\s*$")
+
+
+def parse_deliverables_tail(text: str | None) -> tuple[str, ...] | None:
+    """Parser determinista del contrato de entregables (slice #2).
+
+    Fail-closed como parse_verdict_tail: sin header `DELIVERABLES:`, o con el
+    header sin items, devuelve None y nada se envía. Los nombres se devuelven
+    crudos — el containment (nombre simple, dentro del directorio, existencia)
+    vive en el dispatch del daemon, no aquí.
+    """
+    tail = str(text or "")[-2400:]
+    matches = list(_DELIVERABLES_HEADER_RE.finditer(tail))
+    if not matches:
+        return None
+    items: list[str] = []
+    for line in tail[matches[-1].end() :].splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if items:
+                break
+            continue
+        item = _DELIVERABLES_ITEM_RE.match(stripped)
+        if item is None:
+            break
+        items.append(item.group(1))
+    return tuple(items) or None
+
+
 def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dict[str, str]:
     verification_results = result.phase_results.get("verification", [])
     implementation_results = result.phase_results.get("implementation", [])
@@ -2392,6 +2432,11 @@ def _coordinator_checkpoint(result: CoordinatorResult, *, objective: str) -> dic
     if tail is not None and tail.clase != "ninguna" and verification_status != "passed":
         checkpoint["blocker_class"] = tail.clase
         checkpoint["blockers"] = [f"{slug}: {desc}" for slug, desc in tail.blockers]
+    # Slice #2: solo la fase que PRODUCE archivos puede declararlos — el tail
+    # se lee del texto de implementation, nunca del verifier (advisory).
+    deliverables = parse_deliverables_tail(implementation_text)
+    if deliverables:
+        checkpoint["deliverables"] = list(deliverables)
     if critical_worker_error:
         checkpoint["critical_worker_error"] = True
         checkpoint["coordinator_audit"] = dict(getattr(result, "audit", {}) or {})

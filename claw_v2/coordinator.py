@@ -48,6 +48,7 @@ class WorkerTask:
     lane: str = "research"
     assigned_agent: str | None = None
     timeout_seconds: float | None = None
+    cwd: str | None = None
 
 
 @dataclass(slots=True)
@@ -904,6 +905,10 @@ class CoordinatorService:
             else self._timeout_for_worker_task(task),
             "evidence_pack": attach_trace({"coordinator_task": task.name}, task_trace),
         }
+        if task.cwd:
+            # El codex CLI workspace-write solo escribe bajo su working root
+            # (probe 2026-07-02) — un WorkerTask con cwd corre anclado ahí.
+            kwargs["cwd"] = task.cwd
         if task.assigned_agent and task.assigned_agent in self.agent_registry:
             agent = self.agent_registry[task.assigned_agent]
             kwargs["provider"] = agent["provider"]
