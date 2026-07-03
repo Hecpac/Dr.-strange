@@ -227,6 +227,130 @@ def test_knowledge_authorized_reply_no_gap() -> None:
 
 
 # ---------------------------------------------------------------------------
+# deliver_inline (slice under-delegación 2026-07-03): la clase de bypass que
+# la exclusión "action ask handled inline WITH tools — legitimate" hacía
+# invisible. Fixtures = los bypasses VIVOS de 2026-07-03 (brain_fallback
+# inline, 0 eventos shadow, ledgers 455845/455937 y turno 39e0a5ff20ab6ca0).
+# ---------------------------------------------------------------------------
+
+BYPASS_WEB = (
+    "Crea DOS archivos HTML self-contained: saludo.html (un saludo corto para "
+    "Hector) y fecha.html (la fecha de hoy legible), y envíamelos aquí."
+)
+BYPASS_TG_1 = (
+    "Abre la carpeta de descarga y envíame aquí por telegram el archivo que dice Ar war club"
+)
+BYPASS_TG_2 = "Ahora envíame el que dice Absolute Recomp"
+
+
+def test_send_to_owner_detector_matches_live_bypass_asks() -> None:
+    from claw_v2.bot import _looks_like_send_to_owner_ask
+
+    for text in (BYPASS_WEB, BYPASS_TG_1, BYPASS_TG_2):
+        assert _looks_like_send_to_owner_ask(text), text
+    # Variantes de ancla del DELEGATION_CONTRACT + inglés.
+    assert _looks_like_send_to_owner_ask("genera el reporte y mándamelo")
+    assert _looks_like_send_to_owner_ask("pásame los archivos cuando estén")
+    assert _looks_like_send_to_owner_ask("create the report and send it to me")
+    # Registro cortés / infinitivo+clítico y reenvío (review SHOULD-FIX #2:
+    # el undercount sesga la serie shadow→enforcement hacia abajo).
+    assert _looks_like_send_to_owner_ask("puedes enviarme el archivo cuando puedas")
+    assert _looks_like_send_to_owner_ask("reenvíame el correo de ayer")
+    assert _looks_like_send_to_owner_ask("genera el PDF, quiero mandarme una copia")
+
+
+def test_send_to_owner_detector_rejects_non_owner_sends() -> None:
+    from claw_v2.bot import _looks_like_send_to_owner_ask
+
+    # Acción operativa sin dirección al dueño (la exclusión legítima de hoy).
+    assert not _looks_like_send_to_owner_ask("Limpia el ledger ahora.")
+    # Envío NO reflexivo (publicar/subir no es entrega al dueño).
+    assert not _looks_like_send_to_owner_ask("envía un tweet con el resumen")
+    assert not _looks_like_send_to_owner_ask("sube el archivo al server")
+    # Pregunta plana.
+    assert not _looks_like_send_to_owner_ask("¿Qué hora es?")
+    # Falsos positivos morfológicos del regex ampliado.
+    assert not _looks_like_send_to_owner_ask("prepárame un resumen")
+    assert not _looks_like_send_to_owner_ask("demándame si quieres")
+    assert not _looks_like_send_to_owner_ask("recomiéndame un libro")
+
+
+def test_deliver_ask_inline_with_tools_emits_deliver_inline() -> None:
+    # El bypass exacto de 2026-07-03: misión de entrega al dueño trabajada
+    # inline CON tools (Write+Bash) y sin delegate_task → gap deliver_inline.
+    artifacts = {"tool_calls": [{"name": "Write"}, {"name": "Bash"}]}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, _runtime_env(root), clear=False):
+            runtime = _runtime(
+                root,
+                _fake_anthropic(
+                    content="Listo, los creé y te los mandé por Telegram.",
+                    artifacts=artifacts,
+                ),
+            )
+            response, events = _drive(runtime.bot, BYPASS_WEB)
+
+    gaps = _gap_events(events)
+    assert len(gaps) == 1, f"expected exactly one gap event, got {gaps}"
+    gap = gaps[0]
+    assert gap["reason"] == "deliver_inline"
+    assert gap["action_request"] is True
+    # OBSERVACIONAL (invariante shadow_delegation_gap_observational): la
+    # respuesta del brain llega intacta, el shadow no bloquea nada.
+    assert response is not None
+    assert "los creé" in response
+
+
+def test_deliver_ask_delegated_emits_no_gap() -> None:
+    artifacts = {"tool_calls": [{"name": "mcp__claw__delegate_task"}]}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, _runtime_env(root), clear=False):
+            runtime = _runtime(root, _fake_anthropic(artifacts=artifacts))
+            _, events = _drive(runtime.bot, BYPASS_WEB)
+
+    assert _gap_events(events) == []
+
+
+def test_bare_clitic_send_ask_inline_with_tools_emits_deliver_inline() -> None:
+    # Review MUST-FIX #1: un follow-up send desnudo ("Ahora mándamelo") no
+    # matchea _looks_like_operator_action_request — sin send_ask en el gate,
+    # el return temprano hacía deliver_inline inalcanzable para exactamente
+    # la clase de BYPASS_TG_2. El gate debe optar-in también por send_ask.
+    artifacts = {"tool_calls": [{"name": "Bash"}]}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, _runtime_env(root), clear=False):
+            runtime = _runtime(
+                root,
+                _fake_anthropic(content="Te lo mandé por aquí.", artifacts=artifacts),
+            )
+            _, events = _drive(runtime.bot, "Ahora mándamelo por aquí")
+
+    gaps = _gap_events(events)
+    assert len(gaps) == 1, f"expected exactly one gap event, got {gaps}"
+    assert gaps[0]["reason"] == "deliver_inline"
+
+
+def test_research_ask_with_send_anchor_keeps_research_inline_precedence() -> None:
+    # NIT #6 del review: research+send → la clase vieja gana (lock del orden).
+    artifacts = {"tool_calls": [{"name": "WebFetch"}]}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        with patch.dict(os.environ, _runtime_env(root), clear=False):
+            runtime = _runtime(root, _fake_anthropic(artifacts=artifacts))
+            _, events = _drive(
+                runtime.bot,
+                "investiga a fondo, hazme un reporte con fuentes y envíamelo",
+            )
+
+    gaps = _gap_events(events)
+    assert len(gaps) == 1, f"expected exactly one gap event, got {gaps}"
+    assert gaps[0]["reason"] == "research_inline"
+
+
+# ---------------------------------------------------------------------------
 # Unidad sobre el helper (exclusiones estructurales)
 # ---------------------------------------------------------------------------
 

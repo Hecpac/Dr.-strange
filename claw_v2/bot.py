@@ -551,6 +551,38 @@ _RESEARCH_DELIVERABLE_OBJECT_RE = re.compile(
 )
 
 
+# Slice under-delegación (2026-07-03): anclas REFLEXIVAS de entrega al dueño —
+# las mismas del DELEGATION_CONTRACT (envíame/mándame/pásame) sobre texto
+# normalizado (lowercase, sin diacríticos ⇒ literales ASCII). La clase es
+# send-TO-ME: "envia un tweet" (publicar) y "sube el archivo" (upload) quedan
+# fuera a propósito.
+_SEND_TO_OWNER_RE = re.compile(
+    # (?:re)? cubre reenvíame; r? cubre el infinitivo+clítico cortés
+    # (enviarme/mandarme/pasarme) — review SHOULD-FIX #2, el undercount
+    # sesgaba la serie. \b mantiene fuera prepárame/demándame/recomiéndame.
+    r"\b(?:re)?(?:envia|manda|pasa)r?me(?:lo|la|los|las)?\b"
+    r"|\bsend me\b"
+    r"|\bsend\b[^.!?]{0,60}?\bto me\b"
+)
+
+
+def _looks_like_send_to_owner_ask(text: str) -> bool:
+    """True when the user asks to be SENT files/deliverables (reflexive send).
+
+    The 2026-07-03 bypasses ("crea 2 HTML y envíamelos", "envíame el archivo
+    que dice…") were invisible to the shadow detector because an action ask
+    handled inline WITH tools is the legitimate-inline exclusion. This class
+    narrows that exclusion: producing-and-sending owner files is bright-line
+    delegation (DELEGATION_CONTRACT, deliver_to_owner arc), so working it
+    inline is a gap worth counting. Consumed by the shadow detector only —
+    observational, never a gate.
+    """
+    normalized = _normalize_command_text(text)
+    if not normalized.strip():
+        return False
+    return bool(_SEND_TO_OWNER_RE.search(normalized))
+
+
 def _looks_like_research_deliverable_ask(text: str) -> bool:
     """True when the user asks for multi-source research that must produce a
     deliverable — the class DELEGATION_CONTRACT declares delegable (B2.0).
@@ -3332,14 +3364,26 @@ class BotService:
                 return
             research_ask = _looks_like_research_deliverable_ask(source_text)
             action_request = _looks_like_operator_action_request(source_text)
-            if not (research_ask or action_request):
+            # Review MUST-FIX #1: send_ask opta-in al gate por sí mismo — un
+            # follow-up send desnudo ("Ahora mándamelo") no es operator-action
+            # term y el return temprano hacía deliver_inline inalcanzable
+            # para exactamente la clase del bypass vivo (BYPASS_TG_2).
+            send_ask = _looks_like_send_to_owner_ask(source_text)
+            if not (research_ask or action_request or send_ask):
                 return
             if self._turn_trace_called_delegate_task(response):
                 return  # the turn delegated — no gap by definition
             if self._response_has_evidence_signal(response):
-                if not research_ask:
+                if research_ask:
+                    reason = "research_inline"
+                elif send_ask:
+                    # Slice under-delegación (2026-07-03): misión de entrega
+                    # al dueño trabajada inline con tools — la clase de bypass
+                    # brain_fallback que la exclusión de abajo hacía invisible
+                    # (4 casos vivos ese día, 0 eventos). Sigue observacional.
+                    reason = "deliver_inline"
+                else:
                     return  # action ask handled inline WITH tools — legitimate
-                reason = "research_inline"
             else:
                 reason = "no_action"
             self._emit_safe(
