@@ -8149,6 +8149,12 @@ class BotService:
                 # operate every tab, instead of reading just the first URL (H6).
                 if len(_extract_url_candidates(text)) > 1:
                     return _BrainShortcut(text)
+                # …and a single-site open carrying task content beyond the bare
+                # command ("Abre <URL> ahí está el prototipo original") also goes
+                # to the brain — the shortcut's shallow text browse would look
+                # like it saw the page without doing the task (2026-07-03).
+                if _open_command_carries_task(text):
+                    return _BrainShortcut(text)
                 return self._chrome_handler.browse_response(extracted_url, session_id=session_id)
             if any(
                 token in normalized for token in _BROWSE_SHORTCUT_TOKENS

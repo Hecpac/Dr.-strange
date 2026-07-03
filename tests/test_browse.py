@@ -406,6 +406,30 @@ class OpenSiteCdpRoutingTests(unittest.TestCase):
         self.assertEqual(reply, "LINK-REVIEW")
         bot._chrome_handler.browse_response.assert_not_called()
 
+    def test_open_url_with_task_clause_falls_through_to_brain(self) -> None:
+        # 2026-07-03 (messages 3426/3427): "Abre <URL> ahí está el prototipo
+        # original" carries task intent + continuity beyond a bare "open this",
+        # so it must reach the brain (which has session state to plan the real
+        # task) — not the shortcut's shallow authenticated-CDP text dump that
+        # reads like "I saw the design" without doing anything.
+        bot = self._bot()
+        text = (
+            "Abre https://claude.ai/design?via=web_sidebar_products ahí está el prototipo original"
+        )
+        reply = bot._maybe_handle_shortcut(text, session_id="s1")
+        self.assertIsInstance(reply, _BrainShortcut)
+        self.assertEqual(reply.text, text)
+        bot._chrome_handler.browse_response.assert_not_called()
+        bot._browse_handler.browse_response.assert_not_called()
+
+    def test_bare_open_command_still_routes_to_cdp(self) -> None:
+        # Regression: the task-intent guard must NOT over-capture a bare
+        # open-this-site command (verb + URL only, incl. duplicate URLs).
+        for text in ("abre fal.ai", "abre https://fal.ai", "abre fal.ai y fal.ai"):
+            bot = self._bot()
+            reply = bot._maybe_handle_shortcut(text, session_id="s1")
+            self.assertEqual(reply, "CDP-OK", text)
+
     def test_open_non_url_does_not_trigger_cdp(self) -> None:
         # D1 (Hector ruling 2026-06-02): "README.md" matches the host regex
         # (.md is a TLD) and "read" is a substring of "readme", so it is caught

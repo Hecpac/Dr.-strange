@@ -131,6 +131,7 @@ __all__ = [
     "_looks_like_raw_markup",
     "_looks_like_runtime_capability_question",
     "_looks_like_standalone_url",
+    "_open_command_carries_task",
     "_looks_like_tweet_followup_request",
     "_matched_named_actions",
     "_matched_policy_actions",
@@ -2961,6 +2962,25 @@ def _looks_like_standalone_url(text: str, url: str) -> bool:
     remainder = text.replace(url, " ", 1)
     remainder = re.sub(r"[\s`\"'“”‘’<>()\[\]{}.,;:!?-]+", "", remainder)
     return remainder == ""
+
+
+def _open_command_carries_task(text: str) -> bool:
+    """True when an 'open + URL' message carries task content beyond the bare
+    'open this site' command — natural-language intent the brain should plan,
+    not the shortcut's shallow browse (2026-07-03: "Abre <URL> ahí está el
+    prototipo original" dumped the page text instead of doing the task).
+    Strip every URL and every open verb, then require >= 2 content words
+    (>= 3 letters). Bare/duplicate URLs and connectors ('y'/'and') fall below the
+    threshold and keep the shortcut path. URLs are stripped with the same
+    scheme/host regexes the extractor uses — matching the raw text, so a
+    scheme-less host ('fal.ai') is removed too and its 'fal' does not count."""
+    remainder = text
+    for pattern in (_SCHEME_URL_RE, _HOST_URL_RE):
+        remainder = pattern.sub(" ", remainder)
+    remainder = re.sub(
+        r"\b(?:" + "|".join(_BROWSE_OPEN_TOKENS) + r")\b", " ", remainder, flags=re.IGNORECASE
+    )
+    return len(re.findall(r"[^\W\d_]{3,}", remainder)) >= 2
 
 
 def _url_identity(url: str) -> str:
