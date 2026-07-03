@@ -19,6 +19,7 @@ from unittest import mock
 
 from claw_v2.bot_helpers import (
     DELIVERABLES_TAIL_INSTRUCTION,
+    DELIVERABLES_VERIFIER_TAIL_INSTRUCTION,
     _coordinator_checkpoint,
     parse_deliverables_tail,
 )
@@ -269,6 +270,38 @@ class OpsDeliverablesWiringTests(unittest.TestCase):
             self.assertIn("DELIVERABLES:", impl_tasks[0].instruction)
             # git init = trust-marker del codex CLI (probe 2026-07-02).
             self.assertTrue((expected_cwd / ".git").exists())
+
+    def test_ops_deliver_verifier_gets_deliver_aware_tail(self) -> None:
+        # Follow-up (b) #2b: con el flag activo el verifier recibe el contexto
+        # de entrega (el sistema envía; no exigir contenido adjunto como
+        # blocker evidencia_externa). Test estructural: presencia del constant,
+        # NO su fraseo.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coordinator = _DeliverCoordinator(root / "scratch")
+            handler, _memory, _observe, _stored = _mk_handler(
+                root, coordinator, _RecordingDelivery()
+            )
+            _run_ops_task(handler, "tg-1", OBJECTIVE)
+
+            verify_tasks = coordinator.calls[0].get("verification_tasks") or []
+            self.assertTrue(verify_tasks)
+            self.assertIn(DELIVERABLES_VERIFIER_TAIL_INSTRUCTION, verify_tasks[0].instruction)
+
+    def test_ops_without_flag_verifier_untouched(self) -> None:
+        # Follow-up (b) #2b: sin el flag, la instrucción del verifier es
+        # byte-idéntica a pre-#2b — el tail deliver-aware no aparece.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            coordinator = _DeliverCoordinator(root / "scratch", impl_content=IMPL_NO_TAIL)
+            handler, _memory, _observe, _stored = _mk_handler(
+                root, coordinator, _RecordingDelivery()
+            )
+            _run_ops_task(handler, "tg-1", OBJECTIVE, deliver_to_owner=False)
+
+            verify_tasks = coordinator.calls[0].get("verification_tasks") or []
+            self.assertTrue(verify_tasks)
+            self.assertNotIn(DELIVERABLES_VERIFIER_TAIL_INSTRUCTION, verify_tasks[0].instruction)
 
     def test_ops_without_flag_is_byte_identical_no_cwd(self) -> None:
         # #2b: un ops SIN deliver_to_owner es byte-idéntico a pre-#2 — sin cwd,

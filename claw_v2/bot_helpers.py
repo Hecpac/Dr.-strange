@@ -2370,6 +2370,16 @@ DELIVERABLES_TAIL_INSTRUCTION = (
     "el bloque por completo."
 )
 
+DELIVERABLES_VERIFIER_TAIL_INSTRUCTION = (
+    "ENTREGA: los archivos declarados en el bloque DELIVERABLES los envía el "
+    "SISTEMA al dueño después de tu veredicto, y el daemon valida su "
+    "existencia antes de enviar — NO exijas el contenido crudo adjunto como "
+    "blocker `evidencia_externa` (nadie puede adjuntarlo aquí; el entregable "
+    "mismo llega al dueño). Evalúa desde las secciones del worker "
+    "(`## Actions`, `## Verify`, `## Evidence`). Una duda de calidad sobre el "
+    "contenido va como observación en `Siguiente paso: ...`, no como blocker. "
+)
+
 _DELIVERABLES_HEADER_RE = re.compile(r"^\s*DELIVERABLES:\s*$", re.IGNORECASE | re.MULTILINE)
 _DELIVERABLES_ITEM_RE = re.compile(r"^-\s*(\S.{0,200}?)\s*$")
 
