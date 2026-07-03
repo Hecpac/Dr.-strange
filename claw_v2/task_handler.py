@@ -24,6 +24,7 @@ from claw_v2.action_events import ActionResult, ProposedAction, emit_event
 from claw_v2.automation_outcome import AutomationOutcome
 from claw_v2.bot_helpers import (
     DELIVERABLES_TAIL_INSTRUCTION,
+    DELIVERABLES_VERIFIER_TAIL_INSTRUCTION,
     _build_coordinator_tasks,
     _coordinator_checkpoint,
     normalize_blocker_ident,
@@ -80,6 +81,7 @@ def _max_task_redrives() -> int:
         return max(0, int(os.getenv("CLAW_MAX_TASK_REDRIVES", "2")))
     except ValueError:
         return 0
+
 
 # AM-VOCAB (2026-06-12): the session task_queue used to receive raw
 # verification/terminal statuses ("passed", "failed", "unknown", ...) next to
@@ -1062,6 +1064,17 @@ class TaskHandler:
                     impl_task.instruction = (
                         f"{impl_task.instruction}\n{DELIVERABLES_TAIL_INSTRUCTION}"
                     )
+                # Follow-up (b) #2b: el verifier recibe el mismo contexto de
+                # entrega — sin él, su propia definición de evidencia_externa
+                # ("producir y adjuntar") le hace exigir el contenido crudo,
+                # y esa clase es terminal determinística en ops+deliver (γ
+                # infeasible por el marker de implementation; el dispatch
+                # exige succeeded). El daemon valida existencia en el dispatch
+                # y el dueño recibe el archivo mismo.
+                for verify_task in verification_tasks or []:
+                    verify_task.instruction = (
+                        f"{verify_task.instruction}\n{DELIVERABLES_VERIFIER_TAIL_INSTRUCTION}"
+                    )
         # F3.1 (2026-06-12): a resumed task loads completed-phase artifacts
         # from scratch instead of re-running coordinator.run() from zero
         # (re-running implementation duplicated external side effects).
@@ -1512,9 +1525,7 @@ class TaskHandler:
         )
         if verification_status == "passed":
             return (
-                f"Listo. Cerré la tarea `{task_id}`.\n"
-                f"{result.summary}\n"
-                "Verification Status: passed"
+                f"Listo. Cerré la tarea `{task_id}`.\n{result.summary}\nVerification Status: passed"
             )
         return (
             f"No pude cerrar bien la tarea `{task_id}`.\n"
@@ -1769,9 +1780,12 @@ class TaskHandler:
                     # aquí solo cuando el governor declinó el pre-step γ
                     # (duplicado/agotado/frozen/disabled) — el fallback
                     # fail-closed con hint S-α.
-                    detail = "; ".join(
-                        str(blocker) for blocker in (completed_checkpoint.get("blockers") or [])
-                    ) or blocker_class
+                    detail = (
+                        "; ".join(
+                            str(blocker) for blocker in (completed_checkpoint.get("blockers") or [])
+                        )
+                        or blocker_class
+                    )
                     blocked_reason = f"waiting_for_user_input: {detail[:500]}"
                 if blocked_reason and active_task.get("task_id") == task_id:
                     redrive_seen = list(active_task.get("redrive_seen") or [])

@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice #2b deliver_to_owner (par #1→#2, 2026-07-02): closes #2's arc by separating produce from deliver at DELEGATION. delegate_task gains a deliver_to_owner boolean (anthropic_options schema + payload); the brain sets it (DELEGATION_CONTRACT, bilingual anchors) and writes a send-free objective; the flag rides delegation_metadata → active_task; TaskHandler._task_delivers_to_owner gates BOTH the cwd wiring and the daemon-side dispatch — without the flag a mode=ops task is byte-identical to pre-#2. This strips the send from the objective so synthesis never plans a sendDocument Step (the #2-smoke failure mode). Reinforced DELIVERABLES_TAIL_INSTRUCTION forbids in-band send + absolute paths. Extends §1 invariant deliverable_dispatch_daemon_side. Predecessor: #2 deliverable_dispatch (doc_version 2.57) in main 2e5983b"
-doc_version: 2.59
+describes_commit: "slice #2b follow-up (b) (2026-07-02/03): verifier deliver-aware tail. The SAME gated block that wires the ops+deliver_to_owner worker (cwd + DELIVERABLES tail) now also appends DELIVERABLES_VERIFIER_TAIL_INSTRUCTION to the verification tasks, reframing the verifier's evidence demand: the system sends the declared files after the verdict and the daemon validates existence at dispatch — raw attached content must not be demanded as an evidencia_externa blocker (that class is a deterministic arc killer under ops+deliver: γ infeasible via implementation.started marker, live event 443818; dispatch requires succeeded). Prompt-level only: no lane gains tools, parser/router untouched, without the flag byte-identical to pre-#2b. Extends §1 invariant deliverable_dispatch_daemon_side. OPEN owner decision: deterministic degrade evidencia_externa→formato under the flag (recon UNKNOWN 8). Predecessor: #2b deliver_to_owner (doc_version 2.59) in main 58b5b5f"
+doc_version: 2.60
 last_verified: 2026-07-03
-verification_method: "TDD red-first: 6 #2b tests + review #188 MUST-FIX (flag dropped on resume) fixed + test-locked (DeliverToOwnerResumeSurvivalTests). Full suite 4197 passed + 550 subtests. Merged #188 → main 38e7651, deployed ff-only pid 14893, clean boot. #2b CLOSING SMOKE RAN AND CAME BACK PARTIAL (see live_smoke_status): root cause (in-band send) is verifiably DEAD — brain set the flag organically, verifier validates no-red + flat-paths and no longer cites .env/DNS — but the ACCEPTANCE CRITERION (succeeded→dispatch→message_id) was NOT met: terminal blocked on two newly-unmasked obstacles, (a) worker wrote to the daemon workspace root not the -C dir (cwd mechanism a named adapter-wide follow-up, UNVERIFIED), (b) verifier evidence-escalation now LIVE-CONFIRMED (demands raw file contents; ops can't redrive). #2b's own mechanism works; the end-to-end arc is unit-locked but NOT live-proven — slice-gate does NOT pass. Code inert-safe as deployed."
+verification_method: "TDD red-first: 2 structural tests in OpsDeliverablesWiringTests (tail present with flag / absent without — constant identity, wording not locked) failed pre-wiring, green post. test_task_deliverables.py 39 passed; test_architecture_invariants.py 39 passed + 22 subtests; test_task_handler.py + test_task_redrive.py 104 passed + 3 subtests. NOT yet live-smoked (worktree slice-2b-followup-b-wip; never against the prod daemon) — live smoke pends merge+deploy; prompt-level compliance by the verifier LLM is the named residual risk (recon UNKNOWN 8). Predecessor context: #2b closing smoke PARTIAL (see live_smoke_status), follow-up (a) cwd still open."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1297,6 +1297,32 @@ invariants:
           Publish/browse/coding modes are untouched; a generic LLM-invocable
           send tool (arbitrary chat_id) stays a Tier-3/approval design, NOT
           this edge.
+          Follow-up (b) (#2b closing smoke, this slice): the SAME gated block
+          (mode=ops AND deliver_to_owner AND deliverables_cwd prepared) also
+          appends DELIVERABLES_VERIFIER_TAIL_INSTRUCTION to the verification
+          tasks — a deliver-aware reframe of the verifier's evidence demand.
+          Without it the verdict contract's own class definition
+          ("evidencia_externa = ... producir y adjuntar") teaches the verifier
+          to demand raw file contents as attached evidence, and that class is
+          a DETERMINISTIC arc killer under ops+deliver: the tool-less verifier
+          (NON_TOOL_LANES) can only be satisfied by the worker pasting content;
+          γ is structurally infeasible for ops (implementation.started marker →
+          synthesis_redrive_would_block → fail_closed_infeasible, live event
+          443818) and the dispatch requires terminal succeeded — so the demand
+          can never be met and the task dies blocked with the files on disk.
+          The tail states: the system sends the declared files to the owner
+          after the verdict, the daemon validates their existence at dispatch
+          (_dispatch_deliverables containment), do NOT raise evidencia_externa
+          for raw attached content; judge from the worker's sections; content
+          quality doubts go in `Siguiente paso:` as observations, not blockers.
+          The tail is prompt-level guidance for the ADVISORY verifier only —
+          no lane gains tools, the verdict parser and router semantics are
+          untouched, and without the flag the verification instruction is
+          byte-identical to pre-#2b. OPEN (owner decision, recon UNKNOWN 8):
+          whether an evidencia_externa verdict under an active flag should ALSO
+          degrade to formato in the router as a deterministic belt against LLM
+          non-compliance with the reframe — changes governor semantics, NOT
+          implemented.
     enforced_by:
       - tests/test_task_deliverables.py::ParseDeliverablesTailTests (fail-closed, raw names)
       - tests/test_task_deliverables.py::CheckpointDeliverablesTests (solo implementation declara; verifier ignorado)
@@ -1310,6 +1336,8 @@ invariants:
       - tests/test_task_deliverables.py::OpsDeliverablesWiringTests::test_ops_without_flag_is_byte_identical_no_cwd (#2b — sin flag byte-idéntico a pre-#2)
       - tests/test_task_deliverables.py::SmokeNegativeContainmentTests (#2b — la ruta absoluta del smoke negativo declarada ⇒ nombre_invalido, 0 envíos)
       - tests/test_task_deliverables.py::DeliverToOwnerResumeSurvivalTests (#2b review #188 MUST-FIX — el flag se persiste al ledger metadata y se restaura en _resume_autonomous_record; sin esto el resume lo pierde y el dispatch se salta)
+      - tests/test_task_deliverables.py::OpsDeliverablesWiringTests::test_ops_deliver_verifier_gets_deliver_aware_tail (follow-up (b) — con flag el verifier lleva DELIVERABLES_VERIFIER_TAIL_INSTRUCTION; estructural, no lockea fraseo)
+      - tests/test_task_deliverables.py::OpsDeliverablesWiringTests::test_ops_without_flag_verifier_untouched (follow-up (b) — sin flag la instrucción del verifier es byte-idéntica a pre-#2b)
     why: the first organic post-B2 ops-network delegation (send 2 HTML to
          Telegram, task 1783021694523108000) put sendDocument INSIDE
          implementation - the network-blocked worker failed, the redrive was
@@ -1346,7 +1374,11 @@ invariants:
       "escalada de demandas del verifier" residual, now the load-bearing
       blocker. #2b's own mechanism (flag + send-free objective) works; the arc
       does not close until (a) and (b) land. Unit-locked, NOT live-proven
-      end-to-end.
+      end-to-end. Follow-up (b) IMPLEMENTED (this slice): verifier deliver-aware
+      tail (see rule above) — test-locked, NOT yet live-smoked; being
+      prompt-level it has no deterministic guarantee of verifier compliance
+      (recon UNKNOWN 8), the deterministic belt is a named OPEN owner decision.
+      Follow-up (a) cwd remains open.
 
   evidence_pre_step_contained:
     rule: γ's evidence gathering is a PRE-STEP of the re-enqueued durable
