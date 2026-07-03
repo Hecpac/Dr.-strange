@@ -43,10 +43,36 @@ class ManagedChrome:
     def cdp_url(self) -> str:
         return f"http://localhost:{self.port}"
 
-    def start(self, *, headless: bool = False) -> None:
-        """Start or attach to a Chrome CDP process without corrupting profiles."""
+    def start(self, *, headless: bool = False, force_restart: bool = False) -> None:
+        """Start or attach to a Chrome CDP process without corrupting profiles.
+
+        ``force_restart``: the caller (BrowserCapability) positively classified
+        the running CDP endpoint as a zombie — /json/version answers but tabs
+        cannot be created — so the /json/version-based reuse branch below must
+        NOT reattach to it. Kill the managed-profile instance and launch fresh.
+        Only PIDs matching the managed --user-data-dir are killed; a foreign
+        Chrome holding the port is still refused, never killed.
+        """
         pids = _check_port_pids(self.port)
         profile_pids = set(_profile_user_data_pids(self.profile_dir)) if pids else set()
+        if force_restart and pids:
+            matching = [
+                pid
+                for pid, name in pids
+                if any(cn in name.lower() for cn in _CHROME_NAMES) and pid in profile_pids
+            ]
+            if matching:
+                logger.info(
+                    "Force-restarting zombie CDP Chrome on port %d (PID(s) %s)",
+                    self.port,
+                    matching,
+                )
+                for pid in matching:
+                    _kill_pid(pid)
+                _wait_for_port_free(self.port, timeout=5)
+                self._attached_pid = None
+                pids = _check_port_pids(self.port)
+                profile_pids = set(_profile_user_data_pids(self.profile_dir)) if pids else set()
         if pids and _is_cdp_ready(self.port, timeout=1):
             if all(any(cn in name.lower() for cn in _CHROME_NAMES) for _, name in pids):
                 matching_profile_pids = [pid for pid, _name in pids if pid in profile_pids]
@@ -256,10 +282,10 @@ class ManagedChrome:
                     "ManagedChrome detached from attached Chrome PID %d (left running)", pid
                 )
 
-    def ensure(self, *, headless: bool = False) -> None:
-        if self._process is not None and self._process.poll() is None:
+    def ensure(self, *, headless: bool = False, force_restart: bool = False) -> None:
+        if not force_restart and self._process is not None and self._process.poll() is None:
             return
-        self.start(headless=headless)
+        self.start(headless=headless, force_restart=force_restart)
 
     @property
     def is_running(self) -> bool:

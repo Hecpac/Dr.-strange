@@ -73,7 +73,9 @@ class _FakeCdpEndpoint:
     ) -> None:
         self.version = list(version or [_VERSION_OK])
         self.new_tab = list(new_tab or [_NEW_TAB_OK])
-        self.close = list(close or [b""])
+        # Real Chrome answers /json/close with plain text, not JSON — the
+        # default fake models that so a JSON-parse of the close body fails loud.
+        self.close = list(close or [b"Target is closing"])
         self.calls: list[tuple[str, str]] = []
 
     def _next(self, queue: list[object]) -> object:
@@ -180,7 +182,8 @@ class BrowserCapabilityTests(unittest.TestCase):
             ],
         )
         chrome_factory.assert_called_once()
-        chrome.ensure.assert_called_once_with(headless=False)
+        # Dead endpoint keeps the normal recovery path: no forced restart.
+        chrome.ensure.assert_called_once_with(headless=False, force_restart=False)
         self.assertEqual(
             [event_type for event_type, _ in observe.events],
             [
@@ -231,7 +234,8 @@ class BrowserCapabilityTests(unittest.TestCase):
         endpoint = capability.ensure_ready()
 
         self.assertEqual(endpoint, "http://127.0.0.1:9250")
-        chrome.ensure.assert_called_once_with(headless=False)
+        # Headless is rejected, not zombie-classified: no forced restart.
+        chrome.ensure.assert_called_once_with(headless=False, force_restart=False)
         self.assertTrue(observe.events[-1][1]["started_chrome"])
         # Headless rejection happens at the version stage: no tab probe is
         # attempted against the headless Chrome.
@@ -294,7 +298,9 @@ class BrowserCapabilityZombieTests(unittest.TestCase):
 
         self.assertEqual(endpoint, "http://127.0.0.1:9250")
         chrome_factory.assert_called_once()
-        chrome.ensure.assert_called_once_with(headless=False)
+        # Positively-classified zombie: the reuse path must not reattach, so
+        # BrowserCapability requests a forced restart through ManagedChrome.
+        chrome.ensure.assert_called_once_with(headless=False, force_restart=True)
         # First round: version OK, tab create fails (zombie). Second round
         # (after respawn): version + tab create + tab close all healthy.
         self.assertEqual(
@@ -330,7 +336,7 @@ class BrowserCapabilityZombieTests(unittest.TestCase):
             capability.ensure_ready()
 
         self.assertIn("no puede crear pestañas", str(ctx.exception))
-        chrome.ensure.assert_called_once_with(headless=False)
+        chrome.ensure.assert_called_once_with(headless=False, force_restart=True)
         failed = [
             payload
             for event_type, payload in observe.events
@@ -353,7 +359,7 @@ class BrowserCapabilityZombieTests(unittest.TestCase):
         endpoint = capability.ensure_ready()
 
         self.assertEqual(endpoint, "http://127.0.0.1:9250")
-        chrome.ensure.assert_called_once_with(headless=False)
+        chrome.ensure.assert_called_once_with(headless=False, force_restart=True)
         self.assertIn(
             "browser_capability_probe_zombie",
             [event_type for event_type, _ in observe.events],
@@ -377,6 +383,20 @@ class BrowserCapabilityZombieTests(unittest.TestCase):
 
         self.assertEqual(endpoint, "http://127.0.0.1:9250")
         chrome_factory.assert_not_called()
+
+    def test_plain_text_close_body_is_healthy_and_never_json_parsed(self) -> None:
+        # Real Chrome answers /json/close with "Target is closing" (plain
+        # text). The close is best-effort cleanup: it must not raise, not be
+        # JSON-parsed, and not trigger any respawn.
+        cdp = _FakeCdpEndpoint(close=[b"Target is closing"])
+        chrome_factory = MagicMock()
+        capability = BrowserCapability(chrome_factory=chrome_factory, urlopen=cdp)
+
+        endpoint = capability.ensure_ready(visible=False)
+
+        self.assertEqual(endpoint, "http://127.0.0.1:9250")
+        chrome_factory.assert_not_called()
+        self.assertIn(("GET", "http://127.0.0.1:9250/json/close/probe-tab-1"), cdp.calls)
 
 
 if __name__ == "__main__":

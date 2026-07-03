@@ -1,6 +1,35 @@
 # PR 1 — CDP zombie preflight hardening (implementation notes)
 
-Última revisión: 2026-07-03
+Última revisión: 2026-07-03 (2ª iteración — fix del P1 de review)
+
+## Fix post-review (P1 Codex + medium Gemini)
+
+El review de Codex encontró un gap real en la 1ª iteración: el zombie
+respondía `/json/version`, así que `ManagedChrome.start()` (cuyo
+`_is_cdp_ready()` solo consulta `/json/version`) **reattachaba al mismo
+Chrome zombie** en vez de relanzarlo — fail-fast correcto pero self-heal
+incompleto. Fix:
+
+- `ManagedChrome.start()/ensure()` aceptan `force_restart: bool = False`.
+  Con `True`, mata SOLO los PIDs de Chrome que coinciden con el
+  `--user-data-dir` gestionado antes de la rama de reuse, y lanza fresco.
+  Un Chrome ajeno en el puerto sigue siendo **rechazado, nunca matado**
+  (semántica existente intacta). Default preserva el comportamiento previo.
+- `BrowserCapability._probe_endpoint()` ahora devuelve `(error, is_zombie)`;
+  `ensure_ready()` pasa `force_restart=is_zombie` — solo el zombie
+  positivamente clasificado fuerza restart; endpoint muerto y headless
+  siguen por el camino normal de recovery.
+- Medium de Gemini: `/json/close/<id>` responde texto plano
+  ("Target is closing"), no JSON — el close del probe ya no parsea JSON
+  (`parse_json=False`); cualquier 2xx/3xx cuenta como cierre aceptado.
+  El fake de tests ahora modela el cuerpo texto-plano real.
+
+Tests nuevos del fix: `test_chrome.py` (force_restart mata al zombie del
+perfil gestionado en vez de reattachear — modela `_is_cdp_ready()` True;
+nunca mata Chrome de perfil ajeno; `ensure(force_restart=True)` no hace
+early-return con proceso vivo) y `test_browser_capability.py` (aserciones
+`force_restart=True` solo en zombie, `False` en muerto/headless; close
+texto-plano sano sin JSONDecodeError).
 
 ## Problema
 
