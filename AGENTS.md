@@ -42,10 +42,7 @@ edit them only with explicit approval.
   file, task id, verb+object) is unambiguous from the literal message text alone,
   without reading `session_state`, `reply_context`, the last assistant turn, or
   the task ledger.
-- Conversational continuations such as "continúa"/"continua", "procede",
-  "sigue", "dale", "sí hazlo"/"si hazlo", "ok", "listo", numbered option picks,
-  and quoted replies must fall through to the brain. The brain has the state
-  needed to resolve them.
+- Conversational continuations such as "continúa"/"continua", "procede", "sigue", "dale", "sí hazlo"/"si hazlo", "ok", "listo", numbered option picks, and quoted replies must fall through to the brain. The brain has the state needed to resolve them.
 - When a dispatcher cannot resolve target/object without external context, emit
   `dispatch_decision=fallthrough_to_brain` and pass through silently. Do not ask
   for clarification from the pre-brain layer; that response belongs to the brain
