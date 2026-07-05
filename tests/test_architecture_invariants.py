@@ -597,6 +597,54 @@ class ArchitectureInvariantTests(unittest.TestCase):
         unwired = drain_funcs - registered_handlers
         self.assertEqual(unwired, set(), f"drain_spill call-sites not off-tick: {unwired}")
 
+    def test_audit_critical_observe_events_are_centrally_classified(self) -> None:
+        """O1.5: audit-critical observe events must be marked before any
+        RuntimeDb contention spill path, so policy/auth/tool/approval/critical
+        failures cannot be silently fast-dropped as ordinary diagnostics."""
+        from claw_v2.observe import (
+            AUDIT_CRITICAL_OBSERVE_EVENTS,
+            ObserveStream,
+            is_audit_critical_event,
+        )
+
+        required = {
+            "approval": {"approval_created", "approval_approved", "approval_rejected"},
+            "human_authorization": {
+                "owner_delegation_approval_required",
+                "telegram_imperative_pending_approval",
+                "implicit_approval_requires_explicit_approval",
+                "approval_detected",
+                "computer_approval_pending",
+                "computer_browser_use_approval_required",
+                "computer_approval_resume_blocked",
+            },
+            "tool_use": {
+                "sdk_post_tool_use",
+                "sdk_post_tool_use_failure",
+                "runtime_policy_tool_not_declared",
+            },
+            "auth_policy": {"web_chat_auth_rejected", "tier3_approval_required"},
+            "critical_errors": {
+                "runtime_db_degraded",
+                "daemon_branch_integrity_violation",
+                "scheduled_job_error",
+            },
+        }
+        missing = {
+            category: sorted(events - AUDIT_CRITICAL_OBSERVE_EVENTS)
+            for category, events in required.items()
+            if events - AUDIT_CRITICAL_OBSERVE_EVENTS
+        }
+        self.assertEqual(missing, {})
+        for event_type in set().union(*required.values()):
+            self.assertTrue(is_audit_critical_event(event_type), event_type)
+        self.assertFalse(is_audit_critical_event("daemon_background_runner_cycle"))
+
+        emit_source = inspect.getsource(ObserveStream.emit)
+        spill_source = inspect.getsource(ObserveStream._spill_dropped_event)
+        self.assertIn("is_audit_critical_event", emit_source)
+        self.assertIn("audit_critical", spill_source)
+
     def test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick(self) -> None:
         """Deny-by-default backstop for Core Invariant 1.
 

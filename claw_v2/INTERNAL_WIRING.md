@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice observe-spill-drain (2026-07-05, O1.4): ObserveStream now drains claw.spill.jsonl back into observe_stream idempotently. New spill lines carry an occurrence id, legacy lines are occurrence-scoped during replay, legacy survivors are atomically upgraded with an id during compaction, and compaction removes only processed snapshot positions after durable insert/already-present proof in the off-tick observe_maintenance runner. New invariant observe_spill_drain_is_idempotent_and_lossless_until_durable."
-doc_version: 2.80
+describes_commit: "slice audit-critical-observe-no-fast-drop (2026-07-05, O1.5): ObserveStream centrally classifies audit-critical events, stamps their payloads with audit_critical=true, and preserves that marker in claw.spill.jsonl when RuntimeDb contention prevents an immediate insert. LocalChatAPI emits web_chat_auth_rejected without credential material before returning 401. Owner-delegation, computer-use, Telegram pending, and implicit approval events are included in the human-authorization set. New invariant audit_critical_observe_events_survive_contention."
+doc_version: 2.82
 last_verified: 2026-07-05
-verification_method: "O1.4 local: tests/test_observe_spill_drain.py covers successful drain, duplicate raw-line occurrences, idempotent duplicate replay, max_lines-bounded replay across duplicate drains, newly appended duplicate preservation, malformed-line preservation, DB contention fail-safe behavior, and no compaction before durable insert; tests/test_architecture_invariants.py locks drain_spill to the off-tick observe_maintenance runner and preserves RuntimeDb lock discipline."
+verification_method: "O1.5 local: tests/test_observe_audit_critical.py covers critical event classification, owner-delegation approval normal persist and RuntimeDb contention spill fallback, auth rejection spill fallback, and unchanged non-critical behavior; tests/test_architecture_invariants.py locks central audit-critical classification and spill marking while preserving the O1.4 off-tick drain invariant."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -313,6 +313,30 @@ invariants:
          audit events remain permanently outside `observe_stream`; without the
          durable-marker-before-compaction rule, recovery itself could become an
          audit-loss path.
+
+  audit_critical_observe_events_survive_contention:
+    rule: Audit-critical observe events are classified centrally in
+          `AUDIT_CRITICAL_OBSERVE_EVENTS` before persistence. Approval,
+          human-authorization, tool-use, runtime-policy, auth, RuntimeDb
+          degradation, branch integrity, scheduler-error, and critical failure
+          events must carry `audit_critical=true` in their payload. If RuntimeDb
+          contention or a shared-connection write error prevents immediate
+          insertion, the spill record must also carry `audit_critical=true` so
+          recovery and review can distinguish audit evidence from ordinary
+          diagnostics. Non-critical observe events remain non-blocking and are
+          not marked as audit-critical by default.
+    enforced_by:
+      - tests/test_observe_audit_critical.py::ObserveAuditCriticalTests::test_audit_critical_event_classification_covers_security_categories
+      - tests/test_observe_audit_critical.py::ObserveAuditCriticalTests::test_audit_critical_event_spills_with_marker_when_runtime_db_lock_contended
+      - tests/test_observe_audit_critical.py::ObserveAuditCriticalTests::test_owner_delegation_approval_required_persists_with_audit_marker
+      - tests/test_observe_audit_critical.py::ObserveAuditCriticalTests::test_owner_delegation_approval_required_spills_with_audit_marker_when_contended
+      - tests/test_observe_audit_critical.py::ObserveAuditCriticalTests::test_web_chat_auth_rejection_is_audit_critical_and_spills_under_contention
+      - tests/test_observe_audit_critical.py::ObserveAuditCriticalTests::test_non_critical_event_contention_behavior_is_unchanged
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_audit_critical_observe_events_are_centrally_classified
+    why: O1.4 made observe spill replayable, but audit-critical events still
+         looked like ordinary diagnostics under contention. O1.5 prevents
+         approval, tool-use, auth/policy, and critical-error evidence from
+         becoming an indistinguishable fast-drop during RuntimeDb contention.
 
   web_chat_api_fail_closed_without_token:
     rule: LocalChatAPI protects every `/api/*` route with a configured web chat
