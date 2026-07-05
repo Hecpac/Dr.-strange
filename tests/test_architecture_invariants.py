@@ -206,6 +206,15 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
         self.assertEqual(offenders, [])
 
+    def test_runtime_db_self_heal_reconnect_is_lock_only(self) -> None:
+        from claw_v2.sqlite_runtime import RuntimeDb
+
+        source = inspect.getsource(RuntimeDb)
+        handle_source = inspect.getsource(RuntimeDb._handle_sqlite_exception)
+        self.assertIn("_is_sqlite_locked_error(exc)", handle_source)
+        self.assertIn("_reconnect_after_persistent_lock(operation, exc)", handle_source)
+        self.assertEqual(source.count("_reconnect_after_persistent_lock("), 2)
+
     def test_runtime_builder_and_git_probe_remain_sync(self) -> None:
         self.assertFalse(inspect.iscoroutinefunction(build_runtime))
         self.assertFalse(inspect.iscoroutinefunction(_is_git_repo))

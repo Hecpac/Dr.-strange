@@ -408,7 +408,7 @@ class RuntimeDbDegradedTests(unittest.TestCase):
             self.assertEqual(health.reason_code, error.reason.reason_code)
             self.assertEqual(health.database_path, str(db.db_path))
 
-    def test_locked_transient_does_not_degrade_but_persistent_lock_does(self) -> None:
+    def test_locked_transient_does_not_degrade_and_threshold_self_heals(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = self._runtime_db(tmpdir, persistent_lock_threshold=3)
             real_conn = db._current_connection_for_tests()
@@ -428,15 +428,87 @@ class RuntimeDbDegradedTests(unittest.TestCase):
                 with self.assertRaises(sqlite3.OperationalError):
                     with db.cursor() as cur:
                         cur.execute("SELECT 1")
-            with self.assertRaises(RuntimeDbDegradedError) as caught:
+            with self.assertRaises(sqlite3.OperationalError):
                 with db.cursor() as cur:
                     cur.execute("SELECT 1")
 
+            self.assertFalse(db.healthcheck().degraded)
+            with db.cursor() as cur:
+                self.assertEqual(cur.execute("SELECT COUNT(*) FROM t").fetchone()[0], 1)
+
+    def test_persistent_lock_self_heals_once_and_retries_owned_execute(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            events: list[dict[str, object]] = []
+            db = self._runtime_db(
+                tmpdir,
+                persistent_lock_threshold=1,
+                degraded_event_sink=events.append,
+            )
+            failing = _FailingConnection(sqlite3.OperationalError("database is locked"))
+            db._conn = failing
+            handle = db.connection_handle()
+
+            row = handle.execute("SELECT COUNT(*) FROM t").fetchone()
+
+            self.assertEqual(row[0], 1)
+            self.assertTrue(failing.closed)
+            self.assertFalse(db.healthcheck().degraded)
+            self.assertEqual(db._consecutive_locked_errors, 0)
+            self.assertEqual(db._persistent_lock_self_heal_used, False)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_type"], "runtime_db_persistent_lock_self_heal")
+            self.assertEqual(events[0]["reason_code"], "persistent_lock")
+            self.assertEqual(events[0]["self_heal_budget"], 1)
+
+    def test_persistent_lock_after_self_heal_budget_degrades_and_fails_closed(self) -> None:
+        import claw_v2.sqlite_runtime as sqlite_runtime
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            events: list[dict[str, object]] = []
+            db = self._runtime_db(
+                tmpdir,
+                persistent_lock_threshold=1,
+                degraded_event_sink=events.append,
+            )
+            db._conn = _FailingConnection(sqlite3.OperationalError("database is locked"))
+            with patch.object(
+                sqlite_runtime,
+                "connect_runtime_sqlite",
+                return_value=_FailingConnection(sqlite3.OperationalError("database is locked")),
+            ):
+                with self.assertRaises(RuntimeDbDegradedError) as caught:
+                    db.connection_handle().execute("SELECT COUNT(*) FROM t")
+
             self.assertEqual(caught.exception.reason.reason_code, "persistent_lock")
+            self.assertTrue(db.healthcheck().degraded)
+            self.assertEqual(events[0]["event_type"], "runtime_db_persistent_lock_self_heal")
+            self.assertEqual(events[-1]["reason_code"], "persistent_lock")
+            self.assertNotIn("event_type", events[-1])
+
+            with self.assertRaises(RuntimeDbDegradedError):
+                with db.cursor():
+                    pass
+
+    def test_non_lock_critical_sqlite_error_does_not_self_heal(self) -> None:
+        import claw_v2.sqlite_runtime as sqlite_runtime
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+            db._conn = _FailingConnection(sqlite3.DatabaseError("database disk image is malformed"))
+            with patch.object(
+                sqlite_runtime,
+                "connect_runtime_sqlite",
+                side_effect=AssertionError("non-lock errors must not reconnect"),
+            ):
+                with self.assertRaises(RuntimeDbDegradedError) as caught:
+                    db.connection_handle().execute("SELECT COUNT(*) FROM t")
+
+            self.assertEqual(caught.exception.reason.reason_code, "healthcheck_failed")
             self.assertTrue(db.healthcheck().degraded)
 
     def test_degraded_event_sink_failure_still_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
+
             def broken_sink(payload):
                 raise RuntimeError("sink unavailable")
 
@@ -459,9 +531,7 @@ class RuntimeDbDegradedTests(unittest.TestCase):
             shm = Path(f"{db.db_path}-shm")
             wal.write_bytes(b"non-empty wal frames")
             shm.write_bytes(b"live shm")
-            db._conn = _FailingConnection(
-                _sqlite_error("disk I/O error", name="SQLITE_IOERR")
-            )
+            db._conn = _FailingConnection(_sqlite_error("disk I/O error", name="SQLITE_IOERR"))
 
             with patch.object(
                 sqlite_runtime,

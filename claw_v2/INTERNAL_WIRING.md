@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice ui-open-app-bare-targets (2026-07-05, S0.6): audit HIGH #3 found pre-brain ui.open_app/ui.inspect_app bare-target regexes using re.search without whole-message anchoring, allowing embedded text such as si digo abre chrome no lo hagas to reach subprocess.run([open, -a, ...]) outside ToolRegistry gating. Fix: anchor app matchers, reject known app aliases with trailing clauses, include Chrome in ambiguity checks, and lock the invariant ui_open_app_bare_targets_are_anchored_and_do_not_bypass_tool_registry."
-doc_version: 2.76
+describes_commit: "slice runtime-bounded-persistent-lock-self-heal (2026-07-05, O1.3): RuntimeDb persistent_lock no longer immediately leaves a permanent zombie on the first threshold crossing. Lock-only errors may spend one owner-controlled reconnect/retry budget per episode; success resets the episode, repeated lock after budget still marks degraded/fails closed, and corruption/no-lock SQLite errors never self-heal. New invariant runtime_db_persistent_lock_self_heal_is_bounded_and_lock_only."
+doc_version: 2.77
 last_verified: 2026-07-05
-verification_method: "S0.6 local: tests/test_telegram_imperative_router.py covers embedded open/inspect Chrome phrases, explicit Chrome/ChatGPT/Codex opens, Spanish opening punctuation, and the trailing-clause case Abrir la app de Chrome no lo hagas; tests/test_architecture_invariants.py locks whole-message matchers. Fast gate and secret scan passed on PR #204 before merge."
+verification_method: "O1.3 local: tests/test_sqlite_runtime.py covers transient persistent_lock self-heal success, repeated lock after budget degrade/fail-closed, and non-lock critical SQLite errors with no reconnect; tests/test_runtimedb_wiring.py proves observe event wiring and no WAL-heal handles; tests/test_architecture_invariants.py locks the reconnect path to _is_sqlite_locked_error."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -260,6 +260,24 @@ invariants:
          while the daemon's in-process RuntimeDb owner was write-dead. A
          read-only external healthcheck is insufficient; liveness must prove
          the daemon can still write through its actual RuntimeDb owner.
+
+  runtime_db_persistent_lock_self_heal_is_bounded_and_lock_only:
+    rule: RuntimeDb may self-heal only `_is_sqlite_locked_error` persistent_lock
+          episodes. The budget is one owner-controlled reconnect/retry per
+          episode, skipped inside active transactions; success resets the
+          episode, while a repeated lock after budget still marks degraded,
+          emits `runtime_db_degraded`, and fails closed. Corruption, malformed,
+          readonly/permission, disk I/O, short read, closed connection, and
+          unknown critical SQLite errors must never reconnect/self-heal.
+    enforced_by:
+      - tests/test_sqlite_runtime.py::RuntimeDbDegradedTests::test_persistent_lock_self_heals_once_and_retries_owned_execute
+      - tests/test_sqlite_runtime.py::RuntimeDbDegradedTests::test_persistent_lock_after_self_heal_budget_degrades_and_fails_closed
+      - tests/test_sqlite_runtime.py::RuntimeDbDegradedTests::test_non_lock_critical_sqlite_error_does_not_self_heal
+      - tests/test_runtimedb_wiring.py::BuildRuntimeIdentityTests::test_runtime_db_persistent_lock_self_heal_emits_observe_event
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_db_self_heal_reconnect_is_lock_only
+    why: O1.2 made write-dead RuntimeDb visible. O1.3 closes the transient lock
+         zombie class without reviving the retired WAL-heal cascade or masking
+         corruption/no-lock SQLite failures that require fail-closed handling.
 
   web_chat_api_fail_closed_without_token:
     rule: LocalChatAPI protects every `/api/*` route with a configured web chat

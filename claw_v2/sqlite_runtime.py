@@ -319,11 +319,7 @@ def _runtime_degraded_reason_code(exc: BaseException) -> str | None:
     code = _sqlite_error_code(exc)
     if is_sqlite_closed_connection_error(exc):
         return "connection_closed"
-    if (
-        name == "SQLITE_IOERR_SHORT_READ"
-        or code == 522
-        or "short read" in message
-    ):
+    if name == "SQLITE_IOERR_SHORT_READ" or code == 522 or "short read" in message:
         return "sqlite_ioerr_short_read"
     if is_sqlite_disk_io_error(exc):
         return "sqlite_ioerr"
@@ -797,6 +793,7 @@ class RuntimeDb:
         self._closed = False
         self._persistent_lock_threshold = max(1, int(persistent_lock_threshold))
         self._consecutive_locked_errors = 0
+        self._persistent_lock_self_heal_used = False
         self._degraded_event_sink = degraded_event_sink
         # Opened through the shared connect/configure path so the durable
         # runtime pragmas (WAL, synchronous=FULL, busy_timeout, foreign_keys)
@@ -856,21 +853,73 @@ class RuntimeDb:
 
     def _record_sqlite_success(self) -> None:
         self._consecutive_locked_errors = 0
+        self._persistent_lock_self_heal_used = False
 
-    def _handle_sqlite_exception(self, operation: str, exc: BaseException) -> None:
+    def _connection_in_transaction(self) -> bool:
+        return bool(getattr(self._conn, "in_transaction", False))
+
+    def _emit_runtime_db_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self._degraded_event_sink is None:
+            return
+        try:
+            self._degraded_event_sink({"event_type": event_type, **payload})
+        except Exception:
+            logger.exception("RuntimeDb event sink failed event_type=%s", event_type)
+
+    def _reconnect_after_persistent_lock(self, operation: str, exc: BaseException) -> None:
+        old_conn = self._conn
+        self._conn = connect_runtime_sqlite(self.db_path, row_factory=self._row_factory)
+        try:
+            old_conn.close()
+        except Exception:
+            logger.debug(
+                "RuntimeDb old connection close failed after persistent lock", exc_info=True
+            )
+        payload = {
+            "reason_code": "persistent_lock",
+            "operation": operation,
+            "database_path": str(self.db_path),
+            "sqlite_error_code": _sqlite_error_code(exc),
+            "consecutive_locked_errors": self._consecutive_locked_errors,
+            "self_heal_budget": 1,
+        }
+        logger.warning(
+            "RuntimeDb persistent lock self-heal reconnected operation=%s path=%s",
+            operation,
+            self.db_path,
+        )
+        self._emit_runtime_db_event("runtime_db_persistent_lock_self_heal", payload)
+
+    def _handle_sqlite_exception(self, operation: str, exc: BaseException) -> bool:
         if _is_sqlite_locked_error(exc):
             self._consecutive_locked_errors += 1
             if self._consecutive_locked_errors >= self._persistent_lock_threshold:
+                if (
+                    not self._persistent_lock_self_heal_used
+                    and not self._in_transaction
+                    and not self._connection_in_transaction()
+                ):
+                    self._persistent_lock_self_heal_used = True
+                    try:
+                        self._reconnect_after_persistent_lock(operation, exc)
+                    except Exception as reconnect_exc:
+                        raise self._mark_degraded(
+                            reason_code="persistent_lock",
+                            message=f"{exc}; reconnect failed: {reconnect_exc}",
+                            operation=operation,
+                            sqlite_error_code=_sqlite_error_code(exc),
+                        ) from exc
+                    return True
                 raise self._mark_degraded(
                     reason_code="persistent_lock",
                     message=str(exc),
                     operation=operation,
                     sqlite_error_code=_sqlite_error_code(exc),
                 ) from exc
-            return
+            return False
         reason_code = _runtime_degraded_reason_code(exc)
         if reason_code is None:
-            return
+            return False
         raise self._mark_degraded(
             reason_code=reason_code,
             message=str(exc),
@@ -1130,26 +1179,34 @@ class _RuntimeConnHandle:
         self._row_factory = sqlite3.Row if row_factory else None
 
     def execute(self, sql: str, parameters=()):  # noqa: ANN001 - sqlite param shape
-        self._db._ensure_operational("RuntimeDb.connection_handle.execute")
-        try:
-            cur = self._db._conn.cursor()
-            cur.row_factory = self._row_factory
-            result = cur.execute(sql, parameters)
-            self._db._record_sqlite_success()
-            return result
-        except BaseException as exc:
-            self._db._handle_sqlite_exception("RuntimeDb.connection_handle.execute", exc)
-            raise
+        for _attempt in range(2):
+            self._db._ensure_operational("RuntimeDb.connection_handle.execute")
+            try:
+                cur = self._db._conn.cursor()
+                cur.row_factory = self._row_factory
+                result = cur.execute(sql, parameters)
+                self._db._record_sqlite_success()
+                return result
+            except BaseException as exc:
+                if self._db._handle_sqlite_exception("RuntimeDb.connection_handle.execute", exc):
+                    continue
+                raise
+        raise RuntimeError("RuntimeDb.connection_handle.execute retry budget exhausted")
 
     def executescript(self, sql_script: str):
-        self._db._ensure_operational("RuntimeDb.connection_handle.executescript")
-        try:
-            result = self._db._conn.executescript(sql_script)
-            self._db._record_sqlite_success()
-            return result
-        except BaseException as exc:
-            self._db._handle_sqlite_exception("RuntimeDb.connection_handle.executescript", exc)
-            raise
+        for _attempt in range(2):
+            self._db._ensure_operational("RuntimeDb.connection_handle.executescript")
+            try:
+                result = self._db._conn.executescript(sql_script)
+                self._db._record_sqlite_success()
+                return result
+            except BaseException as exc:
+                if self._db._handle_sqlite_exception(
+                    "RuntimeDb.connection_handle.executescript", exc
+                ):
+                    continue
+                raise
+        raise RuntimeError("RuntimeDb.connection_handle.executescript retry budget exhausted")
 
     def commit(self) -> None:
         self._db._ensure_operational("RuntimeDb.connection_handle.commit")

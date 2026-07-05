@@ -94,6 +94,28 @@ class _DiskIoCursorConn:
         return None
 
 
+class _LockedCursor:
+    row_factory = None
+
+    def execute(self, *args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+
+class _LockedCursorConn:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def cursor(self):
+        return _LockedCursor()
+
+    def close(self) -> None:
+        self.closed = True
+
+    @property
+    def in_transaction(self) -> bool:
+        return False
+
+
 class BuildRuntimeIdentityTests(unittest.TestCase):
     def test_five_core_stores_share_one_runtimedb_lock_and_connection(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -150,6 +172,27 @@ class BuildRuntimeIdentityTests(unittest.TestCase):
             self.assertEqual(events[0]["database_path"], str(shared.db_path))
             spill = shared.db_path.with_suffix(".spill.jsonl")
             self.assertIn("runtime_db_degraded", spill.read_text(encoding="utf-8"))
+
+    def test_runtime_db_persistent_lock_self_heal_emits_observe_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rt = _build_runtime(tmpdir)
+            _add_runtime_cleanup(self, rt)
+            shared = rt.memory._db
+            self.assertIsInstance(shared, RuntimeDb)
+            shared._persistent_lock_threshold = 1
+            events: list[dict[str, object]] = []
+            rt.observe.subscribe("runtime_db_persistent_lock_self_heal", events.append)
+            locked = _LockedCursorConn()
+            shared._conn = locked
+
+            row = shared.connection_handle().execute("SELECT 1").fetchone()
+
+            self.assertEqual(row[0], 1)
+            self.assertTrue(locked.closed)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["reason_code"], "persistent_lock")
+            self.assertEqual(events[0]["self_heal_budget"], 1)
+            self.assertEqual(_live_wal_heal_handles(shared.db_path), [])
 
 
 class HeyGenCapabilityGrantsWiringTests(unittest.TestCase):

@@ -258,7 +258,9 @@ class RuntimeDbDegradedEventSink:
 
     @staticmethod
     def _emit(observe: ObserveStream, payload: dict[str, Any]) -> None:
-        observe.emit("runtime_db_degraded", payload=dict(payload))
+        event_payload = dict(payload)
+        event_type = str(event_payload.pop("event_type", "runtime_db_degraded"))
+        observe.emit(event_type, payload=event_payload)
 
 
 def build_runtime_approval_gate(approvals: ApprovalManager) -> Callable[[object, dict], None]:
