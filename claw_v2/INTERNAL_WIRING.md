@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice observe-spill-drain (2026-07-05, O1.4): ObserveStream now drains claw.spill.jsonl back into observe_stream idempotently. Each raw spill line gets a deterministic spill_id marker committed atomically with the replayed event, malformed/failed lines remain in the append-only spill, and compaction runs only after durable insert/already-present proof in the off-tick observe_maintenance runner. New invariant observe_spill_drain_is_idempotent_and_lossless_until_durable."
-doc_version: 2.78
+describes_commit: "slice observe-spill-drain (2026-07-05, O1.4): ObserveStream now drains claw.spill.jsonl back into observe_stream idempotently. New spill lines carry an occurrence id, legacy lines derive one from their physical snapshot occurrence, and compaction removes only processed snapshot positions after durable insert/already-present proof in the off-tick observe_maintenance runner. New invariant observe_spill_drain_is_idempotent_and_lossless_until_durable."
+doc_version: 2.79
 last_verified: 2026-07-05
-verification_method: "O1.4 local: tests/test_observe_spill_drain.py covers successful drain, idempotent replay, malformed-line preservation, DB contention fail-safe behavior, and no compaction before durable insert; tests/test_architecture_invariants.py locks drain_spill to the off-tick observe_maintenance runner and preserves RuntimeDb lock discipline."
+verification_method: "O1.4 local: tests/test_observe_spill_drain.py covers successful drain, duplicate raw-line occurrences, idempotent duplicate replay, max_lines-safe compaction, newly appended duplicate preservation, malformed-line preservation, DB contention fail-safe behavior, and no compaction before durable insert; tests/test_architecture_invariants.py locks drain_spill to the off-tick observe_maintenance runner and preserves RuntimeDb lock discipline."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -282,17 +282,25 @@ invariants:
   observe_spill_drain_is_idempotent_and_lossless_until_durable:
     rule: `claw.spill.jsonl` remains the append-only recovery source for
           observe events that could not be inserted during DB contention or
-          degradation. `ObserveStream.drain_spill()` may remove a spill line
-          only after the event insert and its deterministic `spill_id` marker
-          are committed in SQLite, or after that marker proves a prior replay
-          already succeeded. Malformed lines and lines that cannot currently
-          acquire/commit to the DB stay in the spill file. JSONL compaction must
-          be atomic under the same spill-file lock used by appenders, and the
-          production drain call-site must remain off-tick in
-          `observe_maintenance`.
+          degradation. `ObserveStream.drain_spill()` treats every physical
+          spill occurrence as replayable: new spill writes include an
+          occurrence id, and legacy lines without one derive an id from their
+          physical snapshot position plus raw hash. The drain may remove only
+          snapshot positions whose event insert and `spill_id` marker are
+          committed in SQLite, or whose marker proves that exact occurrence
+          already replayed. Duplicate raw lines must replay as distinct events.
+          Malformed lines, failed lines, unprocessed lines beyond `max_lines`,
+          and lines appended after the drain snapshot stay in the spill file.
+          JSONL compaction must be atomic under the same spill-file lock used
+          by appenders, and the production drain call-site must remain off-tick
+          in `observe_maintenance`.
     enforced_by:
       - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_inserts_events_and_removes_durable_lines
       - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_replay_is_idempotent
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_replays_duplicate_raw_lines_as_distinct_occurrences
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_duplicate_replay_is_idempotent_per_occurrence
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_max_lines_keeps_unprocessed_duplicate_occurrences
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_compaction_keeps_newly_appended_duplicate_line
       - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_preserves_malformed_lines_and_drains_valid_lines
       - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_leaves_file_untouched_when_runtime_db_lock_is_contended
       - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_keeps_lines_that_fail_before_durable_insert

@@ -9,6 +9,7 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Literal
@@ -65,6 +66,7 @@ class ObserveSpillDrainResult:
 class _SpillRecord:
     raw_line: str
     spill_id: str
+    raw_sha256: str
     event_type: str
     payload_json: str
     dropped_at: float | None
@@ -445,6 +447,7 @@ class ObserveStream:
                 {
                     "dropped_at": time.time(),
                     "event_type": event_type,
+                    "spill_id": f"obs-spill:{uuid.uuid4().hex}",
                     **{k: v for k, v in columns.items() if v is not None},
                     "payload": payload_json,
                 },
@@ -497,7 +500,10 @@ class ObserveStream:
         if not spill_path.exists():
             return ObserveSpillDrainResult(spill_path=str(spill_path))
         try:
-            raw_lines = spill_path.read_text(encoding="utf-8").splitlines()
+            with self._spill_file_lock():
+                if not spill_path.exists():
+                    return ObserveSpillDrainResult(spill_path=str(spill_path))
+                raw_lines = spill_path.read_text(encoding="utf-8").splitlines()
         except OSError:
             logger.exception("observe spill drain could not read %s", spill_path)
             return ObserveSpillDrainResult(spill_path=str(spill_path), failed=1)
@@ -506,26 +512,26 @@ class ObserveStream:
         lines_to_process = raw_lines[:limit]
         limited = len(raw_lines) > len(lines_to_process)
         inserted = already_present = malformed = failed = 0
-        removable_raw_lines: set[str] = set()
-        for raw_line in lines_to_process:
-            record = self._parse_spill_record(raw_line)
+        removable_line_indexes: set[int] = set()
+        for line_index, raw_line in enumerate(lines_to_process):
+            record = self._parse_spill_record(raw_line, line_index=line_index)
             if record is None:
                 malformed += 1
                 continue
             status = self._drain_spill_record(record, max_attempts=max_attempts)
             if status == "inserted":
                 inserted += 1
-                removable_raw_lines.add(raw_line)
+                removable_line_indexes.add(line_index)
             elif status == "already_present":
                 already_present += 1
-                removable_raw_lines.add(raw_line)
+                removable_line_indexes.add(line_index)
             else:
                 failed += 1
 
         removed_lines = 0
         remaining_lines = len(raw_lines)
-        if removable_raw_lines:
-            removed_lines, remaining_lines = self._compact_spill(removable_raw_lines)
+        if removable_line_indexes:
+            removed_lines, remaining_lines = self._compact_spill(raw_lines, removable_line_indexes)
         return ObserveSpillDrainResult(
             spill_path=str(spill_path),
             read_lines=len(lines_to_process),
@@ -538,7 +544,7 @@ class ObserveStream:
             limited=limited,
         )
 
-    def _parse_spill_record(self, raw_line: str) -> _SpillRecord | None:
+    def _parse_spill_record(self, raw_line: str, *, line_index: int) -> _SpillRecord | None:
         try:
             parsed = json.loads(raw_line)
         except json.JSONDecodeError:
@@ -575,10 +581,17 @@ class ObserveStream:
         }
         if any(value is not None and not isinstance(value, str) for value in text_columns.values()):
             return None
-        digest = hashlib.sha256(raw_line.encode("utf-8")).hexdigest()
+        raw_sha256 = hashlib.sha256(raw_line.encode("utf-8")).hexdigest()
+        parsed_spill_id = parsed.get("spill_id")
+        if isinstance(parsed_spill_id, str) and parsed_spill_id:
+            spill_id = parsed_spill_id
+        else:
+            occurrence_material = f"{line_index}:{raw_sha256}".encode("utf-8")
+            spill_id = f"legacy-sha256:{hashlib.sha256(occurrence_material).hexdigest()}"
         return _SpillRecord(
             raw_line=raw_line,
-            spill_id=f"sha256:{digest}",
+            spill_id=spill_id,
+            raw_sha256=raw_sha256,
             event_type=event_type,
             payload_json=payload_raw,
             dropped_at=dropped_at,
@@ -606,7 +619,6 @@ class ObserveStream:
         return "failed"
 
     def _insert_spill_record_locked(self, record: _SpillRecord) -> _SPILL_INSERT_STATUS:
-        raw_sha256 = record.spill_id.removeprefix("sha256:")
         try:
             existing = self._conn.execute(
                 "SELECT observe_stream_id FROM observe_spill_drain WHERE spill_id = ?",
@@ -649,7 +661,7 @@ class ObserveStream:
                     int(cursor.lastrowid),
                     time.time(),
                     record.dropped_at,
-                    raw_sha256,
+                    record.raw_sha256,
                 ),
             )
             self._conn.commit()
@@ -672,13 +684,20 @@ class ObserveStream:
             )
             return "failed"
 
-    def _compact_spill(self, removable_raw_lines: set[str]) -> tuple[int, int]:
+    def _compact_spill(
+        self, snapshot_lines: list[str], removable_line_indexes: set[int]
+    ) -> tuple[int, int]:
         spill_path = self._spill_path()
         with self._spill_file_lock():
             if not spill_path.exists():
                 return 0, 0
             raw_lines = spill_path.read_text(encoding="utf-8").splitlines()
-            remaining = [line for line in raw_lines if line not in removable_raw_lines]
+            if raw_lines[: len(snapshot_lines)] != snapshot_lines:
+                logger.warning("observe spill drain skipped compaction after concurrent mutation")
+                return 0, len(raw_lines)
+            remaining = [
+                line for index, line in enumerate(raw_lines) if index not in removable_line_indexes
+            ]
             removed = len(raw_lines) - len(remaining)
             if not removed:
                 return 0, len(raw_lines)

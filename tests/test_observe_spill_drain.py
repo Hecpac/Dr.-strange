@@ -72,6 +72,93 @@ class ObserveSpillDrainTests(unittest.TestCase):
             self.assertEqual(count, 1)
             self.assertFalse(spill_path.exists())
 
+    def test_drain_spill_replays_duplicate_raw_lines_as_distinct_occurrences(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            spill_path = observe.db_path.with_suffix(".spill.jsonl")
+            raw = _spill_line("duplicate_spill", {"n": 1})
+            spill_path.write_text(raw + "\n" + raw + "\n", encoding="utf-8")
+
+            result = observe.drain_spill()
+
+            self.assertEqual(result.inserted, 2)
+            self.assertEqual(result.already_present, 0)
+            self.assertFalse(spill_path.exists())
+            with observe._lock:
+                event_count = observe._conn.execute(
+                    "SELECT COUNT(*) FROM observe_stream WHERE event_type = 'duplicate_spill'"
+                ).fetchone()[0]
+                marker_count = observe._conn.execute(
+                    "SELECT COUNT(*) FROM observe_spill_drain"
+                ).fetchone()[0]
+            self.assertEqual(event_count, 2)
+            self.assertEqual(marker_count, 2)
+
+    def test_drain_spill_duplicate_replay_is_idempotent_per_occurrence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            spill_path = observe.db_path.with_suffix(".spill.jsonl")
+            raw = _spill_line("duplicate_spill", {"n": 1})
+            spill_path.write_text(raw + "\n" + raw + "\n", encoding="utf-8")
+
+            with patch.object(observe, "_compact_spill", return_value=(0, 2)):
+                first = observe.drain_spill()
+            self.assertEqual(first.inserted, 2)
+            self.assertTrue(spill_path.exists())
+
+            second = observe.drain_spill()
+
+            self.assertEqual(second.already_present, 2)
+            self.assertFalse(spill_path.exists())
+            with observe._lock:
+                count = observe._conn.execute(
+                    "SELECT COUNT(*) FROM observe_stream WHERE event_type = 'duplicate_spill'"
+                ).fetchone()[0]
+            self.assertEqual(count, 2)
+
+    def test_drain_spill_max_lines_keeps_unprocessed_duplicate_occurrences(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            spill_path = observe.db_path.with_suffix(".spill.jsonl")
+            raw = _spill_line("bounded_spill", {"n": 1})
+            spill_path.write_text(raw + "\n" + raw + "\n" + raw + "\n", encoding="utf-8")
+
+            result = observe.drain_spill(max_lines=2)
+
+            self.assertEqual(result.inserted, 2)
+            self.assertTrue(result.limited)
+            self.assertEqual(result.remaining_lines, 1)
+            self.assertEqual(spill_path.read_text(encoding="utf-8"), raw + "\n")
+            with observe._lock:
+                count = observe._conn.execute(
+                    "SELECT COUNT(*) FROM observe_stream WHERE event_type = 'bounded_spill'"
+                ).fetchone()[0]
+            self.assertEqual(count, 2)
+
+    def test_drain_spill_compaction_keeps_newly_appended_duplicate_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            spill_path = observe.db_path.with_suffix(".spill.jsonl")
+            raw = _spill_line("appended_spill", {"n": 1})
+            spill_path.write_text(raw + "\n", encoding="utf-8")
+            real_drain = observe._drain_spill_record
+            appended = False
+
+            def drain_and_append(record, *, max_attempts):
+                nonlocal appended
+                status = real_drain(record, max_attempts=max_attempts)
+                if not appended:
+                    appended = True
+                    spill_path.write_text(spill_path.read_text(encoding="utf-8") + raw + "\n")
+                return status
+
+            with patch.object(observe, "_drain_spill_record", side_effect=drain_and_append):
+                result = observe.drain_spill(max_lines=1)
+
+            self.assertEqual(result.inserted, 1)
+            self.assertEqual(result.remaining_lines, 1)
+            self.assertEqual(spill_path.read_text(encoding="utf-8"), raw + "\n")
+
     def test_drain_spill_preserves_malformed_lines_and_drains_valid_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = ObserveStream(Path(tmpdir) / "observe.db")
