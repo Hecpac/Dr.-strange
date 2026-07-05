@@ -550,6 +550,53 @@ class ArchitectureInvariantTests(unittest.TestCase):
             f"maintenance_vacuum call-sites not wired off-tick: {unwired}",
         )
 
+    def test_observe_spill_drain_only_runs_off_tick(self) -> None:
+        """O1.4: spill replay can perform bounded SQLite writes and JSONL
+        compaction, so it belongs in an off-tick background runner, not
+        daemon.tick or a CronScheduler handler."""
+        for rel in ("daemon.py", "cron.py"):
+            src = (REPO_ROOT / "claw_v2" / rel).read_text(encoding="utf-8")
+            self.assertNotIn("drain_spill", src, f"drain_spill must not appear in {rel}")
+
+        tree = ast.parse((REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8"))
+
+        def _directly_calls_drain_spill(func: ast.AST) -> bool:
+            stack = list(getattr(func, "body", []))
+            while stack:
+                node = stack.pop()
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "drain_spill"
+                ):
+                    return True
+                stack.extend(ast.iter_child_nodes(node))
+            return False
+
+        drain_funcs = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and _directly_calls_drain_spill(node)
+        }
+        self.assertTrue(drain_funcs, "expected a main.py function calling drain_spill")
+
+        registered_handlers: set[str] = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "register_background_job_runner"
+            ):
+                for kw in node.keywords:
+                    if kw.arg == "handler" and isinstance(kw.value, ast.Name):
+                        registered_handlers.add(kw.value.id)
+
+        unwired = drain_funcs - registered_handlers
+        self.assertEqual(unwired, set(), f"drain_spill call-sites not off-tick: {unwired}")
+
     def test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick(self) -> None:
         """Deny-by-default backstop for Core Invariant 1.
 
@@ -1378,6 +1425,9 @@ class RuntimeDbReadLockDisciplineTests(unittest.TestCase):
             "claw_v2/observe.py": {
                 "ObserveStream.__init__",  # schema executescript, single-threaded at build
                 "ObserveStream._ensure_schema",  # one-time migration, single-threaded at build
+                # spill drain insert+marker helper; callers acquire self._lock
+                # or RuntimeDb.try_acquire before invoking it.
+                "ObserveStream._insert_spill_record_locked",
             },
             "claw_v2/jobs.py": {
                 "JobService._get_active_by_resume_key_unlocked",  # caller holds lock

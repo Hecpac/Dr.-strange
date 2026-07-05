@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice runtime-bounded-persistent-lock-self-heal (2026-07-05, O1.3): RuntimeDb persistent_lock no longer immediately leaves a permanent zombie on the first threshold crossing. Lock-only errors may spend one owner-controlled reconnect/retry budget per episode; success resets the episode, repeated lock after budget still marks degraded/fails closed, and corruption/no-lock SQLite errors never self-heal. New invariant runtime_db_persistent_lock_self_heal_is_bounded_and_lock_only."
-doc_version: 2.77
+describes_commit: "slice observe-spill-drain (2026-07-05, O1.4): ObserveStream now drains claw.spill.jsonl back into observe_stream idempotently. New spill lines carry an occurrence id, legacy lines are occurrence-scoped during replay, legacy survivors are atomically upgraded with an id during compaction, and compaction removes only processed snapshot positions after durable insert/already-present proof in the off-tick observe_maintenance runner. New invariant observe_spill_drain_is_idempotent_and_lossless_until_durable."
+doc_version: 2.80
 last_verified: 2026-07-05
-verification_method: "O1.3 local: tests/test_sqlite_runtime.py covers transient persistent_lock self-heal success, repeated lock after budget degrade/fail-closed, and non-lock critical SQLite errors with no reconnect; tests/test_runtimedb_wiring.py proves observe event wiring and no WAL-heal handles; tests/test_architecture_invariants.py locks the reconnect path to _is_sqlite_locked_error."
+verification_method: "O1.4 local: tests/test_observe_spill_drain.py covers successful drain, duplicate raw-line occurrences, idempotent duplicate replay, max_lines-bounded replay across duplicate drains, newly appended duplicate preservation, malformed-line preservation, DB contention fail-safe behavior, and no compaction before durable insert; tests/test_architecture_invariants.py locks drain_spill to the off-tick observe_maintenance runner and preserves RuntimeDb lock discipline."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -278,6 +278,41 @@ invariants:
     why: O1.2 made write-dead RuntimeDb visible. O1.3 closes the transient lock
          zombie class without reviving the retired WAL-heal cascade or masking
          corruption/no-lock SQLite failures that require fail-closed handling.
+
+  observe_spill_drain_is_idempotent_and_lossless_until_durable:
+    rule: `claw.spill.jsonl` remains the append-only recovery source for
+          observe events that could not be inserted during DB contention or
+          degradation. `ObserveStream.drain_spill()` treats every physical
+          spill occurrence as replayable: new spill writes include an
+          occurrence id; legacy lines without one are replayed with a
+          snapshot-occurrence id, and valid legacy survivors are atomically
+          upgraded in the spill file with an occurrence id during compaction so
+          later drains cannot collapse shifted duplicate bytes. The drain may remove only
+          snapshot positions whose event insert and `spill_id` marker are
+          committed in SQLite, or whose marker proves that exact occurrence
+          already replayed. Duplicate raw lines must replay as distinct events.
+          Malformed lines, failed lines, unprocessed lines beyond `max_lines`,
+          and lines appended after the drain snapshot stay in the spill file.
+          JSONL compaction must be atomic under the same spill-file lock used
+          by appenders, and the production drain call-site must remain off-tick
+          in `observe_maintenance`.
+    enforced_by:
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_inserts_events_and_removes_durable_lines
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_replay_is_idempotent
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_replays_duplicate_raw_lines_as_distinct_occurrences
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_duplicate_replay_is_idempotent_per_occurrence
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_max_lines_keeps_unprocessed_duplicate_occurrences
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_max_lines_replays_remaining_duplicate_occurrences
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_compaction_keeps_newly_appended_duplicate_line
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_preserves_malformed_lines_and_drains_valid_lines
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_leaves_file_untouched_when_runtime_db_lock_is_contended
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_keeps_lines_that_fail_before_durable_insert
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_observe_spill_drain_only_runs_off_tick
+    why: O1.1 made RuntimeDb degradation visible and spill-backed, and O1.3
+         lets transient locks recover. Without an idempotent drain, spilled
+         audit events remain permanently outside `observe_stream`; without the
+         durable-marker-before-compaction rule, recovery itself could become an
+         audit-loss path.
 
   web_chat_api_fail_closed_without_token:
     rule: LocalChatAPI protects every `/api/*` route with a configured web chat
