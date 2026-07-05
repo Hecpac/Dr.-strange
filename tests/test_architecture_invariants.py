@@ -193,6 +193,19 @@ class _HeavyInlineCall(BaseException):
 
 
 class ArchitectureInvariantTests(unittest.TestCase):
+    def test_ui_open_app_and_inspect_app_patterns_are_whole_message_only(self) -> None:
+        from claw_v2.bot_helpers import _TELEGRAM_IMPERATIVE_RULES
+
+        offenders: list[str] = []
+        for rule in _TELEGRAM_IMPERATIVE_RULES:
+            if rule.get("intent") not in {"ui.open_app", "ui.inspect_app"}:
+                continue
+            for pattern in rule.get("patterns", ()):
+                if not pattern.startswith(r"^\s*") or not pattern.endswith("$"):
+                    offenders.append(f"{rule['intent']}:{pattern}")
+
+        self.assertEqual(offenders, [])
+
     def test_runtime_builder_and_git_probe_remain_sync(self) -> None:
         self.assertFalse(inspect.iscoroutinefunction(build_runtime))
         self.assertFalse(inspect.iscoroutinefunction(_is_git_repo))
