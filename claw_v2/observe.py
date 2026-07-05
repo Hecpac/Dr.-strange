@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import hashlib
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 from claw_v2.sqlite_runtime import (
     WAL_HEAL_RETRY_LIMIT,
@@ -36,6 +41,42 @@ OBSERVE_SQLITE_BUSY_TIMEOUT_MS = 250
 # wait for any in-flight emit to finish (rather than drop-fast like emits do),
 # so it gets a much longer busy timeout.
 OBSERVE_MAINTENANCE_BUSY_TIMEOUT_MS = 30_000
+OBSERVE_SPILL_DRAIN_MAX_LINES = 1_000
+_SPILL_INSERT_STATUS = Literal["inserted", "already_present", "failed"]
+
+
+@dataclass(frozen=True, slots=True)
+class ObserveSpillDrainResult:
+    spill_path: str
+    read_lines: int = 0
+    inserted: int = 0
+    already_present: int = 0
+    malformed: int = 0
+    failed: int = 0
+    removed_lines: int = 0
+    remaining_lines: int = 0
+    limited: bool = False
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class _SpillRecord:
+    raw_line: str
+    spill_id: str
+    event_type: str
+    payload_json: str
+    dropped_at: float | None
+    lane: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    trace_id: str | None = None
+    root_trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
+    job_id: str | None = None
+    artifact_id: str | None = None
 
 
 OBSERVE_SCHEMA = """
@@ -53,6 +94,14 @@ CREATE TABLE IF NOT EXISTS observe_stream (
     job_id TEXT,
     artifact_id TEXT,
     payload TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS observe_spill_drain (
+    spill_id TEXT PRIMARY KEY,
+    observe_stream_id INTEGER NOT NULL,
+    drained_at REAL NOT NULL,
+    dropped_at REAL,
+    raw_sha256 TEXT NOT NULL
 );
 """
 
@@ -401,11 +450,256 @@ class ObserveStream:
                 },
                 sort_keys=True,
             )
-            spill_path = self.db_path.with_suffix(".spill.jsonl")
-            with open(spill_path, "a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
+            self._append_spill_line(line)
         except Exception:
             logger.debug("observe spill write failed", exc_info=True)
+
+    def _spill_path(self) -> Path:
+        return self.db_path.with_suffix(".spill.jsonl")
+
+    @contextlib.contextmanager
+    def _spill_file_lock(self):
+        spill_path = self._spill_path()
+        lock_path = spill_path.with_suffix(spill_path.suffix + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+    def _append_spill_line(self, line: str) -> None:
+        spill_path = self._spill_path()
+        with self._spill_file_lock():
+            with spill_path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+
+    def drain_spill(
+        self,
+        *,
+        max_lines: int = OBSERVE_SPILL_DRAIN_MAX_LINES,
+        max_attempts: int = OBSERVE_LOCKED_RETRY_ATTEMPTS,
+    ) -> ObserveSpillDrainResult:
+        """Replay spilled observe events into ``observe_stream`` idempotently.
+
+        The spill file is append-only on the emit path. Drain removes only lines
+        whose event insert and dedup marker are already durable, and it compacts
+        through a temp file + atomic replace under the same spill-file lock used
+        by appenders. Malformed or currently uninsertable lines stay in place.
+        """
+        spill_path = self._spill_path()
+        if not spill_path.exists():
+            return ObserveSpillDrainResult(spill_path=str(spill_path))
+        try:
+            raw_lines = spill_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            logger.exception("observe spill drain could not read %s", spill_path)
+            return ObserveSpillDrainResult(spill_path=str(spill_path), failed=1)
+
+        limit = max(0, int(max_lines))
+        lines_to_process = raw_lines[:limit]
+        limited = len(raw_lines) > len(lines_to_process)
+        inserted = already_present = malformed = failed = 0
+        removable_raw_lines: set[str] = set()
+        for raw_line in lines_to_process:
+            record = self._parse_spill_record(raw_line)
+            if record is None:
+                malformed += 1
+                continue
+            status = self._drain_spill_record(record, max_attempts=max_attempts)
+            if status == "inserted":
+                inserted += 1
+                removable_raw_lines.add(raw_line)
+            elif status == "already_present":
+                already_present += 1
+                removable_raw_lines.add(raw_line)
+            else:
+                failed += 1
+
+        removed_lines = 0
+        remaining_lines = len(raw_lines)
+        if removable_raw_lines:
+            removed_lines, remaining_lines = self._compact_spill(removable_raw_lines)
+        return ObserveSpillDrainResult(
+            spill_path=str(spill_path),
+            read_lines=len(lines_to_process),
+            inserted=inserted,
+            already_present=already_present,
+            malformed=malformed,
+            failed=failed,
+            removed_lines=removed_lines,
+            remaining_lines=remaining_lines,
+            limited=limited,
+        )
+
+    def _parse_spill_record(self, raw_line: str) -> _SpillRecord | None:
+        try:
+            parsed = json.loads(raw_line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        event_type = parsed.get("event_type")
+        payload_raw = parsed.get("payload")
+        if not isinstance(event_type, str) or not event_type:
+            return None
+        if not isinstance(payload_raw, str):
+            return None
+        try:
+            payload = json.loads(payload_raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        dropped_at_raw = parsed.get("dropped_at")
+        dropped_at = float(dropped_at_raw) if isinstance(dropped_at_raw, (int, float)) else None
+        text_columns = {
+            name: parsed.get(name)
+            for name in (
+                "lane",
+                "provider",
+                "model",
+                "trace_id",
+                "root_trace_id",
+                "span_id",
+                "parent_span_id",
+                "job_id",
+                "artifact_id",
+            )
+        }
+        if any(value is not None and not isinstance(value, str) for value in text_columns.values()):
+            return None
+        digest = hashlib.sha256(raw_line.encode("utf-8")).hexdigest()
+        return _SpillRecord(
+            raw_line=raw_line,
+            spill_id=f"sha256:{digest}",
+            event_type=event_type,
+            payload_json=payload_raw,
+            dropped_at=dropped_at,
+            **text_columns,
+        )
+
+    def _drain_spill_record(
+        self, record: _SpillRecord, *, max_attempts: int
+    ) -> _SPILL_INSERT_STATUS:
+        attempts = max(1, int(max_attempts))
+        for attempt in range(1, attempts + 1):
+            if self._db is not None:
+                with self._db.try_acquire() as acquired:
+                    if acquired:
+                        return self._insert_spill_record_locked(record)
+            else:
+                acquired = self._lock.acquire(blocking=False)
+                if acquired:
+                    try:
+                        return self._insert_spill_record_locked(record)
+                    finally:
+                        self._lock.release()
+            if attempt < attempts:
+                time.sleep(OBSERVE_LOCKED_RETRY_DELAY_SECONDS * attempt)
+        return "failed"
+
+    def _insert_spill_record_locked(self, record: _SpillRecord) -> _SPILL_INSERT_STATUS:
+        raw_sha256 = record.spill_id.removeprefix("sha256:")
+        try:
+            existing = self._conn.execute(
+                "SELECT observe_stream_id FROM observe_spill_drain WHERE spill_id = ?",
+                (record.spill_id,),
+            ).fetchone()
+            if existing is not None:
+                return "already_present"
+            cursor = self._conn.execute(
+                """
+                INSERT INTO observe_stream (
+                    event_type, lane, provider, model,
+                    trace_id, root_trace_id, span_id, parent_span_id, job_id, artifact_id,
+                    payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.event_type,
+                    record.lane,
+                    record.provider,
+                    record.model,
+                    record.trace_id,
+                    record.root_trace_id,
+                    record.span_id,
+                    record.parent_span_id,
+                    record.job_id,
+                    record.artifact_id,
+                    record.payload_json,
+                ),
+            )
+            self._conn.execute(
+                """
+                INSERT INTO observe_spill_drain (
+                    spill_id, observe_stream_id, drained_at, dropped_at, raw_sha256
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    record.spill_id,
+                    int(cursor.lastrowid),
+                    time.time(),
+                    record.dropped_at,
+                    raw_sha256,
+                ),
+            )
+            self._conn.commit()
+            return "inserted"
+        except sqlite3.IntegrityError:
+            try:
+                self._conn.rollback()
+            except Exception:
+                logger.debug("observe spill drain rollback failed after duplicate", exc_info=True)
+            return "already_present"
+        except sqlite3.Error:
+            try:
+                self._conn.rollback()
+            except Exception:
+                logger.debug("observe spill drain rollback failed", exc_info=True)
+            logger.warning(
+                "observe spill drain could not insert event_type=%s",
+                record.event_type,
+                exc_info=True,
+            )
+            return "failed"
+
+    def _compact_spill(self, removable_raw_lines: set[str]) -> tuple[int, int]:
+        spill_path = self._spill_path()
+        with self._spill_file_lock():
+            if not spill_path.exists():
+                return 0, 0
+            raw_lines = spill_path.read_text(encoding="utf-8").splitlines()
+            remaining = [line for line in raw_lines if line not in removable_raw_lines]
+            removed = len(raw_lines) - len(remaining)
+            if not removed:
+                return 0, len(raw_lines)
+            if remaining:
+                tmp_path = spill_path.with_name(f".{spill_path.name}.tmp")
+                with tmp_path.open("w", encoding="utf-8") as fh:
+                    fh.write("\n".join(remaining) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_path, spill_path)
+            else:
+                spill_path.unlink(missing_ok=True)
+            try:
+                dir_fd = os.open(str(spill_path.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                logger.debug("observe spill drain parent fsync failed", exc_info=True)
+            return removed, len(remaining)
 
     def _ensure_schema(self) -> None:
         existing = {

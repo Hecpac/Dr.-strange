@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice runtime-bounded-persistent-lock-self-heal (2026-07-05, O1.3): RuntimeDb persistent_lock no longer immediately leaves a permanent zombie on the first threshold crossing. Lock-only errors may spend one owner-controlled reconnect/retry budget per episode; success resets the episode, repeated lock after budget still marks degraded/fails closed, and corruption/no-lock SQLite errors never self-heal. New invariant runtime_db_persistent_lock_self_heal_is_bounded_and_lock_only."
-doc_version: 2.77
+describes_commit: "slice observe-spill-drain (2026-07-05, O1.4): ObserveStream now drains claw.spill.jsonl back into observe_stream idempotently. Each raw spill line gets a deterministic spill_id marker committed atomically with the replayed event, malformed/failed lines remain in the append-only spill, and compaction runs only after durable insert/already-present proof in the off-tick observe_maintenance runner. New invariant observe_spill_drain_is_idempotent_and_lossless_until_durable."
+doc_version: 2.78
 last_verified: 2026-07-05
-verification_method: "O1.3 local: tests/test_sqlite_runtime.py covers transient persistent_lock self-heal success, repeated lock after budget degrade/fail-closed, and non-lock critical SQLite errors with no reconnect; tests/test_runtimedb_wiring.py proves observe event wiring and no WAL-heal handles; tests/test_architecture_invariants.py locks the reconnect path to _is_sqlite_locked_error."
+verification_method: "O1.4 local: tests/test_observe_spill_drain.py covers successful drain, idempotent replay, malformed-line preservation, DB contention fail-safe behavior, and no compaction before durable insert; tests/test_architecture_invariants.py locks drain_spill to the off-tick observe_maintenance runner and preserves RuntimeDb lock discipline."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -278,6 +278,30 @@ invariants:
     why: O1.2 made write-dead RuntimeDb visible. O1.3 closes the transient lock
          zombie class without reviving the retired WAL-heal cascade or masking
          corruption/no-lock SQLite failures that require fail-closed handling.
+
+  observe_spill_drain_is_idempotent_and_lossless_until_durable:
+    rule: `claw.spill.jsonl` remains the append-only recovery source for
+          observe events that could not be inserted during DB contention or
+          degradation. `ObserveStream.drain_spill()` may remove a spill line
+          only after the event insert and its deterministic `spill_id` marker
+          are committed in SQLite, or after that marker proves a prior replay
+          already succeeded. Malformed lines and lines that cannot currently
+          acquire/commit to the DB stay in the spill file. JSONL compaction must
+          be atomic under the same spill-file lock used by appenders, and the
+          production drain call-site must remain off-tick in
+          `observe_maintenance`.
+    enforced_by:
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_inserts_events_and_removes_durable_lines
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_replay_is_idempotent
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_preserves_malformed_lines_and_drains_valid_lines
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_leaves_file_untouched_when_runtime_db_lock_is_contended
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_keeps_lines_that_fail_before_durable_insert
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_observe_spill_drain_only_runs_off_tick
+    why: O1.1 made RuntimeDb degradation visible and spill-backed, and O1.3
+         lets transient locks recover. Without an idempotent drain, spilled
+         audit events remain permanently outside `observe_stream`; without the
+         durable-marker-before-compaction rule, recovery itself could become an
+         audit-loss path.
 
   web_chat_api_fail_closed_without_token:
     rule: LocalChatAPI protects every `/api/*` route with a configured web chat

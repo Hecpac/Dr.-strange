@@ -1976,6 +1976,7 @@ def _setup_scheduler(
             # opt-in via CLAW_OBSERVE_VACUUM_ENABLED.
             if _maintenance_skip():
                 return
+            spill_drain = observe.drain_spill()
             deleted = observe.prune(
                 retention_days=OBSERVE_RETENTION_DAYS,
                 max_total_rows=OBSERVE_MAX_TOTAL_ROWS,
@@ -1989,6 +1990,7 @@ def _setup_scheduler(
                 payload={
                     "deleted_rows": deleted,
                     "max_total_rows": OBSERVE_MAX_TOTAL_ROWS,
+                    "spill_drain": spill_drain.to_dict(),
                     "vacuum_ran": vacuum_ran,
                 },
             )
