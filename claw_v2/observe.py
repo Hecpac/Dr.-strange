@@ -45,6 +45,57 @@ OBSERVE_MAINTENANCE_BUSY_TIMEOUT_MS = 30_000
 OBSERVE_SPILL_DRAIN_MAX_LINES = 1_000
 _SPILL_INSERT_STATUS = Literal["inserted", "already_present", "failed"]
 
+AUDIT_CRITICAL_OBSERVE_EVENTS = frozenset(
+    {
+        # Approvals / human authorization.
+        "approval_created",
+        "approval_approved",
+        "approval_rejected",
+        "approval_expired",
+        "approval_archived",
+        "approval_pending",
+        "approval_required",
+        "tier3_approval_required",
+        # Tool-use and runtime policy enforcement.
+        "sdk_post_tool_use",
+        "sdk_post_tool_use_failure",
+        "runtime_policy_tool_not_declared",
+        "brain_inline_browser_drive_blocked",
+        "brain_detached_process_blocked",
+        "brain_sdk_agent_dispatch_blocked",
+        "brain_tooluse_ledger_started",
+        "brain_tooluse_ledger_needs_verification",
+        "brain_tooluse_ledger_completed_with_warnings",
+        "brain_tooluse_ledger_failed",
+        "brain_tooluse_ledger_blocked_unverified_action",
+        "brain_tooluse_ledger_verification_failed",
+        "tool_pivot",
+        "critical_action_execution",
+        "critical_action_verification",
+        # Auth / policy surfaces.
+        "web_chat_auth_rejected",
+        "web_chat_request_failed",
+        # Runtime degradation and critical errors.
+        "runtime_db_degraded",
+        "runtime_db_persistent_lock_self_heal",
+        "daemon_branch_integrity_violation",
+        "startup_healthcheck_failed",
+        "scheduled_job_error",
+        "coordinator_critical_worker_error",
+        "coordinator_critical_abort_orphaned_workers",
+        "kairos_decide_failed",
+        "llm_error",
+        "f2_durability_write_failed",
+        "p0_telemetry_failed",
+    }
+)
+
+
+def is_audit_critical_event(event_type: str, payload: dict | None = None) -> bool:
+    if event_type in AUDIT_CRITICAL_OBSERVE_EVENTS:
+        return True
+    return isinstance(payload, dict) and payload.get("audit_critical") is True
+
 
 @dataclass(frozen=True, slots=True)
 class ObserveSpillDrainResult:
@@ -191,6 +242,9 @@ class ObserveStream:
         from claw_v2.redaction import redact_sensitive
 
         clean_payload = redact_sensitive(scrub_for_persistence(payload or {}), limit=0)
+        audit_critical = is_audit_critical_event(event_type, clean_payload)
+        if audit_critical and isinstance(clean_payload, dict):
+            clean_payload.setdefault("audit_critical", True)
         # P0-B: stamp the active turn_id (if any) on every persisted payload so
         # behavior receipts can join observe, task ledger, and approval rows by
         # one column instead of fragile timestamp windows. When a critical
@@ -219,6 +273,7 @@ class ObserveStream:
             job_id=job_id,
             artifact_id=artifact_id,
             clean_payload=clean_payload,
+            audit_critical=audit_critical,
         )
         # Dispatch in-process subscribers even if the diagnostic write was
         # dropped: a transient SQLite lock must not swallow task-completion
@@ -255,6 +310,7 @@ class ObserveStream:
         job_id: str | None,
         artifact_id: str | None,
         clean_payload: dict,
+        audit_critical: bool,
     ) -> bool:
         payload_json = json.dumps(clean_payload)
         if self._db is not None:
@@ -273,6 +329,7 @@ class ObserveStream:
                 parent_span_id=parent_span_id,
                 job_id=job_id,
                 artifact_id=artifact_id,
+                audit_critical=audit_critical,
             )
         # M5: bounded heal burst — concurrent heals can re-close the connection
         # during a post-heal retry, so tolerate a run of heals (not exactly one)
@@ -361,6 +418,7 @@ class ObserveStream:
                         parent_span_id=parent_span_id,
                         job_id=job_id,
                         artifact_id=artifact_id,
+                        audit_critical=audit_critical,
                         payload_json=payload_json,
                     )
                     return False
@@ -376,7 +434,12 @@ class ObserveStream:
         return False
 
     def _persist_event_shared(
-        self, event_type: str, payload_json: str, **columns: str | None
+        self,
+        event_type: str,
+        payload_json: str,
+        *,
+        audit_critical: bool = False,
+        **columns: str | None,
     ) -> bool:
         """Persist via the shared RuntimeDb connection (F1.1a1 production path).
 
@@ -430,11 +493,21 @@ class ObserveStream:
             # indefinitely; exhausting the attempts spills below.
             if attempt < OBSERVE_LOCKED_RETRY_ATTEMPTS:
                 time.sleep(OBSERVE_LOCKED_RETRY_DELAY_SECONDS * attempt)
-        self._spill_dropped_event(event_type, payload_json=payload_json, **columns)
+        self._spill_dropped_event(
+            event_type,
+            payload_json=payload_json,
+            audit_critical=audit_critical,
+            **columns,
+        )
         return False
 
     def _spill_dropped_event(
-        self, event_type: str, *, payload_json: str, **columns: str | None
+        self,
+        event_type: str,
+        *,
+        payload_json: str,
+        audit_critical: bool = False,
+        **columns: str | None,
     ) -> None:
         """Append a dropped event as a JSONL line next to the DB.
 
@@ -448,6 +521,7 @@ class ObserveStream:
                     "dropped_at": time.time(),
                     "event_type": event_type,
                     "spill_id": f"obs-spill:{uuid.uuid4().hex}",
+                    **({"audit_critical": True} if audit_critical else {}),
                     **{k: v for k, v in columns.items() if v is not None},
                     "payload": payload_json,
                 },

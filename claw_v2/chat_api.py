@@ -79,6 +79,14 @@ class LocalChatAPI:
     ) -> ChatAPIResponse:
         normalized_path = path.split("?", 1)[0]
         if normalized_path.startswith("/api/") and not self._is_authorized(headers):
+            self._emit_chat_event(
+                "web_chat_auth_rejected",
+                {
+                    "path": normalized_path,
+                    "method": method.upper(),
+                    "reason": "unauthorized",
+                },
+            )
             return ChatAPIResponse(status_code=401, payload={"error": "unauthorized"})
         if normalized_path == "/api/traces":
             return self._dispatch_traces(method=method, path=path)
