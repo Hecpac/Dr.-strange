@@ -609,6 +609,15 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
         required = {
             "approval": {"approval_created", "approval_approved", "approval_rejected"},
+            "human_authorization": {
+                "owner_delegation_approval_required",
+                "telegram_imperative_pending_approval",
+                "implicit_approval_requires_explicit_approval",
+                "approval_detected",
+                "computer_approval_pending",
+                "computer_browser_use_approval_required",
+                "computer_approval_resume_blocked",
+            },
             "tool_use": {
                 "sdk_post_tool_use",
                 "sdk_post_tool_use_failure",
