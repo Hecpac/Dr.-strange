@@ -1152,8 +1152,8 @@ _TELEGRAM_IMPERATIVE_RULES: tuple[dict[str, Any], ...] = (
     {
         "intent": "ui.open_app",
         "patterns": (
-            r"^\s*(?:abre|abrir)\s+(?:la\s+)?app(?:\s+de\s+(?P<target_es_app>[a-z0-9 ._-]+))?[\s.!?…]*$",
-            r"^\s*(?:abre|abrir)\s+(?P<target_es_bare>codex|chatgpt|chrome|claude)[\s.!?…]*$",
+            r"^\s*[¿¡]?\s*(?:abre|abrir)\s+(?:la\s+)?app(?:\s+de\s+(?P<target_es_app>[a-z0-9 ._-]+))?[\s.!?…]*$",
+            r"^\s*[¿¡]?\s*(?:abre|abrir)\s+(?P<target_es_bare>codex|chatgpt|chrome|claude)[\s.!?…]*$",
             r"^\s*open\s+(?:the\s+)?app(?:\s+(?P<target_en_app>[a-z0-9 ._-]+))?[\s.!?…]*$",
             r"^\s*open\s+(?P<target_en_bare>codex|chatgpt|chrome|claude)[\s.!?…]*$",
         ),
@@ -1164,9 +1164,9 @@ _TELEGRAM_IMPERATIVE_RULES: tuple[dict[str, Any], ...] = (
     {
         "intent": "ui.inspect_app",
         "patterns": (
-            r"^\s*revisa\s+(?:la\s+)?app(?:\s+(?:de\s+)?(?P<target_es_inspect>[a-z0-9 ._-]+))?[\s.!?…]*$",
-            r"^\s*revisa\s+(?P<target_es_inspect_bare>codex|chatgpt|chrome|claude)[\s.!?…]*$",
-            r"^\s*revisa\s+en\s+(?P<target_es_inspect_in>[a-z0-9 ._-]+)[\s.!?…]*$",
+            r"^\s*[¿¡]?\s*revisa\s+(?:la\s+)?app(?:\s+(?:de\s+)?(?P<target_es_inspect>[a-z0-9 ._-]+))?[\s.!?…]*$",
+            r"^\s*[¿¡]?\s*revisa\s+(?P<target_es_inspect_bare>codex|chatgpt|chrome|claude)[\s.!?…]*$",
+            r"^\s*[¿¡]?\s*revisa\s+en\s+(?P<target_es_inspect_in>[a-z0-9 ._-]+)[\s.!?…]*$",
             r"^\s*review\s+(?:the\s+)?app(?:\s+(?P<target_en_inspect>[a-z0-9 ._-]+))?[\s.!?…]*$",
             r"^\s*review\s+(?P<target_en_inspect_bare>codex|chatgpt|chrome|claude)[\s.!?…]*$",
             r"^\s*review\s+in\s+(?P<target_en_inspect_in>[a-z0-9 ._-]+)[\s.!?…]*$",
@@ -1220,6 +1220,30 @@ _ACTIONABLE_TELEGRAM_MARKERS: tuple[str, ...] = (
 )
 
 
+_KNOWN_CANONICAL_APP_TARGETS: dict[str, str] = {
+    "codex": "Codex app",
+    "codex app": "Codex app",
+    "chatgpt": "ChatGPT",
+    "chat gpt": "ChatGPT",
+    "chrome": "Chrome",
+    "google chrome": "Chrome",
+    "claude": "Claude",
+    "claude app": "Claude",
+    "gcp": "Google Cloud",
+    "google cloud": "Google Cloud",
+}
+
+_KNOWN_CANONICAL_APP_MARKERS: tuple[str, ...] = (
+    "codex",
+    "chatgpt",
+    "chat gpt",
+    "chrome",
+    "claude",
+    "google cloud",
+    "gcp",
+)
+
+
 def _target_from_match(match: re.Match[str]) -> str | None:
     for name, value in match.groupdict().items():
         if not name.startswith("target_"):
@@ -1235,16 +1259,11 @@ def _canonical_target(target: str | None) -> str | None:
     if not target:
         return None
     normalized = _normalize_command_text(target).strip()
-    if "codex" in normalized:
-        return "Codex app"
-    if "chatgpt" in normalized or "chat gpt" in normalized:
-        return "ChatGPT"
-    if "chrome" in normalized:
-        return "Chrome"
-    if "claude" in normalized:
-        return "Claude"
-    if "google cloud" in normalized or "gcp" in normalized:
-        return "Google Cloud"
+    known_target = _KNOWN_CANONICAL_APP_TARGETS.get(normalized)
+    if known_target:
+        return known_target
+    if any(marker in normalized for marker in _KNOWN_CANONICAL_APP_MARKERS):
+        return None
     if normalized in {"app", "la app", "the app"}:
         return None
     return target.strip()[:80]

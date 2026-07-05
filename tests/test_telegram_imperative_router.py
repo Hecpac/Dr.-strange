@@ -1008,6 +1008,7 @@ def test_open_app_imperative_uses_local_open_without_approval(bot) -> None:
         "no abras chrome",
         "me molesta que digas abre chrome",
         "si digo abre chrome no lo hagas",
+        "Abrir la app de Chrome no lo hagas",
     ],
 )
 def test_embedded_open_chrome_phrase_does_not_call_local_open(bot, text: str) -> None:
@@ -1028,6 +1029,8 @@ def test_embedded_open_chrome_phrase_does_not_call_local_open(bot, text: str) ->
     [
         ("Abre Chrome", "Google Chrome"),
         ("Abrir Chrome", "Google Chrome"),
+        ("¿Abre Chrome?", "Google Chrome"),
+        ("¡Abre Chrome!", "Google Chrome"),
         ("Abre ChatGPT", "ChatGPT"),
         ("Abre Codex", "Codex"),
     ],
@@ -1051,6 +1054,61 @@ def test_explicit_bare_open_app_commands_still_use_local_open(
     run.assert_called_once_with(
         ["open", "-a", expected_app], capture_output=True, text=True, timeout=10
     )
+    assert "telegram_imperative_executed" in events
+    _assert_not_brain_fallback(response, decisions)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "no revises chrome",
+        "me molesta que digas revisa chrome",
+        "si digo revisa chrome no lo hagas",
+    ],
+)
+def test_embedded_inspect_chrome_phrase_does_not_run_local_inspect(bot, text: str) -> None:
+    bot.computer = MagicMock()
+    bot.browser_use = None
+    bot.computer_gate = MagicMock()
+
+    with patch("claw_v2.bot.subprocess.run") as run:
+        response, _decisions, events = _drive(bot, text)
+
+    run.assert_not_called()
+    bot.computer.capture_screenshot.assert_not_called()
+    assert "ui.inspect_app" not in (response or "")
+    assert "telegram_imperative_executed" not in events
+
+
+@pytest.mark.parametrize("text", ["Revisa Chrome", "¿Revisa Chrome?"])
+def test_explicit_bare_inspect_app_command_still_uses_computer_read(bot, text: str) -> None:
+    bot.computer = MagicMock()
+    bot.computer.capture_screenshot.return_value = {
+        "data": "abc123",
+        "media_type": "image/png",
+    }
+
+    with (
+        patch("claw_v2.bot.subprocess.run") as run,
+        patch.object(
+            type(bot.brain),
+            "handle_message",
+            return_value=LLMResponse(
+                content="Chrome is visible.",
+                lane="brain",
+                provider="anthropic",
+                model="claude-opus-4-7",
+            ),
+        ) as mock_handle_message,
+    ):
+        response, decisions, events = _drive(bot, text)
+
+    assert response
+    _assert_no_imperative_receipt(response)
+    assert "Chrome is visible." in response
+    run.assert_not_called()
+    bot.computer.capture_screenshot.assert_called_once_with()
+    mock_handle_message.assert_called_once()
     assert "telegram_imperative_executed" in events
     _assert_not_brain_fallback(response, decisions)
 
