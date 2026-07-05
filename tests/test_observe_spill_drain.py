@@ -58,10 +58,10 @@ class ObserveSpillDrainTests(unittest.TestCase):
             spill_path = observe.db_path.with_suffix(".spill.jsonl")
             raw = _spill_line("spilled_event", {"n": 1})
             spill_path.write_text(raw + "\n", encoding="utf-8")
-            first = observe.drain_spill()
+            with patch.object(observe, "_compact_spill", return_value=(0, 1)):
+                first = observe.drain_spill()
             self.assertEqual(first.inserted, 1)
 
-            spill_path.write_text(raw + "\n", encoding="utf-8")
             second = observe.drain_spill()
 
             self.assertEqual(second.already_present, 1)
@@ -125,15 +125,48 @@ class ObserveSpillDrainTests(unittest.TestCase):
 
             result = observe.drain_spill(max_lines=2)
 
+            self.assertEqual(result.read_lines, 2)
             self.assertEqual(result.inserted, 2)
             self.assertTrue(result.limited)
             self.assertEqual(result.remaining_lines, 1)
-            self.assertEqual(spill_path.read_text(encoding="utf-8"), raw + "\n")
+            remaining = spill_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(remaining), 1)
+            remaining_record = json.loads(remaining[0])
+            self.assertEqual(remaining_record["event_type"], "bounded_spill")
+            self.assertEqual(json.loads(remaining_record["payload"]), {"n": 1})
+            self.assertIsInstance(remaining_record["spill_id"], str)
             with observe._lock:
                 count = observe._conn.execute(
                     "SELECT COUNT(*) FROM observe_stream WHERE event_type = 'bounded_spill'"
                 ).fetchone()[0]
             self.assertEqual(count, 2)
+
+    def test_drain_spill_max_lines_replays_remaining_duplicate_occurrences(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = ObserveStream(Path(tmpdir) / "observe.db")
+            spill_path = observe.db_path.with_suffix(".spill.jsonl")
+            raw = _spill_line("bounded_spill", {"n": 1})
+            spill_path.write_text(raw + "\n" + raw + "\n" + raw + "\n", encoding="utf-8")
+
+            first = observe.drain_spill(max_lines=1)
+            second = observe.drain_spill(max_lines=1)
+            third = observe.drain_spill(max_lines=1)
+
+            self.assertEqual(first.inserted, 1)
+            self.assertEqual(second.inserted, 1)
+            self.assertEqual(third.inserted, 1)
+            self.assertEqual(first.already_present, 0)
+            self.assertEqual(second.already_present, 0)
+            self.assertEqual(third.already_present, 0)
+            self.assertEqual(first.read_lines, 1)
+            self.assertEqual(second.read_lines, 1)
+            self.assertEqual(third.read_lines, 1)
+            self.assertFalse(spill_path.exists())
+            with observe._lock:
+                count = observe._conn.execute(
+                    "SELECT COUNT(*) FROM observe_stream WHERE event_type = 'bounded_spill'"
+                ).fetchone()[0]
+            self.assertEqual(count, 3)
 
     def test_drain_spill_compaction_keeps_newly_appended_duplicate_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -157,7 +190,12 @@ class ObserveSpillDrainTests(unittest.TestCase):
 
             self.assertEqual(result.inserted, 1)
             self.assertEqual(result.remaining_lines, 1)
-            self.assertEqual(spill_path.read_text(encoding="utf-8"), raw + "\n")
+            remaining = spill_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(remaining), 1)
+            remaining_record = json.loads(remaining[0])
+            self.assertEqual(remaining_record["event_type"], "appended_spill")
+            self.assertEqual(json.loads(remaining_record["payload"]), {"n": 1})
+            self.assertIsInstance(remaining_record["spill_id"], str)
 
     def test_drain_spill_preserves_malformed_lines_and_drains_valid_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -223,7 +261,12 @@ class ObserveSpillDrainTests(unittest.TestCase):
 
             self.assertEqual(result.inserted, 1)
             self.assertEqual(result.failed, 1)
-            self.assertEqual(spill_path.read_text(encoding="utf-8"), second + "\n")
+            remaining = spill_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(remaining), 1)
+            remaining_record = json.loads(remaining[0])
+            self.assertEqual(remaining_record["event_type"], "second_spill")
+            self.assertEqual(json.loads(remaining_record["payload"]), {"n": 2})
+            self.assertIsInstance(remaining_record["spill_id"], str)
             events = observe.recent_events(limit=5, event_type="first_spill")
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["payload"]["n"], 1)

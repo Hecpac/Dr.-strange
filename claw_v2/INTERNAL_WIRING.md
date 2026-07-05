@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice observe-spill-drain (2026-07-05, O1.4): ObserveStream now drains claw.spill.jsonl back into observe_stream idempotently. New spill lines carry an occurrence id, legacy lines derive one from their physical snapshot occurrence, and compaction removes only processed snapshot positions after durable insert/already-present proof in the off-tick observe_maintenance runner. New invariant observe_spill_drain_is_idempotent_and_lossless_until_durable."
-doc_version: 2.79
+describes_commit: "slice observe-spill-drain (2026-07-05, O1.4): ObserveStream now drains claw.spill.jsonl back into observe_stream idempotently. New spill lines carry an occurrence id, legacy lines are occurrence-scoped during replay, legacy survivors are atomically upgraded with an id during compaction, and compaction removes only processed snapshot positions after durable insert/already-present proof in the off-tick observe_maintenance runner. New invariant observe_spill_drain_is_idempotent_and_lossless_until_durable."
+doc_version: 2.80
 last_verified: 2026-07-05
-verification_method: "O1.4 local: tests/test_observe_spill_drain.py covers successful drain, duplicate raw-line occurrences, idempotent duplicate replay, max_lines-safe compaction, newly appended duplicate preservation, malformed-line preservation, DB contention fail-safe behavior, and no compaction before durable insert; tests/test_architecture_invariants.py locks drain_spill to the off-tick observe_maintenance runner and preserves RuntimeDb lock discipline."
+verification_method: "O1.4 local: tests/test_observe_spill_drain.py covers successful drain, duplicate raw-line occurrences, idempotent duplicate replay, max_lines-bounded replay across duplicate drains, newly appended duplicate preservation, malformed-line preservation, DB contention fail-safe behavior, and no compaction before durable insert; tests/test_architecture_invariants.py locks drain_spill to the off-tick observe_maintenance runner and preserves RuntimeDb lock discipline."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -284,8 +284,10 @@ invariants:
           observe events that could not be inserted during DB contention or
           degradation. `ObserveStream.drain_spill()` treats every physical
           spill occurrence as replayable: new spill writes include an
-          occurrence id, and legacy lines without one derive an id from their
-          physical snapshot position plus raw hash. The drain may remove only
+          occurrence id; legacy lines without one are replayed with a
+          snapshot-occurrence id, and valid legacy survivors are atomically
+          upgraded in the spill file with an occurrence id during compaction so
+          later drains cannot collapse shifted duplicate bytes. The drain may remove only
           snapshot positions whose event insert and `spill_id` marker are
           committed in SQLite, or whose marker proves that exact occurrence
           already replayed. Duplicate raw lines must replay as distinct events.
@@ -300,6 +302,7 @@ invariants:
       - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_replays_duplicate_raw_lines_as_distinct_occurrences
       - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_duplicate_replay_is_idempotent_per_occurrence
       - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_max_lines_keeps_unprocessed_duplicate_occurrences
+      - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_max_lines_replays_remaining_duplicate_occurrences
       - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_compaction_keeps_newly_appended_duplicate_line
       - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_preserves_malformed_lines_and_drains_valid_lines
       - tests/test_observe_spill_drain.py::ObserveSpillDrainTests::test_drain_spill_leaves_file_untouched_when_runtime_db_lock_is_contended

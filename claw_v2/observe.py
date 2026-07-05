@@ -483,6 +483,30 @@ class ObserveStream:
                 fh.flush()
                 os.fsync(fh.fileno())
 
+    def _ensure_spill_occurrence_ids(self, raw_lines: list[str]) -> tuple[list[str], bool]:
+        normalized_lines: list[str] = []
+        changed = False
+        for raw_line in raw_lines:
+            normalized_line = self._line_with_spill_occurrence_id(raw_line)
+            normalized_lines.append(normalized_line)
+            changed = changed or normalized_line != raw_line
+        return normalized_lines, changed
+
+    def _line_with_spill_occurrence_id(self, raw_line: str) -> str:
+        try:
+            parsed = json.loads(raw_line)
+        except json.JSONDecodeError:
+            return raw_line
+        if not isinstance(parsed, dict):
+            return raw_line
+        parsed_spill_id = parsed.get("spill_id")
+        if isinstance(parsed_spill_id, str) and parsed_spill_id:
+            return raw_line
+        if self._parse_spill_record(raw_line, line_index=0) is None:
+            return raw_line
+        parsed["spill_id"] = f"obs-spill:{uuid.uuid4().hex}"
+        return json.dumps(parsed, sort_keys=True)
+
     def drain_spill(
         self,
         *,
@@ -701,24 +725,31 @@ class ObserveStream:
             removed = len(raw_lines) - len(remaining)
             if not removed:
                 return 0, len(raw_lines)
-            if remaining:
-                tmp_path = spill_path.with_name(f".{spill_path.name}.tmp")
-                with tmp_path.open("w", encoding="utf-8") as fh:
-                    fh.write("\n".join(remaining) + "\n")
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                os.replace(tmp_path, spill_path)
-            else:
-                spill_path.unlink(missing_ok=True)
-            try:
-                dir_fd = os.open(str(spill_path.parent), os.O_RDONLY)
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
-            except OSError:
-                logger.debug("observe spill drain parent fsync failed", exc_info=True)
+            remaining, _ = self._ensure_spill_occurrence_ids(remaining)
+            self._replace_spill_lines_locked(spill_path, remaining)
             return removed, len(remaining)
+
+    def _replace_spill_lines_locked(self, spill_path: Path, lines: list[str]) -> None:
+        if lines:
+            tmp_path = spill_path.with_name(f".{spill_path.name}.tmp")
+            with tmp_path.open("w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, spill_path)
+        else:
+            spill_path.unlink(missing_ok=True)
+        self._fsync_spill_parent(spill_path)
+
+    def _fsync_spill_parent(self, spill_path: Path) -> None:
+        try:
+            dir_fd = os.open(str(spill_path.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            logger.debug("observe spill drain parent fsync failed", exc_info=True)
 
     def _ensure_schema(self) -> None:
         existing = {
