@@ -32,6 +32,9 @@ DEFAULT_ALERT_RULES: dict[str, AlertRule] = {
     "daemon_tick_error": AlertRule(
         "Daemon tick failed", severity="critical", cooldown_seconds=1800
     ),
+    "runtime_db_degraded": AlertRule(
+        "Runtime DB degraded", severity="critical", cooldown_seconds=1800
+    ),
     "daemon_task_reconciliation": AlertRule(
         "Stale task reconciliation",
         cooldown_seconds=1800,
@@ -186,6 +189,13 @@ def _event_detail(event_type: str, payload: dict[str, Any]) -> str:
         return f"Job: {payload.get('job', 'unknown')}\nError: {payload.get('error', 'unknown')}"
     if event_type == "daemon_tick_error":
         return f"Error: {payload.get('error', 'unknown')}"
+    if event_type == "runtime_db_degraded":
+        return (
+            f"Reason: {payload.get('reason_code', 'unknown')}\n"
+            f"Operation: {payload.get('operation', 'unknown')}\n"
+            f"Database: {payload.get('database_path', 'unknown')}\n"
+            f"Error: {payload.get('message', 'unknown')}"
+        )
     if event_type == "daemon_task_reconciliation":
         return f"Lost tasks: {payload.get('lost_tasks', 0)}"
     if event_type == "approval_expired":

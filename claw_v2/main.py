@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -231,6 +232,33 @@ class ClawRuntime:
     openai_tool_executor: object | None = None
     observation_window: ObservationWindowState | None = None
     f2_durability_store: F2DurabilityStore | None = None
+
+
+class RuntimeDbDegradedEventSink:
+    def __init__(self) -> None:
+        self._observe: ObserveStream | None = None
+        self._pending: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+
+    def bind(self, observe: ObserveStream) -> None:
+        with self._lock:
+            self._observe = observe
+            pending = self._pending
+            self._pending = []
+        for payload in pending:
+            self._emit(observe, payload)
+
+    def emit(self, payload: dict[str, Any]) -> None:
+        with self._lock:
+            observe = self._observe
+            if observe is None:
+                self._pending.append(dict(payload))
+                return
+        self._emit(observe, payload)
+
+    @staticmethod
+    def _emit(observe: ObserveStream, payload: dict[str, Any]) -> None:
+        observe.emit("runtime_db_degraded", payload=dict(payload))
 
 
 def build_runtime_approval_gate(approvals: ApprovalManager) -> Callable[[object, dict], None]:
@@ -622,13 +650,9 @@ def _startup_model_role_summary(config: AppConfig) -> str:
         if str(config.computer_browser_use_model).lower().startswith("claude")
         else "openai"
     )
-    pairs["browser_agent_configured"] = (
-        f"{browser_provider}:{config.computer_browser_use_model}"
-    )
+    pairs["browser_agent_configured"] = f"{browser_provider}:{config.computer_browser_use_model}"
     if BROWSER_USE_OAUTH_FALLBACK_MODEL:
-        pairs["browser_agent_fallback"] = (
-            f"anthropic:{BROWSER_USE_OAUTH_FALLBACK_MODEL}"
-        )
+        pairs["browser_agent_fallback"] = f"anthropic:{BROWSER_USE_OAUTH_FALLBACK_MODEL}"
     else:
         pairs["browser_agent_fallback"] = "disabled"
     return "; ".join(f"{key}={value}" for key, value in sorted(pairs.items()))
@@ -2352,10 +2376,12 @@ def build_runtime(
     # stores so the daemon is a single writer (RAÍZ #1). No production store
     # falls back to its own connection or per-store WAL-heal registration
     # (runtime_db=None is legacy/test-only).
-    runtime_db = RuntimeDb(config.db_path)
+    runtime_db_degraded_sink = RuntimeDbDegradedEventSink()
+    runtime_db = RuntimeDb(config.db_path, degraded_event_sink=runtime_db_degraded_sink.emit)
     memory, observe, metrics, approvals, bus, agent_store = _setup_core_state(
         config, runtime_db=runtime_db
     )
+    runtime_db_degraded_sink.bind(observe)
     task_ledger = TaskLedger(config.db_path, observe=observe, runtime_db=runtime_db)
     task_ledger.reconcile_false_successes()
     job_service = JobService(

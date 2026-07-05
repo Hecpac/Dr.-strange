@@ -26,7 +26,13 @@ from claw_v2.memory import MemoryStore
 from claw_v2.observe import ObserveStream
 from claw_v2.orchestration import OrchestrationStore
 from claw_v2.property_graph import PropertyGraphProjection
-from claw_v2.sqlite_runtime import RuntimeDb, _RuntimeConnHandle, _registry_key, _WAL_HEAL_REGISTRY
+from claw_v2.sqlite_runtime import (
+    RuntimeDb,
+    RuntimeDbDegradedError,
+    _RuntimeConnHandle,
+    _registry_key,
+    _WAL_HEAL_REGISTRY,
+)
 from claw_v2.task_ledger import TaskLedger
 from claw_v2.types import LLMResponse
 
@@ -80,6 +86,14 @@ class _DiskIoConn:
         return None
 
 
+class _DiskIoCursorConn:
+    def cursor(self):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    def rollback(self) -> None:
+        return None
+
+
 class BuildRuntimeIdentityTests(unittest.TestCase):
     def test_five_core_stores_share_one_runtimedb_lock_and_connection(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -115,6 +129,27 @@ class BuildRuntimeIdentityTests(unittest.TestCase):
             shared = rt.memory._db
             self.assertIsInstance(shared, RuntimeDb)
             self.assertEqual(_live_wal_heal_handles(shared.db_path), [])
+
+    def test_build_runtime_wires_runtime_db_degraded_sink_to_observe_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rt = _build_runtime(tmpdir)
+            _add_runtime_cleanup(self, rt)
+            shared = rt.memory._db
+            self.assertIsInstance(shared, RuntimeDb)
+            events: list[dict[str, object]] = []
+            rt.observe.subscribe("runtime_db_degraded", events.append)
+            shared._conn = _DiskIoCursorConn()
+
+            with self.assertRaises(RuntimeDbDegradedError):
+                with shared.cursor():
+                    pass
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["reason_code"], "sqlite_ioerr")
+            self.assertEqual(events[0]["operation"], "RuntimeDb.cursor")
+            self.assertEqual(events[0]["database_path"], str(shared.db_path))
+            spill = shared.db_path.with_suffix(".spill.jsonl")
+            self.assertIn("runtime_db_degraded", spill.read_text(encoding="utf-8"))
 
 
 class HeyGenCapabilityGrantsWiringTests(unittest.TestCase):

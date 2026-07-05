@@ -169,6 +169,26 @@ class OperationalAlertRouterTests(unittest.TestCase):
         self.assertIn("LLM provider circuit opened", notifications[0])
         self.assertIn("anthropic", notifications[0])
 
+    def test_alerts_when_runtime_db_degrades(self) -> None:
+        notifications: list[str] = []
+        router = OperationalAlertRouter(observe=self.observe, notify=notifications.append)
+        router.install()
+
+        self.observe.emit(
+            "runtime_db_degraded",
+            payload={
+                "reason_code": "sqlite_ioerr",
+                "operation": "RuntimeDb.cursor",
+                "database_path": "/tmp/claw.db",
+                "message": "disk I/O error",
+            },
+        )
+
+        self.assertEqual(len(notifications), 1)
+        self.assertIn("Runtime DB degraded", notifications[0])
+        self.assertIn("sqlite_ioerr", notifications[0])
+        self.assertIn("RuntimeDb.cursor", notifications[0])
+
     def test_alerts_when_token_window_breaker_degrades_autonomy(self) -> None:
         # #3: trip_breaker emits autonomy_degraded_by_token_window on every trip
         # (not behind the freeze `if changed` guard); the router must forward it
