@@ -266,19 +266,24 @@ invariants:
           lifecycle-owned `liveness.json` sink and `collect_diagnostics()`
           reader, not a parallel metrics stack. The compact `runtime_health`
           object must carry `spill_pending_count`, `db_write_probe_status`, and
-          `runtime_db_degraded_state`. A missing spill file counts as zero
-          pending records; malformed non-blank spill lines count as pending
-          recovery work because the spill drain preserves them until a durable
-          replay/compaction can prove removal is safe. The degraded state is
-          read from the existing RuntimeDb degraded reason and serialized by
-          the daemon heartbeat so out-of-process diagnostics can see it.
+          `runtime_db_degraded_state`. The spill count is a bounded, read-only
+          scan with `spill_pending_limited` marking truncation; it must never
+          truncate or mutate `claw.spill.jsonl`. A missing spill file counts as
+          zero pending records; malformed non-blank spill lines count as
+          pending recovery work because the spill drain preserves them until a
+          durable replay/compaction can prove removal is safe. The degraded
+          state is read from the existing RuntimeDb degraded reason and
+          serialized by the daemon heartbeat so out-of-process diagnostics can
+          see it even when the DB is already degraded/unreadable.
     enforced_by:
       - tests/test_daemon_liveness_sink.py::LivenessSinkModuleTests::test_spill_pending_summary_missing_file_counts_zero
       - tests/test_daemon_liveness_sink.py::LivenessSinkModuleTests::test_spill_pending_summary_counts_malformed_physical_lines
+      - tests/test_daemon_liveness_sink.py::LivenessSinkModuleTests::test_spill_pending_summary_is_bounded_and_does_not_mutate_spill
       - tests/test_daemon_liveness_sink.py::LifecycleHeartbeatWriterTests::test_writer_records_successful_runtime_db_write_probe
       - tests/test_daemon_liveness_sink.py::LifecycleHeartbeatWriterTests::test_writer_records_failed_runtime_db_write_probe
       - tests/test_diagnostics.py::HeartbeatSinkTests::test_runtime_health_surface_is_healthy_with_missing_spill
       - tests/test_diagnostics.py::HeartbeatSinkTests::test_runtime_health_surface_counts_malformed_spill_lines_as_pending
+      - tests/test_diagnostics.py::HeartbeatSinkTests::test_runtime_health_surface_survives_unreadable_database_from_liveness_sink
       - tests/test_diagnostics.py::HeartbeatSinkTests::test_runtime_health_surface_propagates_degraded_runtime_db_state
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_minimal_runtime_health_surface_is_shared_by_liveness_and_diagnostics
     why: O1.1-O1.5 made RuntimeDb degradation, write-probe failure,

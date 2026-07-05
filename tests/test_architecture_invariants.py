@@ -240,11 +240,15 @@ class ArchitectureInvariantTests(unittest.TestCase):
         writer = (REPO_ROOT / "claw_v2" / "lifecycle.py").read_text(encoding="utf-8")
         reader = (REPO_ROOT / "claw_v2" / "diagnostics.py").read_text(encoding="utf-8")
         health_source = inspect.getsource(liveness.runtime_health_snapshot)
+        spill_source = inspect.getsource(liveness.spill_pending_summary)
         self.assertEqual(liveness.RUNTIME_HEALTH_FIELD, "runtime_health")
         self.assertIn("liveness.runtime_health_snapshot", writer)
         self.assertIn("liveness.RUNTIME_HEALTH_FIELD", writer)
         self.assertIn("liveness.runtime_health_snapshot", reader)
         self.assertIn("liveness.RUNTIME_HEALTH_FIELD", reader)
+        self.assertGreater(liveness.SPILL_PENDING_COUNT_MAX_LINES, 0)
+        self.assertIn("max_lines", spill_source)
+        self.assertIn("spill_pending_limited", spill_source)
         for field in (
             "spill_pending_count",
             "db_write_probe_status",

@@ -253,13 +253,17 @@ def _database_summary(
     acknowledgements: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not db_path.exists():
-        return {"present": False, "error": "database not found"}
+        return _database_error_summary(
+            db_path,
+            present=False,
+            error="database not found",
+        )
     try:
         conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 5000")
     except sqlite3.Error as exc:
-        return {"present": True, "error": str(exc)}
+        return _database_error_summary(db_path, present=True, error=str(exc))
     try:
         try:
             summary: dict[str, Any] = {"present": True}
@@ -325,9 +329,21 @@ def _database_summary(
             summary["autonomy"] = _autonomy_summary(conn, limit=limit)
             return summary
         except sqlite3.Error as exc:
-            return {"present": True, "error": str(exc)}
+            return _database_error_summary(db_path, present=True, error=str(exc))
     finally:
         conn.close()
+
+
+def _database_error_summary(db_path: Path, *, present: bool, error: str) -> dict[str, Any]:
+    heartbeat = _heartbeat_summary_from_liveness_sink(db_path)
+    summary: dict[str, Any] = {"present": present, "error": error}
+    if heartbeat is not None:
+        summary["heartbeat"] = heartbeat
+    summary["health"] = _runtime_health_summary(
+        db_path,
+        heartbeat=heartbeat or {"present": False},
+    )
+    return summary
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -1212,27 +1228,9 @@ def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) ->
     """
     db_file = _main_db_file(conn)
     if db_file is not None:
-        record = liveness.read_liveness(liveness.liveness_sink_path(db_file.parent))
-        if record is not None:
-            raw_ts = record.get("ts")
-            age_s: float | None = None
-            if isinstance(raw_ts, (int, float)):
-                current = time.time() if now is None else now
-                age_s = max(0.0, float(current) - float(raw_ts))
-            return {
-                "present": True,
-                "ts": raw_ts,
-                "age_s": age_s,
-                "web_transport_serving": record.get("web_transport_serving"),
-                "db_write_probe_status": record.get("db_write_probe_status"),
-                "db_write_probe": record.get("db_write_probe"),
-                liveness.RUNTIME_HEALTH_FIELD: record.get(liveness.RUNTIME_HEALTH_FIELD)
-                if isinstance(record.get(liveness.RUNTIME_HEALTH_FIELD), dict)
-                else None,
-                "pid": record.get("pid"),
-                "boot_id": record.get("boot_id"),
-                "source": "liveness_sink",
-            }
+        sink_summary = _heartbeat_summary_from_liveness_sink(db_file, now=now)
+        if sink_summary is not None:
+            return sink_summary
 
     row = conn.execute(
         """
@@ -1272,6 +1270,35 @@ def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) ->
         "pid": payload.get("pid") if isinstance(payload, dict) else None,
         "boot_id": payload.get("boot_id") if isinstance(payload, dict) else None,
         "source": "observe_stream",
+    }
+
+
+def _heartbeat_summary_from_liveness_sink(
+    db_path: Path,
+    *,
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    record = liveness.read_liveness(liveness.liveness_sink_path(db_path.parent))
+    if record is None:
+        return None
+    raw_ts = record.get("ts")
+    age_s: float | None = None
+    if isinstance(raw_ts, (int, float)):
+        current = time.time() if now is None else now
+        age_s = max(0.0, float(current) - float(raw_ts))
+    return {
+        "present": True,
+        "ts": raw_ts,
+        "age_s": age_s,
+        "web_transport_serving": record.get("web_transport_serving"),
+        "db_write_probe_status": record.get("db_write_probe_status"),
+        "db_write_probe": record.get("db_write_probe"),
+        liveness.RUNTIME_HEALTH_FIELD: record.get(liveness.RUNTIME_HEALTH_FIELD)
+        if isinstance(record.get(liveness.RUNTIME_HEALTH_FIELD), dict)
+        else None,
+        "pid": record.get("pid"),
+        "boot_id": record.get("boot_id"),
+        "source": "liveness_sink",
     }
 
 

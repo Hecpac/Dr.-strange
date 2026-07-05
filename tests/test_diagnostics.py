@@ -222,7 +222,9 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertFalse(db_path.exists())
             self.assertEqual(report["checks"]["status"], "critical")
             self.assertFalse(report["checks"]["database_readable"])
-            self.assertEqual(report["database"], {"present": False, "error": "database not found"})
+            self.assertFalse(report["database"]["present"])
+            self.assertEqual(report["database"]["error"], "database not found")
+            self.assertEqual(report["database"]["health"]["spill_pending_count"], 0)
 
     def test_malformed_database_reports_error_without_raising(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -235,6 +237,7 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertFalse(report["checks"]["database_readable"])
             self.assertTrue(report["database"]["present"])
             self.assertIn("file is not a database", report["database"]["error"])
+            self.assertEqual(report["database"]["health"]["spill_pending_count"], 0)
 
     def test_old_actionable_events_do_not_keep_status_in_attention(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -660,6 +663,50 @@ class HeartbeatSinkTests(unittest.TestCase):
             self.assertEqual(health["spill_pending_count"], 2)
             self.assertEqual(health["spill_pending_status"], "ok")
             self.assertEqual(report["checks"]["spill_pending_count"], 2)
+
+    def test_runtime_health_surface_survives_unreadable_database_from_liveness_sink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            db_path.write_text("not sqlite", encoding="utf-8")
+            db_path.with_suffix(".spill.jsonl").write_text(
+                "one\n{not json}\n",
+                encoding="utf-8",
+            )
+            stale_health = liveness.runtime_health_snapshot(
+                db_path=db_path,
+                db_write_probe_status="ok",
+            )
+            stale_health["runtime_db_degraded"] = True
+            stale_health["runtime_db_degraded_state"] = {
+                "degraded": True,
+                "reason_code": "healthcheck_failed",
+                "reason": {"reason_code": "healthcheck_failed"},
+            }
+            self._write_sink(
+                db_path,
+                {
+                    "pid": 99,
+                    "ts": time.time(),
+                    "boot_id": "b1",
+                    "web_transport_serving": True,
+                    "db_write_probe_status": "failed",
+                    liveness.RUNTIME_HEALTH_FIELD: stale_health,
+                    "source": "lifecycle",
+                },
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["database"]["error"], "file is not a database")
+            self.assertEqual(report["database"]["heartbeat"]["source"], "liveness_sink")
+            health = report["database"]["health"]
+            self.assertEqual(health["spill_pending_count"], 2)
+            self.assertEqual(health["db_write_probe_status"], "failed")
+            self.assertTrue(health["runtime_db_degraded"])
+            self.assertEqual(
+                health["runtime_db_degraded_state"]["reason_code"], "healthcheck_failed"
+            )
+            self.assertEqual(report["checks"]["status"], "critical")
 
     def test_runtime_health_surface_propagates_degraded_runtime_db_state(self) -> None:
         from claw_v2.lifecycle import write_liveness_heartbeat_record

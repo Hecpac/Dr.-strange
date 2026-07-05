@@ -25,6 +25,7 @@ from typing import Any
 
 LIVENESS_SINK_FILENAME = "liveness.json"
 RUNTIME_HEALTH_FIELD = "runtime_health"
+SPILL_PENDING_COUNT_MAX_LINES = 10_000
 
 
 def liveness_sink_path(data_dir: Path | str) -> Path:
@@ -32,33 +33,58 @@ def liveness_sink_path(data_dir: Path | str) -> Path:
     return Path(data_dir) / LIVENESS_SINK_FILENAME
 
 
-def spill_pending_summary(db_path: Path | str) -> dict[str, Any]:
+def spill_pending_summary(
+    db_path: Path | str,
+    *,
+    max_lines: int = SPILL_PENDING_COUNT_MAX_LINES,
+) -> dict[str, Any]:
     """Count physical pending spill records next to ``db_path``.
 
     Malformed JSONL rows are still pending durable recovery work, so this count
     intentionally counts non-blank physical lines instead of parsing records.
+    The scan is bounded; ``spill_pending_limited`` marks counts truncated at the
+    line budget.
     """
     spill_path = Path(db_path).with_suffix(".spill.jsonl")
+    line_limit = max(0, int(max_lines))
+    pending_count = 0
+    scanned_lines = 0
+    limited = False
     try:
         with spill_path.open("r", encoding="utf-8") as handle:
-            pending_count = sum(1 for line in handle if line.strip())
+            for line in handle:
+                if scanned_lines >= line_limit:
+                    limited = True
+                    break
+                scanned_lines += 1
+                if line.strip():
+                    pending_count += 1
     except FileNotFoundError:
         return {
             "spill_path": str(spill_path),
             "spill_pending_count": 0,
             "spill_pending_status": "missing",
+            "spill_pending_limited": False,
+            "spill_pending_limit": line_limit,
+            "spill_lines_scanned": 0,
         }
     except (OSError, UnicodeDecodeError) as exc:
         return {
             "spill_path": str(spill_path),
             "spill_pending_count": None,
             "spill_pending_status": "unreadable",
+            "spill_pending_limited": False,
+            "spill_pending_limit": line_limit,
+            "spill_lines_scanned": scanned_lines,
             "error_type": type(exc).__name__,
         }
     return {
         "spill_path": str(spill_path),
         "spill_pending_count": pending_count,
         "spill_pending_status": "ok",
+        "spill_pending_limited": limited,
+        "spill_pending_limit": line_limit,
+        "spill_lines_scanned": scanned_lines,
     }
 
 
@@ -100,6 +126,9 @@ def runtime_health_snapshot(
     return {
         "spill_pending_count": spill["spill_pending_count"],
         "spill_pending_status": spill["spill_pending_status"],
+        "spill_pending_limited": spill["spill_pending_limited"],
+        "spill_pending_limit": spill["spill_pending_limit"],
+        "spill_lines_scanned": spill["spill_lines_scanned"],
         "spill_path": spill["spill_path"],
         "db_write_probe_status": db_write_probe_status,
         "runtime_db_degraded": bool(degraded_state["degraded"]),

@@ -103,6 +103,22 @@ class LivenessSinkModuleTests(unittest.TestCase):
 
             self.assertEqual(summary["spill_pending_count"], 2)
             self.assertEqual(summary["spill_pending_status"], "ok")
+            self.assertFalse(summary["spill_pending_limited"])
+
+    def test_spill_pending_summary_is_bounded_and_does_not_mutate_spill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            spill_path = db_path.with_suffix(".spill.jsonl")
+            original = "one\n{not json}\nthree\n"
+            spill_path.write_text(original, encoding="utf-8")
+
+            summary = liveness.spill_pending_summary(db_path, max_lines=2)
+
+            self.assertEqual(summary["spill_pending_count"], 2)
+            self.assertEqual(summary["spill_lines_scanned"], 2)
+            self.assertTrue(summary["spill_pending_limited"])
+            self.assertEqual(summary["spill_pending_limit"], 2)
+            self.assertEqual(spill_path.read_text(encoding="utf-8"), original)
 
 
 class _FakeWebTransport:
