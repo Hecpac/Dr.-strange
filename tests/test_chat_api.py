@@ -14,7 +14,10 @@ from tests.helpers import make_config
 
 
 WEB_CHAT_TEST_CREDENTIAL = "test-web-chat-credential"
-AUTH_HEADERS = {"X-Chat-Token": WEB_CHAT_TEST_CREDENTIAL}
+AUTH_HEADERS = {
+    "X-Chat-Token": WEB_CHAT_TEST_CREDENTIAL,
+    "Content-Type": "application/json",
+}
 
 
 class LocalChatAPITests(unittest.TestCase):
@@ -157,6 +160,43 @@ class LocalChatAPITests(unittest.TestCase):
         self.assertEqual(payload["error"], "unauthorized")
         bot_service.handle_text.assert_not_called()
 
+    def test_rejects_missing_content_type_for_chat_post(self) -> None:
+        bot_service = MagicMock()
+        bot_service.allowed_user_id = "123"
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
+
+        status_code, _, body = api.handle_http(
+            method="POST",
+            path="/api/chat",
+            body=json.dumps({"session_id": "mac-main", "text": "hola"}).encode("utf-8"),
+            headers={"X-Chat-Token": WEB_CHAT_TEST_CREDENTIAL},
+        )
+
+        self.assertEqual(status_code, 415)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["error"], "content-type must be application/json")
+        bot_service.handle_text.assert_not_called()
+
+    def test_rejects_non_json_content_type_for_chat_post(self) -> None:
+        bot_service = MagicMock()
+        bot_service.allowed_user_id = "123"
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
+
+        status_code, _, body = api.handle_http(
+            method="POST",
+            path="/api/chat",
+            body=json.dumps({"session_id": "mac-main", "text": "hola"}).encode("utf-8"),
+            headers={
+                "X-Chat-Token": WEB_CHAT_TEST_CREDENTIAL,
+                "Content-Type": "text/plain",
+            },
+        )
+
+        self.assertEqual(status_code, 415)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(payload["error"], "content-type must be application/json")
+        bot_service.handle_text.assert_not_called()
+
     def test_rejects_api_when_auth_token_is_not_configured(self) -> None:
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
@@ -240,6 +280,7 @@ class LocalChatAPITests(unittest.TestCase):
             "REQUEST_METHOD": "POST",
             "PATH_INFO": "/api/chat",
             "CONTENT_LENGTH": "43",
+            "CONTENT_TYPE": "application/json",
             "HTTP_X_CHAT_TOKEN": WEB_CHAT_TEST_CREDENTIAL,
             "wsgi.input": io.BytesIO(b'{"session_id":"mac-main","text":"hola"}'),
         }
@@ -265,6 +306,7 @@ class LocalChatAPITests(unittest.TestCase):
             "REQUEST_METHOD": "POST",
             "PATH_INFO": "/api/chat",
             "CONTENT_LENGTH": "43",
+            "CONTENT_TYPE": "application/json",
             "HTTP_X_CHAT_TOKEN": WEB_CHAT_TEST_CREDENTIAL,
             "wsgi.input": io.BytesIO(b'{"session_id":"mac-main","text":"hola"}'),
         }

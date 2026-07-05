@@ -18,7 +18,10 @@ from claw_v2.web_transport import WebTransport
 
 
 WEB_CHAT_TEST_CREDENTIAL = "test-web-chat-credential"
-AUTH_HEADERS = {"X-Chat-Token": WEB_CHAT_TEST_CREDENTIAL}
+AUTH_HEADERS = {
+    "X-Chat-Token": WEB_CHAT_TEST_CREDENTIAL,
+    "Content-Type": "application/json",
+}
 
 
 class _StubBotService:
@@ -314,6 +317,50 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
             with urlopen(authorized) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(payload["reply"], "reply:123:mac-main:hola")
+        finally:
+            await transport.stop()
+
+    async def test_chat_api_rejects_invalid_host_header(self) -> None:
+        transport = WebTransport(
+            chat_api=LocalChatAPI(
+                bot_service=_StubBotService(), auth_token=WEB_CHAT_TEST_CREDENTIAL
+            ),
+            host="127.0.0.1",
+            port=0,
+        )
+        await transport.start()
+        try:
+            self.assertEqual(
+                _http_status(
+                    transport.port,
+                    "/api/chat",
+                    method="POST",
+                    headers={**AUTH_HEADERS, "Host": "evil.test"},
+                ),
+                403,
+            )
+        finally:
+            await transport.stop()
+
+    async def test_chat_api_rejects_cross_origin_post(self) -> None:
+        transport = WebTransport(
+            chat_api=LocalChatAPI(
+                bot_service=_StubBotService(), auth_token=WEB_CHAT_TEST_CREDENTIAL
+            ),
+            host="127.0.0.1",
+            port=0,
+        )
+        await transport.start()
+        try:
+            self.assertEqual(
+                _http_status(
+                    transport.port,
+                    "/api/chat",
+                    method="POST",
+                    headers={**AUTH_HEADERS, "Origin": "https://evil.test"},
+                ),
+                403,
+            )
         finally:
             await transport.stop()
 
