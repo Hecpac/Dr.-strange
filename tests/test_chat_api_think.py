@@ -18,6 +18,10 @@ from claw_v2.chat_api import LocalChatAPI
 from claw_v2.task_board import TaskBoard
 
 
+AUTH_TOKEN = "secret-token"
+AUTH_HEADERS = {"X-Chat-Token": AUTH_TOKEN}
+
+
 class ThinkSpendingTests(unittest.TestCase):
     def test_returns_spending_today_and_per_agent_costs(self) -> None:
         bot_service = MagicMock()
@@ -25,9 +29,11 @@ class ThinkSpendingTests(unittest.TestCase):
         observe = MagicMock()
         observe.spending_today.return_value = {"total": 1.42, "by_lane": {"worker": 1.0}}
         observe.cost_per_agent_today.return_value = {"rook": 1.0, "alma": 0.42}
-        api = LocalChatAPI(bot_service=bot_service, observe=observe)
+        api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
 
-        status, _, body = api.handle_http(method="GET", path="/api/think/spending")
+        status, _, body = api.handle_http(
+            method="GET", path="/api/think/spending", headers=AUTH_HEADERS
+        )
 
         self.assertEqual(status, 200)
         payload = json.loads(body.decode("utf-8"))
@@ -38,8 +44,10 @@ class ThinkSpendingTests(unittest.TestCase):
         bot_service = MagicMock()
         bot_service.allowed_user_id = "1"
         bot_service.observe = None
-        api = LocalChatAPI(bot_service=bot_service, observe=None)
-        status, _, body = api.handle_http(method="GET", path="/api/think/spending")
+        api = LocalChatAPI(bot_service=bot_service, observe=None, auth_token=AUTH_TOKEN)
+        status, _, body = api.handle_http(
+            method="GET", path="/api/think/spending", headers=AUTH_HEADERS
+        )
         self.assertEqual(status, 503)
         self.assertIn("observe stream unavailable", json.loads(body)["error"])
 
@@ -53,8 +61,10 @@ class ThinkRecentTests(unittest.TestCase):
             {"event_type": "dispatch_decision", "payload": {"x": 1}},
             {"event_type": "llm_response", "payload": {}},
         ]
-        api = LocalChatAPI(bot_service=bot_service, observe=observe)
-        status, _, body = api.handle_http(method="GET", path="/api/think/recent?limit=2")
+        api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
+        status, _, body = api.handle_http(
+            method="GET", path="/api/think/recent?limit=2", headers=AUTH_HEADERS
+        )
         self.assertEqual(status, 200)
         payload = json.loads(body.decode("utf-8"))
         self.assertEqual(len(payload["events"]), 2)
@@ -68,9 +78,11 @@ class ThinkRecentTests(unittest.TestCase):
             {"event_type": "dispatch_decision", "payload": {}},
             {"event_type": "dispatch_decision", "payload": {}},
         ]
-        api = LocalChatAPI(bot_service=bot_service, observe=observe)
+        api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
         status, _, body = api.handle_http(
-            method="GET", path="/api/think/recent?type=dispatch_decision"
+            method="GET",
+            path="/api/think/recent?type=dispatch_decision",
+            headers=AUTH_HEADERS,
         )
         self.assertEqual(status, 200)
         payload = json.loads(body.decode("utf-8"))
@@ -92,8 +104,11 @@ class ThinkCircuitTests(unittest.TestCase):
         api = LocalChatAPI(
             bot_service=bot_service,
             observation_window=observation_window,
+            auth_token=AUTH_TOKEN,
         )
-        status, _, body = api.handle_http(method="GET", path="/api/think/circuit")
+        status, _, body = api.handle_http(
+            method="GET", path="/api/think/circuit", headers=AUTH_HEADERS
+        )
         self.assertEqual(status, 200)
         payload = json.loads(body.decode("utf-8"))
         self.assertFalse(payload["frozen"])
@@ -103,8 +118,12 @@ class ThinkCircuitTests(unittest.TestCase):
         bot_service = MagicMock()
         bot_service.observation_window = None
         bot_service.allowed_user_id = "1"
-        api = LocalChatAPI(bot_service=bot_service, observation_window=None)
-        status, _, body = api.handle_http(method="GET", path="/api/think/circuit")
+        api = LocalChatAPI(
+            bot_service=bot_service, observation_window=None, auth_token=AUTH_TOKEN
+        )
+        status, _, body = api.handle_http(
+            method="GET", path="/api/think/circuit", headers=AUTH_HEADERS
+        )
         self.assertEqual(status, 503)
 
 
@@ -119,9 +138,13 @@ class ThinkProjectsTests(unittest.TestCase):
             )
             board.publish("step 1", "do step 1", project_id=project.id)
             board.publish("step 2", "do step 2", project_id=project.id)
-            api = LocalChatAPI(bot_service=bot_service, task_board=board)
+            api = LocalChatAPI(
+                bot_service=bot_service, task_board=board, auth_token=AUTH_TOKEN
+            )
 
-            status, _, body = api.handle_http(method="GET", path="/api/think/projects")
+            status, _, body = api.handle_http(
+                method="GET", path="/api/think/projects", headers=AUTH_HEADERS
+            )
 
             self.assertEqual(status, 200)
             payload = json.loads(body.decode("utf-8"))
@@ -132,8 +155,10 @@ class ThinkProjectsTests(unittest.TestCase):
     def test_returns_503_when_task_board_missing(self) -> None:
         bot_service = MagicMock()
         bot_service.allowed_user_id = "1"
-        api = LocalChatAPI(bot_service=bot_service, task_board=None)
-        status, _, body = api.handle_http(method="GET", path="/api/think/projects")
+        api = LocalChatAPI(bot_service=bot_service, task_board=None, auth_token=AUTH_TOKEN)
+        status, _, body = api.handle_http(
+            method="GET", path="/api/think/projects", headers=AUTH_HEADERS
+        )
         self.assertEqual(status, 503)
 
 
@@ -141,8 +166,10 @@ class ThinkMethodsTests(unittest.TestCase):
     def test_post_returns_405(self) -> None:
         bot_service = MagicMock()
         bot_service.allowed_user_id = "1"
-        api = LocalChatAPI(bot_service=bot_service, observe=MagicMock())
-        status, _, _ = api.handle_http(method="POST", path="/api/think/spending")
+        api = LocalChatAPI(bot_service=bot_service, observe=MagicMock(), auth_token=AUTH_TOKEN)
+        status, _, _ = api.handle_http(
+            method="POST", path="/api/think/spending", headers=AUTH_HEADERS
+        )
         self.assertEqual(status, 405)
 
 

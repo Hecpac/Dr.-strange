@@ -382,7 +382,7 @@ class LocalChatAPI:
 
     def _is_authorized(self, headers: dict[str, str] | None) -> bool:
         if self._auth_token is None:
-            return True
+            return False
         normalized = {key.lower(): value for key, value in (headers or {}).items()}
         direct = normalized.get("x-chat-token") or normalized.get("x-web-chat-token")
         if direct == self._auth_token:

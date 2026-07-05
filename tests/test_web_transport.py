@@ -17,6 +17,10 @@ from claw_v2.observability_dashboard import ObservabilityDashboard
 from claw_v2.web_transport import WebTransport
 
 
+AUTH_TOKEN = "secret-token"
+AUTH_HEADERS = {"X-Chat-Token": AUTH_TOKEN}
+
+
 class _StubBotService:
     allowed_user_id = "123"
 
@@ -44,12 +48,17 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
             text="runtime reply",
             session_id="mac-main",
         )
-        api = LocalChatAPI(bot_service=_StubBotService(), agent_runtime=agent_runtime)
+        api = LocalChatAPI(
+            bot_service=_StubBotService(),
+            agent_runtime=agent_runtime,
+            auth_token=AUTH_TOKEN,
+        )
 
         response = api.dispatch(
             method="POST",
             path="/api/chat",
             body=json.dumps({"session_id": "mac-main", "text": "hola"}).encode("utf-8"),
+            headers=AUTH_HEADERS,
         )
 
         self.assertEqual(response.status_code, 200)
@@ -64,7 +73,7 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_serves_chat_ui_and_api(self) -> None:
         transport = WebTransport(
-            chat_api=LocalChatAPI(bot_service=_StubBotService()),
+            chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token=AUTH_TOKEN),
             host="127.0.0.1",
             port=0,
         )
@@ -78,7 +87,7 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
                 f"{transport.base_url}/api/chat",
                 method="POST",
                 data=json.dumps({"session_id": "mac-main", "text": "hola"}).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", **AUTH_HEADERS},
             )
             with urlopen(request) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -147,18 +156,26 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             window = ObservationWindowState(state_path=Path(tmpdir) / "window.json")
             transport = WebTransport(
-                chat_api=LocalChatAPI(bot_service=_StubBotService()),
+                chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token=AUTH_TOKEN),
                 observability_dashboard=ObservabilityDashboard(window),
                 host="127.0.0.1",
                 port=0,
             )
             await transport.start()
             try:
-                with urlopen(f"{transport.base_url}/observability") as response:
+                observability_request = Request(
+                    f"{transport.base_url}/observability",
+                    headers=AUTH_HEADERS,
+                )
+                with urlopen(observability_request) as response:
                     html = response.read().decode("utf-8")
                 self.assertIn("Claw Observability", html)
 
-                request = Request(f"{transport.base_url}/observability/freeze", method="POST")
+                request = Request(
+                    f"{transport.base_url}/observability/freeze",
+                    method="POST",
+                    headers=AUTH_HEADERS,
+                )
                 with urlopen(request) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 self.assertTrue(payload["frozen"])
@@ -170,7 +187,7 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             window = ObservationWindowState(state_path=Path(tmpdir) / "window.json")
             transport = WebTransport(
-                chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token="secret-token"),
+                chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token=AUTH_TOKEN),
                 observability_dashboard=ObservabilityDashboard(window),
                 host="127.0.0.1",
                 port=0,
@@ -187,7 +204,7 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
                         transport.port,
                         "/observability/freeze",
                         method="POST",
-                        headers={"X-Chat-Token": "secret-token"},
+                        headers=AUTH_HEADERS,
                     ),
                     200,
                 )
@@ -212,13 +229,19 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
                     )
 
             transport = WebTransport(
-                chat_api=LocalChatAPI(bot_service=_ObservedStubBotService()),
+                chat_api=LocalChatAPI(
+                    bot_service=_ObservedStubBotService(), auth_token=AUTH_TOKEN
+                ),
                 host="127.0.0.1",
                 port=0,
             )
             await transport.start()
             try:
-                with urlopen(f"{transport.base_url}/api/traces?limit=5") as response:
+                request = Request(
+                    f"{transport.base_url}/api/traces?limit=5",
+                    headers=AUTH_HEADERS,
+                )
+                with urlopen(request) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(payload["traces"][0]["trace_id"], "trace-1")
             finally:
@@ -259,7 +282,7 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_api_requires_token_when_chat_api_is_protected(self) -> None:
         transport = WebTransport(
-            chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token="secret-token"),
+            chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token=AUTH_TOKEN),
             host="127.0.0.1",
             port=0,
         )
@@ -278,7 +301,7 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
                 f"{transport.base_url}/api/chat",
                 method="POST",
                 data=json.dumps({"session_id": "mac-main", "text": "hola"}).encode("utf-8"),
-                headers={"Content-Type": "application/json", "X-Chat-Token": "secret-token"},
+                headers={"Content-Type": "application/json", **AUTH_HEADERS},
             )
             with urlopen(authorized) as response:
                 payload = json.loads(response.read().decode("utf-8"))
