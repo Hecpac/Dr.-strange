@@ -53,6 +53,7 @@ def is_restartable(checks: Mapping[str, object]) -> bool:
             or not checks.get("port_listening")
             or checks.get("heartbeat_stale")
             or checks.get("web_transport_serving") is False
+            or checks.get("db_write_probe_status") == "failed"
         )
     )
 

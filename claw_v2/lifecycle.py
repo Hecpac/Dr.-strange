@@ -21,6 +21,7 @@ from claw_v2.notebooklm import NotebookLMService
 from claw_v2.notebooklm_adapter import JacobNotebookLMCLIAdapter
 from claw_v2.observability_dashboard import ObservabilityDashboard
 from claw_v2.operational_alerts import install_operational_alerts
+from claw_v2.sqlite_runtime import RuntimeDb
 from claw_v2.telegram import TelegramTransport
 from claw_v2.web_transport import WebTransport
 
@@ -228,6 +229,69 @@ def _normalize_chat_id(value: object) -> str:
 # sink (it alone knows web_transport_serving). It mirrors the high-frequency
 # signal into observe_stream only 1-in-K to keep the audit log readable.
 LIVENESS_OBSERVE_EMIT_SAMPLE = 15
+RUNTIME_DB_WRITE_PROBE_TABLE = """
+CREATE TABLE IF NOT EXISTS runtime_write_probe (
+    probe_name TEXT PRIMARY KEY,
+    checked_at REAL NOT NULL,
+    boot_id TEXT NOT NULL,
+    pid INTEGER NOT NULL
+);
+"""
+
+
+def runtime_db_write_probe(
+    runtime_db: RuntimeDb | None,
+    *,
+    boot_id: str,
+    probe_name: str = "daemon_heartbeat",
+) -> dict[str, Any]:
+    checked_at = time.time()
+    if runtime_db is None:
+        return {
+            "status": "not_configured",
+            "checked_at": checked_at,
+            "reason": "runtime_db_missing",
+        }
+    with runtime_db.try_acquire() as acquired:
+        if not acquired:
+            return {
+                "status": "failed",
+                "checked_at": checked_at,
+                "reason": "runtime_db_lock_contended",
+            }
+        handle = runtime_db.connection_handle()
+        try:
+            handle.execute(RUNTIME_DB_WRITE_PROBE_TABLE)
+            handle.execute(
+                """
+                INSERT INTO runtime_write_probe (probe_name, checked_at, boot_id, pid)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(probe_name) DO UPDATE SET
+                    checked_at = excluded.checked_at,
+                    boot_id = excluded.boot_id,
+                    pid = excluded.pid
+                """,
+                (probe_name, checked_at, boot_id, os.getpid()),
+            )
+            handle.commit()
+        except Exception as exc:
+            try:
+                handle.rollback()
+            except Exception:
+                logger.debug("runtime DB write probe rollback failed", exc_info=True)
+            logger.warning("runtime DB write probe failed", exc_info=True)
+            return {
+                "status": "failed",
+                "checked_at": checked_at,
+                "reason": "write_failed",
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:500],
+            }
+    return {
+        "status": "ok",
+        "checked_at": checked_at,
+        "probe_name": probe_name,
+    }
 
 
 def write_liveness_heartbeat_record(
@@ -236,6 +300,7 @@ def write_liveness_heartbeat_record(
     boot_id: str,
     web_transport: Any,
     web_chat_enabled: bool,
+    runtime_db: RuntimeDb | None = None,
 ) -> dict[str, Any]:
     """Write the authoritative liveness record (with web_transport_serving).
 
@@ -244,11 +309,14 @@ def write_liveness_heartbeat_record(
     Returns the payload so the caller can mirror it into observe_stream.
     """
     web_serving = web_transport.is_serving() if web_chat_enabled else None
+    db_write_probe = runtime_db_write_probe(runtime_db, boot_id=boot_id)
     payload: dict[str, Any] = {
         "pid": os.getpid(),
         "ts": time.time(),
         "boot_id": boot_id,
         "web_transport_serving": web_serving,
+        "db_write_probe_status": db_write_probe["status"],
+        "db_write_probe": db_write_probe,
         "source": "lifecycle",
     }
     liveness.write_liveness(sink_path, payload)
@@ -786,11 +854,16 @@ async def run() -> int:
                     boot_id=_liveness_boot_id,
                     web_transport=web_transport,
                     web_chat_enabled=runtime.config.web_chat_enabled,
+                    runtime_db=getattr(runtime.memory, "_db", None),
                 )
             except OSError:
                 # A sink write failure must never break the heartbeat job; the
                 # watchdog still has the (sampled) observe_stream signal.
                 logger.warning("liveness sink write failed", exc_info=True)
+                db_write_probe = runtime_db_write_probe(
+                    getattr(runtime.memory, "_db", None),
+                    boot_id=_liveness_boot_id,
+                )
                 payload = {
                     "pid": os.getpid(),
                     "ts": time.time(),
@@ -798,6 +871,8 @@ async def run() -> int:
                     "web_transport_serving": (
                         web_transport.is_serving() if runtime.config.web_chat_enabled else None
                     ),
+                    "db_write_probe_status": db_write_probe["status"],
+                    "db_write_probe": db_write_probe,
                     "source": "lifecycle",
                 }
             _liveness_emit_counter += 1
