@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice audit-critical-observe-no-fast-drop (2026-07-05, O1.5): ObserveStream centrally classifies audit-critical events, stamps their payloads with audit_critical=true, and preserves that marker in claw.spill.jsonl when RuntimeDb contention prevents an immediate insert. LocalChatAPI emits web_chat_auth_rejected without credential material before returning 401. Owner-delegation, computer-use, Telegram pending, and implicit approval events are included in the human-authorization set. New invariant audit_critical_observe_events_survive_contention."
-doc_version: 2.82
+describes_commit: "slice minimal-health-metrics (2026-07-05, O1.6): the lifecycle liveness sink and diagnostics reader share a compact runtime_health surface carrying spill_pending_count, db_write_probe_status, and RuntimeDb degraded_state without adding a metrics stack. New invariant minimal_runtime_health_surface_uses_existing_liveness_and_diagnostics."
+doc_version: 2.83
 last_verified: 2026-07-05
-verification_method: "O1.5 local: tests/test_observe_audit_critical.py covers critical event classification, owner-delegation approval normal persist and RuntimeDb contention spill fallback, auth rejection spill fallback, and unchanged non-critical behavior; tests/test_architecture_invariants.py locks central audit-critical classification and spill marking while preserving the O1.4 off-tick drain invariant."
+verification_method: "O1.6 local: tests/test_daemon_liveness_sink.py covers missing/malformed spill pending counts, healthy runtime_health, db_write_probe_status, and degraded RuntimeDb state in liveness; tests/test_diagnostics.py covers diagnostics health propagation; tests/test_architecture_invariants.py locks the shared liveness/diagnostics health surface while preserving O1.1-O1.5 invariants."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -260,6 +260,33 @@ invariants:
          while the daemon's in-process RuntimeDb owner was write-dead. A
          read-only external healthcheck is insufficient; liveness must prove
          the daemon can still write through its actual RuntimeDb owner.
+
+  minimal_runtime_health_surface_uses_existing_liveness_and_diagnostics:
+    rule: The daemon exposes O1.x runtime health through the existing
+          lifecycle-owned `liveness.json` sink and `collect_diagnostics()`
+          reader, not a parallel metrics stack. The compact `runtime_health`
+          object must carry `spill_pending_count`, `db_write_probe_status`, and
+          `runtime_db_degraded_state`. A missing spill file counts as zero
+          pending records; malformed non-blank spill lines count as pending
+          recovery work because the spill drain preserves them until a durable
+          replay/compaction can prove removal is safe. The degraded state is
+          read from the existing RuntimeDb degraded reason and serialized by
+          the daemon heartbeat so out-of-process diagnostics can see it.
+    enforced_by:
+      - tests/test_daemon_liveness_sink.py::LivenessSinkModuleTests::test_spill_pending_summary_missing_file_counts_zero
+      - tests/test_daemon_liveness_sink.py::LivenessSinkModuleTests::test_spill_pending_summary_counts_malformed_physical_lines
+      - tests/test_daemon_liveness_sink.py::LifecycleHeartbeatWriterTests::test_writer_records_successful_runtime_db_write_probe
+      - tests/test_daemon_liveness_sink.py::LifecycleHeartbeatWriterTests::test_writer_records_failed_runtime_db_write_probe
+      - tests/test_diagnostics.py::HeartbeatSinkTests::test_runtime_health_surface_is_healthy_with_missing_spill
+      - tests/test_diagnostics.py::HeartbeatSinkTests::test_runtime_health_surface_counts_malformed_spill_lines_as_pending
+      - tests/test_diagnostics.py::HeartbeatSinkTests::test_runtime_health_surface_propagates_degraded_runtime_db_state
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_minimal_runtime_health_surface_is_shared_by_liveness_and_diagnostics
+    why: O1.1-O1.5 made RuntimeDb degradation, write-probe failure,
+         spill-backed observe recovery, and audit-critical preservation
+         actionable, but operators still had to inspect separate surfaces to
+         know whether spill backlog, write-probe status, and degraded state
+         agreed. O1.6 keeps that health view compact and colocated with the
+         existing liveness/diagnostics path.
 
   runtime_db_persistent_lock_self_heal_is_bounded_and_lock_only:
     rule: RuntimeDb may self-heal only `_is_sqlite_locked_error` persistent_lock

@@ -301,6 +301,7 @@ def write_liveness_heartbeat_record(
     web_transport: Any,
     web_chat_enabled: bool,
     runtime_db: RuntimeDb | None = None,
+    observe_db_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Write the authoritative liveness record (with web_transport_serving).
 
@@ -310,6 +311,9 @@ def write_liveness_heartbeat_record(
     """
     web_serving = web_transport.is_serving() if web_chat_enabled else None
     db_write_probe = runtime_db_write_probe(runtime_db, boot_id=boot_id)
+    health_db_path = (
+        Path(observe_db_path) if observe_db_path is not None else sink_path.parent / "claw.db"
+    )
     payload: dict[str, Any] = {
         "pid": os.getpid(),
         "ts": time.time(),
@@ -317,6 +321,11 @@ def write_liveness_heartbeat_record(
         "web_transport_serving": web_serving,
         "db_write_probe_status": db_write_probe["status"],
         "db_write_probe": db_write_probe,
+        liveness.RUNTIME_HEALTH_FIELD: liveness.runtime_health_snapshot(
+            db_path=health_db_path,
+            db_write_probe_status=db_write_probe["status"],
+            runtime_db=runtime_db,
+        ),
         "source": "lifecycle",
     }
     liveness.write_liveness(sink_path, payload)
@@ -329,6 +338,7 @@ def seed_liveness_heartbeat_record(
     boot_id: str,
     web_transport: Any,
     web_chat_enabled: bool,
+    observe_db_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Write the first-boot liveness seed.
 
@@ -341,11 +351,18 @@ def seed_liveness_heartbeat_record(
     ``write_liveness_heartbeat_record`` but are intentionally not probed.
     """
     del web_transport, web_chat_enabled
+    health_db_path = (
+        Path(observe_db_path) if observe_db_path is not None else sink_path.parent / "claw.db"
+    )
     payload: dict[str, Any] = {
         "pid": os.getpid(),
         "ts": time.time(),
         "boot_id": boot_id,
         "web_transport_serving": None,
+        liveness.RUNTIME_HEALTH_FIELD: liveness.runtime_health_snapshot(
+            db_path=health_db_path,
+            db_write_probe_status=None,
+        ),
         "source": "lifecycle",
     }
     liveness.write_liveness(sink_path, payload)
@@ -855,6 +872,7 @@ async def run() -> int:
                     web_transport=web_transport,
                     web_chat_enabled=runtime.config.web_chat_enabled,
                     runtime_db=getattr(runtime.memory, "_db", None),
+                    observe_db_path=runtime.observe.db_path,
                 )
             except OSError:
                 # A sink write failure must never break the heartbeat job; the
@@ -873,6 +891,11 @@ async def run() -> int:
                     ),
                     "db_write_probe_status": db_write_probe["status"],
                     "db_write_probe": db_write_probe,
+                    liveness.RUNTIME_HEALTH_FIELD: liveness.runtime_health_snapshot(
+                        db_path=runtime.observe.db_path,
+                        db_write_probe_status=db_write_probe["status"],
+                        runtime_db=getattr(runtime.memory, "_db", None),
+                    ),
                     "source": "lifecycle",
                 }
             _liveness_emit_counter += 1
@@ -888,6 +911,7 @@ async def run() -> int:
                 boot_id=_liveness_boot_id,
                 web_transport=web_transport,
                 web_chat_enabled=runtime.config.web_chat_enabled,
+                observe_db_path=runtime.observe.db_path,
             )
         except OSError:
             logger.warning("liveness sink seed write failed", exc_info=True)

@@ -263,6 +263,7 @@ def _database_summary(
     try:
         try:
             summary: dict[str, Any] = {"present": True}
+            heartbeat: dict[str, Any] = {"present": False}
             if _table_exists(conn, "observe_stream"):
                 heartbeat = _heartbeat_summary(conn)
                 summary["heartbeat"] = heartbeat
@@ -304,6 +305,7 @@ def _database_summary(
                 }
             else:
                 summary["observe"] = {"present": False}
+            summary["health"] = _runtime_health_summary(db_path, heartbeat=heartbeat)
             if _table_exists(conn, "agent_jobs"):
                 summary["jobs"] = {
                     "counts": _status_counts(conn, "agent_jobs"),
@@ -1224,6 +1226,9 @@ def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) ->
                 "web_transport_serving": record.get("web_transport_serving"),
                 "db_write_probe_status": record.get("db_write_probe_status"),
                 "db_write_probe": record.get("db_write_probe"),
+                liveness.RUNTIME_HEALTH_FIELD: record.get(liveness.RUNTIME_HEALTH_FIELD)
+                if isinstance(record.get(liveness.RUNTIME_HEALTH_FIELD), dict)
+                else None,
                 "pid": record.get("pid"),
                 "boot_id": record.get("boot_id"),
                 "source": "liveness_sink",
@@ -1251,6 +1256,9 @@ def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) ->
         payload.get("db_write_probe_status") if isinstance(payload, dict) else None
     )
     db_write_probe = payload.get("db_write_probe") if isinstance(payload, dict) else None
+    runtime_health = (
+        payload.get(liveness.RUNTIME_HEALTH_FIELD) if isinstance(payload, dict) else None
+    )
     return {
         "present": True,
         "id": int(row["id"]),
@@ -1260,10 +1268,29 @@ def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) ->
         "web_transport_serving": web_serving,
         "db_write_probe_status": db_write_probe_status,
         "db_write_probe": db_write_probe,
+        liveness.RUNTIME_HEALTH_FIELD: runtime_health if isinstance(runtime_health, dict) else None,
         "pid": payload.get("pid") if isinstance(payload, dict) else None,
         "boot_id": payload.get("boot_id") if isinstance(payload, dict) else None,
         "source": "observe_stream",
     }
+
+
+def _runtime_health_summary(db_path: Path, *, heartbeat: dict[str, Any]) -> dict[str, Any]:
+    raw_health = heartbeat.get(liveness.RUNTIME_HEALTH_FIELD)
+    db_write_probe_status = heartbeat.get("db_write_probe_status")
+    if db_write_probe_status is None and isinstance(raw_health, dict):
+        raw_status = raw_health.get("db_write_probe_status")
+        db_write_probe_status = raw_status if isinstance(raw_status, str) else None
+    health = liveness.runtime_health_snapshot(
+        db_path=db_path,
+        db_write_probe_status=db_write_probe_status,
+    )
+    if isinstance(raw_health, dict):
+        degraded_state = raw_health.get("runtime_db_degraded_state")
+        if isinstance(degraded_state, dict):
+            health["runtime_db_degraded_state"] = degraded_state
+            health["runtime_db_degraded"] = bool(degraded_state.get("degraded"))
+    return health
 
 
 def _event_counts_24h(conn: sqlite3.Connection) -> dict[str, int]:
@@ -1719,6 +1746,7 @@ def _checks(
     autonomy_blockers = list(autonomy.get("objective_blockers") or [])
     current_window = observe.get("current_daemon_window") or {}
     heartbeat = database.get("heartbeat") or {}
+    runtime_health = database.get("health") or {}
     heartbeat_age = heartbeat.get("age_s")
     heartbeat_present = bool(heartbeat.get("present"))
     heartbeat_stale = (
@@ -1730,6 +1758,7 @@ def _checks(
     web_thread_dead = web_serving_known is False
     db_write_probe_status = heartbeat.get("db_write_probe_status")
     db_write_probe_failed = db_write_probe_status == "failed"
+    runtime_db_degraded = bool(runtime_health.get("runtime_db_degraded"))
     fresh_heartbeat = heartbeat_present and not heartbeat_stale
     transient_port_probe_failure = (
         not port_ok and process_ok and fresh_heartbeat and not web_thread_dead
@@ -1746,6 +1775,7 @@ def _checks(
         and not heartbeat_stale
         and not web_thread_dead
         and not db_write_probe_failed
+        and not runtime_db_degraded
         else "attention"
     )
     if (
@@ -1754,6 +1784,7 @@ def _checks(
         or heartbeat_stale
         or web_thread_dead
         or db_write_probe_failed
+        or runtime_db_degraded
         or (not port_ok and not transient_port_probe_failure)
     ):
         status = "critical"
@@ -1792,6 +1823,14 @@ def _checks(
         "web_transport_serving": web_serving_known,
         "db_write_probe_status": db_write_probe_status,
         "db_write_probe_failed": db_write_probe_failed,
+        "runtime_health": runtime_health,
+        "spill_pending_count": runtime_health.get("spill_pending_count"),
+        "runtime_db_degraded": runtime_db_degraded,
+        "runtime_db_degraded_reason_code": (
+            (runtime_health.get("runtime_db_degraded_state") or {}).get("reason_code")
+            if isinstance(runtime_health.get("runtime_db_degraded_state"), dict)
+            else None
+        ),
     }
 
 
@@ -1831,6 +1870,20 @@ def format_text(report: dict[str, Any]) -> str:
         lines.append("")
         lines.append(
             f"Heartbeat: age={age_text} web_transport_serving={heartbeat.get('web_transport_serving')}"
+        )
+    runtime_health = database.get("health") or {}
+    if runtime_health:
+        degraded_state = runtime_health.get("runtime_db_degraded_state") or {}
+        reason_code = (
+            degraded_state.get("reason_code") if isinstance(degraded_state, dict) else None
+        )
+        lines.append("")
+        lines.append(
+            "Runtime health: "
+            f"spill_pending_count={runtime_health.get('spill_pending_count')} "
+            f"db_write_probe_status={runtime_health.get('db_write_probe_status')} "
+            f"runtime_db_degraded={runtime_health.get('runtime_db_degraded')} "
+            f"reason_code={reason_code}"
         )
     observe = database.get("observe") or {}
     current_window = observe.get("current_daemon_window") or {}

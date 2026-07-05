@@ -21,13 +21,90 @@ import json
 import os
 import secrets
 from pathlib import Path
+from typing import Any
 
 LIVENESS_SINK_FILENAME = "liveness.json"
+RUNTIME_HEALTH_FIELD = "runtime_health"
 
 
 def liveness_sink_path(data_dir: Path | str) -> Path:
     """Return the liveness sink path inside ``data_dir`` (the SQLite data dir)."""
     return Path(data_dir) / LIVENESS_SINK_FILENAME
+
+
+def spill_pending_summary(db_path: Path | str) -> dict[str, Any]:
+    """Count physical pending spill records next to ``db_path``.
+
+    Malformed JSONL rows are still pending durable recovery work, so this count
+    intentionally counts non-blank physical lines instead of parsing records.
+    """
+    spill_path = Path(db_path).with_suffix(".spill.jsonl")
+    try:
+        with spill_path.open("r", encoding="utf-8") as handle:
+            pending_count = sum(1 for line in handle if line.strip())
+    except FileNotFoundError:
+        return {
+            "spill_path": str(spill_path),
+            "spill_pending_count": 0,
+            "spill_pending_status": "missing",
+        }
+    except (OSError, UnicodeDecodeError) as exc:
+        return {
+            "spill_path": str(spill_path),
+            "spill_pending_count": None,
+            "spill_pending_status": "unreadable",
+            "error_type": type(exc).__name__,
+        }
+    return {
+        "spill_path": str(spill_path),
+        "spill_pending_count": pending_count,
+        "spill_pending_status": "ok",
+    }
+
+
+def runtime_db_degraded_state(
+    *,
+    runtime_db: Any | None = None,
+    db_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Return a serializable RuntimeDb degraded-state snapshot without probing."""
+    reason = None
+    if runtime_db is not None:
+        reason = getattr(runtime_db, "degraded_reason", None)
+    elif db_path is not None:
+        from claw_v2.sqlite_runtime import runtime_db_degraded_reason
+
+        reason = runtime_db_degraded_reason(db_path)
+    if reason is None:
+        return {"degraded": False, "reason_code": None, "reason": None}
+    if hasattr(reason, "to_dict"):
+        reason_dict = reason.to_dict()
+    else:
+        reason_dict = {"message": str(reason)}
+    return {
+        "degraded": True,
+        "reason_code": reason_dict.get("reason_code"),
+        "reason": reason_dict,
+    }
+
+
+def runtime_health_snapshot(
+    *,
+    db_path: Path | str,
+    db_write_probe_status: str | None,
+    runtime_db: Any | None = None,
+) -> dict[str, Any]:
+    """Compact runtime health surface consumed by liveness diagnostics."""
+    spill = spill_pending_summary(db_path)
+    degraded_state = runtime_db_degraded_state(runtime_db=runtime_db, db_path=db_path)
+    return {
+        "spill_pending_count": spill["spill_pending_count"],
+        "spill_pending_status": spill["spill_pending_status"],
+        "spill_path": spill["spill_path"],
+        "db_write_probe_status": db_write_probe_status,
+        "runtime_db_degraded": bool(degraded_state["degraded"]),
+        "runtime_db_degraded_state": degraded_state,
+    }
 
 
 def write_liveness(path: Path, payload: dict) -> None:
