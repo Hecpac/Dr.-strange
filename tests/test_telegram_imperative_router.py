@@ -1002,6 +1002,59 @@ def test_open_app_imperative_uses_local_open_without_approval(bot) -> None:
     _assert_not_brain_fallback(response, decisions)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "no abras chrome",
+        "me molesta que digas abre chrome",
+        "si digo abre chrome no lo hagas",
+    ],
+)
+def test_embedded_open_chrome_phrase_does_not_call_local_open(bot, text: str) -> None:
+    bot.computer = MagicMock()
+    bot.browser_use = None
+    bot.computer_gate = MagicMock()
+
+    with patch("claw_v2.bot.subprocess.run") as run:
+        response, _decisions, events = _drive(bot, text)
+
+    run.assert_not_called()
+    assert "ui.open_app" not in (response or "")
+    assert "telegram_imperative_executed" not in events
+
+
+@pytest.mark.parametrize(
+    "text,expected_app",
+    [
+        ("Abre Chrome", "Google Chrome"),
+        ("Abrir Chrome", "Google Chrome"),
+        ("Abre ChatGPT", "ChatGPT"),
+        ("Abre Codex", "Codex"),
+    ],
+)
+def test_explicit_bare_open_app_commands_still_use_local_open(
+    bot, text: str, expected_app: str
+) -> None:
+    bot.computer = MagicMock()
+    bot.browser_use = None
+    bot.computer_gate = MagicMock()
+
+    with patch(
+        "claw_v2.bot.subprocess.run",
+        return_value=subprocess.CompletedProcess(["open", "-a", expected_app], 0, "", ""),
+    ) as run:
+        response, decisions, events = _drive(bot, text)
+
+    assert response
+    _assert_no_imperative_receipt(response)
+    assert f"`{expected_app}` abierto/enfocado." in response
+    run.assert_called_once_with(
+        ["open", "-a", expected_app], capture_output=True, text=True, timeout=10
+    )
+    assert "telegram_imperative_executed" in events
+    _assert_not_brain_fallback(response, decisions)
+
+
 def test_open_claude_design_does_not_route_to_desktop_app(bot) -> None:
     bot.computer = MagicMock()
     bot.browser_use = None

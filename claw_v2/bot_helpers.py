@@ -1152,10 +1152,10 @@ _TELEGRAM_IMPERATIVE_RULES: tuple[dict[str, Any], ...] = (
     {
         "intent": "ui.open_app",
         "patterns": (
-            r"\babre\s+(?:la\s+)?app(?:\s+de\s+(?P<target_es_app>[a-z0-9 ._-]+))?\b",
-            r"\babre\s+(?P<target_es_bare>codex|chatgpt|chrome|claude)\b",
-            r"\bopen\s+(?:the\s+)?app(?:\s+(?P<target_en_app>[a-z0-9 ._-]+))?\b",
-            r"\bopen\s+(?P<target_en_bare>codex|chatgpt|chrome|claude)\b",
+            r"^\s*(?:abre|abrir)\s+(?:la\s+)?app(?:\s+de\s+(?P<target_es_app>[a-z0-9 ._-]+))?[\s.!?…]*$",
+            r"^\s*(?:abre|abrir)\s+(?P<target_es_bare>codex|chatgpt|chrome|claude)[\s.!?…]*$",
+            r"^\s*open\s+(?:the\s+)?app(?:\s+(?P<target_en_app>[a-z0-9 ._-]+))?[\s.!?…]*$",
+            r"^\s*open\s+(?P<target_en_bare>codex|chatgpt|chrome|claude)[\s.!?…]*$",
         ),
         "requires_ui_write": True,
         "requires_ui_read": False,
@@ -1164,12 +1164,12 @@ _TELEGRAM_IMPERATIVE_RULES: tuple[dict[str, Any], ...] = (
     {
         "intent": "ui.inspect_app",
         "patterns": (
-            r"\brevisa\s+(?:la\s+)?app(?:\s+(?:de\s+)?(?P<target_es_inspect>[a-z0-9 ._-]+))?\b",
-            r"\brevisa\s+(?P<target_es_inspect_bare>codex|chatgpt|chrome|claude)\b",
-            r"\brevisa\s+en\s+(?P<target_es_inspect_in>[a-z0-9 ._-]+)\b",
-            r"\breview\s+(?:the\s+)?app(?:\s+(?P<target_en_inspect>[a-z0-9 ._-]+))?\b",
-            r"\breview\s+(?P<target_en_inspect_bare>codex|chatgpt|chrome|claude)\b",
-            r"\breview\s+in\s+(?P<target_en_inspect_in>[a-z0-9 ._-]+)\b",
+            r"^\s*revisa\s+(?:la\s+)?app(?:\s+(?:de\s+)?(?P<target_es_inspect>[a-z0-9 ._-]+))?[\s.!?…]*$",
+            r"^\s*revisa\s+(?P<target_es_inspect_bare>codex|chatgpt|chrome|claude)[\s.!?…]*$",
+            r"^\s*revisa\s+en\s+(?P<target_es_inspect_in>[a-z0-9 ._-]+)[\s.!?…]*$",
+            r"^\s*review\s+(?:the\s+)?app(?:\s+(?P<target_en_inspect>[a-z0-9 ._-]+))?[\s.!?…]*$",
+            r"^\s*review\s+(?P<target_en_inspect_bare>codex|chatgpt|chrome|claude)[\s.!?…]*$",
+            r"^\s*review\s+in\s+(?P<target_en_inspect_in>[a-z0-9 ._-]+)[\s.!?…]*$",
         ),
         "requires_ui_read": True,
         "needs_context": True,
@@ -1300,11 +1300,16 @@ def _is_web_target_ambiguous(normalized: str, target_hint: str | None) -> bool:
     """
     if not target_hint:
         return False
-    if target_hint not in {"Claude", "ChatGPT", "Codex app"}:
+    if target_hint not in {"Claude", "ChatGPT", "Codex app", "Chrome"}:
         return False
-    if "claude.ai" in normalized or "chatgpt.com" in normalized or "openai.com" in normalized:
+    if (
+        "claude.ai" in normalized
+        or "chatgpt.com" in normalized
+        or "chrome://" in normalized
+        or "openai.com" in normalized
+    ):
         return True
-    if re.search(r"\b(?:claude|chatgpt|codex)\s*/\s*\w+", normalized):
+    if re.search(r"\b(?:claude|chatgpt|codex|chrome)\s*/\s*\w+", normalized):
         return True
     if "en chrome" in normalized or "in chrome" in normalized:
         return True
