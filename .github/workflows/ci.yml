@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Fast gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --locked
+
+      - name: Detect changed Python files
+        id: changed-python
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+          elif [[ -n "${{ github.event.before }}" && "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+            base_sha="${{ github.event.before }}"
+          else
+            base_sha="$(git rev-parse HEAD~1)"
+          fi
+
+          git diff --name-only --diff-filter=ACMR "$base_sha" HEAD -- "*.py" \
+            | awk 'NF' > changed-python-files.txt
+
+          if [[ -s changed-python-files.txt ]]; then
+            {
+              echo "files<<EOF"
+              cat changed-python-files.txt
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "has_files=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_files=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ruff check changed Python
+        if: steps.changed-python.outputs.has_files == 'true'
+        run: xargs uv run ruff check < changed-python-files.txt
+
+      - name: Ruff format check changed Python
+        if: steps.changed-python.outputs.has_files == 'true'
+        run: xargs uv run ruff format --check < changed-python-files.txt
+
+      - name: Pytest fast gate
+        run: >
+          uv run pytest
+          tests/test_chat_api.py
+          tests/test_chat_api_think.py
+          tests/test_web_transport.py
+          tests/test_architecture_invariants.py
+          tests/test_secret_scanning.py
+          tests/test_ci_workflow.py
+          -q

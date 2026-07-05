@@ -229,9 +229,7 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
                     )
 
             transport = WebTransport(
-                chat_api=LocalChatAPI(
-                    bot_service=_ObservedStubBotService(), auth_token=AUTH_TOKEN
-                ),
+                chat_api=LocalChatAPI(bot_service=_ObservedStubBotService(), auth_token=AUTH_TOKEN),
                 host="127.0.0.1",
                 port=0,
             )

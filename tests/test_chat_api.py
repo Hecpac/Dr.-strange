@@ -198,9 +198,7 @@ class LocalChatAPITests(unittest.TestCase):
             bot_service = MagicMock()
             bot_service.allowed_user_id = "123"
             bot_service.handle_text.return_value = "reply text"
-            api = LocalChatAPI(
-                bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN
-            )
+            api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
 
             status_code, _, body = api.handle_http(
                 method="POST",
@@ -307,9 +305,7 @@ class LocalChatAPITests(unittest.TestCase):
             )
             bot_service = MagicMock()
             bot_service.allowed_user_id = "123"
-            api = LocalChatAPI(
-                bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN
-            )
+            api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
 
             status_code, _, body = api.handle_http(
                 method="GET", path="/api/traces?limit=2", body=b"", headers=AUTH_HEADERS
@@ -340,9 +336,7 @@ class LocalChatAPITests(unittest.TestCase):
             )
             bot_service = MagicMock()
             bot_service.allowed_user_id = "123"
-            api = LocalChatAPI(
-                bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN
-            )
+            api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
 
             status_code, _, body = api.handle_http(
                 method="GET", path="/api/traces/trace-1", body=b"", headers=AUTH_HEADERS
@@ -373,9 +367,7 @@ class LocalChatAPITests(unittest.TestCase):
             observe = ObserveStream(Path(tmpdir) / "observe.db")
             bot_service = MagicMock()
             bot_service.allowed_user_id = "123"
-            api = LocalChatAPI(
-                bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN
-            )
+            api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
 
             status_code, _, body = api.handle_http(
                 method="GET", path="/api/traces/trace-missing", body=b"", headers=AUTH_HEADERS

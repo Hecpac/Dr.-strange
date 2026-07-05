@@ -118,9 +118,7 @@ class ThinkCircuitTests(unittest.TestCase):
         bot_service = MagicMock()
         bot_service.observation_window = None
         bot_service.allowed_user_id = "1"
-        api = LocalChatAPI(
-            bot_service=bot_service, observation_window=None, auth_token=AUTH_TOKEN
-        )
+        api = LocalChatAPI(bot_service=bot_service, observation_window=None, auth_token=AUTH_TOKEN)
         status, _, body = api.handle_http(
             method="GET", path="/api/think/circuit", headers=AUTH_HEADERS
         )
@@ -138,9 +136,7 @@ class ThinkProjectsTests(unittest.TestCase):
             )
             board.publish("step 1", "do step 1", project_id=project.id)
             board.publish("step 2", "do step 2", project_id=project.id)
-            api = LocalChatAPI(
-                bot_service=bot_service, task_board=board, auth_token=AUTH_TOKEN
-            )
+            api = LocalChatAPI(bot_service=bot_service, task_board=board, auth_token=AUTH_TOKEN)
 
             status, _, body = api.handle_http(
                 method="GET", path="/api/think/projects", headers=AUTH_HEADERS
