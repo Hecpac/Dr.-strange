@@ -17,8 +17,8 @@ from claw_v2.observability_dashboard import ObservabilityDashboard
 from claw_v2.web_transport import WebTransport
 
 
-AUTH_TOKEN = "secret-token"
-AUTH_HEADERS = {"X-Chat-Token": AUTH_TOKEN}
+WEB_CHAT_TEST_CREDENTIAL = "test-web-chat-credential"
+AUTH_HEADERS = {"X-Chat-Token": WEB_CHAT_TEST_CREDENTIAL}
 
 
 class _StubBotService:
@@ -51,7 +51,7 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
         api = LocalChatAPI(
             bot_service=_StubBotService(),
             agent_runtime=agent_runtime,
-            auth_token=AUTH_TOKEN,
+            auth_token=WEB_CHAT_TEST_CREDENTIAL,
         )
 
         response = api.dispatch(
@@ -73,7 +73,9 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_serves_chat_ui_and_api(self) -> None:
         transport = WebTransport(
-            chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token=AUTH_TOKEN),
+            chat_api=LocalChatAPI(
+                bot_service=_StubBotService(), auth_token=WEB_CHAT_TEST_CREDENTIAL
+            ),
             host="127.0.0.1",
             port=0,
         )
@@ -156,7 +158,9 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             window = ObservationWindowState(state_path=Path(tmpdir) / "window.json")
             transport = WebTransport(
-                chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token=AUTH_TOKEN),
+                chat_api=LocalChatAPI(
+                    bot_service=_StubBotService(), auth_token=WEB_CHAT_TEST_CREDENTIAL
+                ),
                 observability_dashboard=ObservabilityDashboard(window),
                 host="127.0.0.1",
                 port=0,
@@ -187,7 +191,9 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             window = ObservationWindowState(state_path=Path(tmpdir) / "window.json")
             transport = WebTransport(
-                chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token=AUTH_TOKEN),
+                chat_api=LocalChatAPI(
+                    bot_service=_StubBotService(), auth_token=WEB_CHAT_TEST_CREDENTIAL
+                ),
                 observability_dashboard=ObservabilityDashboard(window),
                 host="127.0.0.1",
                 port=0,
@@ -229,7 +235,9 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
                     )
 
             transport = WebTransport(
-                chat_api=LocalChatAPI(bot_service=_ObservedStubBotService(), auth_token=AUTH_TOKEN),
+                chat_api=LocalChatAPI(
+                    bot_service=_ObservedStubBotService(), auth_token=WEB_CHAT_TEST_CREDENTIAL
+                ),
                 host="127.0.0.1",
                 port=0,
             )
@@ -280,7 +288,9 @@ class WebTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_api_requires_token_when_chat_api_is_protected(self) -> None:
         transport = WebTransport(
-            chat_api=LocalChatAPI(bot_service=_StubBotService(), auth_token=AUTH_TOKEN),
+            chat_api=LocalChatAPI(
+                bot_service=_StubBotService(), auth_token=WEB_CHAT_TEST_CREDENTIAL
+            ),
             host="127.0.0.1",
             port=0,
         )

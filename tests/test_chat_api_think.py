@@ -18,8 +18,8 @@ from claw_v2.chat_api import LocalChatAPI
 from claw_v2.task_board import TaskBoard
 
 
-AUTH_TOKEN = "secret-token"
-AUTH_HEADERS = {"X-Chat-Token": AUTH_TOKEN}
+WEB_CHAT_TEST_CREDENTIAL = "test-web-chat-credential"
+AUTH_HEADERS = {"X-Chat-Token": WEB_CHAT_TEST_CREDENTIAL}
 
 
 class ThinkSpendingTests(unittest.TestCase):
@@ -29,7 +29,9 @@ class ThinkSpendingTests(unittest.TestCase):
         observe = MagicMock()
         observe.spending_today.return_value = {"total": 1.42, "by_lane": {"worker": 1.0}}
         observe.cost_per_agent_today.return_value = {"rook": 1.0, "alma": 0.42}
-        api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(
+            bot_service=bot_service, observe=observe, auth_token=WEB_CHAT_TEST_CREDENTIAL
+        )
 
         status, _, body = api.handle_http(
             method="GET", path="/api/think/spending", headers=AUTH_HEADERS
@@ -44,7 +46,9 @@ class ThinkSpendingTests(unittest.TestCase):
         bot_service = MagicMock()
         bot_service.allowed_user_id = "1"
         bot_service.observe = None
-        api = LocalChatAPI(bot_service=bot_service, observe=None, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(
+            bot_service=bot_service, observe=None, auth_token=WEB_CHAT_TEST_CREDENTIAL
+        )
         status, _, body = api.handle_http(
             method="GET", path="/api/think/spending", headers=AUTH_HEADERS
         )
@@ -61,7 +65,9 @@ class ThinkRecentTests(unittest.TestCase):
             {"event_type": "dispatch_decision", "payload": {"x": 1}},
             {"event_type": "llm_response", "payload": {}},
         ]
-        api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(
+            bot_service=bot_service, observe=observe, auth_token=WEB_CHAT_TEST_CREDENTIAL
+        )
         status, _, body = api.handle_http(
             method="GET", path="/api/think/recent?limit=2", headers=AUTH_HEADERS
         )
@@ -78,7 +84,9 @@ class ThinkRecentTests(unittest.TestCase):
             {"event_type": "dispatch_decision", "payload": {}},
             {"event_type": "dispatch_decision", "payload": {}},
         ]
-        api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(
+            bot_service=bot_service, observe=observe, auth_token=WEB_CHAT_TEST_CREDENTIAL
+        )
         status, _, body = api.handle_http(
             method="GET",
             path="/api/think/recent?type=dispatch_decision",
@@ -104,7 +112,7 @@ class ThinkCircuitTests(unittest.TestCase):
         api = LocalChatAPI(
             bot_service=bot_service,
             observation_window=observation_window,
-            auth_token=AUTH_TOKEN,
+            auth_token=WEB_CHAT_TEST_CREDENTIAL,
         )
         status, _, body = api.handle_http(
             method="GET", path="/api/think/circuit", headers=AUTH_HEADERS
@@ -118,7 +126,9 @@ class ThinkCircuitTests(unittest.TestCase):
         bot_service = MagicMock()
         bot_service.observation_window = None
         bot_service.allowed_user_id = "1"
-        api = LocalChatAPI(bot_service=bot_service, observation_window=None, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(
+            bot_service=bot_service, observation_window=None, auth_token=WEB_CHAT_TEST_CREDENTIAL
+        )
         status, _, body = api.handle_http(
             method="GET", path="/api/think/circuit", headers=AUTH_HEADERS
         )
@@ -136,7 +146,9 @@ class ThinkProjectsTests(unittest.TestCase):
             )
             board.publish("step 1", "do step 1", project_id=project.id)
             board.publish("step 2", "do step 2", project_id=project.id)
-            api = LocalChatAPI(bot_service=bot_service, task_board=board, auth_token=AUTH_TOKEN)
+            api = LocalChatAPI(
+                bot_service=bot_service, task_board=board, auth_token=WEB_CHAT_TEST_CREDENTIAL
+            )
 
             status, _, body = api.handle_http(
                 method="GET", path="/api/think/projects", headers=AUTH_HEADERS
@@ -151,7 +163,9 @@ class ThinkProjectsTests(unittest.TestCase):
     def test_returns_503_when_task_board_missing(self) -> None:
         bot_service = MagicMock()
         bot_service.allowed_user_id = "1"
-        api = LocalChatAPI(bot_service=bot_service, task_board=None, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(
+            bot_service=bot_service, task_board=None, auth_token=WEB_CHAT_TEST_CREDENTIAL
+        )
         status, _, body = api.handle_http(
             method="GET", path="/api/think/projects", headers=AUTH_HEADERS
         )
@@ -162,7 +176,9 @@ class ThinkMethodsTests(unittest.TestCase):
     def test_post_returns_405(self) -> None:
         bot_service = MagicMock()
         bot_service.allowed_user_id = "1"
-        api = LocalChatAPI(bot_service=bot_service, observe=MagicMock(), auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(
+            bot_service=bot_service, observe=MagicMock(), auth_token=WEB_CHAT_TEST_CREDENTIAL
+        )
         status, _, _ = api.handle_http(
             method="POST", path="/api/think/spending", headers=AUTH_HEADERS
         )

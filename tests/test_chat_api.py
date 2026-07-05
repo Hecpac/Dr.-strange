@@ -13,8 +13,8 @@ from claw_v2.observe import ObserveStream
 from tests.helpers import make_config
 
 
-AUTH_TOKEN = "secret-token"
-AUTH_HEADERS = {"X-Chat-Token": AUTH_TOKEN}
+WEB_CHAT_TEST_CREDENTIAL = "test-web-chat-credential"
+AUTH_HEADERS = {"X-Chat-Token": WEB_CHAT_TEST_CREDENTIAL}
 
 
 class LocalChatAPITests(unittest.TestCase):
@@ -22,7 +22,7 @@ class LocalChatAPITests(unittest.TestCase):
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
         bot_service.handle_text.return_value = "reply text"
-        api = LocalChatAPI(bot_service=bot_service, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
 
         status_code, headers, body = api.handle_http(
             method="POST",
@@ -49,7 +49,7 @@ class LocalChatAPITests(unittest.TestCase):
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
         bot_service.handle_text.return_value = "tu key sk-proj-ABCDEFGHIJKLMNOP0123 lista"
-        api = LocalChatAPI(bot_service=bot_service, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
 
         status_code, _headers, body = api.handle_http(
             method="POST",
@@ -67,7 +67,7 @@ class LocalChatAPITests(unittest.TestCase):
         bot_service = MagicMock()
         bot_service.allowed_user_id = None
         bot_service.handle_text.return_value = "reply text"
-        api = LocalChatAPI(bot_service=bot_service, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
 
         api.handle_http(
             method="POST",
@@ -85,7 +85,7 @@ class LocalChatAPITests(unittest.TestCase):
     def test_post_chat_rejects_invalid_json(self) -> None:
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
-        api = LocalChatAPI(bot_service=bot_service, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
 
         status_code, _, body = api.handle_http(
             method="POST",
@@ -102,7 +102,7 @@ class LocalChatAPITests(unittest.TestCase):
     def test_post_chat_rejects_missing_fields(self) -> None:
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
-        api = LocalChatAPI(bot_service=bot_service, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
 
         status_code, _, body = api.handle_http(
             method="POST",
@@ -118,7 +118,7 @@ class LocalChatAPITests(unittest.TestCase):
     def test_unknown_route_returns_404(self) -> None:
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
-        api = LocalChatAPI(bot_service=bot_service, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
 
         status_code, _, body = api.handle_http(
             method="GET", path="/api/nope", body=b"", headers=AUTH_HEADERS
@@ -131,7 +131,7 @@ class LocalChatAPITests(unittest.TestCase):
     def test_wrong_method_returns_405(self) -> None:
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
-        api = LocalChatAPI(bot_service=bot_service, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
 
         status_code, _, body = api.handle_http(
             method="GET", path="/api/chat", body=b"", headers=AUTH_HEADERS
@@ -144,7 +144,7 @@ class LocalChatAPITests(unittest.TestCase):
     def test_rejects_missing_auth_token_when_configured(self) -> None:
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
-        api = LocalChatAPI(bot_service=bot_service, auth_token="secret-token")
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
 
         status_code, _, body = api.handle_http(
             method="POST",
@@ -177,7 +177,7 @@ class LocalChatAPITests(unittest.TestCase):
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
         bot_service.handle_text.return_value = "reply text"
-        api = LocalChatAPI(bot_service=bot_service, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
 
         status_code, _, body = api.handle_http(
             method="POST",
@@ -198,7 +198,9 @@ class LocalChatAPITests(unittest.TestCase):
             bot_service = MagicMock()
             bot_service.allowed_user_id = "123"
             bot_service.handle_text.return_value = "reply text"
-            api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
+            api = LocalChatAPI(
+                bot_service=bot_service, observe=observe, auth_token=WEB_CHAT_TEST_CREDENTIAL
+            )
 
             status_code, _, body = api.handle_http(
                 method="POST",
@@ -233,12 +235,12 @@ class LocalChatAPITests(unittest.TestCase):
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
         bot_service.handle_text.return_value = "reply text"
-        api = LocalChatAPI(bot_service=bot_service, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
         environ = {
             "REQUEST_METHOD": "POST",
             "PATH_INFO": "/api/chat",
             "CONTENT_LENGTH": "43",
-            "HTTP_X_CHAT_TOKEN": AUTH_TOKEN,
+            "HTTP_X_CHAT_TOKEN": WEB_CHAT_TEST_CREDENTIAL,
             "wsgi.input": io.BytesIO(b'{"session_id":"mac-main","text":"hola"}'),
         }
         captured: dict[str, object] = {}
@@ -258,12 +260,12 @@ class LocalChatAPITests(unittest.TestCase):
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
         bot_service.handle_text.return_value = "reply text"
-        api = LocalChatAPI(bot_service=bot_service, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
         environ = {
             "REQUEST_METHOD": "POST",
             "PATH_INFO": "/api/chat",
             "CONTENT_LENGTH": "43",
-            "HTTP_X_CHAT_TOKEN": AUTH_TOKEN,
+            "HTTP_X_CHAT_TOKEN": WEB_CHAT_TEST_CREDENTIAL,
             "wsgi.input": io.BytesIO(b'{"session_id":"mac-main","text":"hola"}'),
         }
         captured: dict[str, object] = {}
@@ -305,7 +307,9 @@ class LocalChatAPITests(unittest.TestCase):
             )
             bot_service = MagicMock()
             bot_service.allowed_user_id = "123"
-            api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
+            api = LocalChatAPI(
+                bot_service=bot_service, observe=observe, auth_token=WEB_CHAT_TEST_CREDENTIAL
+            )
 
             status_code, _, body = api.handle_http(
                 method="GET", path="/api/traces?limit=2", body=b"", headers=AUTH_HEADERS
@@ -336,7 +340,9 @@ class LocalChatAPITests(unittest.TestCase):
             )
             bot_service = MagicMock()
             bot_service.allowed_user_id = "123"
-            api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
+            api = LocalChatAPI(
+                bot_service=bot_service, observe=observe, auth_token=WEB_CHAT_TEST_CREDENTIAL
+            )
 
             status_code, _, body = api.handle_http(
                 method="GET", path="/api/traces/trace-1", body=b"", headers=AUTH_HEADERS
@@ -352,7 +358,7 @@ class LocalChatAPITests(unittest.TestCase):
         bot_service = MagicMock()
         bot_service.allowed_user_id = "123"
         bot_service.observe = None
-        api = LocalChatAPI(bot_service=bot_service, auth_token=AUTH_TOKEN)
+        api = LocalChatAPI(bot_service=bot_service, auth_token=WEB_CHAT_TEST_CREDENTIAL)
 
         status_code, _, body = api.handle_http(
             method="GET", path="/api/traces/trace-missing", body=b"", headers=AUTH_HEADERS
@@ -367,7 +373,9 @@ class LocalChatAPITests(unittest.TestCase):
             observe = ObserveStream(Path(tmpdir) / "observe.db")
             bot_service = MagicMock()
             bot_service.allowed_user_id = "123"
-            api = LocalChatAPI(bot_service=bot_service, observe=observe, auth_token=AUTH_TOKEN)
+            api = LocalChatAPI(
+                bot_service=bot_service, observe=observe, auth_token=WEB_CHAT_TEST_CREDENTIAL
+            )
 
             status_code, _, body = api.handle_http(
                 method="GET", path="/api/traces/trace-missing", body=b"", headers=AUTH_HEADERS
