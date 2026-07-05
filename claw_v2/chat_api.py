@@ -101,6 +101,11 @@ class LocalChatAPI:
             return ChatAPIResponse(
                 status_code=405, payload={"error": "method not allowed", "allowed": ["POST"]}
             )
+        if not self._is_json_content_type(headers):
+            return ChatAPIResponse(
+                status_code=415,
+                payload={"error": "content-type must be application/json"},
+            )
 
         try:
             payload = self._decode_json(body)
@@ -396,6 +401,13 @@ class LocalChatAPI:
         return self._is_authorized(headers)
 
     @staticmethod
+    def _is_json_content_type(headers: dict[str, str] | None) -> bool:
+        normalized = {key.lower(): value for key, value in (headers or {}).items()}
+        content_type = normalized.get("content-type", "")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        return media_type == "application/json"
+
+    @staticmethod
     def _headers_from_environ(environ: dict[str, Any]) -> dict[str, str]:
         headers: dict[str, str] = {}
         for key, value in environ.items():
@@ -444,9 +456,11 @@ class LocalChatAPI:
         mapping = {
             200: "OK",
             401: "Unauthorized",
+            403: "Forbidden",
             400: "Bad Request",
             404: "Not Found",
             405: "Method Not Allowed",
+            415: "Unsupported Media Type",
             503: "Service Unavailable",
         }
         return mapping.get(status_code, "OK")

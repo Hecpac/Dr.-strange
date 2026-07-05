@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 from claw_v2.chat_api import LocalChatAPI
@@ -65,6 +65,84 @@ def _resolve_static_path(path_info: str) -> Path | None:
     if not candidate.is_file():
         return None
     return candidate
+
+
+def _normalize_hostname(hostname: str | None) -> str | None:
+    value = (hostname or "").strip().lower().rstrip(".")
+    return value or None
+
+
+def _allowed_hostnames(bound_host: str) -> set[str]:
+    hostnames = {"127.0.0.1", "localhost", "::1"}
+    normalized = _normalize_hostname(bound_host)
+    if normalized and normalized not in {"0.0.0.0", "::"}:
+        hostnames.add(normalized)
+    return hostnames
+
+
+def _split_host_header(value: str | None) -> tuple[str, int | None] | None:
+    raw = (value or "").strip()
+    if not raw or "," in raw:
+        return None
+    if raw.startswith("["):
+        end = raw.find("]")
+        if end <= 1:
+            return None
+        hostname = _normalize_hostname(raw[1:end])
+        rest = raw[end + 1 :]
+        if rest.startswith(":"):
+            port_raw = rest[1:]
+        elif rest:
+            return None
+        else:
+            port_raw = ""
+    else:
+        if raw.count(":") > 1:
+            return None
+        hostname_raw, separator, port_raw = raw.partition(":")
+        hostname = _normalize_hostname(hostname_raw)
+        if not separator:
+            port_raw = ""
+    if hostname is None:
+        return None
+    if not port_raw:
+        return hostname, None
+    if not port_raw.isdigit():
+        return None
+    port = int(port_raw)
+    if port < 1 or port > 65535:
+        return None
+    return hostname, port
+
+
+def _host_header_allowed(value: str | None, *, bound_host: str, bound_port: int) -> bool:
+    parsed = _split_host_header(value)
+    if parsed is None:
+        return False
+    hostname, port = parsed
+    if hostname not in _allowed_hostnames(bound_host):
+        return False
+    if port is None:
+        return bound_port in {80, 443}
+    return port == bound_port
+
+
+def _origin_header_allowed(value: str | None, *, bound_host: str, bound_port: int) -> bool:
+    raw = (value or "").strip()
+    if not raw:
+        return True
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    hostname = _normalize_hostname(parsed.hostname)
+    if hostname not in _allowed_hostnames(bound_host):
+        return False
+    effective_port = port if port is not None else (443 if parsed.scheme == "https" else 80)
+    return effective_port == bound_port
 
 
 def _json_response(
@@ -155,8 +233,9 @@ class WebTransport:
                     ],
                 )
                 return [body]
+            headers = LocalChatAPI._headers_from_environ(environ)
             if path == "/observability" or path.startswith("/observability/"):
-                if not self._chat_api.is_authorized(LocalChatAPI._headers_from_environ(environ)):
+                if not self._chat_api.is_authorized(headers):
                     return _json_response(
                         start_response, "401 Unauthorized", {"error": "unauthorized"}
                     )
@@ -167,6 +246,15 @@ class WebTransport:
                         {"error": "observability unavailable"},
                     )
                 return self._observability_dashboard.wsgi_app(environ, start_response)
+            if path == "/api/chat":
+                if not _host_header_allowed(
+                    headers.get("Host"), bound_host=self.host, bound_port=self.port
+                ):
+                    return _json_response(start_response, "403 Forbidden", {"error": "forbidden"})
+                if not _origin_header_allowed(
+                    headers.get("Origin"), bound_host=self.host, bound_port=self.port
+                ):
+                    return _json_response(start_response, "403 Forbidden", {"error": "forbidden"})
             if path.startswith("/api/"):
                 return self._chat_api.wsgi_app(environ, start_response)
             file_path = _resolve_static_path(path)
