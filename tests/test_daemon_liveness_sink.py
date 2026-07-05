@@ -82,6 +82,44 @@ class LivenessSinkModuleTests(unittest.TestCase):
             path.write_bytes(b"\xff\xfe\x00\x80not utf-8")
             self.assertIsNone(liveness.read_liveness(path))
 
+    def test_spill_pending_summary_missing_file_counts_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+
+            summary = liveness.spill_pending_summary(db_path)
+
+            self.assertEqual(summary["spill_pending_count"], 0)
+            self.assertEqual(summary["spill_pending_status"], "missing")
+
+    def test_spill_pending_summary_counts_malformed_physical_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            db_path.with_suffix(".spill.jsonl").write_text(
+                '{not json}\n\n{"event_type": "ok"}\n',
+                encoding="utf-8",
+            )
+
+            summary = liveness.spill_pending_summary(db_path)
+
+            self.assertEqual(summary["spill_pending_count"], 2)
+            self.assertEqual(summary["spill_pending_status"], "ok")
+            self.assertFalse(summary["spill_pending_limited"])
+
+    def test_spill_pending_summary_is_bounded_and_does_not_mutate_spill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            spill_path = db_path.with_suffix(".spill.jsonl")
+            original = "one\n{not json}\nthree\n"
+            spill_path.write_text(original, encoding="utf-8")
+
+            summary = liveness.spill_pending_summary(db_path, max_lines=2)
+
+            self.assertEqual(summary["spill_pending_count"], 2)
+            self.assertEqual(summary["spill_lines_scanned"], 2)
+            self.assertTrue(summary["spill_pending_limited"])
+            self.assertEqual(summary["spill_pending_limit"], 2)
+            self.assertEqual(spill_path.read_text(encoding="utf-8"), original)
+
 
 class _FakeWebTransport:
     def __init__(self, serving: bool) -> None:
@@ -155,6 +193,9 @@ class LifecycleHeartbeatWriterTests(unittest.TestCase):
             assert record is not None
             self.assertEqual(record["db_write_probe_status"], "ok")
             self.assertEqual(record["db_write_probe"]["status"], "ok")
+            self.assertEqual(record[liveness.RUNTIME_HEALTH_FIELD]["spill_pending_count"], 0)
+            self.assertEqual(record[liveness.RUNTIME_HEALTH_FIELD]["db_write_probe_status"], "ok")
+            self.assertFalse(record[liveness.RUNTIME_HEALTH_FIELD]["runtime_db_degraded"])
             with sqlite3.connect(Path(tmpdir) / "claw.db") as conn:
                 row = conn.execute(
                     "SELECT boot_id, pid FROM runtime_write_probe WHERE probe_name = ?",
@@ -183,6 +224,11 @@ class LifecycleHeartbeatWriterTests(unittest.TestCase):
             self.assertEqual(record["db_write_probe_status"], "failed")
             self.assertEqual(record["db_write_probe"]["reason"], "write_failed")
             self.assertIn("RuntimeDb", record["db_write_probe"]["error"])
+            self.assertTrue(record[liveness.RUNTIME_HEALTH_FIELD]["runtime_db_degraded"])
+            self.assertEqual(
+                record[liveness.RUNTIME_HEALTH_FIELD]["runtime_db_degraded_state"]["reason_code"],
+                "connection_closed",
+            )
 
     def test_seed_writes_fresh_record_with_none_web_state(self) -> None:
         """Criterion 5 (seed): the first-boot seed writes a record WITHOUT
@@ -221,6 +267,7 @@ class LifecycleHeartbeatWriterTests(unittest.TestCase):
             assert record is not None
             self.assertEqual(record["boot_id"], "new-boot")
             self.assertIsNone(record["web_transport_serving"])
+            self.assertIn(liveness.RUNTIME_HEALTH_FIELD, record)
             # Seed must NOT probe is_serving (transport may not be up yet).
             self.assertEqual(calls, [])
             del web

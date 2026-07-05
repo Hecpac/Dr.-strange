@@ -231,6 +231,32 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIn("liveness.read_liveness", reader)
         self.assertIn("liveness.liveness_sink_path", reader)
 
+    def test_minimal_runtime_health_surface_is_shared_by_liveness_and_diagnostics(self) -> None:
+        """O1.6 tripwire: the compact runtime health surface must stay on the
+        existing liveness/diagnostics path, not drift into a parallel metrics
+        stack or lose spill/degraded/db-probe fields."""
+        from claw_v2 import liveness
+
+        writer = (REPO_ROOT / "claw_v2" / "lifecycle.py").read_text(encoding="utf-8")
+        reader = (REPO_ROOT / "claw_v2" / "diagnostics.py").read_text(encoding="utf-8")
+        health_source = inspect.getsource(liveness.runtime_health_snapshot)
+        spill_source = inspect.getsource(liveness.spill_pending_summary)
+        self.assertEqual(liveness.RUNTIME_HEALTH_FIELD, "runtime_health")
+        self.assertIn("liveness.runtime_health_snapshot", writer)
+        self.assertIn("liveness.RUNTIME_HEALTH_FIELD", writer)
+        self.assertIn("liveness.runtime_health_snapshot", reader)
+        self.assertIn("liveness.RUNTIME_HEALTH_FIELD", reader)
+        self.assertGreater(liveness.SPILL_PENDING_COUNT_MAX_LINES, 0)
+        self.assertIn("max_lines", spill_source)
+        self.assertIn("spill_pending_limited", spill_source)
+        for field in (
+            "spill_pending_count",
+            "db_write_probe_status",
+            "runtime_db_degraded_state",
+        ):
+            self.assertIn(field, health_source)
+            self.assertIn(field, reader)
+
     def test_operational_state_writers_are_atomic(self) -> None:
         """F0.4 tripwire: operational state files — the shared task board
         (``task_board.py``) and the observation-window circuit/budget freeze
