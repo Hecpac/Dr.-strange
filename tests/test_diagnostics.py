@@ -592,7 +592,41 @@ class HeartbeatSinkTests(unittest.TestCase):
             self.assertTrue(report["checks"]["heartbeat_present"])
             self.assertFalse(report["checks"]["heartbeat_stale"])
             self.assertEqual(report["checks"]["web_transport_serving"], True)
+            self.assertIsNone(report["checks"]["db_write_probe_status"])
+            self.assertFalse(report["checks"]["db_write_probe_failed"])
             self.assertEqual(report["database"]["heartbeat"]["source"], "liveness_sink")
+
+    def test_failed_db_write_probe_flags_critical_from_fresh_sink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            ObserveStream(db_path).emit("noop_marker", payload={})
+            self._write_sink(
+                db_path,
+                {
+                    "pid": 99,
+                    "ts": time.time(),
+                    "boot_id": "b1",
+                    "web_transport_serving": True,
+                    "db_write_probe_status": "failed",
+                    "db_write_probe": {
+                        "status": "failed",
+                        "reason": "write_failed",
+                        "error_type": "RuntimeDbDegradedError",
+                    },
+                    "source": "lifecycle",
+                },
+            )
+
+            report = collect_diagnostics(db_path=db_path, port=8765, runner=_healthy_runner)
+
+            self.assertEqual(report["checks"]["status"], "critical")
+            self.assertEqual(report["checks"]["db_write_probe_status"], "failed")
+            self.assertTrue(report["checks"]["db_write_probe_failed"])
+            self.assertTrue(is_restartable(report["checks"]))
+            self.assertEqual(
+                report["database"]["heartbeat"]["db_write_probe"]["reason"],
+                "write_failed",
+            )
 
     def test_stale_sink_flags_critical_from_sink(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

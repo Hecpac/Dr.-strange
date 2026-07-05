@@ -1222,6 +1222,8 @@ def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) ->
                 "ts": raw_ts,
                 "age_s": age_s,
                 "web_transport_serving": record.get("web_transport_serving"),
+                "db_write_probe_status": record.get("db_write_probe_status"),
+                "db_write_probe": record.get("db_write_probe"),
                 "pid": record.get("pid"),
                 "boot_id": record.get("boot_id"),
                 "source": "liveness_sink",
@@ -1245,6 +1247,10 @@ def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) ->
         current = time.time() if now is None else now
         age_s = max(0.0, float(current) - float(raw_ts))
     web_serving = payload.get("web_transport_serving") if isinstance(payload, dict) else None
+    db_write_probe_status = (
+        payload.get("db_write_probe_status") if isinstance(payload, dict) else None
+    )
+    db_write_probe = payload.get("db_write_probe") if isinstance(payload, dict) else None
     return {
         "present": True,
         "id": int(row["id"]),
@@ -1252,6 +1258,8 @@ def _heartbeat_summary(conn: sqlite3.Connection, *, now: float | None = None) ->
         "ts": raw_ts,
         "age_s": age_s,
         "web_transport_serving": web_serving,
+        "db_write_probe_status": db_write_probe_status,
+        "db_write_probe": db_write_probe,
         "pid": payload.get("pid") if isinstance(payload, dict) else None,
         "boot_id": payload.get("boot_id") if isinstance(payload, dict) else None,
         "source": "observe_stream",
@@ -1720,6 +1728,8 @@ def _checks(
     )
     web_serving_known = heartbeat.get("web_transport_serving")
     web_thread_dead = web_serving_known is False
+    db_write_probe_status = heartbeat.get("db_write_probe_status")
+    db_write_probe_failed = db_write_probe_status == "failed"
     fresh_heartbeat = heartbeat_present and not heartbeat_stale
     transient_port_probe_failure = (
         not port_ok and process_ok and fresh_heartbeat and not web_thread_dead
@@ -1735,6 +1745,7 @@ def _checks(
         and not autonomy_blockers
         and not heartbeat_stale
         and not web_thread_dead
+        and not db_write_probe_failed
         else "attention"
     )
     if (
@@ -1742,6 +1753,7 @@ def _checks(
         or not db_ok
         or heartbeat_stale
         or web_thread_dead
+        or db_write_probe_failed
         or (not port_ok and not transient_port_probe_failure)
     ):
         status = "critical"
@@ -1778,6 +1790,8 @@ def _checks(
         "heartbeat_age_s": heartbeat_age,
         "heartbeat_stale": heartbeat_stale,
         "web_transport_serving": web_serving_known,
+        "db_write_probe_status": db_write_probe_status,
+        "db_write_probe_failed": db_write_probe_failed,
     }
 
 

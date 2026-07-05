@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -13,6 +14,7 @@ from claw_v2 import liveness
 from claw_v2.cron import CronScheduler
 from claw_v2.daemon import ClawDaemon
 from claw_v2.heartbeat import HeartbeatSnapshot
+from claw_v2.sqlite_runtime import RuntimeDb
 
 
 def _snapshot() -> HeartbeatSnapshot:
@@ -115,6 +117,7 @@ class LifecycleHeartbeatWriterTests(unittest.TestCase):
             self.assertEqual(record["pid"], os.getpid())
             self.assertEqual(record["source"], "lifecycle")
             self.assertIsInstance(record["ts"], (int, float))
+            self.assertEqual(record["db_write_probe_status"], "not_configured")
 
     def test_writer_records_none_when_web_chat_disabled(self) -> None:
         from claw_v2.lifecycle import write_liveness_heartbeat_record
@@ -131,6 +134,55 @@ class LifecycleHeartbeatWriterTests(unittest.TestCase):
             record = liveness.read_liveness(sink)
             assert record is not None
             self.assertIsNone(record["web_transport_serving"])
+
+    def test_writer_records_successful_runtime_db_write_probe(self) -> None:
+        from claw_v2.lifecycle import write_liveness_heartbeat_record
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sink = liveness.liveness_sink_path(tmpdir)
+            runtime_db = RuntimeDb(Path(tmpdir) / "claw.db")
+            self.addCleanup(runtime_db.close)
+
+            write_liveness_heartbeat_record(
+                sink_path=sink,
+                boot_id="boot-abc",
+                web_transport=_FakeWebTransport(serving=True),
+                web_chat_enabled=True,
+                runtime_db=runtime_db,
+            )
+
+            record = liveness.read_liveness(sink)
+            assert record is not None
+            self.assertEqual(record["db_write_probe_status"], "ok")
+            self.assertEqual(record["db_write_probe"]["status"], "ok")
+            with sqlite3.connect(Path(tmpdir) / "claw.db") as conn:
+                row = conn.execute(
+                    "SELECT boot_id, pid FROM runtime_write_probe WHERE probe_name = ?",
+                    ("daemon_heartbeat",),
+                ).fetchone()
+            self.assertEqual(row, ("boot-abc", os.getpid()))
+
+    def test_writer_records_failed_runtime_db_write_probe(self) -> None:
+        from claw_v2.lifecycle import write_liveness_heartbeat_record
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sink = liveness.liveness_sink_path(tmpdir)
+            runtime_db = RuntimeDb(Path(tmpdir) / "claw.db")
+            runtime_db.close()
+
+            write_liveness_heartbeat_record(
+                sink_path=sink,
+                boot_id="boot-abc",
+                web_transport=_FakeWebTransport(serving=True),
+                web_chat_enabled=True,
+                runtime_db=runtime_db,
+            )
+
+            record = liveness.read_liveness(sink)
+            assert record is not None
+            self.assertEqual(record["db_write_probe_status"], "failed")
+            self.assertEqual(record["db_write_probe"]["reason"], "write_failed")
+            self.assertIn("RuntimeDb", record["db_write_probe"]["error"])
 
     def test_seed_writes_fresh_record_with_none_web_state(self) -> None:
         """Criterion 5 (seed): the first-boot seed writes a record WITHOUT

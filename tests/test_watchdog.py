@@ -53,6 +53,16 @@ class IsRestartableTests(unittest.TestCase):
             is_restartable(_critical(process_running=True, web_transport_serving=False))
         )
 
+    def test_critical_and_db_write_probe_failed(self) -> None:
+        self.assertTrue(
+            is_restartable(
+                _critical(
+                    process_running=True,
+                    db_write_probe_status="failed",
+                )
+            )
+        )
+
     def test_critical_but_all_subchecks_ok_is_not_restartable(self) -> None:
         self.assertFalse(
             is_restartable(_critical(process_running=True))  # nothing else wrong
