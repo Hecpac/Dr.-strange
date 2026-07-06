@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re
 import time
@@ -39,6 +40,10 @@ LEARNING_SOUL_SUGGESTIONS_RESUME_KEY = "scheduler:learning_soul_suggestions"
 DAEMON_HEALTH_CHECK_JOB_KIND = "scheduler.daemon_health_check"
 DAEMON_HEALTH_CHECK_RESUME_KEY = "scheduler:daemon_health_check"
 SITE_MONITOR_JOB_KIND = "scheduler.site_monitor"
+NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND = "scheduler.notebooklm_orchestration_poll"
+NOTEBOOKLM_ORCHESTRATION_POLL_RESUME_KEY = "scheduler:notebooklm_orchestration_poll"
+NLM_WIKI_SYNC_JOB_KIND = "scheduler.nlm_wiki_sync"
+NLM_WIKI_SYNC_RESUME_KEY = "scheduler:nlm_wiki_sync"
 SCHEDULED_BACKGROUND_STALE_RUNNING_SECONDS = 60 * 60
 _ERROR_PREVIEW_LIMIT = 200
 _RESULT_STRING_LIMIT = 200
@@ -131,6 +136,7 @@ class ScheduledBackgroundJobRunner:
         stale_running_seconds: float = SCHEDULED_BACKGROUND_STALE_RUNNING_SECONDS,
         should_stop: Callable[[], bool] | None = None,
         result_summary: Callable[[object], dict[str, Any]] | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         self.job_name = job_name
         self.job_kind = job_kind
@@ -142,6 +148,10 @@ class ScheduledBackgroundJobRunner:
         self.stale_running_seconds = max(0.001, float(stale_running_seconds))
         self.should_stop = should_stop
         self.result_summary = result_summary
+        self.timeout_seconds = (
+            max(0.001, float(timeout_seconds)) if timeout_seconds is not None else None
+        )
+        self._timed_handler_future: concurrent.futures.Future[object] | None = None
 
     def run_available(self, *, limit: int = 1, now: float | None = None) -> int:
         if self._should_stop():
@@ -238,10 +248,35 @@ class ScheduledBackgroundJobRunner:
 
     def _execute(self, job: Any) -> dict[str, Any]:
         payload = job.payload if isinstance(job.payload, dict) else {}
-        result = self.handler(payload)
+        result = self._execute_handler(payload)
         if self.result_summary is not None:
             return self.result_summary(result)
         return _default_result_summary(result)
+
+    def _execute_handler(self, payload: dict[str, Any]) -> object:
+        if self.timeout_seconds is None:
+            return self.handler(payload)
+        if self._timed_handler_future is not None and self._timed_handler_future.done():
+            self._timed_handler_future = None
+        if self._timed_handler_future is not None:
+            raise TimeoutError(f"{self.job_name} job still running after a prior timeout")
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"{self.job_name}-job",
+        )
+        future = executor.submit(self.handler, payload)
+        try:
+            return future.result(timeout=self.timeout_seconds)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            self._timed_handler_future = future
+            raise TimeoutError(
+                f"{self.job_name} job timed out after {self.timeout_seconds:.3g}s"
+            ) from exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+            if future.done() and self._timed_handler_future is future:
+                self._timed_handler_future = None
 
     def _should_stop(self) -> bool:
         return bool(self.should_stop and self.should_stop())
@@ -336,6 +371,18 @@ def kairos_tick_result_summary(result: object) -> dict[str, Any]:
     return summary
 
 
+def notebooklm_orchestration_poll_result_summary(result: object) -> dict[str, Any]:
+    return {"processed": _safe_int(result)}
+
+
+def nlm_wiki_sync_result_summary(result: object) -> dict[str, Any]:
+    data = result if isinstance(result, dict) else {}
+    return {
+        "notebooks_scanned": _safe_int(data.get("notebooks_scanned")),
+        "pages_written": _safe_int(data.get("pages_written")),
+    }
+
+
 def safe_non_negative_int(value: object, *, default: int) -> int:
     if value is None:
         return max(0, int(default))
@@ -372,10 +419,14 @@ def _source_result_previews(value: object) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         raw_reasons = item.get("skip_reasons")
-        skip_reasons = {
-            _safe_text_preview(str(reason), limit=60): _safe_int(count)
-            for reason, count in raw_reasons.items()
-        } if isinstance(raw_reasons, dict) else {}
+        skip_reasons = (
+            {
+                _safe_text_preview(str(reason), limit=60): _safe_int(count)
+                for reason, count in raw_reasons.items()
+            }
+            if isinstance(raw_reasons, dict)
+            else {}
+        )
         previews.append(
             {
                 "source": _safe_text_preview(str(item.get("source") or ""), limit=80),
