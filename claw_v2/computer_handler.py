@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ from claw_v2.bot_helpers import (
     _computer_instruction_requires_actions,
     _format_computer_pending_summary,
 )
+from claw_v2.computer import ComputerUseOutcome, coerce_computer_use_outcome
 from claw_v2.redaction import redact_text
 
 logger = logging.getLogger(__name__)
@@ -116,6 +118,40 @@ def _is_unverifiable_browser_result(result: str | None) -> bool:
         return True
     first_line = text.splitlines()[0].strip().lower()
     return first_line == _NO_RESULT_SENTINEL
+
+
+def _computer_outcome_event_payload(outcome: ComputerUseOutcome) -> dict[str, Any]:
+    return {
+        "outcome_status": outcome.status,
+        "reason_code": outcome.reason_code,
+        "retryable": outcome.retryable,
+    }
+
+
+def _exception_outcome(message: str) -> ComputerUseOutcome:
+    lower = message.lower()
+    if "timed out" in lower or "timeout" in lower:
+        return ComputerUseOutcome.failed(
+            f"computer use error: {message}",
+            reason_code="timeout",
+            retryable=True,
+            raw_text=message,
+        )
+    return ComputerUseOutcome.failed(
+        f"computer use error: {message}",
+        reason_code="exception",
+        retryable=False,
+        raw_text=message,
+    )
+
+
+def _real_callable_attr(obj: Any, name: str) -> Callable[..., Any] | None:
+    try:
+        inspect.getattr_static(obj, name)
+    except AttributeError:
+        return None
+    candidate = getattr(obj, name, None)
+    return candidate if callable(candidate) else None
 
 
 def _format_unverifiable_browser_result(session: Any) -> str:
@@ -418,25 +454,47 @@ class ComputerHandler:
         try:
             setattr(session, "session_id", session_id)
             if self._is_browser_use_session(session):
-                result = self._run_browser_use_session(session)
+                outcome = coerce_computer_use_outcome(self._run_browser_use_session(session))
             else:
                 if self.computer is None:
-                    return "computer use unavailable"
+                    outcome = ComputerUseOutcome.unavailable("computer use unavailable")
+                    return outcome.user_safe_summary
                 gate = self._get_gate()
                 client = None if self.computer.codex_backend is not None else self._get_client()
-                result = self.computer.run_agent_loop(
-                    session=session,
-                    client=client,
-                    gate=gate,
-                    model=self.computer_model,
-                    system_prompt=self.computer_system_prompt,
-                    current_url_resolver=lambda: self._resolve_current_url(
-                        session_id, getattr(session, "task", "")
-                    ),
+                run_agent_loop_outcome = _real_callable_attr(
+                    self.computer, "run_agent_loop_outcome"
                 )
+                if callable(run_agent_loop_outcome):
+                    outcome = coerce_computer_use_outcome(
+                        run_agent_loop_outcome(
+                            session=session,
+                            client=client,
+                            gate=gate,
+                            model=self.computer_model,
+                            system_prompt=self.computer_system_prompt,
+                            current_url_resolver=lambda: self._resolve_current_url(
+                                session_id, getattr(session, "task", "")
+                            ),
+                        )
+                    )
+                else:
+                    outcome = coerce_computer_use_outcome(
+                        self.computer.run_agent_loop(
+                            session=session,
+                            client=client,
+                            gate=gate,
+                            model=self.computer_model,
+                            system_prompt=self.computer_system_prompt,
+                            current_url_resolver=lambda: self._resolve_current_url(
+                                session_id, getattr(session, "task", "")
+                            ),
+                        )
+                    )
+            result = outcome.user_safe_summary
         except Exception as exc:
             self._sessions.pop(session_id, None)
             message = _error_message(exc)
+            outcome = _exception_outcome(message)
             logger.exception("computer use failed for %s", session_id)
             if backend == "browser_use" and "timed out" in message.lower():
                 self._emit(
@@ -457,13 +515,14 @@ class ComputerHandler:
                     "status": getattr(session, "status", None),
                     "error": message[:200],
                     "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+                    **_computer_outcome_event_payload(outcome),
                 },
             )
             if self.observe is not None:
                 self.observe.emit(
                     "error", payload={"source": "computer_use", "error": message[:200]}
                 )
-            return f"computer use error: {message}"
+            return outcome.user_safe_summary
 
         if session.status == "awaiting_approval":
             if self.approvals is None:
@@ -544,6 +603,7 @@ class ComputerHandler:
                     "current_url": getattr(session, "current_url", None),
                     "screenshot_captured": "screenshot_path" in screenshot_metadata,
                     "screenshot_error": screenshot_metadata.get("screenshot_error"),
+                    **_computer_outcome_event_payload(outcome),
                 },
             )
             return (
@@ -552,17 +612,19 @@ class ComputerHandler:
                 "Responde `te autorizo` para ejecutarla o `aborta` para cancelarla."
             )
 
-        if session.status in {"done", "aborted"}:
+        if session.status in {"done", "aborted", "cancelled"}:
             self._sessions.pop(session_id, None)
-        if session.status == "done":
-            self._emit(
-                "computer_session_completed",
-                {
-                    "session_id": session_id,
-                    "backend": backend,
-                    "result_chars": len(str(result or "")),
-                },
-            )
+        if session.status in {"done", "cancelled"}:
+            event_payload = {
+                "session_id": session_id,
+                "backend": backend,
+                "result_chars": len(str(result or "")),
+                **_computer_outcome_event_payload(outcome),
+            }
+            if outcome.status in {"failed", "no_result", "cancelled", "unavailable"}:
+                self._emit("computer_session_failed", event_payload)
+            else:
+                self._emit("computer_session_completed", event_payload)
         return result
 
     def _get_client(self) -> Any:

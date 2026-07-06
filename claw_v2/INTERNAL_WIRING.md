@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice a3.4-browser-computer-lock-symmetry (2026-07-06, A3.4): interactive and delegated browser/CDP work share profile-first/browser_use-second lock ordering; interactive browser_use lazily initializes the service under that discipline."
-doc_version: 2.89
+describes_commit: "slice a3.6-typed-computer-use-outcomes (2026-07-06, A3.6): computer/browser task outcomes carry typed status, reason_code, retryable, and user_safe_summary while preserving legacy summary text for callers."
+doc_version: 2.90
 last_verified: 2026-07-06
-verification_method: "A3.4 local: tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_browser_use_lazily_initializes_service proves interactive lazy BrowserUseService construction; tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_browser_use_blocks_delegated_cdp_profile_work proves profile lock coverage through interactive run; tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_delegated_browser_use_blocks_interactive_browser_use and ::test_interactive_and_delegated_browser_use_runs_do_not_overlap prove no browser_use overlap in either direction; tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_browser_use_lock_releases_on_exception_and_cancel proves lock release on failure/cancel; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_browser_use_interactive_and_delegated_runs_share_lock locks ordering."
+verification_method: "A3.6 local: tests/test_computer.py::ComputerUseOutcomeTests covers success, approval, no-result, cancellation, and retryable iteration-limit typed outcomes; tests/test_computer.py::ComputerHandlerOutcomeTests proves handler downstream events use typed status/reason/retryable instead of summary parsing for failure, approval, no-result, exception, MagicMock legacy fallback, real typed runner selection, and CDP unavailable paths; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes locks the typed outcome chokepoint."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -848,6 +848,23 @@ invariants:
          profile lock. That allowed delegated CDP navigation or a second
          browser_use session to mutate the shared BrowserUseService/CDP profile
          while an interactive browser agent was active.
+
+  computer_use_task_outcomes_are_typed:
+    rule: Computer/browser task execution returns a typed
+          `ComputerUseOutcome` at the service/handler boundary. Downstream
+          handler decisions and observe events use `status`, `reason_code`, and
+          `retryable`; `user_safe_summary` is the only field used to preserve
+          legacy user-facing text. Do not infer completion/failure/approval
+          from summary substrings in `ComputerHandler._run_session`.
+    enforced_by:
+      - tests/test_computer.py::ComputerUseOutcomeTests
+      - tests/test_computer.py::ComputerHandlerOutcomeTests
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes
+    why: A3.6 closes the ambiguity where iteration limits, no-result browser
+         runs, approval waits, exceptions, and success all collapsed into
+         plain strings. That made downstream handling brittle and could mark a
+         failed/no-result automation as completed if the human-readable text
+         did not match an expected phrase.
 
   subprocess_bounded_execution:
     rule: Runtime subprocess execution must be time-bounded. New synchronous
