@@ -74,9 +74,24 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeDatabaseError, sqlite3.DatabaseError) as exc:
         # Slice 2a: corruption leaves a persistent halt marker so the launcher
         # holds instead of letting launchd KeepAlive crash-loop the daemon.
-        marker = write_runtime_db_halt_marker(args.db, exc, source="preflight")
+        # The failure may come from the BACKUP side (e.g. full disk corrupting
+        # the copy) with a healthy source — re-verify the source and only
+        # write the marker when the source itself is the corrupt one.
+        source_corrupt = True
+        try:
+            check_runtime_sqlite_health(args.db, thorough=True)
+            source_corrupt = False
+        except (RuntimeDatabaseError, sqlite3.DatabaseError):
+            pass
         print(f"ERROR: runtime DB preflight failed: {exc}", file=sys.stderr)
-        print(f"ERROR: halt marker written: {marker}", file=sys.stderr)
+        if source_corrupt:
+            marker = write_runtime_db_halt_marker(args.db, exc, source="preflight")
+            print(f"ERROR: halt marker written: {marker}", file=sys.stderr)
+        else:
+            print(
+                "ERROR: backup-side failure with a healthy source DB — no halt marker",
+                file=sys.stderr,
+            )
         return 1
     except OSError as exc:
         # Not a corruption verdict (e.g. backup dir unwritable) — abort the

@@ -39,10 +39,14 @@ cd "$REPO_ROOT"
 # the boot. The preflight re-runs each cycle and is the only thing that clears
 # the marker — and only after the DB passes a thorough integrity check.
 notify_owner() {
+  # The token travels via curl --config on stdin so it is not exposed in the
+  # process argument list while the alert is in flight.
   [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_ALLOWED_USER_ID:-}" ]] || return 0
-  curl -sS -m 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+  curl -sS -m 10 --config - \
     --data-urlencode "chat_id=${TELEGRAM_ALLOWED_USER_ID}" \
-    --data-urlencode "text=$1" >/dev/null 2>&1 || true
+    --data-urlencode "text=$1" >/dev/null 2>&1 <<EOF || true
+url = "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+EOF
 }
 
 CLAW_DB_PATH="${DB_PATH:-data/claw.db}"

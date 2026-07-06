@@ -2405,18 +2405,19 @@ def _ensure_runtime_db_boot_health(config: Any) -> None:
         logger.critical(
             "runtime DB failed boot health check; halt marker written: %s (%s)", marker, exc
         )
-        try:
-            send_telegram_message(
-                config.telegram_bot_token or "",
-                config.telegram_allowed_user_id or "",
-                (
-                    "🛑 Claw no arrancó: la DB de runtime falló el integrity check "
-                    f"({exc}). Marca de halt escrita en {marker}; el boot queda en "
-                    "hold hasta restaurar un backup verificado de data/backups/restart/."
-                ),
-            )
-        except Exception:
-            logger.exception("runtime DB halt alert could not be delivered")
+        if config.telegram_bot_token and config.telegram_allowed_user_id:
+            try:
+                send_telegram_message(
+                    config.telegram_bot_token,
+                    config.telegram_allowed_user_id,
+                    (
+                        "🛑 Claw no arrancó: la DB de runtime falló el integrity check "
+                        f"({exc}). Marca de halt escrita en {marker}; el boot queda en "
+                        "hold hasta restaurar un backup verificado de data/backups/restart/."
+                    ),
+                )
+            except Exception:
+                logger.exception("runtime DB halt alert could not be delivered")
         raise
 
 

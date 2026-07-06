@@ -128,6 +128,22 @@ class PreflightHaltMarkerTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(runtime_db_halt_marker_path(self.db_path).exists())
 
+    def test_backup_side_failure_with_healthy_source_writes_no_marker(self) -> None:
+        # P1 review catch (PR #220): a full-disk/unopenable backup destination
+        # raises sqlite3.DatabaseError with a perfectly healthy source DB —
+        # that must abort the restart (rc 1) but NEVER hold future boots.
+        _make_healthy_db(self.db_path)
+
+        with patch.object(
+            _preflight,
+            "create_verified_backup",
+            side_effect=sqlite3.DatabaseError("backup destination unwritable"),
+        ):
+            rc = self._run()
+
+        self.assertEqual(rc, 1)
+        self.assertFalse(runtime_db_halt_marker_path(self.db_path).exists())
+
     def test_missing_db_never_clears_an_existing_halt_marker(self) -> None:
         # Deleting the corrupt file must NOT unlock a fresh-schema boot: the
         # hold persists until a real DB passes the thorough check.

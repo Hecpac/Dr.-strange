@@ -72,11 +72,14 @@ stop_pid() {
 }
 
 notify_owner() {
-  # Best-effort Telegram alert (stdlib curl, never fails the script).
+  # Best-effort Telegram alert (never fails the script). The token travels via
+  # curl --config on stdin so it is not exposed in the process argument list.
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_ALLOWED_USER_ID:-}" ] || return 0
-  curl -sS -m 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+  curl -sS -m 10 --config - \
     --data-urlencode "chat_id=${TELEGRAM_ALLOWED_USER_ID}" \
-    --data-urlencode "text=$1" >/dev/null 2>&1 || true
+    --data-urlencode "text=$1" >/dev/null 2>&1 <<EOF || true
+url = "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+EOF
 }
 
 # Slice 2a: a failing preflight (DB corruption) must abort the restart before
