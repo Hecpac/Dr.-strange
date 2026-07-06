@@ -75,6 +75,7 @@ class ClawDaemon:
         heartbeat_snapshot_interval: float = 300.0,
         liveness_emit_sample: int = 15,
         tick_emit_sample: int = 30,
+        liveness_heartbeat_writer: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.scheduler = scheduler
         self.heartbeat = heartbeat
@@ -127,9 +128,10 @@ class ClawDaemon:
         self.heartbeat_snapshot_interval = max(0.0, float(heartbeat_snapshot_interval))
         self._cached_heartbeat_snapshot: HeartbeatSnapshot | None = None
         self._cached_heartbeat_snapshot_at = 0.0
-        # F0.3: the daemon loop's liveness signal and the per-tick daemon_tick
-        # row are now SAMPLED into observe_stream (the lifecycle heartbeat owns
-        # the authoritative sink). Both samples must be >= 1.
+        # F0.3/R2.3: the daemon loop owns the authoritative liveness sink and
+        # samples daemon_heartbeat rows into observe_stream. daemon_tick rows
+        # are sampled separately. Both samples must be >= 1.
+        self.liveness_heartbeat_writer = liveness_heartbeat_writer
         self.liveness_emit_sample = max(1, int(liveness_emit_sample))
         self.tick_emit_sample = max(1, int(tick_emit_sample))
         self._tick_count = 0
@@ -459,7 +461,7 @@ class ClawDaemon:
                 self._create_background_task(
                     "f4_delegation",
                     shutdown,
-                    self._run_f4_delegation_runner_loop(shutdown, interval=interval)
+                    self._run_f4_delegation_runner_loop(shutdown, interval=interval),
                 )
             )
         for runner in self._background_job_runners:
@@ -557,23 +559,35 @@ class ClawDaemon:
         *,
         interval: float,
     ) -> None:
-        # F0.3: this loop is now a SAMPLED, SECONDARY signal. The authoritative
-        # liveness sink (with web_transport_serving) is written by the scheduled
-        # lifecycle heartbeat; this loop must NOT write the sink (writing here
-        # would clobber web_transport_serving). It only mirrors a sampled
-        # daemon_heartbeat into observe_stream so the audit log keeps a coarse
-        # daemon-loop liveness trace without flooding.
+        # F0.3/R2.3: the authoritative liveness sink is refreshed from this
+        # daemon-owned loop, not from CronScheduler. Keep the write off the
+        # event loop; the writer may fsync and run the RuntimeDb write probe.
+        # observe_stream remains sampled so liveness does not flood the audit log.
         cycle = 0
         while not shutdown.is_set():
             cycle += 1
-            if (cycle - 1) % self.liveness_emit_sample == 0:
-                await self._emit_off_loop(
-                    "daemon_heartbeat",
-                    payload={
+            payload: dict[str, Any] | None = None
+            if self.liveness_heartbeat_writer is not None:
+                try:
+                    payload = await asyncio.to_thread(self.liveness_heartbeat_writer)
+                except Exception as exc:
+                    logger.warning("liveness heartbeat writer failed", exc_info=True)
+                    payload = {
                         "pid": os.getpid(),
                         "ts": time.time(),
                         "source": "daemon_liveness_loop",
-                    },
+                        "writer_error": _safe_error_preview(exc),
+                    }
+            if (cycle - 1) % self.liveness_emit_sample == 0:
+                if payload is None:
+                    payload = {
+                        "pid": os.getpid(),
+                        "ts": time.time(),
+                        "source": "daemon_liveness_loop",
+                    }
+                await self._emit_off_loop(
+                    "daemon_heartbeat",
+                    payload=payload,
                 )
             try:
                 await asyncio.wait_for(shutdown.wait(), timeout=interval)

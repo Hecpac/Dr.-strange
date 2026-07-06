@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice cron-tick-tripwire-rescope (2026-07-05, R2.0): the scheduler off-tick invariant now catches new inline HTTP, filesystem, subprocess, and blocking/sleep work in CronScheduler handlers, including nested helpers, attribute handlers, dynamic job names, and self.* path writes, without rewriting CronScheduler.run_due. Existing inline residual is explicit by job, callsite, and reason."
-doc_version: 2.84
+describes_commit: "slice scheduler-independent-liveness-sink (2026-07-05, R2.3): the authoritative liveness.json writer now runs from ClawDaemon's independent liveness loop, not CronScheduler, while preserving db_write_probe_status and runtime_health."
+doc_version: 2.85
 last_verified: 2026-07-05
-verification_method: "R2.0 local: tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_tripwire_has_teeth proves the detector fails on synthetic inline httpx, Path.write_text including self.* paths, subprocess.run, time.sleep/join, same-file helper delegation, attribute handlers, and dynamic ScheduledJob names; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_residual_is_explicit_and_minimal locks the current inline residual by job@file plus exact reasons; full tests/test_architecture_invariants.py preserves O1.1-O1.6 invariants."
+verification_method: "R2.3 local: tests/test_daemon_liveness_sink.py::DaemonLivenessLoopSamplingTests::test_liveness_sink_refreshes_while_cron_handler_blocks proves liveness.json refreshes with db_write_probe_status/runtime_health while a cron handler blocks; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_liveness_sink_is_not_scheduler_starved locks the wiring; full tests/test_architecture_invariants.py preserves prior invariants."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -245,12 +245,14 @@ invariants:
          heartbeat write-probes and self-heal policies are layered on top.
 
   heartbeat_carries_runtime_db_write_probe:
-    rule: The lifecycle-owned daemon heartbeat performs a real RuntimeDb write
-          probe and records `db_write_probe_status` in the authoritative
-          liveness sink. Diagnostics must propagate that status into checks and
-          mark a fresh heartbeat with `db_write_probe_status=failed` as critical;
-          the watchdog treats that failed write-probe as restartable only while
-          the database remains readable.
+    rule: The daemon liveness writer performs a real RuntimeDb write probe and
+          records `db_write_probe_status` in the authoritative liveness sink.
+          Lifecycle builds that writer because it owns web transport state, but
+          ClawDaemon runs it independently of CronScheduler. Diagnostics must
+          propagate that status into checks and mark a fresh heartbeat with
+          `db_write_probe_status=failed` as critical; the watchdog treats that
+          failed write-probe as restartable only while the database remains
+          readable.
     enforced_by:
       - tests/test_daemon_liveness_sink.py::LifecycleHeartbeatWriterTests::test_writer_records_successful_runtime_db_write_probe
       - tests/test_daemon_liveness_sink.py::LifecycleHeartbeatWriterTests::test_writer_records_failed_runtime_db_write_probe
@@ -261,9 +263,26 @@ invariants:
          read-only external healthcheck is insufficient; liveness must prove
          the daemon can still write through its actual RuntimeDb owner.
 
+  scheduler_independent_liveness_sink:
+    rule: The authoritative `data/liveness.json` writer runs from
+          `ClawDaemon._run_liveness_heartbeat_loop`, not from a
+          `CronScheduler` `ScheduledJob`. Lifecycle may build and inject the
+          writer because it owns `web_transport_serving`, but a blocked cron
+          handler must not starve the liveness sink. The writer must preserve
+          O1.2 `db_write_probe_status` / `db_write_probe` and O1.6
+          `runtime_health` fields.
+    enforced_by:
+      - tests/test_daemon_liveness_sink.py::DaemonLivenessLoopSamplingTests::test_liveness_sink_refreshes_while_cron_handler_blocks
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_liveness_sink_is_not_scheduler_starved
+      - tests/test_diagnostics.py::HeartbeatSinkTests
+    why: Audit R2.3 found the former authoritative `daemon_heartbeat`
+         scheduler job could be starved behind any inline/blocking
+         CronScheduler handler, leaving watchdog and diagnostics with a stale
+         sink even though the daemon event loop was still alive.
+
   minimal_runtime_health_surface_uses_existing_liveness_and_diagnostics:
     rule: The daemon exposes O1.x runtime health through the existing
-          lifecycle-owned `liveness.json` sink and `collect_diagnostics()`
+          daemon-owned `liveness.json` sink and `collect_diagnostics()`
           reader, not a parallel metrics stack. The compact `runtime_health`
           object must carry `spill_pending_count`, `db_write_probe_status`, and
           `runtime_db_degraded_state`. The spill count is a bounded, read-only
@@ -459,7 +478,6 @@ invariants:
     pending_migration: []  # CORE INVARIANT 1 CLOSED for migrated heavy autonomous jobs.
     inline_blocking_residual:
       - heartbeat  # legacy agent-registry heartbeat write; bounded local residual
-      - daemon_heartbeat  # authoritative liveness sink still scheduler-tick driven until R2.3
       - fitness_reminder  # existing local stamp write + Telegram send; not part of R2.0
       - morning_brief  # brief rendering/notification remains inline until R2.2
       - evening_brief  # brief rendering/notification remains inline until R2.2

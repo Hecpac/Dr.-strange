@@ -71,10 +71,6 @@ _PENDING_INLINE_MIGRATION: frozenset[str] = frozenset()
 # blocking cron work while R2.x migrates the residual off-tick.
 _ALLOWED_INLINE_BLOCKING_CRON_JOBS: dict[str, tuple[str, ...]] = {
     "heartbeat@claw_v2/main.py": ("handler attribute emit",),
-    "daemon_heartbeat@claw_v2/lifecycle.py": (
-        "claw_v2/lifecycle.py:run._emit_daemon_heartbeat:runtime_db_write_probe",
-        "claw_v2/lifecycle.py:run._emit_daemon_heartbeat:write_liveness_heartbeat_record",
-    ),
     "fitness_reminder@claw_v2/lifecycle.py": (
         "claw_v2/lifecycle.py:run._fitness_reminder:Path.mkdir",
         "claw_v2/lifecycle.py:run._fitness_reminder:Path.write_text",
@@ -303,15 +299,30 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
     def test_liveness_signal_has_a_consumer(self) -> None:
         """F0.3 tripwire: the daemon liveness signal lives in a shared atomic
-        JSON sink (``claw_v2/liveness.py``). The WRITER (lifecycle) and the
-        READER (diagnostics) must both reference that shared module so they
-        cannot drift to different paths and silently lose the signal."""
+        JSON sink (``claw_v2/liveness.py``). The writer wiring (daemon loop +
+        lifecycle-owned web state) and the READER (diagnostics) must both
+        reference that shared module so they cannot drift to different paths
+        and silently lose the signal."""
+        daemon = (REPO_ROOT / "claw_v2" / "daemon.py").read_text(encoding="utf-8")
         writer = (REPO_ROOT / "claw_v2" / "lifecycle.py").read_text(encoding="utf-8")
         reader = (REPO_ROOT / "claw_v2" / "diagnostics.py").read_text(encoding="utf-8")
+        self.assertIn("self.liveness_heartbeat_writer", daemon)
+        self.assertIn("asyncio.to_thread(self.liveness_heartbeat_writer)", daemon)
         self.assertIn("liveness.write_liveness", writer)
         self.assertIn("liveness.liveness_sink_path", writer)
         self.assertIn("liveness.read_liveness", reader)
         self.assertIn("liveness.liveness_sink_path", reader)
+
+    def test_liveness_sink_is_not_scheduler_starved(self) -> None:
+        """R2.3 tripwire: the authoritative liveness sink must be refreshed by
+        ClawDaemon's independent liveness loop, not by a CronScheduler job."""
+        daemon = (REPO_ROOT / "claw_v2" / "daemon.py").read_text(encoding="utf-8")
+        lifecycle = (REPO_ROOT / "claw_v2" / "lifecycle.py").read_text(encoding="utf-8")
+        self.assertIn("liveness_heartbeat_writer", daemon)
+        self.assertIn("_run_liveness_heartbeat_loop", daemon)
+        self.assertIn("runtime.daemon.liveness_heartbeat_writer", lifecycle)
+        self.assertNotIn('name="daemon_heartbeat"', lifecycle)
+        self.assertNotIn("name='daemon_heartbeat'", lifecycle)
 
     def test_minimal_runtime_health_surface_is_shared_by_liveness_and_diagnostics(self) -> None:
         """O1.6 tripwire: the compact runtime health surface must stay on the
