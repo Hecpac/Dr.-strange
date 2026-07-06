@@ -592,7 +592,7 @@ class ClawDaemon:
                         writer_task = None
                     else:
                         payload = self._liveness_writer_error_payload(
-                            writer_error="timeout",
+                            writer_error=_safe_error_preview(TimeoutError("timeout")),
                             writer_timeout_seconds=self.liveness_writer_timeout,
                         )
                 if (cycle - 1) % self.liveness_emit_sample == 0:

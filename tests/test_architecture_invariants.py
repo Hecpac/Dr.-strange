@@ -310,6 +310,7 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIn("asyncio.to_thread(self.liveness_heartbeat_writer)", daemon)
         self.assertIn("self.liveness_writer_timeout", daemon)
         self.assertIn("asyncio.wait(", daemon)
+        self.assertIn('_safe_error_preview(TimeoutError("timeout"))', daemon)
         self.assertIn("liveness.write_liveness", writer)
         self.assertIn("liveness.liveness_sink_path", writer)
         self.assertIn("liveness.read_liveness", reader)
