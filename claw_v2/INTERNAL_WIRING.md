@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice cron-tick-tripwire-rescope (2026-07-05, R2.0): the scheduler off-tick invariant now catches new inline HTTP, filesystem, subprocess, and blocking/sleep work in CronScheduler handlers without rewriting CronScheduler.run_due. Existing inline residual is explicit and minimal."
+describes_commit: "slice cron-tick-tripwire-rescope (2026-07-05, R2.0): the scheduler off-tick invariant now catches new inline HTTP, filesystem, subprocess, and blocking/sleep work in CronScheduler handlers, including nested helpers, attribute handlers, dynamic job names, and self.* path writes, without rewriting CronScheduler.run_due. Existing inline residual is explicit by job, callsite, and reason."
 doc_version: 2.84
 last_verified: 2026-07-05
-verification_method: "R2.0 local: tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_tripwire_has_teeth proves the detector fails on synthetic inline httpx, Path.write_text, subprocess.run, and time.sleep handlers; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_residual_is_explicit_and_minimal locks the current inline residual; full tests/test_architecture_invariants.py preserves O1.1-O1.6 invariants."
+verification_method: "R2.0 local: tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_tripwire_has_teeth proves the detector fails on synthetic inline httpx, Path.write_text including self.* paths, subprocess.run, time.sleep/join, same-file helper delegation, attribute handlers, and dynamic ScheduledJob names; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_residual_is_explicit_and_minimal locks the current inline residual by job@file plus exact reasons; full tests/test_architecture_invariants.py preserves O1.1-O1.6 invariants."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -436,8 +436,11 @@ invariants:
           ClawDaemon background runner, not in daemon.tick()'s control path.
           R2.0 does not rewrite `CronScheduler.run_due()`: it rescopes the
           tripwire so any new inline HTTP, filesystem, subprocess, or
-          blocking/sleep call in a scheduler handler fails unless the job is in
-          the explicit residual list below.
+          blocking/sleep call in a scheduler handler fails unless the job and
+          exact callsite/reason are in the explicit residual list below. The
+          detector follows same-file helper delegation, unique attribute
+          handlers such as `handler=service.method`, dynamic `ScheduledJob`
+          names, and `self.*` path-like filesystem calls.
     migrated:
       - skill_expand -> scheduler.skill_expand  # PR1B-a, uses JobService + SkillExpandJobRunner
       - wiki_research -> scheduler.wiki_research  # PR1B-b, uses JobService + ScheduledBackgroundJobRunner
@@ -462,6 +465,8 @@ invariants:
       - evening_brief  # brief rendering/notification remains inline until R2.2
       - notebooklm_orchestration_poll  # NotebookLM orchestration poll remains inline until R2.2
       - nlm_wiki_sync  # NotebookLM-to-wiki sync remains inline until R2.2
+      - wiki_lint  # existing local wiki filesystem scan/log via attribute handler
+      - wiki_confidence  # existing local wiki filesystem recompute/log via attribute handler
     inline_bounded_local_maintenance:
       - durable_retention_prune -> two bounded local SQLite DELETE paths
         (`JobService.prune_terminal`, `TaskLedger.prune_terminal`) plus env
@@ -473,7 +478,8 @@ invariants:
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_tripwire_has_teeth
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_residual_is_explicit_and_minimal
       - `_PENDING_INLINE_MIGRATION` is empty and may only stay empty.
-      - `_ALLOWED_INLINE_BLOCKING_CRON_JOBS` names the current R2.0 residual.
+      - `_ALLOWED_INLINE_BLOCKING_CRON_JOBS` names the current R2.0 residual by
+        `job@file` and exact callsite/reason list; any residual growth fails.
     why: CronScheduler.run_due() invokes handlers synchronously. Any provider
          call, code generation, verifier, subprocess, or research workload left
          inline would freeze the daemon tick and delay heartbeat / reconciliation

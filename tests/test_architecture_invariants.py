@@ -7,6 +7,7 @@ import tempfile
 import textwrap
 import unittest
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -68,14 +69,44 @@ _PENDING_INLINE_MIGRATION: frozenset[str] = frozenset()
 # blocking/FS/network/CDP/LLM work inline. This is not a migration list; it is a
 # narrow, named residual so the tripwire can fail closed for any new inline
 # blocking cron work while R2.x migrates the residual off-tick.
-_ALLOWED_INLINE_BLOCKING_CRON_JOBS: dict[str, str] = {
-    "heartbeat": "legacy heartbeat emits the agent registry inline; bounded local residual",
-    "daemon_heartbeat": "authoritative liveness sink is still scheduler-tick driven until R2.3",
-    "fitness_reminder": "existing local stamp write plus Telegram send; not part of R2.0",
-    "morning_brief": "brief rendering/notification remains inline until R2.2",
-    "evening_brief": "brief rendering/notification remains inline until R2.2",
-    "notebooklm_orchestration_poll": "NotebookLM orchestration poll remains inline until R2.2",
-    "nlm_wiki_sync": "NotebookLM-to-wiki sync remains inline until R2.2",
+_ALLOWED_INLINE_BLOCKING_CRON_JOBS: dict[str, tuple[str, ...]] = {
+    "heartbeat@claw_v2/main.py": ("handler attribute emit",),
+    "daemon_heartbeat@claw_v2/lifecycle.py": (
+        "claw_v2/lifecycle.py:run._emit_daemon_heartbeat:runtime_db_write_probe",
+        "claw_v2/lifecycle.py:run._emit_daemon_heartbeat:write_liveness_heartbeat_record",
+    ),
+    "fitness_reminder@claw_v2/lifecycle.py": (
+        "claw_v2/lifecycle.py:run._fitness_reminder:Path.mkdir",
+        "claw_v2/lifecycle.py:run._fitness_reminder:Path.write_text",
+        "claw_v2/lifecycle.py:run._fitness_reminder:claw_v2/lifecycle.py:should_send_fitness_reminder:Path.read_text",
+    ),
+    "morning_brief@claw_v2/lifecycle.py": (
+        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService._mark_sent:Path.mkdir",
+        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService._mark_sent:Path.write_text",
+        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService.build_message:claw_v2/morning_brief.py:MorningBriefService._render_via_llm:router.ask",
+        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:should_send_morning_brief:Path.read_text",
+    ),
+    "evening_brief@claw_v2/lifecycle.py": (
+        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService._mark_sent:Path.mkdir",
+        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService._mark_sent:Path.write_text",
+        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService.build_message:claw_v2/morning_brief.py:MorningBriefService._render_via_llm:router.ask",
+        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:should_send_morning_brief:Path.read_text",
+    ),
+    "notebooklm_orchestration_poll@claw_v2/lifecycle.py": ("poll_orchestrations",),
+    "nlm_wiki_sync@claw_v2/lifecycle.py": ("ingest_from_notebooklm",),
+    "wiki_lint@claw_v2/main.py": (
+        "claw_v2/wiki.py:WikiService.lint:Path.read_text",
+        "claw_v2/wiki.py:WikiService.lint:claw_v2/wiki.py:WikiService._append_log:Path.open",
+        "claw_v2/wiki.py:WikiService.lint:claw_v2/wiki.py:WikiService._list_wiki_pages:claw_v2/wiki.py:WikiService._is_deprecated:Path.read_text",
+    ),
+    "wiki_confidence@claw_v2/main.py": (
+        "claw_v2/wiki.py:WikiService.recompute_confidence:claw_v2/wiki.py:WikiService._append_log:Path.open",
+        "claw_v2/wiki.py:WikiService.recompute_confidence:claw_v2/wiki.py:WikiService._compute_confidence:claw_v2/wiki.py:WikiService._extract_updated_date:Path.read_text",
+        "claw_v2/wiki.py:WikiService.recompute_confidence:claw_v2/wiki.py:WikiService._compute_confidence:claw_v2/wiki.py:WikiService._list_wiki_pages:claw_v2/wiki.py:WikiService._is_deprecated:Path.read_text",
+        "claw_v2/wiki.py:WikiService.recompute_confidence:claw_v2/wiki.py:WikiService._list_wiki_pages:claw_v2/wiki.py:WikiService._is_deprecated:Path.read_text",
+        "claw_v2/wiki.py:WikiService.recompute_confidence:claw_v2/wiki.py:WikiService._set_frontmatter_field:Path.read_text",
+        "claw_v2/wiki.py:WikiService.recompute_confidence:claw_v2/wiki.py:WikiService._set_frontmatter_field:Path.write_text",
+    ),
 }
 _BLOCKING_HANDLER_ATTRIBUTES = frozenset({"emit", "run_if_due"})
 _BLOCKING_CRON_CALL_NAMES = frozenset(
@@ -110,6 +141,9 @@ _BLOCKING_HTTP_METHODS = frozenset(
     {"delete", "get", "head", "options", "patch", "post", "put", "request", "stream"}
 )
 _BLOCKING_WAIT_METHODS = frozenset({"join", "sleep", "wait"})
+_BLOCKING_WAIT_TARGET_NAMES = frozenset(
+    {"executor", "future", "fut", "process", "proc", "t", "thread", "worker"}
+)
 
 
 # F1.1b read-lock discipline (RAÍZ #1) -----------------------------------------
@@ -720,8 +754,23 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIn("audit_critical", spill_source)
 
     def test_cron_inline_blocking_tripwire_has_teeth(self) -> None:
-        source = textwrap.dedent(
-            """
+        sources = {
+            "synthetic_helpers.py": textwrap.dedent(
+                """
+                import time
+                from pathlib import Path
+
+                class ExternalService:
+                    def service_method(self):
+                        self.stamp_path.write_text("x")
+
+                    def join_method(self):
+                        worker.join()
+
+                """
+            ),
+            "synthetic.py": textwrap.dedent(
+                """
             import httpx
             import subprocess
             import time
@@ -729,11 +778,19 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
             from claw_v2.cron import ScheduledJob
 
+            from synthetic_helpers import ExternalService
+
             def _wrap_job_handler(*, name, observe, handler, skip_if=None):
                 return handler
 
             def _bad_http():
                 httpx.get("https://example.com", timeout=5)
+
+            def helper_sleep():
+                time.sleep(1)
+
+            def _bad_helper_delegation():
+                helper_sleep()
 
             def _bad_filesystem():
                 marker_path = Path("marker")
@@ -745,7 +802,16 @@ class ArchitectureInvariantTests(unittest.TestCase):
             def _bad_blocking():
                 time.sleep(1)
 
+            service = ExternalService()
+            dynamic_name = "bad_dynamic"
             scheduler.register(ScheduledJob(name="bad_http", interval_seconds=60, handler=_bad_http))
+            scheduler.register(
+                ScheduledJob(
+                    name="bad_helper_delegation",
+                    interval_seconds=60,
+                    handler=_bad_helper_delegation,
+                )
+            )
             scheduler.register(
                 ScheduledJob(name="bad_filesystem", interval_seconds=60, handler=_bad_filesystem)
             )
@@ -766,23 +832,40 @@ class ArchitectureInvariantTests(unittest.TestCase):
                     ),
                 )
             )
+            scheduler.register(ScheduledJob(name="bad_service_method", interval_seconds=60, handler=service.service_method))
+            scheduler.register(ScheduledJob(name="bad_join_method", interval_seconds=60, handler=service.join_method))
+            scheduler.register(ScheduledJob(name=dynamic_name, interval_seconds=60, handler=lambda: httpx.get("https://example.com")))
             """
-        )
+            ),
+        }
 
-        offenders = _cron_inline_blocking_offenders_from_sources({"synthetic.py": source})
+        offenders = _cron_inline_blocking_offenders_from_sources(sources)
 
-        self.assertEqual(
-            set(offenders),
-            {
-                "bad_blocking",
-                "bad_filesystem",
-                "bad_http",
-                "bad_subprocess",
-                "bad_wrapped_http",
-            },
+        self.assertTrue(
+            any(key.startswith("<dynamic>@synthetic.py:") for key in offenders),
+            "dynamic ScheduledJob names must not skip handler analysis",
         )
+        expected_literal_jobs = {
+            "bad_blocking@synthetic.py",
+            "bad_filesystem@synthetic.py",
+            "bad_helper_delegation@synthetic.py",
+            "bad_http@synthetic.py",
+            "bad_join_method@synthetic.py",
+            "bad_service_method@synthetic.py",
+            "bad_subprocess@synthetic.py",
+            "bad_wrapped_http@synthetic.py",
+        }
+        self.assertLessEqual(expected_literal_jobs, set(offenders))
         flattened = "\n".join("\n".join(reasons) for reasons in offenders.values())
-        for expected in ("httpx.get", "Path.write_text", "subprocess.run", "time.sleep"):
+        for expected in (
+            "httpx.get",
+            "Path.write_text",
+            "subprocess.run",
+            "time.sleep",
+            "synthetic_helpers.py:ExternalService.service_method:Path.write_text",
+            "synthetic.py:helper_sleep:time.sleep",
+            "blocking.join",
+        ):
             self.assertIn(expected, flattened)
 
     def test_cron_inline_blocking_residual_is_explicit_and_minimal(self) -> None:
@@ -792,11 +875,10 @@ class ArchitectureInvariantTests(unittest.TestCase):
         }
 
         detected = _cron_inline_blocking_offenders_from_sources(sources)
-        self.assertEqual(set(detected), set(_ALLOWED_INLINE_BLOCKING_CRON_JOBS))
-        for job_name, reason in _ALLOWED_INLINE_BLOCKING_CRON_JOBS.items():
-            with self.subTest(job_name=job_name):
-                self.assertGreater(len(reason), 20)
-                self.assertTrue(detected[job_name], f"{job_name} allowlist is stale")
+        self.assertEqual(
+            detected,
+            {key: list(reasons) for key, reasons in _ALLOWED_INLINE_BLOCKING_CRON_JOBS.items()},
+        )
 
     def test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick(self) -> None:
         """Deny-by-default backstop for Core Invariant 1.
@@ -1528,56 +1610,200 @@ def _node_mentions(node: ast.AST, names: set[str]) -> bool:
 def _cron_inline_blocking_offenders_from_sources(
     sources: Mapping[str, str],
 ) -> dict[str, list[str]]:
+    index = _CronSourceIndex.from_sources(sources)
     offenders: dict[str, list[str]] = {}
-    for rel_path, source in sources.items():
-        tree = ast.parse(source, filename=rel_path)
-        functions = {
-            node.name: node
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
+    for rel_path, tree in index.trees.items():
         for call in (node for node in ast.walk(tree) if _is_scheduled_job_call(node)):
             assert isinstance(call, ast.Call)
-            job_name = _literal_string(_keyword_value(call, "name"))
             handler = _keyword_value(call, "handler")
-            if not job_name or handler is None:
+            if handler is None:
                 continue
-            reasons = _blocking_cron_handler_reasons(handler, functions)
+            reasons = _blocking_cron_handler_reasons(handler, index=index, rel_path=rel_path)
             if reasons:
-                offenders.setdefault(job_name, []).extend(
-                    f"{rel_path}:{call.lineno}:{reason}" for reason in reasons
-                )
+                offenders[_scheduled_job_key(call, rel_path)] = sorted(reasons)
     return offenders
 
 
 def _blocking_cron_handler_reasons(
     handler: ast.AST,
-    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    *,
+    index: "_CronSourceIndex",
+    rel_path: str,
 ) -> list[str]:
     if isinstance(handler, ast.Call) and _call_name(handler) == "_wrap_job_handler":
         wrapped = _keyword_value(handler, "handler")
         if wrapped is None:
             return ["_wrap_job_handler missing handler keyword"]
-        return _blocking_cron_handler_reasons(wrapped, functions)
+        return _blocking_cron_handler_reasons(wrapped, index=index, rel_path=rel_path)
     if isinstance(handler, ast.Name):
-        target = functions.get(handler.id)
-        if target is None:
-            return []
-        return _blocking_reasons_in_nodes(target.body)
+        return sorted(
+            {
+                reason
+                for entry in index.functions_named(handler.id, rel_path=rel_path)
+                for reason in index.blocking_reasons_for_entry(entry)
+            }
+        )
     if isinstance(handler, ast.Lambda):
-        return _blocking_reasons_in_nodes([handler.body])
-    if isinstance(handler, ast.Attribute) and handler.attr in _BLOCKING_HANDLER_ATTRIBUTES:
-        return [f"handler attribute {handler.attr}"]
-    return _blocking_reasons_in_nodes([handler])
+        return _blocking_reasons_in_nodes([handler.body], index=index, rel_path=rel_path)
+    if isinstance(handler, ast.Attribute):
+        entries = index.methods_named(handler.attr)
+        if len(entries) == 1:
+            return sorted(index.blocking_reasons_for_entry(entries[0]))
+        if handler.attr in _BLOCKING_HANDLER_ATTRIBUTES:
+            return [f"handler attribute {handler.attr}"]
+        return sorted(
+            {reason for entry in entries for reason in index.blocking_reasons_for_entry(entry)}
+        )
+    return _blocking_reasons_in_nodes([handler], index=index, rel_path=rel_path)
 
 
 def _is_scheduled_job_call(node: ast.AST) -> bool:
     return isinstance(node, ast.Call) and _call_name(node) in {"ScheduledJob", "_SJ"}
 
 
-def _blocking_reasons_in_nodes(nodes: list[ast.AST]) -> list[str]:
+def _scheduled_job_key(node: ast.Call, rel_path: str) -> str:
+    job_name = _literal_string(_keyword_value(node, "name"))
+    if job_name:
+        return f"{job_name}@{rel_path}"
+    return f"<dynamic>@{rel_path}:{node.lineno}"
+
+
+@dataclass(frozen=True)
+class _CronFunctionEntry:
+    rel_path: str
+    name: str
+    qualname: str
+    node: ast.FunctionDef | ast.AsyncFunctionDef
+    class_name: str | None = None
+
+
+class _CronSourceIndex:
+    def __init__(
+        self,
+        *,
+        trees: dict[str, ast.Module],
+        entries: list[_CronFunctionEntry],
+    ) -> None:
+        self.trees = trees
+        self.entries = entries
+        self._entries_by_file_name: dict[tuple[str, str], list[_CronFunctionEntry]] = {}
+        self._entries_by_name: dict[str, list[_CronFunctionEntry]] = {}
+        self._methods_by_name: dict[str, list[_CronFunctionEntry]] = {}
+        self._methods_by_class: dict[tuple[str, str, str], list[_CronFunctionEntry]] = {}
+        for entry in entries:
+            self._entries_by_file_name.setdefault((entry.rel_path, entry.name), []).append(entry)
+            self._entries_by_name.setdefault(entry.name, []).append(entry)
+            if entry.class_name is not None:
+                self._methods_by_name.setdefault(entry.name, []).append(entry)
+                self._methods_by_class.setdefault(
+                    (entry.rel_path, entry.class_name, entry.name), []
+                ).append(entry)
+
+    @classmethod
+    def from_sources(cls, sources: Mapping[str, str]) -> "_CronSourceIndex":
+        trees = {
+            rel_path: ast.parse(source, filename=rel_path) for rel_path, source in sources.items()
+        }
+        entries: list[_CronFunctionEntry] = []
+        for rel_path, tree in trees.items():
+            entries.extend(_collect_cron_function_entries(tree, rel_path=rel_path))
+        return cls(trees=trees, entries=entries)
+
+    def functions_named(self, name: str, *, rel_path: str) -> list[_CronFunctionEntry]:
+        return self._entries_by_file_name.get((rel_path, name), [])
+
+    def methods_named(self, name: str) -> list[_CronFunctionEntry]:
+        return self._methods_by_name.get(name, [])
+
+    def methods_for_class(
+        self, entry: _CronFunctionEntry, method_name: str
+    ) -> list[_CronFunctionEntry]:
+        if entry.class_name is None:
+            return []
+        return self._methods_by_class.get((entry.rel_path, entry.class_name, method_name), [])
+
+    def blocking_reasons_for_entry(
+        self,
+        entry: _CronFunctionEntry,
+        *,
+        visited: frozenset[tuple[str, str]] = frozenset(),
+    ) -> set[str]:
+        key = (entry.rel_path, entry.qualname)
+        if key in visited:
+            return set()
+        visited = visited | {key}
+        reasons = _blocking_reasons_in_nodes(
+            list(entry.node.body),
+            index=self,
+            rel_path=entry.rel_path,
+            current_entry=entry,
+            visited=visited,
+        )
+        return {f"{entry.rel_path}:{entry.qualname}:{reason}" for reason in reasons}
+
+
+def _collect_cron_function_entries(
+    tree: ast.Module,
+    *,
+    rel_path: str,
+) -> list[_CronFunctionEntry]:
+    entries: list[_CronFunctionEntry] = []
+
+    class _Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.scope: list[str] = []
+            self.class_stack: list[str] = []
+            self.function_depth = 0
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self.scope.append(node.name)
+            self.class_stack.append(node.name)
+            self.generic_visit(node)
+            self.class_stack.pop()
+            self.scope.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._visit_function(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._visit_function(node)
+
+        def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            class_name = (
+                self.class_stack[-1] if self.class_stack and self.function_depth == 0 else None
+            )
+            qualname = ".".join((*self.scope, node.name))
+            entries.append(
+                _CronFunctionEntry(
+                    rel_path=rel_path,
+                    name=node.name,
+                    qualname=qualname,
+                    node=node,
+                    class_name=class_name,
+                )
+            )
+            self.scope.append(node.name)
+            self.function_depth += 1
+            self.generic_visit(node)
+            self.function_depth -= 1
+            self.scope.pop()
+
+    _Visitor().visit(tree)
+    return entries
+
+
+def _blocking_reasons_in_nodes(
+    nodes: list[ast.AST],
+    *,
+    index: _CronSourceIndex,
+    rel_path: str,
+    current_entry: _CronFunctionEntry | None = None,
+    visited: frozenset[tuple[str, str]] = frozenset(),
+) -> list[str]:
     reasons: list[str] = []
     path_names = _path_like_names(nodes)
+    if current_entry is not None:
+        path_names |= _function_path_like_arg_names(current_entry.node)
     stack = list(nodes)
     while stack:
         node = stack.pop()
@@ -1587,14 +1813,42 @@ def _blocking_reasons_in_nodes(nodes: list[ast.AST]) -> list[str]:
             reason = _blocking_cron_call_reason(node, path_names=path_names)
             if reason is not None:
                 reasons.append(reason)
+            else:
+                for target in _helper_call_targets(
+                    node,
+                    index=index,
+                    rel_path=rel_path,
+                    current_entry=current_entry,
+                ):
+                    reasons.extend(index.blocking_reasons_for_entry(target, visited=visited))
         stack.extend(ast.iter_child_nodes(node))
     return sorted(set(reasons))
+
+
+def _helper_call_targets(
+    node: ast.Call,
+    *,
+    index: _CronSourceIndex,
+    rel_path: str,
+    current_entry: _CronFunctionEntry | None,
+) -> list[_CronFunctionEntry]:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return index.functions_named(func.id, rel_path=rel_path)
+    if not isinstance(func, ast.Attribute):
+        return []
+    if isinstance(func.value, ast.Name) and func.value.id == "self" and current_entry is not None:
+        return index.methods_for_class(current_entry, func.attr)
+    return []
 
 
 def _path_like_names(nodes: list[ast.AST]) -> set[str]:
     names: set[str] = set()
     for node in nodes:
         for child in ast.walk(node):
+            if isinstance(child, ast.For) and _expr_yields_path_like(child.iter, names):
+                for target in _name_targets(child.target):
+                    names.add(target)
             value: ast.AST | None = None
             targets: list[ast.AST] = []
             if isinstance(child, ast.Assign):
@@ -1611,15 +1865,57 @@ def _path_like_names(nodes: list[ast.AST]) -> set[str]:
     return names
 
 
+def _name_targets(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Tuple | ast.List):
+        return {name for item in node.elts for name in _name_targets(item)}
+    return set()
+
+
+def _expr_yields_path_like(node: ast.AST, path_names: set[str]) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in path_names or node.id.lower().endswith(("paths", "files", "pages"))
+    if not isinstance(node, ast.Call):
+        return False
+    call_name = _call_name(node)
+    return call_name.endswith(("_paths", "_files", "_pages")) or call_name in {
+        "_list_wiki_pages",
+        "glob",
+        "rglob",
+    }
+
+
+def _function_path_like_arg_names(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> set[str]:
+    args = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+    return {
+        arg.arg
+        for arg in args
+        if arg.annotation is not None and _annotation_is_path_like(arg.annotation)
+    }
+
+
+def _annotation_is_path_like(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "Path"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "Path"
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value == "Path" or node.value.endswith(".Path")
+    return False
+
+
 def _expr_is_path_like(node: ast.AST, path_names: set[str]) -> bool:
     if isinstance(node, ast.Call) and _call_name(node) == "Path":
         return True
     if isinstance(node, ast.Name):
         return node.id in path_names or _name_looks_path_like(node.id)
     if isinstance(node, ast.Attribute):
-        return node.attr in {"parent", "path", "stamp_path"} and _expr_is_path_like(
-            node.value, path_names
-        )
+        if _name_looks_path_like(node.attr):
+            return True
+        return node.attr == "parent" and _expr_is_path_like(node.value, path_names)
     return False
 
 
@@ -1635,14 +1931,14 @@ def _blocking_cron_call_reason(node: ast.Call, *, path_names: set[str]) -> str |
         return "urllib.request.urlopen"
     if dotted.startswith("subprocess.") and attr_name in _BLOCKING_SUBPROCESS_METHODS:
         return dotted
-    if call_name in _BLOCKING_CRON_CALL_NAMES:
-        return call_name
-    if call_name == "open":
-        return "open"
     if attr_name in _BLOCKING_FILESYSTEM_METHODS and _looks_like_path_filesystem_call(
         node, path_names
     ):
         return f"Path.{attr_name}"
+    if attr_name == "ask" and any(part.endswith("router") for part in dotted.split(".")):
+        return "router.ask"
+    if call_name in _BLOCKING_CRON_CALL_NAMES:
+        return call_name
     if dotted in {"time.sleep", "asyncio.run"}:
         return dotted
     if attr_name in _BLOCKING_WAIT_METHODS and _looks_like_blocking_wait_call(node):
@@ -1668,7 +1964,7 @@ def _looks_like_path_filesystem_call(node: ast.Call, path_names: set[str]) -> bo
 
 
 def _name_looks_path_like(name: str) -> bool:
-    return name.endswith(("_path", "_stamp", "stamp", "path")) or name.startswith("_")
+    return name.lower().endswith(("_path", "_stamp", "stamp", "path"))
 
 
 def _looks_like_blocking_wait_call(node: ast.Call) -> bool:
@@ -1677,7 +1973,7 @@ def _looks_like_blocking_wait_call(node: ast.Call) -> bool:
     if node.func.attr == "sleep":
         return True
     target = node.func.value
-    return isinstance(target, ast.Name) and target.id in {"thread", "process", "proc"}
+    return isinstance(target, ast.Name) and target.id in _BLOCKING_WAIT_TARGET_NAMES
 
 
 class RuntimeDbReadLockDisciplineTests(unittest.TestCase):
