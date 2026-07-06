@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice 1a-approval-reissue (2026-07-06, blind-spot pass finding #1): /reissue rotates a pending approval's token hash atomically and restarts its TTL window, recovering Tier 3 approvals whose request send never reached the owner."
-doc_version: 2.91
+describes_commit: "slice 1b-owner-notification-outbox (2026-07-06, blind-spot pass finding #6): terminal-task notifications whose Telegram send fails are enqueued as durable owner_notification agent_jobs and retried off-tick until delivered or stale (24h), instead of warning-only drop."
+doc_version: 2.92
 last_verified: 2026-07-06
-verification_method: "Slice 1a local: tests/test_approval.py::ApprovalReissueTests covers pending-only rotation, TTL-window restart with first_created_at audit trail, old-token invalidation, terminal-state refusal, past-TTL expiry instead of rescue, missing-record behavior, event emission without raw token, and required_confirmation preservation; tests/test_approval_gate.py::ApprovalsCommandReissueTests + BotFormatterTests cover the /reissue command surface and the confirmation-branch formatter; tests/test_latency_audit_group3.py::InterruptCommandMatcherTests locks /reissue as an operator interrupt."
+verification_method: "Slice 1b local: tests/test_owner_notification_outbox.py covers enqueue-on-failure payload/resume_key/max_attempts, active-window dedup, non-telegram refusal, drain delivery+completion+event, retry-with-backoff on send failure, stale expiry terminalization with event and no send, invalid-payload terminalization, attempt exhaustion, and max_per_cycle bounds; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_owner_notification_outbox_stays_wired_into_runtime locks the lifecycle seam and the runner registration in main."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -949,6 +949,34 @@ invariants:
          with no recovery path (blind-spot pass 2026-07-06, finding #1).
          Reissue restores delivery without weakening hash-only persistence,
          single-use resolution, or the forged-record signature floor.
+
+  owner_notification_outbox_durable_delivery:
+    rule: A terminal-task notification whose Telegram send fails is never
+          dropped with a warning-only log. The lifecycle send-failure callback
+          enqueues a durable agent_jobs row (kind owner_notification,
+          resume_key owner_notif:<notification_key> for active-window dedup,
+          message text already sanitized by the terminal formatters before it
+          reaches the send path) and the off-tick OwnerNotificationDrainRunner
+          retries delivery via stop_notifier until delivered, attempts are
+          exhausted, or the notice goes stale (24h) — expiry TERMINALIZES the
+          row with an observe event, never deletes it. Delivery is
+          at-least-once by decision (a lost ack double-notifies rather than
+          losing the notice). Scope is tasks-only: approval messages carry
+          raw tokens that are deliberately non-persistable (AH1) and recover
+          via /reissue instead.
+    chokepoints:
+      - lifecycle.enqueue_owner_notification  # the no-silent-drop seam
+      - daemon.OwnerNotificationDrainRunner.run_once  # claim -> send -> complete/fail(retry)
+      - main._setup_scheduler  # register_background_job_runner(name="owner_notification_drain"), gated on Telegram config
+      - jobs.JobService.prune_terminal  # terminal-only reap keeps owed rows prune-safe
+    enforced_by:
+      - tests/test_owner_notification_outbox.py
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_owner_notification_outbox_stays_wired_into_runtime
+    why: The in-memory dedup sets and fire-once send callback meant a Telegram
+         outage during the delivery window lost the notice permanently while
+         the result sat unread in the DB (blind-spot pass 2026-07-06, finding
+         #6; the drain-pass promise in finalize_terminal_notification's
+         docstring had no implementation for succeeded tasks).
 
   recovery_jobs_drained_off_tick:
     rule: recovery_jobs (the brain's "I promised to resume this" queue) must be

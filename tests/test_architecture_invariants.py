@@ -465,6 +465,18 @@ class ArchitectureInvariantTests(unittest.TestCase):
         }
         self.assertTrue(required.issubset(set(PROMOTION_SENSITIVE_PATH_PATTERNS)))
 
+    def test_owner_notification_outbox_stays_wired_into_runtime(self) -> None:
+        # Slice 1b (blind-spot pass 2026-07-06 finding #6): a terminal-task
+        # notification whose Telegram send failed used to be dropped with a
+        # warning-only log. The failure callback must enqueue a durable
+        # owner_notification job and the off-tick drain runner must stay
+        # registered — losing either regresses to silent notification loss.
+        lifecycle_source = (REPO_ROOT / "claw_v2" / "lifecycle.py").read_text(encoding="utf-8")
+        main_source = (REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("enqueue_owner_notification(", lifecycle_source)
+        self.assertIn("OwnerNotificationDrainRunner", main_source)
+        self.assertIn('name="owner_notification_drain"', main_source)
+
     def test_recovery_job_drainer_stays_wired_into_runtime(self) -> None:
         # 2026-06-10 audit C1: recovery_jobs accumulated forever because
         # resolve_recovery_job had no runtime caller (a false promise of

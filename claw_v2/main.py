@@ -61,7 +61,7 @@ from claw_v2.computer import (
 from claw_v2.config import AppConfig, MonitoredSiteConfig, ScheduledSubAgentConfig
 from claw_v2.coordinator import CoordinatorService
 from claw_v2.cron import CronScheduler, ScheduledJob
-from claw_v2.daemon import ClawDaemon, RecoveryJobDrainRunner
+from claw_v2.daemon import ClawDaemon, OwnerNotificationDrainRunner, RecoveryJobDrainRunner
 from claw_v2.dream import AutoDreamService
 from claw_v2.f2_durability_store import F2DurabilityStore
 from claw_v2.github import GitHubPullRequestService
@@ -1724,6 +1724,28 @@ def _setup_scheduler(
             daemon.register_background_job_runner(
                 name="recovery_drain",
                 handler=recovery_drain_runner.run_once,
+                interval=300.0,
+            )
+            # Slice 1b (blind-spot pass 2026-07-06 finding #6): retry durable
+            # de notificaciones de task terminal cuyo send a Telegram falló.
+            # El callback de lifecycle encola owner_notification; este runner
+            # las entrega off-tick hasta que llegan o caducan (24h).
+
+            def _owner_notification_send(chat_id: str, message: str) -> None:
+                send_telegram_message(
+                    config.telegram_bot_token or "",
+                    chat_id,
+                    message,
+                )
+
+            owner_notification_drain = OwnerNotificationDrainRunner(
+                job_service=job_service,
+                send=_owner_notification_send,
+                observe=observe,
+            )
+            daemon.register_background_job_runner(
+                name="owner_notification_drain",
+                handler=owner_notification_drain.run_once,
                 interval=300.0,
             )
 
