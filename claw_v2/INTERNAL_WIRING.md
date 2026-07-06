@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice r2.2a-cdp-cron-off-tick (2026-07-06, R2.2a): notebooklm_orchestration_poll and nlm_wiki_sync now enqueue ScheduledBackgroundJobRunner work with bounded timeouts instead of running CDP/NotebookLM body work inline in CronScheduler."
-doc_version: 2.87
+describes_commit: "slice r2.2b-brief-cron-off-tick (2026-07-06, R2.2b): morning_brief and evening_brief now enqueue ScheduledBackgroundJobRunner work with bounded timeouts instead of running MorningBriefService body work inline in CronScheduler."
+doc_version: 2.88
 last_verified: 2026-07-06
-verification_method: "R2.2a local: tests/test_scheduled_background_jobs.py proves notebooklm_orchestration_poll and nlm_wiki_sync cron handlers enqueue only, registered background runners execute the body off-tick, and runner timeout failures are observable; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_residual_is_explicit_and_minimal verifies the R2.0 residual allowlist no longer includes the CDP NotebookLM jobs."
+verification_method: "R2.2b local: tests/test_scheduled_background_jobs.py proves morning_brief/evening_brief cron handlers enqueue only, registered background runners execute the body off-tick, evaluate the original enqueue/tick timestamp for due-window semantics, duplicate ticks dedupe through stable resume keys, and runner timeout failures are observable; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_residual_is_explicit_and_minimal verifies the R2.0 residual allowlist no longer includes brief jobs."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -482,12 +482,12 @@ invariants:
       - learning_soul_suggestions -> scheduler.learning_soul_suggestions  # final leg, enqueue + ScheduledBackgroundJobRunner (was router.ask(lane=judge) inline)
       - notebooklm_orchestration_poll -> scheduler.notebooklm_orchestration_poll  # R2.2a, enqueue + ScheduledBackgroundJobRunner with timeout (was NotebookLM orchestration poll inline)
       - nlm_wiki_sync -> scheduler.nlm_wiki_sync  # R2.2a, enqueue + ScheduledBackgroundJobRunner with timeout (was NotebookLM chat/wiki ingest inline)
+      - morning_brief -> scheduler.morning_brief  # R2.2b, enqueue + ScheduledBackgroundJobRunner with timeout (was MorningBriefService.run_if_due inline)
+      - evening_brief -> scheduler.evening_brief  # R2.2b, enqueue + ScheduledBackgroundJobRunner with timeout (was MorningBriefService.run_if_due inline)
     pending_migration: []  # CORE INVARIANT 1 CLOSED for migrated heavy autonomous jobs.
     inline_blocking_residual:
       - heartbeat  # legacy agent-registry heartbeat write; bounded local residual
       - fitness_reminder  # existing local stamp write + Telegram send; not part of R2.0
-      - morning_brief  # brief rendering/notification remains inline until R2.2
-      - evening_brief  # brief rendering/notification remains inline until R2.2
       - wiki_lint  # existing local wiki filesystem scan/log via attribute handler
       - wiki_confidence  # existing local wiki filesystem recompute/log via attribute handler
     inline_bounded_local_maintenance:

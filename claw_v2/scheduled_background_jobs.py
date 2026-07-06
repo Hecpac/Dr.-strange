@@ -44,6 +44,10 @@ NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND = "scheduler.notebooklm_orchestration_pol
 NOTEBOOKLM_ORCHESTRATION_POLL_RESUME_KEY = "scheduler:notebooklm_orchestration_poll"
 NLM_WIKI_SYNC_JOB_KIND = "scheduler.nlm_wiki_sync"
 NLM_WIKI_SYNC_RESUME_KEY = "scheduler:nlm_wiki_sync"
+MORNING_BRIEF_JOB_KIND = "scheduler.morning_brief"
+MORNING_BRIEF_RESUME_ID = "scheduler:morning_brief"
+EVENING_BRIEF_JOB_KIND = "scheduler.evening_brief"
+EVENING_BRIEF_RESUME_ID = "scheduler:evening_brief"
 SCHEDULED_BACKGROUND_STALE_RUNNING_SECONDS = 60 * 60
 _ERROR_PREVIEW_LIMIT = 200
 _RESULT_STRING_LIMIT = 200
@@ -380,6 +384,14 @@ def nlm_wiki_sync_result_summary(result: object) -> dict[str, Any]:
     return {
         "notebooks_scanned": _safe_int(data.get("notebooks_scanned")),
         "pages_written": _safe_int(data.get("pages_written")),
+    }
+
+
+def brief_result_summary(result: object) -> dict[str, Any]:
+    message = result if isinstance(result, str) else ""
+    return {
+        "sent": bool(message),
+        "message_chars": len(message),
     }
 
 

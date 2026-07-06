@@ -146,8 +146,8 @@ class MorningBriefService:
             "journal_pending": 0,
         }
 
-    def run_if_due(self) -> str | None:
-        now = self.clock()
+    def run_if_due(self, *, now: datetime | None = None) -> str | None:
+        now = now or self.clock()
         if not should_send_morning_brief(
             now,
             self.settings.stamp_path,

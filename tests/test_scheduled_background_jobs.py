@@ -5,9 +5,11 @@ import threading
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 from claw_v2.adapters.base import LLMRequest, LLMResponse
 from claw_v2.cron import CronScheduler, ScheduledJob
@@ -16,9 +18,14 @@ from claw_v2.heartbeat import HeartbeatSnapshot
 from claw_v2.jobs import JobService
 from claw_v2.kairos import TickDecision
 from claw_v2.main import build_runtime
+from claw_v2.morning_brief import MorningBriefService, MorningBriefSettings
 from claw_v2.scheduled_background_jobs import (
+    EVENING_BRIEF_JOB_KIND,
+    EVENING_BRIEF_RESUME_ID,
     KAIROS_TICK_JOB_KIND,
     KAIROS_TICK_RESUME_KEY,
+    MORNING_BRIEF_JOB_KIND,
+    MORNING_BRIEF_RESUME_ID,
     NLM_WIKI_SYNC_JOB_KIND,
     NLM_WIKI_SYNC_RESUME_KEY,
     NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,
@@ -41,7 +48,7 @@ from claw_v2.scheduled_background_jobs import (
 
 
 class ScheduledBackgroundJobTests(unittest.TestCase):
-    def test_notebooklm_job_kinds_have_isolated_resume_keys(self) -> None:
+    def test_scheduled_job_kinds_have_isolated_resume_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             jobs = JobService(Path(tmpdir) / "claw.db")
 
@@ -71,15 +78,45 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
                 resume_key=NLM_WIKI_SYNC_RESUME_KEY,
                 job_service=jobs,
             )
+            morning_first = enqueue_scheduled_background_job(
+                job_name="morning_brief",
+                job_kind=MORNING_BRIEF_JOB_KIND,
+                resume_key=MORNING_BRIEF_RESUME_ID,
+                job_service=jobs,
+            )
+            morning_second = enqueue_scheduled_background_job(
+                job_name="morning_brief",
+                job_kind=MORNING_BRIEF_JOB_KIND,
+                resume_key=MORNING_BRIEF_RESUME_ID,
+                job_service=jobs,
+            )
+            evening_first = enqueue_scheduled_background_job(
+                job_name="evening_brief",
+                job_kind=EVENING_BRIEF_JOB_KIND,
+                resume_key=EVENING_BRIEF_RESUME_ID,
+                job_service=jobs,
+            )
+            evening_second = enqueue_scheduled_background_job(
+                job_name="evening_brief",
+                job_kind=EVENING_BRIEF_JOB_KIND,
+                resume_key=EVENING_BRIEF_RESUME_ID,
+                job_service=jobs,
+            )
 
             self.assertEqual(poll_first, poll_second)
             self.assertEqual(sync_first, sync_second)
+            self.assertEqual(morning_first, morning_second)
+            self.assertEqual(evening_first, evening_second)
             self.assertNotEqual(poll_first, sync_first)
+            self.assertNotEqual(morning_first, evening_first)
+            self.assertNotEqual(poll_first, morning_first)
             self.assertEqual(
                 len(jobs.list(kinds=(NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,), limit=10)),
                 1,
             )
             self.assertEqual(len(jobs.list(kinds=(NLM_WIKI_SYNC_JOB_KIND,), limit=10)), 1)
+            self.assertEqual(len(jobs.list(kinds=(MORNING_BRIEF_JOB_KIND,), limit=10)), 1)
+            self.assertEqual(len(jobs.list(kinds=(EVENING_BRIEF_JOB_KIND,), limit=10)), 1)
 
     def test_wiki_research_enqueue_does_not_run_inline_and_dedupes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -744,6 +781,67 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
 
 
 class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def _brief_runtime(self, tmpdir: str, *, timeout_seconds: float = 0.5):
+        from claw_v2.lifecycle import wire_brief_scheduler_jobs
+
+        root = Path(tmpdir)
+        observe = MagicMock()
+        job_service = JobService(root / "claw.db")
+        scheduler = CronScheduler()
+        registered: dict[str, object] = {}
+
+        class _Daemon:
+            def register_background_job_runner(self, *, name, handler, interval=60.0):
+                registered[name] = SimpleNamespace(name=name, handler=handler, interval=interval)
+
+        runtime = SimpleNamespace(
+            scheduler=scheduler,
+            job_service=job_service,
+            observe=observe,
+            daemon=_Daemon(),
+        )
+        morning_brief = SimpleNamespace(
+            settings=SimpleNamespace(timezone="America/Chicago"),
+            run_if_due=MagicMock(return_value="morning ready"),
+        )
+        evening_brief = SimpleNamespace(
+            settings=SimpleNamespace(timezone="America/Chicago"),
+            run_if_due=MagicMock(return_value="evening ready"),
+        )
+        wire_brief_scheduler_jobs(
+            runtime,
+            morning_brief=morning_brief,
+            evening_brief=evening_brief,
+            timeout_seconds=timeout_seconds,
+        )
+        return runtime, morning_brief, evening_brief, registered
+
+    def _real_brief_service(
+        self,
+        *,
+        stamp_path: Path,
+        sent: list[str],
+        hour: int,
+        report_name: str,
+        delayed_now: datetime,
+    ) -> MorningBriefService:
+        return MorningBriefService(
+            settings=MorningBriefSettings(
+                hour=hour,
+                timezone="America/Chicago",
+                stamp_path=stamp_path,
+                report_name=report_name,
+                greeting="Cierre del dia, Hector."
+                if report_name == "evening_brief"
+                else "Buenos dias, Hector.",
+            ),
+            notify=sent.append,
+            clock=lambda: delayed_now,
+            weather_fetcher=lambda location, timeout: "auto: 70F",
+            calendar_fetcher=lambda timeout: "sin eventos",
+            email_fetcher=lambda timeout: "sin correo",
+        )
+
     def _notebooklm_runtime(
         self,
         tmpdir: str,
@@ -882,6 +980,329 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ]
             self.assertEqual(len(failed_events), 1)
             self.assertEqual(failed_events[0]["error_type"], "TimeoutError")
+
+    def test_lifecycle_brief_handlers_enqueue_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime, morning_brief, evening_brief, registered = self._brief_runtime(tmpdir)
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+            self.assertIn("morning_brief", jobs)
+            self.assertIn("evening_brief", jobs)
+            self.assertEqual(jobs["morning_brief"].interval_seconds, 300)
+            self.assertEqual(jobs["evening_brief"].interval_seconds, 300)
+            self.assertIn("morning_brief", registered)
+            self.assertIn("evening_brief", registered)
+
+            started = time.monotonic()
+            jobs["morning_brief"].handler()
+            jobs["evening_brief"].handler()
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 0.1)
+            morning_brief.run_if_due.assert_not_called()
+            evening_brief.run_if_due.assert_not_called()
+            morning_rows = runtime.job_service.list(kinds=(MORNING_BRIEF_JOB_KIND,), limit=10)
+            evening_rows = runtime.job_service.list(kinds=(EVENING_BRIEF_JOB_KIND,), limit=10)
+            self.assertEqual(len(morning_rows), 1)
+            self.assertEqual(morning_rows[0].status, "queued")
+            self.assertEqual(morning_rows[0].resume_key, MORNING_BRIEF_RESUME_ID)
+            self.assertEqual(len(evening_rows), 1)
+            self.assertEqual(evening_rows[0].status, "queued")
+            self.assertEqual(evening_rows[0].resume_key, EVENING_BRIEF_RESUME_ID)
+
+    def test_lifecycle_brief_runners_execute_body_off_tick(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime, morning_brief, evening_brief, registered = self._brief_runtime(tmpdir)
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+            jobs["morning_brief"].handler()
+            jobs["evening_brief"].handler()
+
+            self.assertEqual(registered["morning_brief"].handler(), 1)
+            self.assertEqual(registered["evening_brief"].handler(), 1)
+
+            morning_brief.run_if_due.assert_called_once()
+            evening_brief.run_if_due.assert_called_once()
+            self.assertIn("now", morning_brief.run_if_due.call_args.kwargs)
+            self.assertIn("now", evening_brief.run_if_due.call_args.kwargs)
+            morning_rows = runtime.job_service.list(kinds=(MORNING_BRIEF_JOB_KIND,), limit=10)
+            evening_rows = runtime.job_service.list(kinds=(EVENING_BRIEF_JOB_KIND,), limit=10)
+            self.assertEqual(morning_rows[0].status, "completed")
+            self.assertEqual(morning_rows[0].result, {"sent": True, "message_chars": 13})
+            self.assertEqual(evening_rows[0].status, "completed")
+            self.assertEqual(evening_rows[0].result, {"sent": True, "message_chars": 13})
+
+    def test_lifecycle_morning_brief_runner_uses_enqueue_time_for_due_window(self) -> None:
+        from claw_v2.lifecycle import wire_brief_scheduler_jobs
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sent: list[str] = []
+            runtime = SimpleNamespace(
+                scheduler=CronScheduler(),
+                job_service=JobService(root / "claw.db"),
+                observe=MagicMock(),
+                daemon=SimpleNamespace(),
+            )
+            registered: dict[str, object] = {}
+            runtime.daemon.register_background_job_runner = lambda *, name, handler, interval=60.0: (
+                registered.setdefault(
+                    name,
+                    SimpleNamespace(name=name, handler=handler, interval=interval),
+                )
+            )
+            due_time = datetime(2026, 4, 27, 5, 59, tzinfo=ZoneInfo("America/Chicago"))
+            delayed_now = datetime(2026, 4, 27, 6, 5, tzinfo=ZoneInfo("America/Chicago"))
+            morning_brief = self._real_brief_service(
+                stamp_path=root / "morning.txt",
+                sent=sent,
+                hour=5,
+                report_name="morning_brief",
+                delayed_now=delayed_now,
+            )
+            evening_brief = self._real_brief_service(
+                stamp_path=root / "evening.txt",
+                sent=[],
+                hour=21,
+                report_name="evening_brief",
+                delayed_now=delayed_now,
+            )
+            wire_brief_scheduler_jobs(
+                runtime,
+                morning_brief=morning_brief,
+                evening_brief=evening_brief,
+            )
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+
+            with patch(
+                "claw_v2.scheduled_background_jobs.time.time", return_value=due_time.timestamp()
+            ):
+                jobs["morning_brief"].handler()
+
+            self.assertEqual(registered["morning_brief"].handler(), 1)
+            rows = runtime.job_service.list(kinds=(MORNING_BRIEF_JOB_KIND,), limit=10)
+            self.assertEqual(rows[0].status, "completed")
+            self.assertEqual(rows[0].result["sent"], True)
+            self.assertEqual(len(sent), 1)
+            self.assertEqual((root / "morning.txt").read_text(encoding="utf-8"), "2026-04-27")
+
+    def test_lifecycle_evening_brief_runner_uses_enqueue_time_for_due_window(self) -> None:
+        from claw_v2.lifecycle import wire_brief_scheduler_jobs
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sent: list[str] = []
+            runtime = SimpleNamespace(
+                scheduler=CronScheduler(),
+                job_service=JobService(root / "claw.db"),
+                observe=MagicMock(),
+                daemon=SimpleNamespace(),
+            )
+            registered: dict[str, object] = {}
+            runtime.daemon.register_background_job_runner = lambda *, name, handler, interval=60.0: (
+                registered.setdefault(
+                    name,
+                    SimpleNamespace(name=name, handler=handler, interval=interval),
+                )
+            )
+            due_time = datetime(2026, 4, 27, 21, 59, tzinfo=ZoneInfo("America/Chicago"))
+            delayed_now = datetime(2026, 4, 27, 22, 5, tzinfo=ZoneInfo("America/Chicago"))
+            morning_brief = self._real_brief_service(
+                stamp_path=root / "morning.txt",
+                sent=[],
+                hour=5,
+                report_name="morning_brief",
+                delayed_now=delayed_now,
+            )
+            evening_brief = self._real_brief_service(
+                stamp_path=root / "evening.txt",
+                sent=sent,
+                hour=21,
+                report_name="evening_brief",
+                delayed_now=delayed_now,
+            )
+            wire_brief_scheduler_jobs(
+                runtime,
+                morning_brief=morning_brief,
+                evening_brief=evening_brief,
+            )
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+
+            with patch(
+                "claw_v2.scheduled_background_jobs.time.time", return_value=due_time.timestamp()
+            ):
+                jobs["evening_brief"].handler()
+
+            self.assertEqual(registered["evening_brief"].handler(), 1)
+            rows = runtime.job_service.list(kinds=(EVENING_BRIEF_JOB_KIND,), limit=10)
+            self.assertEqual(rows[0].status, "completed")
+            self.assertEqual(rows[0].result["sent"], True)
+            self.assertEqual(len(sent), 1)
+            self.assertEqual((root / "evening.txt").read_text(encoding="utf-8"), "2026-04-27")
+
+    def test_lifecycle_morning_brief_runner_rejects_enqueue_time_outside_due_window(
+        self,
+    ) -> None:
+        from claw_v2.lifecycle import wire_brief_scheduler_jobs
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sent: list[str] = []
+            runtime = SimpleNamespace(
+                scheduler=CronScheduler(),
+                job_service=JobService(root / "claw.db"),
+                observe=MagicMock(),
+                daemon=SimpleNamespace(),
+            )
+            registered: dict[str, object] = {}
+            runtime.daemon.register_background_job_runner = lambda *, name, handler, interval=60.0: (
+                registered.setdefault(
+                    name,
+                    SimpleNamespace(name=name, handler=handler, interval=interval),
+                )
+            )
+            enqueue_time = datetime(2026, 4, 27, 4, 59, tzinfo=ZoneInfo("America/Chicago"))
+            delayed_now = datetime(2026, 4, 27, 5, 5, tzinfo=ZoneInfo("America/Chicago"))
+            morning_brief = self._real_brief_service(
+                stamp_path=root / "morning.txt",
+                sent=sent,
+                hour=5,
+                report_name="morning_brief",
+                delayed_now=delayed_now,
+            )
+            evening_brief = self._real_brief_service(
+                stamp_path=root / "evening.txt",
+                sent=[],
+                hour=21,
+                report_name="evening_brief",
+                delayed_now=delayed_now,
+            )
+            wire_brief_scheduler_jobs(
+                runtime,
+                morning_brief=morning_brief,
+                evening_brief=evening_brief,
+            )
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+
+            with patch(
+                "claw_v2.scheduled_background_jobs.time.time",
+                return_value=enqueue_time.timestamp(),
+            ):
+                jobs["morning_brief"].handler()
+
+            self.assertEqual(registered["morning_brief"].handler(), 1)
+            rows = runtime.job_service.list(kinds=(MORNING_BRIEF_JOB_KIND,), limit=10)
+            self.assertEqual(rows[0].status, "completed")
+            self.assertEqual(rows[0].result, {"sent": False, "message_chars": 0})
+            self.assertEqual(sent, [])
+            self.assertFalse((root / "morning.txt").exists())
+
+    def test_lifecycle_evening_brief_runner_rejects_enqueue_time_outside_due_window(
+        self,
+    ) -> None:
+        from claw_v2.lifecycle import wire_brief_scheduler_jobs
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sent: list[str] = []
+            runtime = SimpleNamespace(
+                scheduler=CronScheduler(),
+                job_service=JobService(root / "claw.db"),
+                observe=MagicMock(),
+                daemon=SimpleNamespace(),
+            )
+            registered: dict[str, object] = {}
+            runtime.daemon.register_background_job_runner = lambda *, name, handler, interval=60.0: (
+                registered.setdefault(
+                    name,
+                    SimpleNamespace(name=name, handler=handler, interval=interval),
+                )
+            )
+            enqueue_time = datetime(2026, 4, 27, 20, 59, tzinfo=ZoneInfo("America/Chicago"))
+            delayed_now = datetime(2026, 4, 27, 21, 5, tzinfo=ZoneInfo("America/Chicago"))
+            morning_brief = self._real_brief_service(
+                stamp_path=root / "morning.txt",
+                sent=[],
+                hour=5,
+                report_name="morning_brief",
+                delayed_now=delayed_now,
+            )
+            evening_brief = self._real_brief_service(
+                stamp_path=root / "evening.txt",
+                sent=sent,
+                hour=21,
+                report_name="evening_brief",
+                delayed_now=delayed_now,
+            )
+            wire_brief_scheduler_jobs(
+                runtime,
+                morning_brief=morning_brief,
+                evening_brief=evening_brief,
+            )
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+
+            with patch(
+                "claw_v2.scheduled_background_jobs.time.time",
+                return_value=enqueue_time.timestamp(),
+            ):
+                jobs["evening_brief"].handler()
+
+            self.assertEqual(registered["evening_brief"].handler(), 1)
+            rows = runtime.job_service.list(kinds=(EVENING_BRIEF_JOB_KIND,), limit=10)
+            self.assertEqual(rows[0].status, "completed")
+            self.assertEqual(rows[0].result, {"sent": False, "message_chars": 0})
+            self.assertEqual(sent, [])
+            self.assertFalse((root / "evening.txt").exists())
+
+    def test_lifecycle_brief_duplicate_ticks_do_not_fan_out_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime, _morning_brief, _evening_brief, _registered = self._brief_runtime(tmpdir)
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+
+            jobs["morning_brief"].handler()
+            jobs["morning_brief"].handler()
+            jobs["evening_brief"].handler()
+            jobs["evening_brief"].handler()
+
+            morning_rows = runtime.job_service.list(kinds=(MORNING_BRIEF_JOB_KIND,), limit=10)
+            evening_rows = runtime.job_service.list(kinds=(EVENING_BRIEF_JOB_KIND,), limit=10)
+            self.assertEqual(len(morning_rows), 1)
+            self.assertEqual(len(evening_rows), 1)
+            self.assertEqual(morning_rows[0].status, "queued")
+            self.assertEqual(evening_rows[0].status, "queued")
+
+    def test_lifecycle_brief_runner_timeout_reports_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime, morning_brief, _evening_brief, registered = self._brief_runtime(
+                tmpdir,
+                timeout_seconds=0.01,
+            )
+            release = threading.Event()
+
+            def blocked_brief(**_kwargs: object) -> str:
+                release.wait(timeout=2.0)
+                return "late"
+
+            morning_brief.run_if_due.side_effect = blocked_brief
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+            jobs["morning_brief"].handler()
+
+            started = time.monotonic()
+            try:
+                self.assertEqual(registered["morning_brief"].handler(), 1)
+                elapsed = time.monotonic() - started
+
+                self.assertLess(elapsed, 0.15)
+                rows = runtime.job_service.list(kinds=(MORNING_BRIEF_JOB_KIND,), limit=10)
+                self.assertEqual(rows[0].status, "failed")
+                self.assertIn("timed out", rows[0].error)
+                failed_events = [
+                    call.kwargs["payload"]
+                    for call in runtime.observe.emit.call_args_list
+                    if call.args[0] == "morning_brief_job_failed"
+                ]
+                self.assertEqual(len(failed_events), 1)
+                self.assertEqual(failed_events[0]["error_type"], "TimeoutError")
+            finally:
+                release.set()
 
     def test_runtime_scheduler_handlers_enqueue_only(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
