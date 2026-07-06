@@ -270,6 +270,28 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
         self.assertEqual(offenders, [])
 
+    def test_browser_use_interactive_and_delegated_runs_share_lock(self) -> None:
+        from claw_v2.computer_handler import ComputerHandler
+
+        interactive_source = inspect.getsource(ComputerHandler._run_browser_use_session)
+        delegated_source = inspect.getsource(ComputerHandler.run_delegated_browser_task)
+
+        interactive_profile_lock = interactive_source.index("with self._cdp_profile_lock(")
+        interactive_browser_lock = interactive_source.index("with self._browser_use_lock:")
+        interactive_ensure = interactive_source.index("self._ensure_browser_use_service(")
+        interactive_run = interactive_source.index("result = self._run_browser_use_task(")
+        self.assertLess(interactive_profile_lock, interactive_browser_lock)
+        self.assertLess(interactive_browser_lock, interactive_ensure)
+        self.assertLess(interactive_ensure, interactive_run)
+
+        delegated_profile_lock = delegated_source.index("lock.acquire")
+        delegated_browser_lock = delegated_source.index("with self._browser_use_lock:")
+        delegated_ensure = delegated_source.index("self._ensure_browser_use_service(")
+        delegated_run = delegated_source.index("output = self._run_browser_use_task(")
+        self.assertLess(delegated_profile_lock, delegated_browser_lock)
+        self.assertLess(delegated_browser_lock, delegated_ensure)
+        self.assertLess(delegated_ensure, delegated_run)
+
     def test_runtime_db_self_heal_reconnect_is_lock_only(self) -> None:
         from claw_v2.sqlite_runtime import RuntimeDb
 

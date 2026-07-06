@@ -167,8 +167,7 @@ def _browser_brand_matches(lowered_text: str, brand: str) -> bool:
     if brand == "google":
         matches = list(re.finditer(r"\bgoogle\b", lowered_text))
         return any(
-            re.match(r"\s+chrome\b", lowered_text[match.end() :]) is None
-            for match in matches
+            re.match(r"\s+chrome\b", lowered_text[match.end() :]) is None for match in matches
         )
     return re.search(rf"\b{re.escape(brand)}\b", lowered_text) is not None
 
@@ -906,16 +905,17 @@ class ComputerHandler:
             return (
                 "Browser automation needs approval before executing authenticated browser actions."
             )
-        if self.browser_use is None:
-            raise RuntimeError("browser_use unavailable for approved browser automation")
         # Same CDP preflight as the delegated route: never spend LLM against an
         # unproven endpoint. ensure_ready() self-heals (ManagedChrome respawn)
         # and re-probes, including the zombie tab-creation check. Serialized
-        # with the delegated route's per-profile lock so this preflight can
-        # never restart the managed Chrome mid-run of a delegated task on the
-        # same profile.
+        # with the delegated route's per-profile lock and held through the
+        # browser_use run so no delegated CDP/prelude/deterministic step mutates
+        # the same profile while the interactive agent is active. Lock order is
+        # profile lock first, then _browser_use_lock, matching the delegated
+        # route and avoiding deadlock.
         cdp_port = self._delegated_browser_cdp_port()
-        with self._cdp_profile_lock(f"http://127.0.0.1:{cdp_port}"):
+        cdp_profile = f"http://127.0.0.1:{cdp_port}"
+        with self._cdp_profile_lock(cdp_profile):
             try:
                 cdp_endpoint = self._get_browser_capability().ensure_ready(
                     port=cdp_port,
@@ -925,118 +925,123 @@ class ComputerHandler:
                 session.status = "done"
                 session.pending_action = None
                 return f"No pude conectar al navegador (CDP): {exc}"
-        self._mark_capability_available("chrome_cdp")
-        self._set_browser_use_cdp_url(cdp_endpoint)
-        try:
-            approved_domains = _normalized_domains(
-                pending.get("approved_domains")
-                or _domains_for_browser_task(
-                    session.task,
-                    getattr(session, "current_url", None),
-                    sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
+            self._mark_capability_available("chrome_cdp")
+            try:
+                approved_domains = _normalized_domains(
+                    pending.get("approved_domains")
+                    or _domains_for_browser_task(
+                        session.task,
+                        getattr(session, "current_url", None),
+                        sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
+                    )
                 )
-            )
-            allow_high_risk_actions = explicitly_approved
-            allowed_high_risk_actions = None
-            approval_scope = pending.get("browser_policy_scope")
-            if auto_approved:
-                grant = CapabilityGrant.browser_read(
-                    domains=approved_domains,
-                    reason="interactive browser_use auto-approved read task",
-                    auto_approved=True,
-                )
-                approved_domains = grant.approved_domains_list()
-                allow_high_risk_actions = False
+                allow_high_risk_actions = explicitly_approved
                 allowed_high_risk_actions = None
-                if not approved_domains:
-                    session.status = "awaiting_approval"
-                    session.pending_action = {
-                        "action": "browser_use_task",
-                        "backend": "browser_use",
-                        "task": session.task,
-                        "approved_domains": [],
-                    }
+                approval_scope = pending.get("browser_policy_scope")
+                if auto_approved:
+                    grant = CapabilityGrant.browser_read(
+                        domains=approved_domains,
+                        reason="interactive browser_use auto-approved read task",
+                        auto_approved=True,
+                    )
+                    approved_domains = grant.approved_domains_list()
+                    allow_high_risk_actions = False
+                    allowed_high_risk_actions = None
+                    if not approved_domains:
+                        session.status = "awaiting_approval"
+                        session.pending_action = {
+                            "action": "browser_use_task",
+                            "backend": "browser_use",
+                            "task": session.task,
+                            "approved_domains": [],
+                        }
+                        self._emit(
+                            "computer_browser_use_missing_domain_grant",
+                            {
+                                "backend": "browser_use",
+                                "current_url": getattr(session, "current_url", None),
+                                "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+                            },
+                        )
+                        return (
+                            "Browser automation needs approval before executing authenticated "
+                            "browser actions."
+                        )
+                with self._browser_use_lock:
+                    self._ensure_browser_use_service(cdp_endpoint)
+                    self._set_browser_use_cdp_url(cdp_endpoint)
+                    if self.browser_use is None:
+                        raise RuntimeError(
+                            "browser_use unavailable for approved browser automation"
+                        )
+                    self._mark_capability_available("browser_use")
                     self._emit(
-                        "computer_browser_use_missing_domain_grant",
+                        "computer_browser_use_task_started",
                         {
                             "backend": "browser_use",
+                            "timeout_seconds": self._browser_use_timeout(),
                             "current_url": getattr(session, "current_url", None),
-                            "instruction_hash": _instruction_hash(
-                                getattr(session, "task", "")
-                            ),
+                            "instruction_hash": _instruction_hash(getattr(session, "task", "")),
                         },
                     )
-                    return (
-                        "Browser automation needs approval before executing authenticated "
-                        "browser actions."
+                    result = self._run_browser_use_task(
+                        session,
+                        allow_high_risk_actions=allow_high_risk_actions,
+                        approved_domains=approved_domains,
+                        allowed_high_risk_actions=allowed_high_risk_actions,
+                        approval_scope=approval_scope,
                     )
-            self._emit(
-                "computer_browser_use_task_started",
-                {
-                    "backend": "browser_use",
-                    "timeout_seconds": self._browser_use_timeout(),
-                    "current_url": getattr(session, "current_url", None),
-                    "instruction_hash": _instruction_hash(getattr(session, "task", "")),
-                },
-            )
-            result = self._run_browser_use_task(
-                session,
-                allow_high_risk_actions=allow_high_risk_actions,
-                approved_domains=approved_domains,
-                allowed_high_risk_actions=allowed_high_risk_actions,
-                approval_scope=approval_scope,
-            )
-        except Exception as exc:
-            from claw_v2.computer import BrowserUsePolicyInterrupt
+            except Exception as exc:
+                from claw_v2.computer import BrowserUsePolicyInterrupt
 
-            if not isinstance(exc, BrowserUsePolicyInterrupt):
-                raise
-            session.status = "awaiting_approval"
-            browser_policy_scope = self._browser_policy_scope_from_interrupt(exc)
-            interrupted_action = {
-                "action": exc.action_name,
-                "params_hash": exc.params_hash,
-                "url": exc.url,
-                "target_url": exc.target_url,
-                "risk": exc.risk,
-                "reason_code": exc.reason_code,
-                "current_origin": exc.current_origin,
-                "target_origin": exc.target_origin,
-                "task_id": exc.task_id,
-                "browser_context_id": exc.browser_context_id,
-            }
-            pending_action = {
-                "action": "browser_use_task",
-                "backend": "browser_use",
-                "task": session.task,
-                "interrupted_action": interrupted_action,
-                "approved_domains": exc.approved_domains
-                or _domains_for_browser_task(
-                    session.task,
-                    exc.url,
-                    sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
-                ),
-            }
-            if browser_policy_scope is not None:
-                pending_action["browser_policy_scope"] = browser_policy_scope
-            session.pending_action = pending_action
-            self._emit(
-                "computer_browser_use_policy_interrupted",
-                {
-                    "backend": "browser_use",
+                if not isinstance(exc, BrowserUsePolicyInterrupt):
+                    raise
+                session.status = "awaiting_approval"
+                browser_policy_scope = self._browser_policy_scope_from_interrupt(exc)
+                interrupted_action = {
                     "action": exc.action_name,
+                    "params_hash": exc.params_hash,
+                    "url": exc.url,
+                    "target_url": exc.target_url,
                     "risk": exc.risk,
                     "reason_code": exc.reason_code,
-                    "current_url": exc.url,
                     "current_origin": exc.current_origin,
                     "target_origin": exc.target_origin,
                     "task_id": exc.task_id,
                     "browser_context_id": exc.browser_context_id,
-                    "params_hash": exc.params_hash,
-                    "instruction_hash": _instruction_hash(getattr(session, "task", "")),
-                },
-            )
-            return "Browser automation needs approval before continuing with a high-risk browser action."
+                }
+                pending_action = {
+                    "action": "browser_use_task",
+                    "backend": "browser_use",
+                    "task": session.task,
+                    "interrupted_action": interrupted_action,
+                    "approved_domains": exc.approved_domains
+                    or _domains_for_browser_task(
+                        session.task,
+                        exc.url,
+                        sensitive_urls=list(getattr(self.config, "sensitive_urls", []) or []),
+                    ),
+                }
+                if browser_policy_scope is not None:
+                    pending_action["browser_policy_scope"] = browser_policy_scope
+                session.pending_action = pending_action
+                self._emit(
+                    "computer_browser_use_policy_interrupted",
+                    {
+                        "backend": "browser_use",
+                        "action": exc.action_name,
+                        "risk": exc.risk,
+                        "reason_code": exc.reason_code,
+                        "current_url": exc.url,
+                        "current_origin": exc.current_origin,
+                        "target_origin": exc.target_origin,
+                        "task_id": exc.task_id,
+                        "browser_context_id": exc.browser_context_id,
+                        "params_hash": exc.params_hash,
+                        "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+                    },
+                )
+                return "Browser automation needs approval before continuing with a high-risk browser action."
         artifact_path = getattr(session, "screenshot_path", None)
         session.pending_action = None
         session.status = "done"
@@ -1321,7 +1326,12 @@ class ComputerHandler:
             message = _error_message(exc)
             self._emit(
                 "x_browser_prelude_failed",
-                {"task_id": task_id, "mode": mode, "target_url": profile.home_url, "error": message},
+                {
+                    "task_id": task_id,
+                    "mode": mode,
+                    "target_url": profile.home_url,
+                    "error": message,
+                },
             )
             return f"No pude completar la tarea de navegador deterministica: {message}"
 
@@ -1333,7 +1343,10 @@ class ComputerHandler:
         ).strip()
         host = _host_from_url(final_url)
         allowed_domain = bool(
-            host and any(host == domain or host.endswith(f".{domain}") for domain in profile.allowed_domains)
+            host
+            and any(
+                host == domain or host.endswith(f".{domain}") for domain in profile.allowed_domains
+            )
         )
         if not allowed_domain:
             message = f"navegacion inicial quedo fuera de X: {final_url or '(url vacia)'}"
@@ -1351,7 +1364,9 @@ class ComputerHandler:
             )
             return f"No pude completar la tarea de navegador deterministica: {message}"
 
-        health = classify_health(final_url=final_url, title=title, body_text=content, profile=profile)
+        health = classify_health(
+            final_url=final_url, title=title, body_text=content, profile=profile
+        )
         if health is BrowserProfileHealth.NEEDS_LOGIN:
             self._emit(
                 "x_browser_prelude_needs_login",

@@ -480,9 +480,7 @@ class RetryChatAnthropicTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_rate_limit_error_propagates_immediately(self) -> None:
         from claw_v2.computer import RetryChatAnthropic
 
-        inner, calls = self._fake_inner(
-            side_effects=[self.ModelProviderError("validation boom")]
-        )
+        inner, calls = self._fake_inner(side_effects=[self.ModelProviderError("validation boom")])
         wrapper = RetryChatAnthropic(inner)
         with patch("claw_v2.computer.asyncio.sleep", new=AsyncMock()) as mock_sleep:
             with self.assertRaises(self.ModelProviderError):
@@ -493,9 +491,7 @@ class RetryChatAnthropicTests(unittest.IsolatedAsyncioTestCase):
     async def test_exhausted_retries_reraises_rate_limit_error(self) -> None:
         from claw_v2.computer import RetryChatAnthropic
 
-        inner, calls = self._fake_inner(
-            side_effects=[self.ModelRateLimitError("429")] * 4
-        )
+        inner, calls = self._fake_inner(side_effects=[self.ModelRateLimitError("429")] * 4)
         wrapper = RetryChatAnthropic(inner)
         with patch("claw_v2.computer.asyncio.sleep", new=AsyncMock()):
             with self.assertRaises(self.ModelRateLimitError):
@@ -506,9 +502,7 @@ class RetryChatAnthropicTests(unittest.IsolatedAsyncioTestCase):
     async def test_observe_emits_retry_event(self) -> None:
         from claw_v2.computer import RetryChatAnthropic
 
-        inner, _ = self._fake_inner(
-            side_effects=[self.ModelRateLimitError("429"), "ok"]
-        )
+        inner, _ = self._fake_inner(side_effects=[self.ModelRateLimitError("429"), "ok"])
         observe = MagicMock()
         wrapper = RetryChatAnthropic(inner, observe=observe)
         with patch("claw_v2.computer.asyncio.sleep", new=AsyncMock()):
@@ -928,7 +922,9 @@ class BrowserUseArtifactTests(unittest.TestCase):
                 ),
             ):
                 svc = BrowserUseService()
-                outcome = asyncio.run(svc.run_task_outcome("Abre https://example.com", artifact_dir=tmp))
+                outcome = asyncio.run(
+                    svc.run_task_outcome("Abre https://example.com", artifact_dir=tmp)
+                )
 
         self.assertEqual(outcome.status, "needs_login")
         self.assertEqual(outcome.reason_code, "login_required")
@@ -1326,6 +1322,7 @@ class BrowserUseGuardTests(unittest.TestCase):
             ttl_seconds=60,
         ).to_dict()
         audits: list[dict] = []
+
         class FakeActionResult:
             def __init__(self, **kwargs):
                 self.__dict__.update(kwargs)
@@ -1566,7 +1563,9 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
                 },
                 screenshot_path=None,
             )
-            handler = ComputerHandler(browser_use=FakeBrowserUse(), approvals=approvals, config=None)
+            handler = ComputerHandler(
+                browser_use=FakeBrowserUse(), approvals=approvals, config=None
+            )
             handler._sessions["s1"] = session
 
             result = handler.action_approve_internal_response(
@@ -1815,10 +1814,10 @@ class InteractiveBrowserPreflightTests(unittest.TestCase):
         self.assertEqual(session.status, "done")
         self.assertIsNone(session.pending_action)
 
-    def test_interactive_preflight_serializes_on_cdp_profile_lock(self) -> None:
-        """The interactive preflight must hold the SAME per-profile lock the
-        delegated route uses, so it can never force-restart the managed Chrome
-        mid-run of a delegated task on the same profile (CodeRabbit Major)."""
+    def test_interactive_run_serializes_on_cdp_profile_lock(self) -> None:
+        """The interactive path must hold the SAME per-profile lock the delegated
+        route uses through the browser_use run, so delegated CDP work cannot
+        mutate the same profile mid-run."""
         import types
 
         from claw_v2.computer_handler import ComputerHandler
@@ -1862,7 +1861,7 @@ class InteractiveBrowserPreflightTests(unittest.TestCase):
         self.assertEqual(result, "hecho")
         # Same key format the delegated route uses -> same underlying lock.
         self.assertEqual(lock_keys, ["http://127.0.0.1:9250"])
-        self.assertEqual(order[:3], ["lock_enter", "ensure_ready", "lock_exit"])
+        self.assertEqual(order, ["lock_enter", "ensure_ready", "run_task", "lock_exit"])
 
 
 class DelegatedBrowserTaskTests(unittest.TestCase):
@@ -2197,7 +2196,9 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
             patch.object(handler, "_browser_profile_gate", return_value=None),
             patch("claw_v2.computer_handler.DevBrowserService", return_value=fake_dev_browser),
         ):
-            out = handler.run_delegated_browser_task("Haz un repaso por X", task_id="t-x", mode="browse")
+            out = handler.run_delegated_browser_task(
+                "Haz un repaso por X", task_id="t-x", mode="browse"
+            )
 
         self.assertEqual(out, "feed capturado: 30 posts")
         self.assertEqual(
@@ -2251,9 +2252,13 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
 
         with (
             patch.object(handler, "_browser_profile_gate", return_value=None),
-            patch("claw_v2.computer_handler.DevBrowserService", return_value=FakeDevBrowserService()),
+            patch(
+                "claw_v2.computer_handler.DevBrowserService", return_value=FakeDevBrowserService()
+            ),
         ):
-            out = handler.run_delegated_browser_task("Haz un repaso por X", task_id="t-x", mode="browse")
+            out = handler.run_delegated_browser_task(
+                "Haz un repaso por X", task_id="t-x", mode="browse"
+            )
 
         self.assertTrue(out.startswith("(no result)"))
         self.assertIn("Evidencia inicial deterministica", out)
@@ -2369,7 +2374,9 @@ class DelegatedBrowserTaskTests(unittest.TestCase):
             browser_capability=self._ReadyBrowserCapability(),
         )
 
-        with patch("claw_v2.computer_handler.DevBrowserService", return_value=FakeDevBrowserService()):
+        with patch(
+            "claw_v2.computer_handler.DevBrowserService", return_value=FakeDevBrowserService()
+        ):
             out = handler.run_delegated_browser_task(
                 "Abre https://example.com en Chrome con CDP. NO uses browser_use.",
                 task_id="t-open",
