@@ -177,6 +177,65 @@ def wire_notebooklm_scheduler_jobs(runtime: Any, nlm_service: NotebookLMService)
     )
 
 
+def wire_brief_scheduler_jobs(
+    runtime: Any,
+    *,
+    morning_brief: MorningBriefService,
+    evening_brief: MorningBriefService,
+    timeout_seconds: float = 120.0,
+) -> None:
+    """Wire daily brief cron jobs as enqueue-only handlers with off-tick runners."""
+    from claw_v2.cron import ScheduledJob
+    from claw_v2.scheduled_background_jobs import (
+        EVENING_BRIEF_JOB_KIND,
+        EVENING_BRIEF_RESUME_ID,
+        MORNING_BRIEF_JOB_KIND,
+        MORNING_BRIEF_RESUME_ID,
+        ScheduledBackgroundJobRunner,
+        brief_result_summary,
+        enqueue_scheduled_background_job,
+    )
+
+    brief_jobs = (
+        ("morning_brief", MORNING_BRIEF_JOB_KIND, MORNING_BRIEF_RESUME_ID, morning_brief),
+        ("evening_brief", EVENING_BRIEF_JOB_KIND, EVENING_BRIEF_RESUME_ID, evening_brief),
+    )
+    if runtime.daemon is not None and runtime.job_service is not None:
+        for job_name, job_kind, _resume_key, service in brief_jobs:
+            runner = ScheduledBackgroundJobRunner(
+                job_name=job_name,
+                job_kind=job_kind,
+                job_service=runtime.job_service,
+                handler=lambda _payload, brief_service=service: brief_service.run_if_due(),
+                observe=runtime.observe,
+                worker_id=f"{job_name.replace('_', '-')}-runner",
+                result_summary=brief_result_summary,
+                timeout_seconds=timeout_seconds,
+            )
+            runtime.daemon.register_background_job_runner(
+                name=job_name,
+                handler=lambda brief_runner=runner: brief_runner.run_available(limit=1),
+            )
+
+    for job_name, job_kind, resume_key, _service in brief_jobs:
+        runtime.scheduler.register(
+            ScheduledJob(
+                name=job_name,
+                interval_seconds=300,
+                handler=lambda name=job_name, kind=job_kind, key=resume_key: (
+                    enqueue_scheduled_background_job(
+                        job_name=name,
+                        job_kind=kind,
+                        resume_key=key,
+                        job_service=runtime.job_service,
+                        observe=runtime.observe,
+                        max_attempts=1,
+                    )
+                ),
+            )
+        )
+
+
 def should_notify_task_ledger_terminal(payload: dict, notified_task_ids: set[str]) -> bool:
     session_id = str(payload.get("session_id") or "")
     task_id = str(payload.get("task_id") or "")
@@ -758,21 +817,10 @@ async def run() -> int:
             llm_router=runtime.router,
         )
 
-        from claw_v2.cron import ScheduledJob as _SJ
-
-        runtime.scheduler.register(
-            _SJ(
-                name="morning_brief",
-                interval_seconds=300,
-                handler=morning_brief.run_if_due,
-            )
-        )
-        runtime.scheduler.register(
-            _SJ(
-                name="evening_brief",
-                interval_seconds=300,
-                handler=evening_brief.run_if_due,
-            )
+        wire_brief_scheduler_jobs(
+            runtime,
+            morning_brief=morning_brief,
+            evening_brief=evening_brief,
         )
 
         if observability_telegram_enabled:
@@ -820,6 +868,8 @@ async def run() -> int:
         runtime.bot.notebooklm = nlm_service
 
         wire_notebooklm_scheduler_jobs(runtime, nlm_service)
+
+        from claw_v2.cron import ScheduledJob as _SJ
 
         # Daily fitness reminder at ~5 AM
         import random as _rnd

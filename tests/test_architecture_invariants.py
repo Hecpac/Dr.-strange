@@ -76,18 +76,6 @@ _ALLOWED_INLINE_BLOCKING_CRON_JOBS: dict[str, tuple[str, ...]] = {
         "claw_v2/lifecycle.py:run._fitness_reminder:Path.write_text",
         "claw_v2/lifecycle.py:run._fitness_reminder:claw_v2/lifecycle.py:should_send_fitness_reminder:Path.read_text",
     ),
-    "morning_brief@claw_v2/lifecycle.py": (
-        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService._mark_sent:Path.mkdir",
-        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService._mark_sent:Path.write_text",
-        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService.build_message:claw_v2/morning_brief.py:MorningBriefService._render_via_llm:router.ask",
-        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:should_send_morning_brief:Path.read_text",
-    ),
-    "evening_brief@claw_v2/lifecycle.py": (
-        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService._mark_sent:Path.mkdir",
-        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService._mark_sent:Path.write_text",
-        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService.build_message:claw_v2/morning_brief.py:MorningBriefService._render_via_llm:router.ask",
-        "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:should_send_morning_brief:Path.read_text",
-    ),
     "wiki_lint@claw_v2/main.py": (
         "claw_v2/wiki.py:WikiService.lint:Path.read_text",
         "claw_v2/wiki.py:WikiService.lint:claw_v2/wiki.py:WikiService._append_log:Path.open",
