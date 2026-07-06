@@ -777,6 +777,8 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
             jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
             self.assertIn("notebooklm_orchestration_poll", jobs)
             self.assertIn("nlm_wiki_sync", jobs)
+            self.assertEqual(jobs["notebooklm_orchestration_poll"].interval_seconds, 60)
+            self.assertEqual(jobs["nlm_wiki_sync"].interval_seconds, 43200)
             self.assertIn("notebooklm_orchestration_poll", registered)
             self.assertIn("nlm_wiki_sync", registered)
 
