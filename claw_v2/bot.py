@@ -5527,7 +5527,7 @@ class BotService:
                 return "usage: /approve <approval_id> <token|CONFIRMO risk_code>"
             approved = self.approvals.approve(parts[1], parts[2])
             return "approval recorded" if approved else "approval rejected"
-        if stripped.startswith("/reissue"):
+        if stripped == "/reissue" or stripped.startswith("/reissue "):
             parts = stripped.split(maxsplit=1)
             if len(parts) != 2:
                 return "usage: /reissue <approval_id>"

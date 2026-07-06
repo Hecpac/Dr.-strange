@@ -311,10 +311,8 @@ class ApprovalManager:
             action=str(result.get("action") or ""),
             summary=str(result.get("summary") or ""),
             token=token,
-            risk_code=metadata.get("risk_code") if isinstance(metadata, dict) else None,
-            required_confirmation=metadata.get("required_confirmation")
-            if isinstance(metadata, dict)
-            else None,
+            risk_code=metadata.get("risk_code"),
+            required_confirmation=metadata.get("required_confirmation"),
         )
 
     def reject(self, approval_id: str) -> bool:
