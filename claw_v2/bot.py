@@ -17,7 +17,7 @@ from claw_v2.agents import AutoResearchAgentService
 from claw_v2.agent_handler import AgentHandler
 from claw_v2.browse_handler import BrowseHandler
 from claw_v2.task_handler import TaskHandler
-from claw_v2.approval import ApprovalManager
+from claw_v2.approval import ApprovalManager, PendingApproval
 from claw_v2.approval_gate import ApprovalPending, approved_tool_invocation
 from claw_v2.brain import BrainService
 from claw_v2.bot_commands import BotCommand, CommandContext, dispatch_commands
@@ -801,6 +801,26 @@ def _format_approval_pending(exc: ApprovalPending) -> str:
         )
     else:
         lines.append(f"Comando: `/approve {exc.approval_id} {exc.token}`")
+    return "\n\n".join(lines)
+
+
+def _format_approval_reissued(reissued: PendingApproval) -> str:
+    """Telegram-ready instructions for a reissued approval (Slice 1a): the
+    original request message never reached Hector, so resend the command with
+    the rotated token. Mirrors `_format_approval_pending`'s confirmation
+    branch — sensitive approvals surface the exact confirmation, never the token."""
+    lines = [
+        f"🔁 Token re-emitido para `{reissued.approval_id}` — ventana TTL reiniciada.",
+        f"Resumen: {reissued.summary}",
+    ]
+    if reissued.required_confirmation:
+        lines.append(f"Risk code: `{reissued.risk_code}`")
+        lines.append(
+            f"Confirmación exacta: `/approve {reissued.approval_id} "
+            f"{reissued.required_confirmation}`"
+        )
+    else:
+        lines.append(f"Comando: `/approve {reissued.approval_id} {reissued.token}`")
     return "\n\n".join(lines)
 
 
@@ -4785,8 +4805,14 @@ class BotService:
             BotCommand(
                 "approvals",
                 self._handle_approvals_command,
-                exact=("/approvals",),
-                prefixes=("/approval_status ", "/approve ", "/task_approve ", "/task_abort "),
+                exact=("/approvals", "/reissue"),
+                prefixes=(
+                    "/approval_status ",
+                    "/approve ",
+                    "/reissue ",
+                    "/task_approve ",
+                    "/task_abort ",
+                ),
             ),
             BotCommand(
                 "traces",
@@ -5501,6 +5527,19 @@ class BotService:
                 return "usage: /approve <approval_id> <token|CONFIRMO risk_code>"
             approved = self.approvals.approve(parts[1], parts[2])
             return "approval recorded" if approved else "approval rejected"
+        if stripped == "/reissue" or stripped.startswith("/reissue "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /reissue <approval_id>"
+            approval_id = parts[1].strip()
+            try:
+                reissued = self.approvals.reissue(approval_id)
+            except FileNotFoundError:
+                return f"approval not found: {approval_id}"
+            if reissued is None:
+                status = self.approvals.status(approval_id)
+                return f"reissue rejected: approval {approval_id} is {status}"
+            return _format_approval_reissued(reissued)
         if stripped.startswith("/task_approve "):
             parts = stripped.split(maxsplit=2)
             if len(parts) != 3:

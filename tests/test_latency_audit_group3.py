@@ -212,6 +212,7 @@ class InterruptCommandMatcherTests(unittest.TestCase):
             "/status",
             "/approvals",
             "/approve abc token",
+            "/reissue abc123",
             "/action_abort abc",
             "/FREEZE",
             "/freeze@DrStrangeBot",

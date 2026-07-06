@@ -184,6 +184,7 @@ _INTERRUPT_COMMANDS = frozenset(
         "budget_status",
         "approvals",
         "approve",
+        "reissue",
         "approval_status",
         "task_approve",
         "task_abort",

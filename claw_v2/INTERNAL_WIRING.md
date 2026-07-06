@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice a3.6-typed-computer-use-outcomes (2026-07-06, A3.6): computer/browser task outcomes carry typed status, reason_code, retryable, and user_safe_summary while preserving legacy summary text for callers."
-doc_version: 2.90
+describes_commit: "slice 1a-approval-reissue (2026-07-06, blind-spot pass finding #1): /reissue rotates a pending approval's token hash atomically and restarts its TTL window, recovering Tier 3 approvals whose request send never reached the owner."
+doc_version: 2.91
 last_verified: 2026-07-06
-verification_method: "A3.6 local: tests/test_computer.py::ComputerUseOutcomeTests covers success, approval, no-result, cancellation, and retryable iteration-limit typed outcomes; tests/test_computer.py::ComputerHandlerOutcomeTests proves handler downstream events use typed status/reason/retryable instead of summary parsing for failure, approval, no-result, exception, MagicMock legacy fallback, real typed runner selection, and CDP unavailable paths; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes locks the typed outcome chokepoint."
+verification_method: "Slice 1a local: tests/test_approval.py::ApprovalReissueTests covers pending-only rotation, TTL-window restart with first_created_at audit trail, old-token invalidation, terminal-state refusal, past-TTL expiry instead of rescue, missing-record behavior, event emission without raw token, and required_confirmation preservation; tests/test_approval_gate.py::ApprovalsCommandReissueTests + BotFormatterTests cover the /reissue command surface and the confirmation-branch formatter; tests/test_latency_audit_group3.py::InterruptCommandMatcherTests locks /reissue as an operator interrupt."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -918,6 +918,37 @@ invariants:
     why: Expired approvals were only discovered lazily during approval, and
          reject() lacked terminal-state parity. Proactive expiry must not create
          a second approval database or run inline in daemon.tick.
+
+  approval_reissue_single_use_token_rotation:
+    rule: ApprovalManager.reissue rotates the token hash of a PENDING record
+          only, atomically under the same fcntl-locked update path, and
+          restarts the TTL window (created_at; original preserved as
+          first_created_at) as an explicit owner action. The previous token is
+          invalid the moment the hash is replaced. Terminal records
+          (approved/rejected/expired/archived) are never reissued; a pending
+          record already past its TTL is expired by reissue, not rescued
+          (resurrecting expired was explicitly rejected in the 2026-07-06
+          pre-slice interview). The raw token is never persisted to disk nor
+          emitted in observe events — delivery-failure recovery is the
+          owner-only `/reissue <id>` interrupt command, not raw-token
+          persistence.
+    chokepoints:
+      - approval.ApprovalManager.reissue  # pending-only rotation + TTL restart
+      - bot.BotService._handle_approvals_command  # /reissue <id> surface
+      - bot._format_approval_reissued  # confirmation branch never surfaces the token
+      - telegram._INTERRUPT_COMMANDS  # /reissue bypasses the per-chat turn lock
+    enforced_by:
+      - tests/test_approval.py::ApprovalReissueTests
+      - tests/test_approval_gate.py::BotFormatterTests::test_format_approval_reissued_contains_new_command
+      - tests/test_approval_gate.py::BotFormatterTests::test_format_approval_reissued_sensitive_uses_confirmation_not_token
+      - tests/test_approval_gate.py::ApprovalsCommandReissueTests
+      - tests/test_latency_audit_group3.py::InterruptCommandMatcherTests::test_operator_interrupts_match
+    why: The raw approval token only ever lived in the outbound Telegram send
+         (hash-only on disk by design, AH1) with a single bounded retry; a
+         failed send left the Tier 3 action silently blocked until TTL expiry
+         with no recovery path (blind-spot pass 2026-07-06, finding #1).
+         Reissue restores delivery without weakening hash-only persistence,
+         single-use resolution, or the forged-record signature floor.
 
   recovery_jobs_drained_off_tick:
     rule: recovery_jobs (the brain's "I promised to resume this" queue) must be
