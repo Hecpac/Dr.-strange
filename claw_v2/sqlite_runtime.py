@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import sqlite3
@@ -22,6 +23,62 @@ SQLITE_PERSISTENT_LOCK_THRESHOLD = 3
 
 class RuntimeDatabaseError(sqlite3.DatabaseError):
     """Raised when the runtime database file is not usable as SQLite."""
+
+
+# Slice 2a (blind-spot pass 2026-07-06 finding #2): a corrupt runtime DB used
+# to crash-loop under launchd KeepAlive with no persistent record of why. The
+# halt marker is that record: written on detected corruption, checked by the
+# launcher before exec (hold instead of respawn), and cleared ONLY after a
+# passing thorough health check — never on a still-corrupt DB.
+RUNTIME_DB_HALT_MARKER_NAME = "runtime_db_halt.json"
+
+
+def runtime_db_halt_marker_path(db_path: Path | str) -> Path:
+    return Path(db_path).parent / RUNTIME_DB_HALT_MARKER_NAME
+
+
+def write_runtime_db_halt_marker(
+    db_path: Path | str,
+    error: object,
+    *,
+    source: str,
+) -> Path:
+    """Persist the reason boot must refuse this DB (atomic tmp + rename)."""
+    marker = runtime_db_halt_marker_path(db_path)
+    payload = {
+        "reason": "runtime_db_corruption",
+        "error": str(error)[:500],
+        "db_path": str(db_path),
+        "source": source,
+        "created_at": time.time(),
+    }
+    tmp = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(tmp, marker)
+    return marker
+
+
+def clear_runtime_db_halt_marker(
+    db_path: Path | str,
+    *,
+    verified_healthy: bool,
+) -> Path | None:
+    """Retire the halt marker after the DB verified healthy again.
+
+    Renames (audit trail preserved) — never deletes. ``verified_healthy`` is a
+    deliberate tripwire argument: the only legitimate caller is one that just
+    ran ``check_runtime_sqlite_health(thorough=True)`` successfully.
+    """
+    if not verified_healthy:
+        raise ValueError("halt marker may only be cleared after a passing thorough health check")
+    marker = runtime_db_halt_marker_path(db_path)
+    if not marker.exists():
+        return None
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    cleared = marker.with_name(f"{marker.name}.cleared-{stamp}")
+    marker.rename(cleared)
+    logger.warning("runtime DB halt marker cleared after healthy check: %s", cleared)
+    return cleared
 
 
 @dataclass(frozen=True, slots=True)

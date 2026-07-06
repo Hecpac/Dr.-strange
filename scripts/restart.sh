@@ -71,7 +71,25 @@ stop_pid() {
   return 1
 }
 
+notify_owner() {
+  # Best-effort Telegram alert (stdlib curl, never fails the script).
+  [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_ALLOWED_USER_ID:-}" ] || return 0
+  curl -sS -m 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${TELEGRAM_ALLOWED_USER_ID}" \
+    --data-urlencode "text=$1" >/dev/null 2>&1 || true
+}
+
+# Slice 2a: a failing preflight (DB corruption) must abort the restart before
+# the launchd kickstart — restarting onto a corrupt DB just re-enters the
+# crash-boot loop. The preflight already wrote the halt marker; the launcher
+# will hold any launchd respawn until the DB verifies healthy again.
 run_runtime_db_preflight
+preflight_rc=$?
+if [ "$preflight_rc" -ne 0 ]; then
+  echo "ERROR: runtime DB preflight failed (rc=$preflight_rc); aborting restart before kickstart" >&2
+  notify_owner "🛑 Claw restart ABORTADO: el preflight de la DB falló (posible corrupción). Revisa data/runtime_db_halt.json y restaura un backup verificado de data/backups/restart/ — el boot queda en hold hasta que la DB pase integrity."
+  exit 1
+fi
 
 if launchctl print "$DOMAIN" >/dev/null 2>&1; then
   # T10 (2026-06-12): two daemons overlapping on the same SQLite WAL risk

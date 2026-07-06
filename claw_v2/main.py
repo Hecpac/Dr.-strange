@@ -92,7 +92,13 @@ from claw_v2.content import ContentEngine
 from claw_v2.sandbox import SandboxPolicy
 from claw_v2.subprocess_runner import run_subprocess_bounded
 from claw_v2.runtime_policy import RuntimePolicyEngine
-from claw_v2.sqlite_runtime import RuntimeDb, check_runtime_sqlite_health
+from claw_v2.sqlite_runtime import (
+    RuntimeDatabaseError,
+    RuntimeDb,
+    check_runtime_sqlite_health,
+    write_runtime_db_halt_marker,
+)
+from claw_v2.stop_notifier import send_telegram_message
 from claw_v2.task_board import TaskBoard
 from claw_v2.task_ledger import (
     TASK_TERMINAL_PRUNE_MAX_ROWS,
@@ -2383,6 +2389,37 @@ def _setup_scheduler(
     return scheduler, dream, wiki, skill_registry, a2a
 
 
+def _ensure_runtime_db_boot_health(config: Any) -> None:
+    """Run the thorough boot health check; on corruption, leave a trace.
+
+    Slice 2a (blind-spot pass 2026-07-06 finding #2): an uncaught
+    RuntimeDatabaseError here exits the process and launchd KeepAlive
+    relaunches it in a crash-boot loop with no record of why. Persist the
+    halt marker (which the launcher honors by holding instead of exec'ing)
+    and alert the owner before re-raising.
+    """
+    try:
+        check_runtime_sqlite_health(config.db_path, thorough=True)
+    except RuntimeDatabaseError as exc:
+        marker = write_runtime_db_halt_marker(config.db_path, exc, source="build_runtime")
+        logger.critical(
+            "runtime DB failed boot health check; halt marker written: %s (%s)", marker, exc
+        )
+        try:
+            send_telegram_message(
+                config.telegram_bot_token or "",
+                config.telegram_allowed_user_id or "",
+                (
+                    "🛑 Claw no arrancó: la DB de runtime falló el integrity check "
+                    f"({exc}). Marca de halt escrita en {marker}; el boot queda en "
+                    "hold hasta restaurar un backup verificado de data/backups/restart/."
+                ),
+            )
+        except Exception:
+            logger.exception("runtime DB halt alert could not be delivered")
+        raise
+
+
 def build_runtime(
     system_prompt: str = "You are Dr. Strange, the autonomous personal agent for Hector Pachano.",
     *,
@@ -2395,7 +2432,7 @@ def build_runtime(
     config = AppConfig.from_env()
     config.validate()
     config.ensure_directories()
-    check_runtime_sqlite_health(config.db_path, thorough=True)
+    _ensure_runtime_db_boot_health(config)
 
     # F1.2/F1.3: ONE RuntimeDb owns the single claw.db connection + shared lock
     # for every runtime store. Built once here and injected into all production

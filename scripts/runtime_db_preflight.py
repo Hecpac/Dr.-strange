@@ -7,7 +7,12 @@ import sys
 import time
 from pathlib import Path
 
-from claw_v2.sqlite_runtime import RuntimeDatabaseError, check_runtime_sqlite_health
+from claw_v2.sqlite_runtime import (
+    RuntimeDatabaseError,
+    check_runtime_sqlite_health,
+    clear_runtime_db_halt_marker,
+    write_runtime_db_halt_marker,
+)
 
 
 def create_verified_backup(
@@ -66,9 +71,26 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         backup_path = create_verified_backup(args.db, args.backup_dir)
-    except (RuntimeDatabaseError, sqlite3.DatabaseError, OSError) as exc:
+    except (RuntimeDatabaseError, sqlite3.DatabaseError) as exc:
+        # Slice 2a: corruption leaves a persistent halt marker so the launcher
+        # holds instead of letting launchd KeepAlive crash-loop the daemon.
+        marker = write_runtime_db_halt_marker(args.db, exc, source="preflight")
+        print(f"ERROR: runtime DB preflight failed: {exc}", file=sys.stderr)
+        print(f"ERROR: halt marker written: {marker}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        # Not a corruption verdict (e.g. backup dir unwritable) — abort the
+        # restart but do not hold future boots on it.
         print(f"ERROR: runtime DB preflight failed: {exc}", file=sys.stderr)
         return 1
+    # Health verified: retire any stale halt marker. Auto-clear is the ONLY
+    # clearing path and requires an EXISTING DB that passed the thorough
+    # check — a missing/empty DB must not clear a halt (deleting the corrupt
+    # file would otherwise silently unlock a fresh-schema boot).
+    if args.db.exists() and args.db.stat().st_size > 0:
+        cleared = clear_runtime_db_halt_marker(args.db, verified_healthy=True)
+        if cleared is not None:
+            print(f"Runtime DB halt marker cleared: {cleared}")
     if backup_path is None:
         print(f"Runtime DB preflight OK: no backup needed for {args.db}")
     else:
