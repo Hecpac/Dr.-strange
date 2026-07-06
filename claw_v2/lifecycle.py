@@ -225,9 +225,8 @@ def _normalize_chat_id(value: object) -> str:
     return ""
 
 
-# F0.3: the scheduled lifecycle heartbeat is the SOLE writer of the liveness
-# sink (it alone knows web_transport_serving). It mirrors the high-frequency
-# signal into observe_stream only 1-in-K to keep the audit log readable.
+# F0.3/R2.3: the daemon-owned liveness loop is the SOLE writer of the liveness
+# sink. lifecycle builds the writer because it owns web_transport_serving.
 LIVENESS_OBSERVE_EMIT_SAMPLE = 15
 RUNTIME_DB_WRITE_PROBE_TABLE = """
 CREATE TABLE IF NOT EXISTS runtime_write_probe (
@@ -855,18 +854,15 @@ async def run() -> int:
         # architecture-invariant sweep covers them. Only the notification
         # consumer lives here.
 
-        # F0.3 liveness sink: the scheduled heartbeat is the SOLE writer of the
-        # atomic JSON sink (it alone carries web_transport_serving). It mirrors
-        # the signal into observe_stream only 1-in-K so the audit log stops
-        # being flooded by high-frequency liveness rows.
+        # F0.3/R2.3 liveness sink: build the authoritative writer here because
+        # lifecycle owns web_transport_serving, then hand it to the daemon-owned
+        # liveness loop so a blocked CronScheduler handler cannot starve it.
         _liveness_boot_id = secrets.token_hex(8)
         _liveness_sink_path = liveness.liveness_sink_path(Path(runtime.observe.db_path).parent)
-        _liveness_emit_counter = 0
 
-        def _emit_daemon_heartbeat() -> None:
-            nonlocal _liveness_emit_counter
+        def _write_daemon_liveness() -> dict[str, Any]:
             try:
-                payload = write_liveness_heartbeat_record(
+                return write_liveness_heartbeat_record(
                     sink_path=_liveness_sink_path,
                     boot_id=_liveness_boot_id,
                     web_transport=web_transport,
@@ -875,14 +871,14 @@ async def run() -> int:
                     observe_db_path=runtime.observe.db_path,
                 )
             except OSError:
-                # A sink write failure must never break the heartbeat job; the
-                # watchdog still has the (sampled) observe_stream signal.
+                # A sink write failure must never break the liveness loop; the
+                # watchdog still has the sampled observe_stream signal.
                 logger.warning("liveness sink write failed", exc_info=True)
                 db_write_probe = runtime_db_write_probe(
                     getattr(runtime.memory, "_db", None),
                     boot_id=_liveness_boot_id,
                 )
-                payload = {
+                return {
                     "pid": os.getpid(),
                     "ts": time.time(),
                     "boot_id": _liveness_boot_id,
@@ -898,13 +894,13 @@ async def run() -> int:
                     ),
                     "source": "lifecycle",
                 }
-            _liveness_emit_counter += 1
-            if (_liveness_emit_counter - 1) % LIVENESS_OBSERVE_EMIT_SAMPLE == 0:
-                runtime.observe.emit("daemon_heartbeat", payload=payload)
+
+        runtime.daemon.liveness_heartbeat_writer = _write_daemon_liveness
+        runtime.daemon.liveness_emit_sample = LIVENESS_OBSERVE_EMIT_SAMPLE
 
         # SEED: write one fresh sink record (web_transport_serving=None, NOT
         # probing is_serving) so a restart immediately replaces any stale sink
-        # left by a previous boot, before the first scheduled heartbeat fires.
+        # left by a previous boot, before the first liveness loop fires.
         try:
             seed_liveness_heartbeat_record(
                 sink_path=_liveness_sink_path,
@@ -915,14 +911,6 @@ async def run() -> int:
             )
         except OSError:
             logger.warning("liveness sink seed write failed", exc_info=True)
-
-        runtime.scheduler.register(
-            _SJ(
-                name="daemon_heartbeat",
-                interval_seconds=60,
-                handler=_emit_daemon_heartbeat,
-            )
-        )
 
         # Wire ManagedChrome
         managed_chrome = None

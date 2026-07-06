@@ -2,10 +2,11 @@
 
 The daemon's high-frequency liveness signal lives in a small, atomically
 overwritten JSON file rather than as ``daemon_heartbeat`` / ``daemon_tick``
-rows flooding ``observe_stream``. The authoritative writer is the scheduled
-lifecycle heartbeat (``claw_v2/lifecycle.py``); the sole reader is the health
+rows flooding ``observe_stream``. The authoritative writer runs in the
+daemon-owned liveness loop (``claw_v2/daemon.py``); lifecycle wires the writer
+because it owns the web transport state. The sole reader is the health
 diagnostics path (``claw_v2/diagnostics.py``). Keeping the path constant
-(``liveness_sink_path``) in both places is enforced by the
+(``liveness_sink_path``) in writer and reader paths is enforced by the
 ``test_liveness_signal_has_a_consumer`` architecture tripwire.
 
 The write is overwrite-style (single current record), durable, and crash-safe:

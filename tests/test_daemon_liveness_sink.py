@@ -5,13 +5,14 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
 from claw_v2 import liveness
-from claw_v2.cron import CronScheduler
+from claw_v2.cron import CronScheduler, ScheduledJob
 from claw_v2.daemon import ClawDaemon
 from claw_v2.heartbeat import HeartbeatSnapshot
 from claw_v2.sqlite_runtime import RuntimeDb
@@ -274,8 +275,8 @@ class LifecycleHeartbeatWriterTests(unittest.TestCase):
 
 
 class DaemonLivenessLoopSamplingTests(unittest.IsolatedAsyncioTestCase):
-    """Criterion 3 (loop) + Criterion 4: the daemon liveness loop is sampled
-    and never writes the sink."""
+    """Criterion 3 (loop) + Criterion 4: the daemon liveness loop samples
+    observe emits and writes the sink only through an explicit writer."""
 
     async def test_liveness_loop_samples_emits_below_cycle_count(self) -> None:
         observe = MagicMock()
@@ -312,9 +313,7 @@ class DaemonLivenessLoopSamplingTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(emits), cycles)
         self.assertLessEqual(len(emits), cycles // sample + 1)
 
-    async def test_liveness_loop_never_writes_the_sink(self) -> None:
-        # Criterion 4: lifecycle wrote web_transport_serving=True; the daemon
-        # loop must NOT clobber it (it must not touch the sink at all).
+    async def test_liveness_loop_without_writer_never_writes_the_sink(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             sink = liveness.liveness_sink_path(tmpdir)
             liveness.write_liveness(
@@ -353,6 +352,180 @@ class DaemonLivenessLoopSamplingTests(unittest.IsolatedAsyncioTestCase):
             assert record is not None
             self.assertEqual(record["web_transport_serving"], True)
             self.assertEqual(record["source"], "lifecycle")
+
+    async def test_liveness_writer_runs_without_observe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sink = liveness.liveness_sink_path(tmpdir)
+            heartbeat = MagicMock()
+            heartbeat.collect.return_value = _snapshot()
+            shutdown = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            writes = 0
+
+            def liveness_writer() -> dict:
+                nonlocal writes
+                writes += 1
+                payload = {
+                    "pid": os.getpid(),
+                    "ts": time.time(),
+                    "source": "test_writer",
+                    "boot_id": "no-observe",
+                }
+                liveness.write_liveness(sink, payload)
+                loop.call_soon_threadsafe(shutdown.set)
+                return payload
+
+            daemon = ClawDaemon(
+                scheduler=CronScheduler(),
+                heartbeat=heartbeat,
+                observe=None,
+                liveness_heartbeat_writer=liveness_writer,
+                liveness_writer_timeout=0.1,
+            )
+
+            await asyncio.wait_for(daemon.run_loop(shutdown, interval=0.01), timeout=1.0)
+
+            record = liveness.read_liveness(sink)
+            assert record is not None
+            self.assertEqual(record["boot_id"], "no-observe")
+            self.assertGreaterEqual(writes, 1)
+
+    async def test_liveness_writer_timeout_is_bounded_and_single_flight(self) -> None:
+        observe = MagicMock()
+        heartbeat = MagicMock()
+        heartbeat.collect.return_value = _snapshot()
+        writer_started = threading.Event()
+        release_writer = threading.Event()
+        writer_calls = 0
+
+        def blocked_writer() -> dict:
+            nonlocal writer_calls
+            writer_calls += 1
+            writer_started.set()
+            release_writer.wait(timeout=1.0)
+            return {
+                "pid": os.getpid(),
+                "ts": time.time(),
+                "source": "blocked_writer",
+            }
+
+        daemon = ClawDaemon(
+            scheduler=CronScheduler(),
+            heartbeat=heartbeat,
+            observe=observe,
+            liveness_emit_sample=1,
+            liveness_heartbeat_writer=blocked_writer,
+            liveness_writer_timeout=0.01,
+        )
+        shutdown = asyncio.Event()
+        cycles = 0
+
+        async def counting_wait() -> bool:
+            nonlocal cycles
+            cycles += 1
+            if cycles >= 4:
+                shutdown.set()
+            return True
+
+        shutdown.wait = counting_wait  # type: ignore[assignment]
+        try:
+            await daemon._run_liveness_heartbeat_loop(shutdown, interval=10)
+        finally:
+            release_writer.set()
+            await asyncio.sleep(0.05)
+
+        self.assertTrue(writer_started.is_set())
+        self.assertEqual(writer_calls, 1)
+        emits = [c for c in observe.emit.call_args_list if c.args[0] == "daemon_heartbeat"]
+        self.assertGreaterEqual(len(emits), 1)
+        timeout_payloads = [
+            c.kwargs["payload"]
+            for c in emits
+            if c.kwargs["payload"].get("writer_error") == "timeout"
+        ]
+        self.assertGreaterEqual(len(timeout_payloads), 1)
+        for payload in timeout_payloads:
+            self.assertEqual(payload["writer_timeout_seconds"], 0.01)
+
+    async def test_liveness_sink_refreshes_while_cron_handler_blocks(self) -> None:
+        from claw_v2.lifecycle import write_liveness_heartbeat_record
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "claw.db"
+            sink = liveness.liveness_sink_path(tmpdir)
+            runtime_db = RuntimeDb(db_path)
+            self.addCleanup(runtime_db.close)
+            liveness.write_liveness(
+                sink,
+                {
+                    "pid": os.getpid(),
+                    "ts": 1.0,
+                    "boot_id": "old",
+                    "web_transport_serving": None,
+                    "source": "seed",
+                },
+            )
+            scheduler = CronScheduler()
+            handler_started = threading.Event()
+            handler_can_finish = threading.Event()
+            writes_during_block: list[float] = []
+
+            def blocking_handler() -> None:
+                handler_started.set()
+                handler_can_finish.wait(timeout=1.0)
+
+            scheduler.register(
+                ScheduledJob(
+                    name="blocking_cron_handler",
+                    interval_seconds=3600,
+                    handler=blocking_handler,
+                )
+            )
+            heartbeat = MagicMock()
+            heartbeat.collect.return_value = _snapshot()
+            observe = MagicMock()
+            shutdown = asyncio.Event()
+            loop = asyncio.get_running_loop()
+
+            def liveness_writer() -> dict:
+                payload = write_liveness_heartbeat_record(
+                    sink_path=sink,
+                    boot_id="boot-r23",
+                    web_transport=_FakeWebTransport(serving=True),
+                    web_chat_enabled=True,
+                    runtime_db=runtime_db,
+                    observe_db_path=db_path,
+                )
+                if handler_started.is_set():
+                    writes_during_block.append(float(payload["ts"]))
+                    handler_can_finish.set()
+                    loop.call_soon_threadsafe(shutdown.set)
+                return payload
+
+            daemon = ClawDaemon(
+                scheduler=scheduler,
+                heartbeat=heartbeat,
+                observe=observe,
+                liveness_emit_sample=1,
+                liveness_heartbeat_writer=liveness_writer,
+            )
+
+            await asyncio.wait_for(daemon.run_loop(shutdown, interval=0.01), timeout=2.0)
+
+            self.assertTrue(writes_during_block)
+            self.assertTrue(handler_started.is_set())
+            record = liveness.read_liveness(sink)
+            assert record is not None
+            self.assertEqual(record["boot_id"], "boot-r23")
+            self.assertEqual(record["web_transport_serving"], True)
+            self.assertEqual(record["db_write_probe_status"], "ok")
+            self.assertIn("db_write_probe", record)
+            self.assertIn(liveness.RUNTIME_HEALTH_FIELD, record)
+            self.assertEqual(
+                record[liveness.RUNTIME_HEALTH_FIELD]["db_write_probe_status"],
+                "ok",
+            )
+            self.assertIn("spill_pending_count", record[liveness.RUNTIME_HEALTH_FIELD])
 
 
 class DaemonTickSamplingTests(unittest.TestCase):
