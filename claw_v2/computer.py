@@ -628,7 +628,7 @@ class ComputerUseService:
         model: str,
         system_prompt: str | None,
         current_url_resolver: Callable[[], str | None] | None,
-    ) -> str:
+    ) -> ComputerUseOutcome:
         tools = [
             {
                 "type": "computer_use_preview",

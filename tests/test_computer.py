@@ -594,6 +594,29 @@ class ComputerHandlerOutcomeTests(unittest.TestCase):
         self.assertEqual(failed[-1]["reason_code"], "exception")
         self.assertFalse(failed[-1]["retryable"])
 
+    def test_handler_cancelled_outcome_is_terminal_failure_event(self) -> None:
+        class FakeComputer:
+            codex_backend = None
+
+            def run_agent_loop_outcome(self, *, session, **kwargs):
+                session.status = "cancelled"
+                return ComputerUseOutcome.cancelled("Session cancelled by Esc key.")
+
+        events: list[tuple[str, dict]] = []
+        handler = self._handler_with_computer(FakeComputer(), events)
+        handler._sessions["s1"] = ComputerSession(task="cancel me")
+
+        result = handler._run_session("s1")
+
+        self.assertEqual(result, "Session cancelled by Esc key.")
+        self.assertNotIn("s1", handler._sessions)
+        failed = [payload for event, payload in events if event == "computer_session_failed"]
+        completed = [payload for event, payload in events if event == "computer_session_completed"]
+        self.assertEqual(completed, [])
+        self.assertEqual(failed[-1]["outcome_status"], "cancelled")
+        self.assertEqual(failed[-1]["reason_code"], "user_cancelled")
+        self.assertFalse(failed[-1]["retryable"])
+
     def test_handler_browser_no_result_is_typed_no_result_failure(self) -> None:
         import types
 

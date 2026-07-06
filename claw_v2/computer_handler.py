@@ -612,9 +612,9 @@ class ComputerHandler:
                 "Responde `te autorizo` para ejecutarla o `aborta` para cancelarla."
             )
 
-        if session.status in {"done", "aborted"}:
+        if session.status in {"done", "aborted", "cancelled"}:
             self._sessions.pop(session_id, None)
-        if session.status == "done":
+        if session.status in {"done", "cancelled"}:
             event_payload = {
                 "session_id": session_id,
                 "backend": backend,
