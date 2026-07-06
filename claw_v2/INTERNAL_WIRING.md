@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice r2.2b-brief-cron-off-tick (2026-07-06, R2.2b): morning_brief and evening_brief now enqueue ScheduledBackgroundJobRunner work with bounded timeouts instead of running MorningBriefService body work inline in CronScheduler."
-doc_version: 2.88
+describes_commit: "slice a3.4-browser-computer-lock-symmetry (2026-07-06, A3.4): interactive and delegated browser_use task runs share the same handler lock around mutable browser_use state and task execution; desktop computer-use retains its file lock."
+doc_version: 2.89
 last_verified: 2026-07-06
-verification_method: "R2.2b local: tests/test_scheduled_background_jobs.py proves morning_brief/evening_brief cron handlers enqueue only, registered background runners execute the body off-tick, evaluate the original enqueue/tick timestamp for due-window semantics, duplicate ticks dedupe through stable resume keys, and runner timeout failures are observable; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_residual_is_explicit_and_minimal verifies the R2.0 residual allowlist no longer includes brief jobs."
+verification_method: "A3.4 local: tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_and_delegated_browser_use_runs_do_not_overlap proves interactive and delegated browser_use work cannot overlap; tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_browser_use_lock_releases_on_exception_and_cancel proves lock release on failure/cancel; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_browser_use_interactive_and_delegated_runs_share_lock locks the shared-lock wiring."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -819,6 +819,26 @@ invariants:
     enforced_by:
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_module_does_not_import_pyautogui_at_module_scope
       - tests/test_computer_import_safety.py
+
+  browser_computer_lock_symmetry:
+    rule: Browser-use task execution uses one handler lock for both interactive
+          approved sessions and delegated browser executor sessions. The lock
+          covers mutable BrowserUseService state (`cdp_url`) and the
+          `_run_browser_use_task` call, so two sessions cannot drive the same
+          unsafe browser-use executor concurrently. Desktop computer-use task
+          loops remain serialized by `computer._computer_use_lock()`.
+    enforced_by:
+      - tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_and_delegated_browser_use_runs_do_not_overlap
+      - tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_browser_use_lock_releases_on_exception_and_cancel
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_browser_use_interactive_and_delegated_runs_share_lock
+      - tests/test_computer.py
+      - tests/test_computer_import_safety.py
+    why: A3.4 closes the concurrency asymmetry where delegated browser-use
+         runs acquired `ComputerHandler._browser_use_lock`, but an approved
+         interactive browser-use run only serialized CDP preflight and then
+         executed the browser agent outside that shared lock. That allowed two
+         sessions to mutate the shared BrowserUseService/CDP context and drive
+         browser-use at the same time.
 
   subprocess_bounded_execution:
     rule: Runtime subprocess execution must be time-bounded. New synchronous

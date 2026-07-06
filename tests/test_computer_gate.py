@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 import unittest
 from types import SimpleNamespace
 
@@ -380,6 +382,11 @@ class _ReadyBrowserCapability:
         return f"http://127.0.0.1:{port}"
 
 
+class _BrowserReadGrant:
+    def approved_domains_list(self) -> list[str]:
+        return ["example.com"]
+
+
 class ComputerHandlerBrowserAutoApproveTests(unittest.TestCase):
     """browser_use_task (authenticated Chrome) auto-runs without 'te autorizo'
     when CLAW_COMPUTER_AUTO_APPROVE is on, EXCEPT when the task targets a
@@ -459,6 +466,107 @@ class ComputerHandlerBrowserAutoApproveTests(unittest.TestCase):
         handler._run_browser_use_session(session)
         self.assertTrue(stub.called)
         self.assertEqual(session.status, "done")
+
+    def test_interactive_and_delegated_browser_use_runs_do_not_overlap(self) -> None:
+        class BlockingBrowserUse:
+            def __init__(self) -> None:
+                self.cdp_url = ""
+                self.first_started = threading.Event()
+                self.first_release = threading.Event()
+                self.delegated_started = threading.Event()
+                self._lock = threading.Lock()
+                self._active = 0
+                self.max_active = 0
+
+            async def run_task(self, instruction: str, **kwargs) -> str:
+                with self._lock:
+                    self._active += 1
+                    self.max_active = max(self.max_active, self._active)
+                try:
+                    if instruction == "interactive task":
+                        self.first_started.set()
+                        await asyncio.to_thread(self.first_release.wait, 2)
+                    else:
+                        self.delegated_started.set()
+                    return f"{instruction} done"
+                finally:
+                    with self._lock:
+                        self._active -= 1
+
+        browser_use = BlockingBrowserUse()
+        handler = self._handler(auto_approve=False, stub=browser_use)
+        handler._browser_profile_gate = lambda *args, **kwargs: None
+        handler._run_x_browser_prelude = lambda *args, **kwargs: None
+        handler._run_deterministic_social_browser_task = lambda *args, **kwargs: None
+        handler._run_deterministic_browser_task = lambda *args, **kwargs: None
+        handler._browser_read_grant_for_task = lambda *args, **kwargs: _BrowserReadGrant()
+
+        session = self._session("interactive task")
+        session.pending_action.update(
+            {
+                "approved": True,
+                "approval_id": "approval-1",
+                "approved_domains": ["example.com"],
+            }
+        )
+        results: dict[str, str] = {}
+
+        interactive = threading.Thread(
+            target=lambda: results.setdefault(
+                "interactive", handler._run_browser_use_session(session)
+            )
+        )
+        delegated = threading.Thread(
+            target=lambda: results.setdefault(
+                "delegated",
+                handler.run_delegated_browser_task("delegated task", task_id="task-1"),
+            )
+        )
+
+        interactive.start()
+        self.assertTrue(browser_use.first_started.wait(1))
+        delegated.start()
+        self.assertFalse(browser_use.delegated_started.wait(0.15))
+        browser_use.first_release.set()
+        interactive.join(2)
+        delegated.join(2)
+
+        self.assertFalse(interactive.is_alive())
+        self.assertFalse(delegated.is_alive())
+        self.assertEqual(results["interactive"], "interactive task done")
+        self.assertEqual(results["delegated"], "delegated task done")
+        self.assertEqual(browser_use.max_active, 1)
+
+    def test_interactive_browser_use_lock_releases_on_exception_and_cancel(self) -> None:
+        class FailingBrowserUse:
+            def __init__(self, exc: BaseException) -> None:
+                self.cdp_url = ""
+                self.exc = exc
+
+            async def run_task(self, instruction: str, **kwargs) -> str:
+                raise self.exc
+
+        cases: tuple[BaseException, ...] = (
+            RuntimeError("browser failed"),
+            asyncio.CancelledError(),
+        )
+        for exc in cases:
+            with self.subTest(exc=exc.__class__.__name__):
+                handler = self._handler(auto_approve=False, stub=FailingBrowserUse(exc))
+                session = self._session("interactive task")
+                session.pending_action.update(
+                    {
+                        "approved": True,
+                        "approval_id": "approval-1",
+                        "approved_domains": ["example.com"],
+                    }
+                )
+
+                with self.assertRaises(exc.__class__):
+                    handler._run_browser_use_session(session)
+
+                self.assertTrue(handler._browser_use_lock.acquire(blocking=False))
+                handler._browser_use_lock.release()
 
 
 import tempfile

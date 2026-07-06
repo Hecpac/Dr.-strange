@@ -167,8 +167,7 @@ def _browser_brand_matches(lowered_text: str, brand: str) -> bool:
     if brand == "google":
         matches = list(re.finditer(r"\bgoogle\b", lowered_text))
         return any(
-            re.match(r"\s+chrome\b", lowered_text[match.end() :]) is None
-            for match in matches
+            re.match(r"\s+chrome\b", lowered_text[match.end() :]) is None for match in matches
         )
     return re.search(rf"\b{re.escape(brand)}\b", lowered_text) is not None
 
@@ -926,7 +925,6 @@ class ComputerHandler:
                 session.pending_action = None
                 return f"No pude conectar al navegador (CDP): {exc}"
         self._mark_capability_available("chrome_cdp")
-        self._set_browser_use_cdp_url(cdp_endpoint)
         try:
             approved_domains = _normalized_domains(
                 pending.get("approved_domains")
@@ -961,31 +959,34 @@ class ComputerHandler:
                         {
                             "backend": "browser_use",
                             "current_url": getattr(session, "current_url", None),
-                            "instruction_hash": _instruction_hash(
-                                getattr(session, "task", "")
-                            ),
+                            "instruction_hash": _instruction_hash(getattr(session, "task", "")),
                         },
                     )
                     return (
                         "Browser automation needs approval before executing authenticated "
                         "browser actions."
                     )
-            self._emit(
-                "computer_browser_use_task_started",
-                {
-                    "backend": "browser_use",
-                    "timeout_seconds": self._browser_use_timeout(),
-                    "current_url": getattr(session, "current_url", None),
-                    "instruction_hash": _instruction_hash(getattr(session, "task", "")),
-                },
-            )
-            result = self._run_browser_use_task(
-                session,
-                allow_high_risk_actions=allow_high_risk_actions,
-                approved_domains=approved_domains,
-                allowed_high_risk_actions=allowed_high_risk_actions,
-                approval_scope=approval_scope,
-            )
+            with self._browser_use_lock:
+                if self.browser_use is None:
+                    raise RuntimeError("browser_use unavailable for approved browser automation")
+                self._set_browser_use_cdp_url(cdp_endpoint)
+                self._mark_capability_available("browser_use")
+                self._emit(
+                    "computer_browser_use_task_started",
+                    {
+                        "backend": "browser_use",
+                        "timeout_seconds": self._browser_use_timeout(),
+                        "current_url": getattr(session, "current_url", None),
+                        "instruction_hash": _instruction_hash(getattr(session, "task", "")),
+                    },
+                )
+                result = self._run_browser_use_task(
+                    session,
+                    allow_high_risk_actions=allow_high_risk_actions,
+                    approved_domains=approved_domains,
+                    allowed_high_risk_actions=allowed_high_risk_actions,
+                    approval_scope=approval_scope,
+                )
         except Exception as exc:
             from claw_v2.computer import BrowserUsePolicyInterrupt
 
@@ -1321,7 +1322,12 @@ class ComputerHandler:
             message = _error_message(exc)
             self._emit(
                 "x_browser_prelude_failed",
-                {"task_id": task_id, "mode": mode, "target_url": profile.home_url, "error": message},
+                {
+                    "task_id": task_id,
+                    "mode": mode,
+                    "target_url": profile.home_url,
+                    "error": message,
+                },
             )
             return f"No pude completar la tarea de navegador deterministica: {message}"
 
@@ -1333,7 +1339,10 @@ class ComputerHandler:
         ).strip()
         host = _host_from_url(final_url)
         allowed_domain = bool(
-            host and any(host == domain or host.endswith(f".{domain}") for domain in profile.allowed_domains)
+            host
+            and any(
+                host == domain or host.endswith(f".{domain}") for domain in profile.allowed_domains
+            )
         )
         if not allowed_domain:
             message = f"navegacion inicial quedo fuera de X: {final_url or '(url vacia)'}"
@@ -1351,7 +1360,9 @@ class ComputerHandler:
             )
             return f"No pude completar la tarea de navegador deterministica: {message}"
 
-        health = classify_health(final_url=final_url, title=title, body_text=content, profile=profile)
+        health = classify_health(
+            final_url=final_url, title=title, body_text=content, profile=profile
+        )
         if health is BrowserProfileHealth.NEEDS_LOGIN:
             self._emit(
                 "x_browser_prelude_needs_login",

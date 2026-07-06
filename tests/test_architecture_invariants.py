@@ -270,6 +270,18 @@ class ArchitectureInvariantTests(unittest.TestCase):
 
         self.assertEqual(offenders, [])
 
+    def test_browser_use_interactive_and_delegated_runs_share_lock(self) -> None:
+        from claw_v2.computer_handler import ComputerHandler
+
+        interactive_source = inspect.getsource(ComputerHandler._run_browser_use_session)
+        delegated_source = inspect.getsource(ComputerHandler.run_delegated_browser_task)
+
+        lock_index = interactive_source.index("with self._browser_use_lock:")
+        run_index = interactive_source.index("result = self._run_browser_use_task(")
+        self.assertLess(lock_index, run_index)
+        self.assertIn("with self._browser_use_lock:", delegated_source)
+        self.assertIn("output = self._run_browser_use_task(", delegated_source)
+
     def test_runtime_db_self_heal_reconnect_is_lock_only(self) -> None:
         from claw_v2.sqlite_runtime import RuntimeDb
 
