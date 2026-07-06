@@ -133,6 +133,10 @@ def wire_notebooklm_scheduler_jobs(runtime: Any, nlm_service: NotebookLMService)
         )
     )
 
+    # Also let Kairos trigger NotebookLM work on demand; this is independent of
+    # whether the optional wiki integration is configured.
+    runtime.kairos.nlm_service = nlm_service
+
     wiki = runtime.bot.wiki
     if wiki is None:
         return
@@ -171,8 +175,6 @@ def wire_notebooklm_scheduler_jobs(runtime: Any, nlm_service: NotebookLMService)
             ),
         )
     )
-    # Also let Kairos trigger it on demand.
-    runtime.kairos.nlm_service = nlm_service
 
 
 def should_notify_task_ledger_terminal(payload: dict, notified_task_ids: set[str]) -> bool:

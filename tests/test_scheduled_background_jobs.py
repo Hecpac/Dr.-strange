@@ -678,7 +678,7 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
             self.assertTrue(runner.run_once())
             elapsed = time.monotonic() - started
 
-            self.assertLess(elapsed, 0.5)
+            self.assertLess(elapsed, 0.15)
             job = jobs.list(kinds=(NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,), limit=10)[0]
             self.assertEqual(job.status, "failed")
             self.assertIn("timed out", job.error)
@@ -744,7 +744,13 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
 
 
 class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
-    def _notebooklm_runtime(self, tmpdir: str, *, timeout_seconds: float = 0.5):
+    def _notebooklm_runtime(
+        self,
+        tmpdir: str,
+        *,
+        timeout_seconds: float = 0.5,
+        wiki_available: bool = True,
+    ):
         from claw_v2.lifecycle import wire_notebooklm_scheduler_jobs
 
         root = Path(tmpdir)
@@ -757,7 +763,7 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
             def register_background_job_runner(self, *, name, handler, interval=60.0):
                 registered[name] = SimpleNamespace(name=name, handler=handler, interval=interval)
 
-        wiki = SimpleNamespace(ingest_from_notebooklm=MagicMock())
+        wiki = SimpleNamespace(ingest_from_notebooklm=MagicMock()) if wiki_available else None
         runtime = SimpleNamespace(
             scheduler=scheduler,
             job_service=job_service,
@@ -799,6 +805,21 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(poll_rows[0].payload["limit"], 3)
             self.assertEqual(len(sync_rows), 1)
             self.assertEqual(sync_rows[0].status, "queued")
+
+    def test_lifecycle_notebooklm_kairos_service_assigned_without_wiki(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime, nlm_service, wiki, registered = self._notebooklm_runtime(
+                tmpdir,
+                wiki_available=False,
+            )
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+
+            self.assertIsNone(wiki)
+            self.assertIs(runtime.kairos.nlm_service, nlm_service)
+            self.assertIn("notebooklm_orchestration_poll", jobs)
+            self.assertNotIn("nlm_wiki_sync", jobs)
+            self.assertIn("notebooklm_orchestration_poll", registered)
+            self.assertNotIn("nlm_wiki_sync", registered)
 
     def test_lifecycle_notebooklm_runners_execute_body_off_tick(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -848,7 +869,7 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(registered["notebooklm_orchestration_poll"].handler(), 1)
             elapsed = time.monotonic() - started
 
-            self.assertLess(elapsed, 0.5)
+            self.assertLess(elapsed, 0.15)
             rows = runtime.job_service.list(
                 kinds=(NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,), limit=10
             )
