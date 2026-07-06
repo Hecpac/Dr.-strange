@@ -301,8 +301,12 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIn("reason_code", ComputerUseOutcome.__dataclass_fields__)
         self.assertIn("retryable", ComputerUseOutcome.__dataclass_fields__)
         self.assertIn("user_safe_summary", ComputerUseOutcome.__dataclass_fields__)
+        self.assertIn("replan_recommended", ComputerUseOutcome.__dataclass_fields__)
+        self.assertIn("replan_reason_code", ComputerUseOutcome.__dataclass_fields__)
 
         handler_source = inspect.getsource(ComputerHandler._run_session)
+        replan_source = inspect.getsource(ComputerHandler._should_attempt_computer_replan)
+        reset_source = inspect.getsource(ComputerHandler._reset_session_for_computer_replan)
         payload_source = inspect.getsource(
             __import__(
                 "claw_v2.computer_handler", fromlist=["_computer_outcome_event_payload"]
@@ -314,6 +318,14 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIn("outcome.status", handler_source)
         self.assertIn("outcome.reason_code", payload_source)
         self.assertIn("outcome.retryable", payload_source)
+        self.assertIn("outcome.replan_recommended", payload_source)
+        self.assertIn("outcome.replan_reason_code", payload_source)
+        self.assertIn("_should_attempt_computer_replan", handler_source)
+        self.assertIn("_computer_replan_attempted", replan_source)
+        self.assertIn('outcome.status in {"failed", "no_result"}', replan_source)
+        self.assertIn("pending_action", replan_source)
+        self.assertIn("session.iteration = 0", reset_source)
+        self.assertIn("computer_replan_started", inspect.getsource(ComputerHandler))
         self.assertIn("computer_session_failed", handler_source)
 
     def test_runtime_db_self_heal_reconnect_is_lock_only(self) -> None:

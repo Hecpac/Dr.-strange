@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice a3.6-typed-computer-use-outcomes (2026-07-06, A3.6): computer/browser task outcomes carry typed status, reason_code, retryable, and user_safe_summary while preserving legacy summary text for callers."
-doc_version: 2.90
+describes_commit: "slice a3.7-computer-use-replan-outcomes (2026-07-06, A3.7): retryable iteration-limit, no-result, scope-drift, and explicitly transient computer/browser outcomes carry typed replan metadata and get at most one safe replan attempt."
+doc_version: 2.91
 last_verified: 2026-07-06
-verification_method: "A3.6 local: tests/test_computer.py::ComputerUseOutcomeTests covers success, approval, no-result, cancellation, and retryable iteration-limit typed outcomes; tests/test_computer.py::ComputerHandlerOutcomeTests proves handler downstream events use typed status/reason/retryable instead of summary parsing for failure, approval, no-result, exception, MagicMock legacy fallback, real typed runner selection, and CDP unavailable paths; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes locks the typed outcome chokepoint."
+verification_method: "A3.7 local: tests/test_computer.py::ComputerUseOutcomeTests covers success, approval, no-result, cancellation, scope-drift, timeout coercion, and retryable iteration-limit typed outcomes with replan metadata; tests/test_computer.py::ComputerHandlerOutcomeTests proves downstream events use typed status/reason/retryable/replan fields, one bounded replan runs for iteration-limit/no-result/scope-drift/explicit transient failure, approvals/destructive waits, cancellations, auth/policy/user denials, and ambiguous actions do not replan, MagicMock legacy fallback and CDP unavailable paths stay typed; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes locks the typed outcome and bounded-replan chokepoint."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -852,19 +852,26 @@ invariants:
   computer_use_task_outcomes_are_typed:
     rule: Computer/browser task execution returns a typed
           `ComputerUseOutcome` at the service/handler boundary. Downstream
-          handler decisions and observe events use `status`, `reason_code`, and
-          `retryable`; `user_safe_summary` is the only field used to preserve
-          legacy user-facing text. Do not infer completion/failure/approval
-          from summary substrings in `ComputerHandler._run_session`.
+          handler decisions and observe events use `status`, `reason_code`,
+          `retryable`, `replan_recommended`, and `replan_reason_code`;
+          `user_safe_summary` is the only field used to preserve legacy
+          user-facing text. Do not infer completion/failure/approval/replan from
+          summary substrings in `ComputerHandler._run_session`. Retryable
+          iteration-limit, no-result, scope-drift, and explicitly typed
+          transient outcomes may trigger one bounded replan; approvals,
+          destructive/pending approval paths, cancellations, auth/policy/user
+          denials, ambiguous actions, and capability-unavailable paths must not
+          silently replan.
     enforced_by:
       - tests/test_computer.py::ComputerUseOutcomeTests
       - tests/test_computer.py::ComputerHandlerOutcomeTests
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes
     why: A3.6 closes the ambiguity where iteration limits, no-result browser
          runs, approval waits, exceptions, and success all collapsed into
-         plain strings. That made downstream handling brittle and could mark a
-         failed/no-result automation as completed if the human-readable text
-         did not match an expected phrase.
+         plain strings. A3.7 builds on that typed chokepoint so recoverable
+         automation exhaustion or explicitly classified transient failure can
+         replan once with a changed non-destructive tactic instead of becoming a
+         generic failure or an unbounded retry.
 
   subprocess_bounded_execution:
     rule: Runtime subprocess execution must be time-bounded. New synchronous

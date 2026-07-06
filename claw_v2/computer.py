@@ -83,12 +83,18 @@ class ComputerUseOutcome:
     retryable: bool
     user_safe_summary: str
     raw_text: str | None = None
+    replan_recommended: bool = False
+    replan_reason_code: str | None = None
 
     def __post_init__(self) -> None:
         if not self.reason_code.strip():
             raise ValueError("ComputerUseOutcome.reason_code is required")
         if not self.user_safe_summary.strip():
             raise ValueError("ComputerUseOutcome.user_safe_summary is required")
+        if self.replan_recommended and not str(self.replan_reason_code or "").strip():
+            raise ValueError(
+                "ComputerUseOutcome.replan_reason_code is required when replan is recommended"
+            )
 
     def __str__(self) -> str:
         return self.user_safe_summary
@@ -129,6 +135,8 @@ class ComputerUseOutcome:
         reason_code: str = "exception",
         retryable: bool = False,
         raw_text: str | None = None,
+        replan_recommended: bool = False,
+        replan_reason_code: str | None = None,
     ) -> "ComputerUseOutcome":
         return cls(
             status="failed",
@@ -136,6 +144,8 @@ class ComputerUseOutcome:
             retryable=retryable,
             user_safe_summary=summary,
             raw_text=raw_text,
+            replan_recommended=replan_recommended,
+            replan_reason_code=replan_reason_code,
         )
 
     @classmethod
@@ -146,6 +156,8 @@ class ComputerUseOutcome:
         reason_code: str = "no_result",
         retryable: bool = True,
         raw_text: str | None = None,
+        replan_recommended: bool = True,
+        replan_reason_code: str | None = None,
     ) -> "ComputerUseOutcome":
         return cls(
             status="no_result",
@@ -153,6 +165,27 @@ class ComputerUseOutcome:
             retryable=retryable,
             user_safe_summary=summary,
             raw_text=raw_text,
+            replan_recommended=replan_recommended,
+            replan_reason_code=(
+                replan_reason_code or reason_code if replan_recommended else replan_reason_code
+            ),
+        )
+
+    @classmethod
+    def scope_drift(
+        cls,
+        summary: str,
+        *,
+        reason_code: str = "scope_drift",
+        raw_text: str | None = None,
+    ) -> "ComputerUseOutcome":
+        return cls.failed(
+            summary,
+            reason_code=reason_code,
+            retryable=True,
+            raw_text=raw_text,
+            replan_recommended=True,
+            replan_reason_code=reason_code,
         )
 
     @classmethod
@@ -203,8 +236,15 @@ def coerce_computer_use_outcome(value: Any) -> ComputerUseOutcome:
         return ComputerUseOutcome.pending_approval(text, raw_text=text)
     if "iteration limit" in normalized:
         return ComputerUseOutcome.failed(
-            text, reason_code="iteration_limit", retryable=True, raw_text=text
+            text,
+            reason_code="iteration_limit",
+            retryable=True,
+            raw_text=text,
+            replan_recommended=True,
+            replan_reason_code="iteration_limit",
         )
+    if "scope drift" in normalized or "scope_drift" in normalized:
+        return ComputerUseOutcome.scope_drift(text, raw_text=text)
     if "timed out" in normalized or "timeout" in normalized:
         return ComputerUseOutcome.failed(text, reason_code="timeout", retryable=True, raw_text=text)
     if normalized.startswith("no pude conectar al navegador (cdp):"):
@@ -744,6 +784,8 @@ class ComputerUseService:
             "Computer Use iteration limit reached.",
             reason_code="iteration_limit",
             retryable=True,
+            replan_recommended=True,
+            replan_reason_code="iteration_limit",
         )
 
     def _run_codex_agent_loop(self, session: ComputerSession) -> str:
