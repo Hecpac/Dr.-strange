@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -142,6 +143,15 @@ def _exception_outcome(message: str) -> ComputerUseOutcome:
         retryable=False,
         raw_text=message,
     )
+
+
+def _real_callable_attr(obj: Any, name: str) -> Callable[..., Any] | None:
+    try:
+        inspect.getattr_static(obj, name)
+    except AttributeError:
+        return None
+    candidate = getattr(obj, name, None)
+    return candidate if callable(candidate) else None
 
 
 def _format_unverifiable_browser_result(session: Any) -> str:
@@ -451,7 +461,9 @@ class ComputerHandler:
                     return outcome.user_safe_summary
                 gate = self._get_gate()
                 client = None if self.computer.codex_backend is not None else self._get_client()
-                run_agent_loop_outcome = getattr(self.computer, "run_agent_loop_outcome", None)
+                run_agent_loop_outcome = _real_callable_attr(
+                    self.computer, "run_agent_loop_outcome"
+                )
                 if callable(run_agent_loop_outcome):
                     outcome = coerce_computer_use_outcome(
                         run_agent_loop_outcome(

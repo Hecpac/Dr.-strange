@@ -207,6 +207,14 @@ def coerce_computer_use_outcome(value: Any) -> ComputerUseOutcome:
         )
     if "timed out" in normalized or "timeout" in normalized:
         return ComputerUseOutcome.failed(text, reason_code="timeout", retryable=True, raw_text=text)
+    if normalized.startswith("no pude conectar al navegador (cdp):"):
+        return ComputerUseOutcome(
+            status="unavailable",
+            reason_code="cdp_unavailable",
+            retryable=True,
+            user_safe_summary=text,
+            raw_text=text,
+        )
     if normalized.startswith("computer use error"):
         return ComputerUseOutcome.failed(text, reason_code="exception", raw_text=text)
     return ComputerUseOutcome.succeeded(text, raw_text=text)

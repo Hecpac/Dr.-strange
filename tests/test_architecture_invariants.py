@@ -309,6 +309,8 @@ class ArchitectureInvariantTests(unittest.TestCase):
             )._computer_outcome_event_payload
         )
         self.assertIn("run_agent_loop_outcome", handler_source)
+        self.assertIn("_real_callable_attr", handler_source)
+        self.assertNotIn('getattr(self.computer, "run_agent_loop_outcome"', handler_source)
         self.assertIn("outcome.status", handler_source)
         self.assertIn("outcome.reason_code", payload_source)
         self.assertIn("outcome.retryable", payload_source)

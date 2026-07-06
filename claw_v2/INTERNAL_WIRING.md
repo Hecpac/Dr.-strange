@@ -11,7 +11,7 @@
 describes_commit: "slice a3.6-typed-computer-use-outcomes (2026-07-06, A3.6): computer/browser task outcomes carry typed status, reason_code, retryable, and user_safe_summary while preserving legacy summary text for callers."
 doc_version: 2.90
 last_verified: 2026-07-06
-verification_method: "A3.6 local: tests/test_computer.py::ComputerUseOutcomeTests covers success, approval, no-result, cancellation, and retryable iteration-limit typed outcomes; tests/test_computer.py::ComputerHandlerOutcomeTests proves handler downstream events use typed status/reason/retryable instead of summary parsing for failure, approval, no-result, and exception paths; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes locks the typed outcome chokepoint."
+verification_method: "A3.6 local: tests/test_computer.py::ComputerUseOutcomeTests covers success, approval, no-result, cancellation, and retryable iteration-limit typed outcomes; tests/test_computer.py::ComputerHandlerOutcomeTests proves handler downstream events use typed status/reason/retryable instead of summary parsing for failure, approval, no-result, exception, MagicMock legacy fallback, real typed runner selection, and CDP unavailable paths; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes locks the typed outcome chokepoint."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```

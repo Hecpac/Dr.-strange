@@ -490,6 +490,57 @@ class ComputerHandlerOutcomeTests(unittest.TestCase):
         self.assertEqual(failed[-1]["reason_code"], "iteration_limit")
         self.assertTrue(failed[-1]["retryable"])
 
+    def test_handler_ignores_fabricated_mock_typed_method_and_uses_legacy_runner(self) -> None:
+        events: list[tuple[str, dict]] = []
+        computer = MagicMock()
+        computer.codex_backend = None
+
+        def legacy_runner(*, session, **kwargs):
+            session.status = "done"
+            return "legacy completed"
+
+        computer.run_agent_loop.side_effect = legacy_runner
+        handler = self._handler_with_computer(computer, events)
+        handler._sessions["s1"] = ComputerSession(task="legacy mock")
+
+        result = handler._run_session("s1")
+
+        self.assertEqual(result, "legacy completed")
+        computer.run_agent_loop.assert_called_once()
+        computer.run_agent_loop_outcome.assert_not_called()
+        completed = [payload for event, payload in events if event == "computer_session_completed"]
+        self.assertEqual(completed[-1]["outcome_status"], "succeeded")
+
+    def test_handler_uses_real_typed_outcome_method_when_declared(self) -> None:
+        class FakeComputer:
+            codex_backend = None
+
+            def __init__(self) -> None:
+                self.legacy_called = False
+                self.typed_called = False
+
+            def run_agent_loop(self, *, session, **kwargs):
+                self.legacy_called = True
+                raise AssertionError("legacy runner should not be selected")
+
+            def run_agent_loop_outcome(self, *, session, **kwargs):
+                self.typed_called = True
+                session.status = "done"
+                return ComputerUseOutcome.succeeded("typed completed")
+
+        events: list[tuple[str, dict]] = []
+        computer = FakeComputer()
+        handler = self._handler_with_computer(computer, events)
+        handler._sessions["s1"] = ComputerSession(task="typed method")
+
+        result = handler._run_session("s1")
+
+        self.assertEqual(result, "typed completed")
+        self.assertTrue(computer.typed_called)
+        self.assertFalse(computer.legacy_called)
+        completed = [payload for event, payload in events if event == "computer_session_completed"]
+        self.assertEqual(completed[-1]["outcome_status"], "succeeded")
+
     def test_handler_creates_approval_from_typed_outcome_without_keyword_parsing(self) -> None:
         class FakeComputer:
             codex_backend = None
@@ -577,6 +628,42 @@ class ComputerHandlerOutcomeTests(unittest.TestCase):
         failed = [payload for event, payload in events if event == "computer_session_failed"]
         self.assertEqual(failed[-1]["outcome_status"], "no_result")
         self.assertEqual(failed[-1]["reason_code"], "no_result")
+        self.assertTrue(failed[-1]["retryable"])
+
+    def test_handler_browser_cdp_preflight_failure_is_unavailable_not_success(self) -> None:
+        import types
+
+        from claw_v2.browser_capability import BrowserCapabilityError
+        from claw_v2.computer_handler import ComputerHandler
+
+        events: list[tuple[str, dict]] = []
+
+        class FakeObserve:
+            def emit(self, event_type, payload=None):
+                events.append((event_type, payload or {}))
+
+        class UnavailableCapability:
+            def ensure_ready(self, *, port: int = 9250, profile_dir: str) -> str:
+                raise BrowserCapabilityError("cdp refused", endpoint="http://127.0.0.1:9250")
+
+        handler = ComputerHandler(
+            browser_use=object(),
+            config=types.SimpleNamespace(computer_auto_approve=True, sensitive_urls=[]),
+            observe=FakeObserve(),
+            browser_capability=UnavailableCapability(),
+        )
+        session = ComputerSession(task="abre chatgpt")
+        session.pending_action = {"action": "browser_use_task", "backend": "browser_use"}
+        handler._sessions["s1"] = session
+
+        result = handler._run_session("s1")
+
+        self.assertIn("No pude conectar al navegador (CDP): cdp refused", result)
+        completed = [payload for event, payload in events if event == "computer_session_completed"]
+        failed = [payload for event, payload in events if event == "computer_session_failed"]
+        self.assertEqual(completed, [])
+        self.assertEqual(failed[-1]["outcome_status"], "unavailable")
+        self.assertEqual(failed[-1]["reason_code"], "cdp_unavailable")
         self.assertTrue(failed[-1]["retryable"])
 
 
