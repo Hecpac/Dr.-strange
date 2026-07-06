@@ -76,6 +76,7 @@ class ClawDaemon:
         liveness_emit_sample: int = 15,
         tick_emit_sample: int = 30,
         liveness_heartbeat_writer: Callable[[], dict[str, Any]] | None = None,
+        liveness_writer_timeout: float = 5.0,
     ) -> None:
         self.scheduler = scheduler
         self.heartbeat = heartbeat
@@ -133,6 +134,7 @@ class ClawDaemon:
         # are sampled separately. Both samples must be >= 1.
         self.liveness_heartbeat_writer = liveness_heartbeat_writer
         self.liveness_emit_sample = max(1, int(liveness_emit_sample))
+        self.liveness_writer_timeout = max(0.001, float(liveness_writer_timeout))
         self.tick_emit_sample = max(1, int(tick_emit_sample))
         self._tick_count = 0
 
@@ -437,7 +439,7 @@ class ClawDaemon:
         if shutdown.is_set():
             return
         background_tasks: list[asyncio.Task[None]] = []
-        if self.observe is not None:
+        if self.observe is not None or self.liveness_heartbeat_writer is not None:
             background_tasks.append(
                 self._create_background_task(
                     "liveness_heartbeat",
@@ -564,35 +566,73 @@ class ClawDaemon:
         # event loop; the writer may fsync and run the RuntimeDb write probe.
         # observe_stream remains sampled so liveness does not flood the audit log.
         cycle = 0
-        while not shutdown.is_set():
-            cycle += 1
-            payload: dict[str, Any] | None = None
-            if self.liveness_heartbeat_writer is not None:
+        writer_task: asyncio.Task[dict[str, Any]] | None = None
+        try:
+            while not shutdown.is_set():
+                cycle += 1
+                payload: dict[str, Any] | None = None
+                if self.liveness_heartbeat_writer is not None:
+                    if writer_task is None:
+                        writer_task = asyncio.create_task(
+                            asyncio.to_thread(self.liveness_heartbeat_writer),
+                            name="claw-daemon:liveness-writer",
+                        )
+                    done, _ = await asyncio.wait(
+                        {writer_task},
+                        timeout=self.liveness_writer_timeout,
+                    )
+                    if writer_task in done:
+                        try:
+                            payload = writer_task.result()
+                        except Exception as exc:
+                            logger.warning("liveness heartbeat writer failed", exc_info=True)
+                            payload = self._liveness_writer_error_payload(
+                                writer_error=_safe_error_preview(exc)
+                            )
+                        writer_task = None
+                    else:
+                        payload = self._liveness_writer_error_payload(
+                            writer_error="timeout",
+                            writer_timeout_seconds=self.liveness_writer_timeout,
+                        )
+                if (cycle - 1) % self.liveness_emit_sample == 0:
+                    if payload is None:
+                        payload = {
+                            "pid": os.getpid(),
+                            "ts": time.time(),
+                            "source": "daemon_liveness_loop",
+                        }
+                    await self._emit_off_loop(
+                        "daemon_heartbeat",
+                        payload=payload,
+                    )
                 try:
-                    payload = await asyncio.to_thread(self.liveness_heartbeat_writer)
-                except Exception as exc:
-                    logger.warning("liveness heartbeat writer failed", exc_info=True)
-                    payload = {
-                        "pid": os.getpid(),
-                        "ts": time.time(),
-                        "source": "daemon_liveness_loop",
-                        "writer_error": _safe_error_preview(exc),
-                    }
-            if (cycle - 1) % self.liveness_emit_sample == 0:
-                if payload is None:
-                    payload = {
-                        "pid": os.getpid(),
-                        "ts": time.time(),
-                        "source": "daemon_liveness_loop",
-                    }
-                await self._emit_off_loop(
-                    "daemon_heartbeat",
-                    payload=payload,
-                )
-            try:
-                await asyncio.wait_for(shutdown.wait(), timeout=interval)
-            except asyncio.TimeoutError:
-                pass
+                    await asyncio.wait_for(shutdown.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            if writer_task is not None:
+                writer_task.cancel()
+                try:
+                    await writer_task
+                except asyncio.CancelledError:
+                    pass
+
+    def _liveness_writer_error_payload(
+        self,
+        *,
+        writer_error: str,
+        writer_timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "pid": os.getpid(),
+            "ts": time.time(),
+            "source": "daemon_liveness_loop",
+            "writer_error": writer_error,
+        }
+        if writer_timeout_seconds is not None:
+            payload["writer_timeout_seconds"] = writer_timeout_seconds
+        return payload
 
     async def _run_pending_verification_reconciliation_job_loop(
         self,

@@ -308,6 +308,8 @@ class ArchitectureInvariantTests(unittest.TestCase):
         reader = (REPO_ROOT / "claw_v2" / "diagnostics.py").read_text(encoding="utf-8")
         self.assertIn("self.liveness_heartbeat_writer", daemon)
         self.assertIn("asyncio.to_thread(self.liveness_heartbeat_writer)", daemon)
+        self.assertIn("self.liveness_writer_timeout", daemon)
+        self.assertIn("asyncio.wait(", daemon)
         self.assertIn("liveness.write_liveness", writer)
         self.assertIn("liveness.liveness_sink_path", writer)
         self.assertIn("liveness.read_liveness", reader)
@@ -320,6 +322,10 @@ class ArchitectureInvariantTests(unittest.TestCase):
         lifecycle = (REPO_ROOT / "claw_v2" / "lifecycle.py").read_text(encoding="utf-8")
         self.assertIn("liveness_heartbeat_writer", daemon)
         self.assertIn("_run_liveness_heartbeat_loop", daemon)
+        self.assertIn(
+            "self.observe is not None or self.liveness_heartbeat_writer is not None",
+            daemon,
+        )
         self.assertIn("runtime.daemon.liveness_heartbeat_writer", lifecycle)
         self.assertNotIn('name="daemon_heartbeat"', lifecycle)
         self.assertNotIn("name='daemon_heartbeat'", lifecycle)

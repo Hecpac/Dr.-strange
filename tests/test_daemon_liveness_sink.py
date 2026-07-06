@@ -353,6 +353,100 @@ class DaemonLivenessLoopSamplingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(record["web_transport_serving"], True)
             self.assertEqual(record["source"], "lifecycle")
 
+    async def test_liveness_writer_runs_without_observe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sink = liveness.liveness_sink_path(tmpdir)
+            heartbeat = MagicMock()
+            heartbeat.collect.return_value = _snapshot()
+            shutdown = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            writes = 0
+
+            def liveness_writer() -> dict:
+                nonlocal writes
+                writes += 1
+                payload = {
+                    "pid": os.getpid(),
+                    "ts": time.time(),
+                    "source": "test_writer",
+                    "boot_id": "no-observe",
+                }
+                liveness.write_liveness(sink, payload)
+                loop.call_soon_threadsafe(shutdown.set)
+                return payload
+
+            daemon = ClawDaemon(
+                scheduler=CronScheduler(),
+                heartbeat=heartbeat,
+                observe=None,
+                liveness_heartbeat_writer=liveness_writer,
+                liveness_writer_timeout=0.1,
+            )
+
+            await asyncio.wait_for(daemon.run_loop(shutdown, interval=0.01), timeout=1.0)
+
+            record = liveness.read_liveness(sink)
+            assert record is not None
+            self.assertEqual(record["boot_id"], "no-observe")
+            self.assertGreaterEqual(writes, 1)
+
+    async def test_liveness_writer_timeout_is_bounded_and_single_flight(self) -> None:
+        observe = MagicMock()
+        heartbeat = MagicMock()
+        heartbeat.collect.return_value = _snapshot()
+        writer_started = threading.Event()
+        release_writer = threading.Event()
+        writer_calls = 0
+
+        def blocked_writer() -> dict:
+            nonlocal writer_calls
+            writer_calls += 1
+            writer_started.set()
+            release_writer.wait(timeout=1.0)
+            return {
+                "pid": os.getpid(),
+                "ts": time.time(),
+                "source": "blocked_writer",
+            }
+
+        daemon = ClawDaemon(
+            scheduler=CronScheduler(),
+            heartbeat=heartbeat,
+            observe=observe,
+            liveness_emit_sample=1,
+            liveness_heartbeat_writer=blocked_writer,
+            liveness_writer_timeout=0.01,
+        )
+        shutdown = asyncio.Event()
+        cycles = 0
+
+        async def counting_wait() -> bool:
+            nonlocal cycles
+            cycles += 1
+            if cycles >= 4:
+                shutdown.set()
+            return True
+
+        shutdown.wait = counting_wait  # type: ignore[assignment]
+        try:
+            await daemon._run_liveness_heartbeat_loop(shutdown, interval=10)
+        finally:
+            release_writer.set()
+            await asyncio.sleep(0.05)
+
+        self.assertTrue(writer_started.is_set())
+        self.assertEqual(writer_calls, 1)
+        emits = [c for c in observe.emit.call_args_list if c.args[0] == "daemon_heartbeat"]
+        self.assertGreaterEqual(len(emits), 1)
+        timeout_payloads = [
+            c.kwargs["payload"]
+            for c in emits
+            if c.kwargs["payload"].get("writer_error") == "timeout"
+        ]
+        self.assertGreaterEqual(len(timeout_payloads), 1)
+        for payload in timeout_payloads:
+            self.assertEqual(payload["writer_timeout_seconds"], 0.01)
+
     async def test_liveness_sink_refreshes_while_cron_handler_blocks(self) -> None:
         from claw_v2.lifecycle import write_liveness_heartbeat_record
 

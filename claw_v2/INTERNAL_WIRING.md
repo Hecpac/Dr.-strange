@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice scheduler-independent-liveness-sink (2026-07-05, R2.3): the authoritative liveness.json writer now runs from ClawDaemon's independent liveness loop, not CronScheduler, while preserving db_write_probe_status and runtime_health."
-doc_version: 2.85
-last_verified: 2026-07-05
-verification_method: "R2.3 local: tests/test_daemon_liveness_sink.py::DaemonLivenessLoopSamplingTests::test_liveness_sink_refreshes_while_cron_handler_blocks proves liveness.json refreshes with db_write_probe_status/runtime_health while a cron handler blocks; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_liveness_sink_is_not_scheduler_starved locks the wiring; full tests/test_architecture_invariants.py preserves prior invariants."
+describes_commit: "slice scheduler-independent-liveness-sink (2026-07-06, R2.3): the authoritative liveness.json writer now runs from ClawDaemon's independent liveness loop, not CronScheduler, with bounded single-flight writer calls while preserving db_write_probe_status and runtime_health."
+doc_version: 2.86
+last_verified: 2026-07-06
+verification_method: "R2.3 local: tests/test_daemon_liveness_sink.py::DaemonLivenessLoopSamplingTests proves liveness.json refreshes with db_write_probe_status/runtime_health while a cron handler blocks, runs without observe when a writer is configured, and bounds writer stalls without unbounded retries; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_liveness_sink_is_not_scheduler_starved locks the wiring; full tests/test_architecture_invariants.py preserves prior invariants."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -266,13 +266,18 @@ invariants:
   scheduler_independent_liveness_sink:
     rule: The authoritative `data/liveness.json` writer runs from
           `ClawDaemon._run_liveness_heartbeat_loop`, not from a
-          `CronScheduler` `ScheduledJob`. Lifecycle may build and inject the
-          writer because it owns `web_transport_serving`, but a blocked cron
-          handler must not starve the liveness sink. The writer must preserve
-          O1.2 `db_write_probe_status` / `db_write_probe` and O1.6
-          `runtime_health` fields.
+          `CronScheduler` `ScheduledJob`, and the loop starts whenever a writer
+          is configured even if `observe` is absent. Lifecycle may build and
+          inject the writer because it owns `web_transport_serving`, but a
+          blocked cron handler must not starve the liveness sink. Writer calls
+          are bounded and single-flight: a stalled writer emits the existing
+          fallback/error payload and cannot spawn unbounded repeated writer
+          tasks. The writer must preserve O1.2 `db_write_probe_status` /
+          `db_write_probe` and O1.6 `runtime_health` fields.
     enforced_by:
       - tests/test_daemon_liveness_sink.py::DaemonLivenessLoopSamplingTests::test_liveness_sink_refreshes_while_cron_handler_blocks
+      - tests/test_daemon_liveness_sink.py::DaemonLivenessLoopSamplingTests::test_liveness_writer_runs_without_observe
+      - tests/test_daemon_liveness_sink.py::DaemonLivenessLoopSamplingTests::test_liveness_writer_timeout_is_bounded_and_single_flight
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_liveness_sink_is_not_scheduler_starved
       - tests/test_diagnostics.py::HeartbeatSinkTests
     why: Audit R2.3 found the former authoritative `daemon_heartbeat`
