@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice 1b-owner-notification-outbox (2026-07-06, blind-spot pass finding #6): terminal-task notifications whose Telegram send fails are enqueued as durable owner_notification agent_jobs and retried off-tick until delivered or stale (24h), instead of warning-only drop."
-doc_version: 2.92
+describes_commit: "slice 2a-db-halt-marker (2026-07-06, blind-spot pass finding #2): runtime-DB corruption writes a persistent halt marker honored by preflight/restart/launcher/boot, so a corrupt DB holds the boot with an owner alert instead of crash-looping under launchd KeepAlive; auto-clear only after an existing DB re-passes integrity."
+doc_version: 2.93
 last_verified: 2026-07-06
-verification_method: "Slice 1b local: tests/test_owner_notification_outbox.py covers enqueue-on-failure payload/resume_key/max_attempts, active-window dedup, non-telegram refusal, drain delivery+completion+event, retry-with-backoff on send failure, stale expiry terminalization with event and no send, invalid-payload terminalization, attempt exhaustion, and max_per_cycle bounds; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_owner_notification_outbox_stays_wired_into_runtime locks the lifecycle seam and the runner registration in main."
+verification_method: "Slice 2a local: tests/test_runtime_db_halt.py covers marker write atomicity/content, verified_healthy clear tripwire, rename-for-audit clearing, preflight corruption exit 1 + marker, healthy auto-clear, missing-DB no-marker and missing-DB-never-clears guards, and _ensure_runtime_db_boot_health marker+alert+re-raise; tests/test_runtime_db_preflight.py locks the restart.sh rc-abort-before-kickstart order; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_db_corruption_halts_boot_persistently locks all four chokepoints."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -977,6 +977,40 @@ invariants:
          the result sat unread in the DB (blind-spot pass 2026-07-06, finding
          #6; the drain-pass promise in finalize_terminal_notification's
          docstring had no implementation for succeeded tasks).
+
+  runtime_db_corruption_halts_boot_persistently:
+    rule: Detected runtime-DB corruption leaves a persistent halt marker
+          (runtime_db_halt.json next to the DB, atomic write) and every boot
+          authority honors it. The preflight writes the marker on a corruption
+          verdict and restart.sh aborts before the launchd kickstart on a
+          non-zero preflight exit; build_runtime writes the same marker (and
+          alerts the owner) before re-raising RuntimeDatabaseError; the
+          launcher holds — alive, without exec'ing the daemon — while the
+          marker exists, so launchd KeepAlive cannot crash-loop the boot. The
+          marker is cleared ONLY by the preflight after an EXISTING DB passes
+          the thorough integrity check (auto-clear); a missing/empty DB never
+          clears it (deleting the corrupt file must not unlock a silent
+          fresh-schema boot), and clearing renames for audit — never deletes.
+          Every halt/hold path alerts via Telegram (no_silent_degrade).
+    chokepoints:
+      - sqlite_runtime.write_runtime_db_halt_marker  # single marker writer helper
+      - sqlite_runtime.clear_runtime_db_halt_marker  # verified_healthy tripwire arg
+      - scripts/runtime_db_preflight.py:main  # write on corruption, auto-clear on healthy existing DB
+      - scripts/restart.sh  # preflight_rc check aborts before kickstart + owner alert
+      - ops/claw-launcher.sh  # hold-loop on marker before exec; preflight re-run each cycle
+      - main._ensure_runtime_db_boot_health  # boot-side marker + alert before re-raise
+    enforced_by:
+      - tests/test_runtime_db_halt.py
+      - tests/test_runtime_db_preflight.py::RuntimeDbPreflightTests::test_restart_script_runs_db_preflight_before_launchctl_kickstart
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_db_corruption_halts_boot_persistently
+    why: An uncaught RuntimeDatabaseError from the boot health check exits the
+         process and launchd KeepAlive relaunches it (~10s) in a crash-boot
+         loop that bypasses restart.sh and the watchdog entirely, with no
+         persisted record of why (blind-spot pass 2026-07-06, finding #2; the
+         degraded mark was process-local and the preflight exit code was
+         discarded at restart.sh). Complements O1.3, which deliberately
+         excludes corruption from self-heal — this is the manual-recovery
+         side of that same boundary.
 
   recovery_jobs_drained_off_tick:
     rule: recovery_jobs (the brain's "I promised to resume this" queue) must be

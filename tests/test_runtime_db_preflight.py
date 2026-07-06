@@ -64,6 +64,11 @@ class RuntimeDbPreflightTests(unittest.TestCase):
         source = (REPO_ROOT / "scripts" / "restart.sh").read_text(encoding="utf-8")
 
         self.assertIn("scripts/runtime_db_preflight.py", source)
-        preflight_call = source.index("run_runtime_db_preflight\n\nif launchctl")
+        # Slice 2a: the preflight's exit code is captured and a failure aborts
+        # the restart BEFORE launchctl kickstart (restarting onto a corrupt DB
+        # just re-enters the crash-boot loop).
+        preflight_call = source.index("run_runtime_db_preflight\npreflight_rc=$?")
+        abort_check = source.index('if [ "$preflight_rc" -ne 0 ]')
         kickstart = source.index("launchctl kickstart")
-        self.assertLess(preflight_call, kickstart)
+        self.assertLess(preflight_call, abort_check)
+        self.assertLess(abort_check, kickstart)

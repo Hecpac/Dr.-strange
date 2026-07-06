@@ -465,6 +465,34 @@ class ArchitectureInvariantTests(unittest.TestCase):
         }
         self.assertTrue(required.issubset(set(PROMOTION_SENSITIVE_PATH_PATTERNS)))
 
+    def test_runtime_db_corruption_halts_boot_persistently(self) -> None:
+        # Slice 2a (blind-spot pass 2026-07-06 finding #2): a corrupt runtime
+        # DB used to crash-boot under launchd KeepAlive with no persistent
+        # record of why. Boot must write the halt marker on corruption, the
+        # launcher must hold (not exec) while the marker exists, and restart.sh
+        # must abort before kickstart when the preflight fails.
+        main_source = (REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
+        restart_source = (REPO_ROOT / "scripts" / "restart.sh").read_text(encoding="utf-8")
+        launcher_source = (REPO_ROOT / "ops" / "claw-launcher.sh").read_text(encoding="utf-8")
+        preflight_source = (REPO_ROOT / "scripts" / "runtime_db_preflight.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("_ensure_runtime_db_boot_health(config)", main_source)
+        self.assertIn("write_runtime_db_halt_marker", main_source)
+        self.assertIn("write_runtime_db_halt_marker", preflight_source)
+        self.assertIn("clear_runtime_db_halt_marker", preflight_source)
+        # restart.sh: rc captured and failure aborts before kickstart.
+        self.assertLess(
+            restart_source.index('if [ "$preflight_rc" -ne 0 ]'),
+            restart_source.index("launchctl kickstart"),
+        )
+        # launcher: hold gate on the marker sits before the daemon exec.
+        self.assertLess(
+            launcher_source.index('while [[ -f "$HALT_MARKER" ]]'),
+            launcher_source.index('exec "$REPO_ROOT/.venv/bin/python" -m claw_v2.main'),
+        )
+
     def test_owner_notification_outbox_stays_wired_into_runtime(self) -> None:
         # Slice 1b (blind-spot pass 2026-07-06 finding #6): a terminal-task
         # notification whose Telegram send failed used to be dropped with a
