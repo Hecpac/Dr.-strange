@@ -204,6 +204,50 @@ class LifecycleHeartbeatWriterTests(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(row, ("boot-abc", os.getpid()))
 
+    def test_runtime_db_write_probe_waits_for_transient_lock_contention(self) -> None:
+        from claw_v2.lifecycle import runtime_db_write_probe
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_db = RuntimeDb(Path(tmpdir) / "claw.db")
+            self.addCleanup(runtime_db.close)
+            lock_acquired = threading.Event()
+            release_lock = threading.Event()
+
+            def hold_lock_briefly() -> None:
+                with runtime_db.lock:
+                    lock_acquired.set()
+                    release_lock.wait(timeout=2.0)
+
+            holder = threading.Thread(target=hold_lock_briefly)
+            holder.start()
+            self.addCleanup(holder.join, 1)
+            self.assertTrue(lock_acquired.wait(timeout=1))
+
+            result: dict[str, object] = {}
+
+            def run_probe() -> None:
+                result.update(
+                    runtime_db_write_probe(
+                        runtime_db,
+                        boot_id="boot-abc",
+                        lock_timeout_seconds=0.5,
+                    )
+                )
+
+            started = time.monotonic()
+            probe = threading.Thread(target=run_probe)
+            probe.start()
+            self.addCleanup(probe.join, 1)
+            time.sleep(0.03)
+            self.assertTrue(probe.is_alive())
+            release_lock.set()
+            probe.join(timeout=1)
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(result["status"], "ok")
+            self.assertGreaterEqual(elapsed, 0.03)
+            self.assertLess(elapsed, 0.5)
+
     def test_writer_records_failed_runtime_db_write_probe(self) -> None:
         from claw_v2.lifecycle import write_liveness_heartbeat_record
 

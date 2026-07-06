@@ -337,6 +337,7 @@ def runtime_db_write_probe(
     *,
     boot_id: str,
     probe_name: str = "daemon_heartbeat",
+    lock_timeout_seconds: float = 0.5,
 ) -> dict[str, Any]:
     checked_at = time.time()
     if runtime_db is None:
@@ -345,13 +346,14 @@ def runtime_db_write_probe(
             "checked_at": checked_at,
             "reason": "runtime_db_missing",
         }
-    with runtime_db.try_acquire() as acquired:
-        if not acquired:
-            return {
-                "status": "failed",
-                "checked_at": checked_at,
-                "reason": "runtime_db_lock_contended",
-            }
+    acquired = runtime_db.lock.acquire(timeout=max(0.0, float(lock_timeout_seconds)))
+    if not acquired:
+        return {
+            "status": "failed",
+            "checked_at": checked_at,
+            "reason": "runtime_db_lock_contended",
+        }
+    try:
         handle = runtime_db.connection_handle()
         try:
             handle.execute(RUNTIME_DB_WRITE_PROBE_TABLE)
@@ -380,6 +382,8 @@ def runtime_db_write_probe(
                 "error_type": type(exc).__name__,
                 "error": str(exc)[:500],
             }
+    finally:
+        runtime_db.lock.release()
     return {
         "status": "ok",
         "checked_at": checked_at,
