@@ -14,7 +14,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from urllib.parse import urlparse
 
 from claw_v2.automation_outcome import AutomationOutcome
@@ -64,6 +64,152 @@ class BrowserUsePolicyInterrupt(RuntimeError):
         self.target_url = target_url
         self.task_id = task_id
         self.browser_context_id = browser_context_id
+
+
+ComputerUseOutcomeStatus = Literal[
+    "succeeded",
+    "failed",
+    "pending_approval",
+    "no_result",
+    "cancelled",
+    "unavailable",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ComputerUseOutcome:
+    status: ComputerUseOutcomeStatus
+    reason_code: str
+    retryable: bool
+    user_safe_summary: str
+    raw_text: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.reason_code.strip():
+            raise ValueError("ComputerUseOutcome.reason_code is required")
+        if not self.user_safe_summary.strip():
+            raise ValueError("ComputerUseOutcome.user_safe_summary is required")
+
+    def __str__(self) -> str:
+        return self.user_safe_summary
+
+    @classmethod
+    def succeeded(
+        cls, summary: str, *, reason_code: str = "ok", raw_text: str | None = None
+    ) -> "ComputerUseOutcome":
+        return cls(
+            status="succeeded",
+            reason_code=reason_code,
+            retryable=False,
+            user_safe_summary=summary,
+            raw_text=raw_text,
+        )
+
+    @classmethod
+    def pending_approval(
+        cls,
+        summary: str,
+        *,
+        reason_code: str = "approval_required",
+        raw_text: str | None = None,
+    ) -> "ComputerUseOutcome":
+        return cls(
+            status="pending_approval",
+            reason_code=reason_code,
+            retryable=False,
+            user_safe_summary=summary,
+            raw_text=raw_text,
+        )
+
+    @classmethod
+    def failed(
+        cls,
+        summary: str,
+        *,
+        reason_code: str = "exception",
+        retryable: bool = False,
+        raw_text: str | None = None,
+    ) -> "ComputerUseOutcome":
+        return cls(
+            status="failed",
+            reason_code=reason_code,
+            retryable=retryable,
+            user_safe_summary=summary,
+            raw_text=raw_text,
+        )
+
+    @classmethod
+    def no_result(
+        cls,
+        summary: str,
+        *,
+        reason_code: str = "no_result",
+        retryable: bool = True,
+        raw_text: str | None = None,
+    ) -> "ComputerUseOutcome":
+        return cls(
+            status="no_result",
+            reason_code=reason_code,
+            retryable=retryable,
+            user_safe_summary=summary,
+            raw_text=raw_text,
+        )
+
+    @classmethod
+    def cancelled(
+        cls,
+        summary: str,
+        *,
+        reason_code: str = "user_cancelled",
+        raw_text: str | None = None,
+    ) -> "ComputerUseOutcome":
+        return cls(
+            status="cancelled",
+            reason_code=reason_code,
+            retryable=False,
+            user_safe_summary=summary,
+            raw_text=raw_text,
+        )
+
+    @classmethod
+    def unavailable(
+        cls,
+        summary: str,
+        *,
+        reason_code: str = "capability_unavailable",
+        raw_text: str | None = None,
+    ) -> "ComputerUseOutcome":
+        return cls(
+            status="unavailable",
+            reason_code=reason_code,
+            retryable=False,
+            user_safe_summary=summary,
+            raw_text=raw_text,
+        )
+
+
+def coerce_computer_use_outcome(value: Any) -> ComputerUseOutcome:
+    if isinstance(value, ComputerUseOutcome):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return ComputerUseOutcome.no_result("(no result)", reason_code="empty_result")
+    normalized = text.lower()
+    if normalized == "(no result)" or normalized == "(no response)":
+        return ComputerUseOutcome.no_result(text, raw_text=text)
+    if "sin un resultado verificable" in normalized:
+        return ComputerUseOutcome.no_result(text, raw_text=text)
+    if "needs approval" in normalized or "requires approval" in normalized:
+        return ComputerUseOutcome.pending_approval(text, raw_text=text)
+    if "iteration limit" in normalized:
+        return ComputerUseOutcome.failed(
+            text, reason_code="iteration_limit", retryable=True, raw_text=text
+        )
+    if "timed out" in normalized or "timeout" in normalized:
+        return ComputerUseOutcome.failed(text, reason_code="timeout", retryable=True, raw_text=text)
+    if normalized.startswith("computer use error"):
+        return ComputerUseOutcome.failed(text, reason_code="exception", raw_text=text)
+    return ComputerUseOutcome.succeeded(text, raw_text=text)
 
 
 def _load_pyautogui() -> Any:
@@ -428,14 +574,33 @@ class ComputerUseService:
         system_prompt: str | None = None,
         current_url_resolver: Callable[[], str | None] | None = None,
     ) -> str:
+        return self.run_agent_loop_outcome(
+            session=session,
+            client=client,
+            gate=gate,
+            model=model,
+            system_prompt=system_prompt,
+            current_url_resolver=current_url_resolver,
+        ).user_safe_summary
+
+    def run_agent_loop_outcome(
+        self,
+        *,
+        session: ComputerSession,
+        client: Any,
+        gate: Any,
+        model: str = "gpt-5.4",
+        system_prompt: str | None = None,
+        current_url_resolver: Callable[[], str | None] | None = None,
+    ) -> ComputerUseOutcome:
         if self.codex_backend is not None:
-            return self._run_codex_agent_loop(session)
+            return self._run_codex_agent_loop_outcome(session)
         esc_listener = _EscListener(session)
         esc_listener.start()
 
         try:
             with _computer_use_lock():
-                return self._run_loop(
+                return self._run_loop_outcome(
                     session=session,
                     client=client,
                     gate=gate,
@@ -446,7 +611,7 @@ class ComputerUseService:
         finally:
             esc_listener.stop()
 
-    def _run_loop(
+    def _run_loop_outcome(
         self,
         *,
         session: ComputerSession,
@@ -491,7 +656,7 @@ class ComputerUseService:
         while session.iteration < session.max_iterations:
             if session._cancelled:
                 session.status = "cancelled"
-                return "Session cancelled by Esc key."
+                return ComputerUseOutcome.cancelled("Session cancelled by Esc key.")
 
             session.iteration += 1
             kwargs: dict[str, Any] = {
@@ -516,12 +681,14 @@ class ComputerUseService:
 
             if not computer_calls:
                 session.status = "done"
-                return text_items[0].text if text_items else "(no response)"
+                if text_items:
+                    return ComputerUseOutcome.succeeded(text_items[0].text)
+                return ComputerUseOutcome.no_result("(no response)", reason_code="no_response")
 
             for call in computer_calls:
                 if session._cancelled:
                     session.status = "cancelled"
-                    return "Session cancelled by Esc key."
+                    return ComputerUseOutcome.cancelled("Session cancelled by Esc key.")
 
                 action = call.action
                 action_dict = action.model_dump() if hasattr(action, "model_dump") else dict(action)
@@ -539,7 +706,9 @@ class ComputerUseService:
                     session.status = "awaiting_approval"
                     session.pending_action = {"call_id": call.call_id, **action_dict}
                     action_type = action_dict.get("type", "unknown")
-                    return f"Action needs approval: {action_type} — waiting for /action_approve"
+                    return ComputerUseOutcome.pending_approval(
+                        f"Action needs approval: {action_type} — waiting for /action_approve"
+                    )
 
                 # Execute the action
                 self.execute_action(action_dict)
@@ -563,9 +732,16 @@ class ComputerUseService:
                 session.messages.append(call_output)
 
         session.status = "done"
-        return "Computer Use iteration limit reached."
+        return ComputerUseOutcome.failed(
+            "Computer Use iteration limit reached.",
+            reason_code="iteration_limit",
+            retryable=True,
+        )
 
     def _run_codex_agent_loop(self, session: ComputerSession) -> str:
+        return self._run_codex_agent_loop_outcome(session).user_safe_summary
+
+    def _run_codex_agent_loop_outcome(self, session: ComputerSession) -> ComputerUseOutcome:
         """Run the Codex backend only after the outer approval flow resumes it."""
         pending = dict(session.pending_action or {})
         approved = (
@@ -580,7 +756,7 @@ class ComputerUseService:
                 "backend": "codex",
                 "task": session.task,
             }
-            return (
+            return ComputerUseOutcome.pending_approval(
                 "Codex computer backend needs approval before executing local desktop automation."
             )
 
@@ -590,13 +766,15 @@ class ComputerUseService:
             with _computer_use_lock():
                 if session._cancelled:
                     session.status = "cancelled"
-                    return "Session cancelled by Esc key."
+                    return ComputerUseOutcome.cancelled("Session cancelled by Esc key.")
                 result = self.codex_backend.run(session.task)
         finally:
             esc_listener.stop()
         session.pending_action = None
         session.status = "done"
-        return result
+        if result:
+            return ComputerUseOutcome.succeeded(result)
+        return ComputerUseOutcome.no_result("(no response)", reason_code="no_response")
 
     def _build_call_output(self, pending: dict[str, Any]) -> dict[str, Any]:
         """Execute a pending action and build OpenAI computer_call_output."""

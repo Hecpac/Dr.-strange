@@ -292,6 +292,28 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertLess(delegated_browser_lock, delegated_ensure)
         self.assertLess(delegated_ensure, delegated_run)
 
+    def test_computer_handler_uses_typed_computer_use_outcomes(self) -> None:
+        from claw_v2.computer import ComputerUseOutcome, ComputerUseService
+        from claw_v2.computer_handler import ComputerHandler
+
+        self.assertTrue(hasattr(ComputerUseService, "run_agent_loop_outcome"))
+        self.assertIn("status", ComputerUseOutcome.__dataclass_fields__)
+        self.assertIn("reason_code", ComputerUseOutcome.__dataclass_fields__)
+        self.assertIn("retryable", ComputerUseOutcome.__dataclass_fields__)
+        self.assertIn("user_safe_summary", ComputerUseOutcome.__dataclass_fields__)
+
+        handler_source = inspect.getsource(ComputerHandler._run_session)
+        payload_source = inspect.getsource(
+            __import__(
+                "claw_v2.computer_handler", fromlist=["_computer_outcome_event_payload"]
+            )._computer_outcome_event_payload
+        )
+        self.assertIn("run_agent_loop_outcome", handler_source)
+        self.assertIn("outcome.status", handler_source)
+        self.assertIn("outcome.reason_code", payload_source)
+        self.assertIn("outcome.retryable", payload_source)
+        self.assertIn("computer_session_failed", handler_source)
+
     def test_runtime_db_self_heal_reconnect_is_lock_only(self) -> None:
         from claw_v2.sqlite_runtime import RuntimeDb
 

@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from claw_v2.computer import ComputerUseService, ComputerSession
+from claw_v2.computer import ComputerUseOutcome, ComputerUseService, ComputerSession
 from claw_v2.computer_gate import ActionGate
 
 
@@ -313,6 +313,271 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result, "Done.")
         self.assertEqual(session.visual_checks, 1)
         self.assertTrue(session.last_visual_changed)
+
+
+class ComputerUseOutcomeTests(unittest.TestCase):
+    def test_agent_loop_outcome_success_keeps_legacy_string_wrapper(self) -> None:
+        svc = ComputerUseService(display_width=1280, display_height=800)
+        gate = ActionGate(sensitive_urls=[])
+        session = ComputerSession(task="report status", current_url="https://example.com")
+        mock_client = MagicMock()
+        mock_client.responses.create.return_value = _mock_openai_response(
+            text="Done.", response_id="resp_done"
+        )
+
+        with patch.object(
+            svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}
+        ):
+            outcome = svc.run_agent_loop_outcome(
+                session=session,
+                client=mock_client,
+                gate=gate,
+                model="computer-use-preview",
+            )
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(outcome.reason_code, "ok")
+        self.assertFalse(outcome.retryable)
+        self.assertEqual(outcome.user_safe_summary, "Done.")
+
+        session2 = ComputerSession(task="report status", current_url="https://example.com")
+        mock_client.responses.create.return_value = _mock_openai_response(
+            text="Done again.", response_id="resp_done_2"
+        )
+        with patch.object(
+            svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}
+        ):
+            legacy = svc.run_agent_loop(
+                session=session2,
+                client=mock_client,
+                gate=gate,
+                model="computer-use-preview",
+            )
+        self.assertEqual(legacy, "Done again.")
+
+    def test_agent_loop_outcome_iteration_limit_is_retryable_failure(self) -> None:
+        svc = ComputerUseService(display_width=1280, display_height=800)
+        gate = ActionGate(sensitive_urls=[])
+        session = ComputerSession(
+            task="keep clicking", max_iterations=1, current_url="https://example.com"
+        )
+        mock_client = MagicMock()
+        mock_client.responses.create.return_value = _mock_openai_response(
+            computer_calls=[{"call_id": "call_x", "action": {"type": "screenshot"}}],
+        )
+
+        with patch.object(
+            svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}
+        ):
+            outcome = svc.run_agent_loop_outcome(
+                session=session,
+                client=mock_client,
+                gate=gate,
+                model="computer-use-preview",
+            )
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(outcome.reason_code, "iteration_limit")
+        self.assertTrue(outcome.retryable)
+        self.assertEqual(outcome.user_safe_summary, "Computer Use iteration limit reached.")
+
+    def test_agent_loop_outcome_approval_and_no_result_are_typed(self) -> None:
+        svc = ComputerUseService(display_width=1280, display_height=800)
+        gate = ActionGate(sensitive_urls=["ads.google.com"])
+        approval_session = ComputerSession(task="click buy", current_url="https://ads.google.com")
+        mock_client = MagicMock()
+        mock_client.responses.create.return_value = _mock_openai_response(
+            computer_calls=[
+                {
+                    "call_id": "call_1",
+                    "action": {"type": "click", "x": 500, "y": 300, "button": "left"},
+                }
+            ],
+        )
+
+        with patch.object(
+            svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}
+        ):
+            approval_outcome = svc.run_agent_loop_outcome(
+                session=approval_session,
+                client=mock_client,
+                gate=gate,
+                model="computer-use-preview",
+            )
+
+        self.assertEqual(approval_outcome.status, "pending_approval")
+        self.assertEqual(approval_outcome.reason_code, "approval_required")
+        self.assertFalse(approval_outcome.retryable)
+
+        no_result_session = ComputerSession(task="say something", current_url="https://example.com")
+        mock_client.responses.create.return_value = _mock_openai_response(response_id="resp_empty")
+        with patch.object(
+            svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}
+        ):
+            no_result_outcome = svc.run_agent_loop_outcome(
+                session=no_result_session,
+                client=mock_client,
+                gate=ActionGate(sensitive_urls=[]),
+                model="computer-use-preview",
+            )
+
+        self.assertEqual(no_result_outcome.status, "no_result")
+        self.assertEqual(no_result_outcome.reason_code, "no_response")
+        self.assertTrue(no_result_outcome.retryable)
+
+    def test_agent_loop_outcome_cancelled_by_user_is_not_retryable(self) -> None:
+        svc = ComputerUseService(display_width=1280, display_height=800)
+        session = ComputerSession(task="stop", current_url="https://example.com")
+        session._cancelled = True
+
+        with patch.object(
+            svc, "capture_screenshot", return_value={"data": "fake", "media_type": "image/png"}
+        ):
+            outcome = svc.run_agent_loop_outcome(
+                session=session,
+                client=MagicMock(),
+                gate=ActionGate(sensitive_urls=[]),
+                model="computer-use-preview",
+            )
+
+        self.assertEqual(outcome.status, "cancelled")
+        self.assertEqual(outcome.reason_code, "user_cancelled")
+        self.assertFalse(outcome.retryable)
+
+
+class ComputerHandlerOutcomeTests(unittest.TestCase):
+    def _handler_with_computer(self, computer, events: list[tuple[str, dict]]):
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        class FakeObserve:
+            def emit(self, event_type, payload=None):
+                events.append((event_type, payload or {}))
+
+        return ComputerHandler(
+            computer=computer,
+            approvals=MagicMock(),
+            config=types.SimpleNamespace(computer_auto_approve=True, sensitive_urls=[]),
+            observe=FakeObserve(),
+            computer_gate=ActionGate(sensitive_urls=[]),
+            computer_client_factory=lambda: object(),
+        )
+
+    def test_handler_downstream_uses_typed_status_not_summary_parsing(self) -> None:
+        class FakeComputer:
+            codex_backend = None
+
+            def run_agent_loop_outcome(self, *, session, **kwargs):
+                session.status = "done"
+                return ComputerUseOutcome.failed(
+                    "Todo salio perfecto.",
+                    reason_code="iteration_limit",
+                    retryable=True,
+                )
+
+        events: list[tuple[str, dict]] = []
+        handler = self._handler_with_computer(FakeComputer(), events)
+        handler._sessions["s1"] = ComputerSession(task="misleading summary")
+
+        result = handler._run_session("s1")
+
+        self.assertEqual(result, "Todo salio perfecto.")
+        failed = [payload for event, payload in events if event == "computer_session_failed"]
+        completed = [payload for event, payload in events if event == "computer_session_completed"]
+        self.assertEqual(completed, [])
+        self.assertEqual(failed[-1]["outcome_status"], "failed")
+        self.assertEqual(failed[-1]["reason_code"], "iteration_limit")
+        self.assertTrue(failed[-1]["retryable"])
+
+    def test_handler_creates_approval_from_typed_outcome_without_keyword_parsing(self) -> None:
+        class FakeComputer:
+            codex_backend = None
+
+            def capture_screenshot(self):
+                return {
+                    "data": base64.b64encode(b"approval-state").decode("ascii"),
+                    "media_type": "image/png",
+                }
+
+            def run_agent_loop_outcome(self, *, session, **kwargs):
+                session.status = "awaiting_approval"
+                session.pending_action = {"action": "click", "x": 1, "y": 2}
+                return ComputerUseOutcome.pending_approval("custom pause text")
+
+        import types
+
+        events: list[tuple[str, dict]] = []
+        handler = self._handler_with_computer(FakeComputer(), events)
+        handler.approvals.create.return_value = types.SimpleNamespace(
+            approval_id="approval-1", token="token-1"
+        )
+        handler._sessions["s1"] = ComputerSession(
+            task="click approve", current_url="https://example.com"
+        )
+
+        result = handler._run_session("s1")
+
+        handler.approvals.create.assert_called_once()
+        self.assertIn("Necesito tu autorización", result)
+        pending = [payload for event, payload in events if event == "computer_approval_pending"]
+        self.assertEqual(pending[-1]["outcome_status"], "pending_approval")
+        self.assertEqual(pending[-1]["reason_code"], "approval_required")
+
+    def test_handler_exception_returns_typed_failure_event(self) -> None:
+        class FakeComputer:
+            codex_backend = None
+
+            def run_agent_loop_outcome(self, *, session, **kwargs):
+                raise RuntimeError("boom")
+
+        events: list[tuple[str, dict]] = []
+        handler = self._handler_with_computer(FakeComputer(), events)
+        handler._sessions["s1"] = ComputerSession(task="explode")
+
+        result = handler._run_session("s1")
+
+        self.assertEqual(result, "computer use error: boom")
+        failed = [payload for event, payload in events if event == "computer_session_failed"]
+        self.assertEqual(failed[-1]["outcome_status"], "failed")
+        self.assertEqual(failed[-1]["reason_code"], "exception")
+        self.assertFalse(failed[-1]["retryable"])
+
+    def test_handler_browser_no_result_is_typed_no_result_failure(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        events: list[tuple[str, dict]] = []
+
+        class FakeObserve:
+            def emit(self, event_type, payload=None):
+                events.append((event_type, payload or {}))
+
+        handler = ComputerHandler(
+            browser_use=object(),
+            config=types.SimpleNamespace(computer_auto_approve=True, sensitive_urls=[]),
+            observe=FakeObserve(),
+        )
+        session = ComputerSession(task="inspect browser")
+        session.pending_action = {"action": "browser_use_task", "backend": "browser_use"}
+        handler._sessions["s1"] = session
+
+        with patch.object(
+            handler,
+            "_run_browser_use_session",
+            side_effect=lambda sess: (
+                setattr(sess, "status", "done")
+                or "La automatización del navegador terminó sin un resultado verificable."
+            ),
+        ):
+            result = handler._run_session("s1")
+
+        self.assertIn("sin un resultado verificable", result)
+        failed = [payload for event, payload in events if event == "computer_session_failed"]
+        self.assertEqual(failed[-1]["outcome_status"], "no_result")
+        self.assertEqual(failed[-1]["reason_code"], "no_result")
+        self.assertTrue(failed[-1]["retryable"])
 
 
 class BrowserUseServiceTests(unittest.TestCase):
