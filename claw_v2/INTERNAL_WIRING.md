@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice a3.4-browser-computer-lock-symmetry (2026-07-06, A3.4): interactive and delegated browser_use task runs share the same handler lock around mutable browser_use state and task execution; desktop computer-use retains its file lock."
+describes_commit: "slice a3.4-browser-computer-lock-symmetry (2026-07-06, A3.4): interactive and delegated browser/CDP work share profile-first/browser_use-second lock ordering; interactive browser_use lazily initializes the service under that discipline."
 doc_version: 2.89
 last_verified: 2026-07-06
-verification_method: "A3.4 local: tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_and_delegated_browser_use_runs_do_not_overlap proves interactive and delegated browser_use work cannot overlap; tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_browser_use_lock_releases_on_exception_and_cancel proves lock release on failure/cancel; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_browser_use_interactive_and_delegated_runs_share_lock locks the shared-lock wiring."
+verification_method: "A3.4 local: tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_browser_use_lazily_initializes_service proves interactive lazy BrowserUseService construction; tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_browser_use_blocks_delegated_cdp_profile_work proves profile lock coverage through interactive run; tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_delegated_browser_use_blocks_interactive_browser_use and ::test_interactive_and_delegated_browser_use_runs_do_not_overlap prove no browser_use overlap in either direction; tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_browser_use_lock_releases_on_exception_and_cancel proves lock release on failure/cancel; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_browser_use_interactive_and_delegated_runs_share_lock locks ordering."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -821,24 +821,33 @@ invariants:
       - tests/test_computer_import_safety.py
 
   browser_computer_lock_symmetry:
-    rule: Browser-use task execution uses one handler lock for both interactive
-          approved sessions and delegated browser executor sessions. The lock
-          covers mutable BrowserUseService state (`cdp_url`) and the
-          `_run_browser_use_task` call, so two sessions cannot drive the same
-          unsafe browser-use executor concurrently. Desktop computer-use task
-          loops remain serialized by `computer._computer_use_lock()`.
+    rule: Browser/CDP profile work uses one lock order for interactive approved
+          sessions and delegated browser executor sessions: acquire the CDP
+          profile lock first, then `ComputerHandler._browser_use_lock` before
+          touching mutable BrowserUseService state (`cdp_url`) or calling
+          `_run_browser_use_task`. Interactive browser_use holds the CDP profile
+          lock from `ensure_ready()` through task completion and lazily
+          initializes BrowserUseService inside `_browser_use_lock`, so delegated
+          CDP/prelude/deterministic work cannot mutate the same profile while
+          the interactive agent is active. Desktop computer-use task loops
+          remain serialized by `computer._computer_use_lock()`.
     enforced_by:
+      - tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_browser_use_lazily_initializes_service
+      - tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_browser_use_blocks_delegated_cdp_profile_work
+      - tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_delegated_browser_use_blocks_interactive_browser_use
       - tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_and_delegated_browser_use_runs_do_not_overlap
       - tests/test_computer_gate.py::ComputerHandlerBrowserAutoApproveTests::test_interactive_browser_use_lock_releases_on_exception_and_cancel
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_browser_use_interactive_and_delegated_runs_share_lock
       - tests/test_computer.py
       - tests/test_computer_import_safety.py
     why: A3.4 closes the concurrency asymmetry where delegated browser-use
-         runs acquired `ComputerHandler._browser_use_lock`, but an approved
-         interactive browser-use run only serialized CDP preflight and then
-         executed the browser agent outside that shared lock. That allowed two
-         sessions to mutate the shared BrowserUseService/CDP context and drive
-         browser-use at the same time.
+         runs acquired both the CDP profile lock and
+         `ComputerHandler._browser_use_lock`, but an approved interactive
+         browser-use run only serialized CDP preflight and then executed the
+         browser agent outside the shared browser_use lock and outside the CDP
+         profile lock. That allowed delegated CDP navigation or a second
+         browser_use session to mutate the shared BrowserUseService/CDP profile
+         while an interactive browser agent was active.
 
   subprocess_bounded_execution:
     rule: Runtime subprocess execution must be time-bounded. New synchronous
