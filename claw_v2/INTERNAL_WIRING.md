@@ -11,7 +11,7 @@
 describes_commit: "slice r2.2b-brief-cron-off-tick (2026-07-06, R2.2b): morning_brief and evening_brief now enqueue ScheduledBackgroundJobRunner work with bounded timeouts instead of running MorningBriefService body work inline in CronScheduler."
 doc_version: 2.88
 last_verified: 2026-07-06
-verification_method: "R2.2b local: tests/test_scheduled_background_jobs.py proves morning_brief/evening_brief cron handlers enqueue only, registered background runners execute the body off-tick, duplicate ticks dedupe through stable resume keys, and runner timeout failures are observable; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_residual_is_explicit_and_minimal verifies the R2.0 residual allowlist no longer includes brief jobs."
+verification_method: "R2.2b local: tests/test_scheduled_background_jobs.py proves morning_brief/evening_brief cron handlers enqueue only, registered background runners execute the body off-tick, evaluate the original enqueue/tick timestamp for due-window semantics, duplicate ticks dedupe through stable resume keys, and runner timeout failures are observable; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_residual_is_explicit_and_minimal verifies the R2.0 residual allowlist no longer includes brief jobs."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```

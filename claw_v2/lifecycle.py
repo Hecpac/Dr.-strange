@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from claw_v2 import liveness
 from claw_v2.chrome import ManagedChrome
@@ -200,13 +201,31 @@ def wire_brief_scheduler_jobs(
         ("morning_brief", MORNING_BRIEF_JOB_KIND, MORNING_BRIEF_RESUME_ID, morning_brief),
         ("evening_brief", EVENING_BRIEF_JOB_KIND, EVENING_BRIEF_RESUME_ID, evening_brief),
     )
+
+    def _run_brief_for_enqueued_tick(
+        payload: dict[str, Any],
+        *,
+        brief_service: MorningBriefService,
+    ) -> str | None:
+        requested_at = payload.get("requested_at")
+        try:
+            requested_epoch = float(requested_at)
+            timezone = ZoneInfo(brief_service.settings.timezone)
+            due_time = datetime.fromtimestamp(requested_epoch, tz=timezone)
+        except (TypeError, ValueError, OverflowError, ZoneInfoNotFoundError):
+            return brief_service.run_if_due()
+        return brief_service.run_if_due(now=due_time)
+
     if runtime.daemon is not None and runtime.job_service is not None:
         for job_name, job_kind, _resume_key, service in brief_jobs:
             runner = ScheduledBackgroundJobRunner(
                 job_name=job_name,
                 job_kind=job_kind,
                 job_service=runtime.job_service,
-                handler=lambda _payload, brief_service=service: brief_service.run_if_due(),
+                handler=lambda payload, brief_service=service: _run_brief_for_enqueued_tick(
+                    payload,
+                    brief_service=brief_service,
+                ),
                 observe=runtime.observe,
                 worker_id=f"{job_name.replace('_', '-')}-runner",
                 result_summary=brief_result_summary,
