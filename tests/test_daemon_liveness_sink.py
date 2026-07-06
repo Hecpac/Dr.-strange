@@ -216,7 +216,7 @@ class LifecycleHeartbeatWriterTests(unittest.TestCase):
             def hold_lock_briefly() -> None:
                 with runtime_db.lock:
                     lock_acquired.set()
-                    release_lock.wait(timeout=0.1)
+                    release_lock.wait(timeout=2.0)
 
             holder = threading.Thread(target=hold_lock_briefly)
             holder.start()
