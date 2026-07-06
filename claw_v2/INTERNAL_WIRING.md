@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice minimal-health-metrics (2026-07-05, O1.6): the lifecycle liveness sink and diagnostics reader share a compact runtime_health surface carrying spill_pending_count, db_write_probe_status, and RuntimeDb degraded_state without adding a metrics stack. New invariant minimal_runtime_health_surface_uses_existing_liveness_and_diagnostics."
-doc_version: 2.83
+describes_commit: "slice cron-tick-tripwire-rescope (2026-07-05, R2.0): the scheduler off-tick invariant now catches new inline HTTP, filesystem, subprocess, and blocking/sleep work in CronScheduler handlers without rewriting CronScheduler.run_due. Existing inline residual is explicit and minimal."
+doc_version: 2.84
 last_verified: 2026-07-05
-verification_method: "O1.6 local: tests/test_daemon_liveness_sink.py covers missing/malformed spill pending counts, healthy runtime_health, db_write_probe_status, and degraded RuntimeDb state in liveness; tests/test_diagnostics.py covers diagnostics health propagation; tests/test_architecture_invariants.py locks the shared liveness/diagnostics health surface while preserving O1.1-O1.5 invariants."
+verification_method: "R2.0 local: tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_tripwire_has_teeth proves the detector fails on synthetic inline httpx, Path.write_text, subprocess.run, and time.sleep handlers; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_residual_is_explicit_and_minimal locks the current inline residual; full tests/test_architecture_invariants.py preserves O1.1-O1.6 invariants."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -434,6 +434,10 @@ invariants:
     rule: CronScheduler handlers for LLM/subprocess/heavy autonomous jobs should
           enqueue durable agent_jobs and return quickly; execution belongs in a
           ClawDaemon background runner, not in daemon.tick()'s control path.
+          R2.0 does not rewrite `CronScheduler.run_due()`: it rescopes the
+          tripwire so any new inline HTTP, filesystem, subprocess, or
+          blocking/sleep call in a scheduler handler fails unless the job is in
+          the explicit residual list below.
     migrated:
       - skill_expand -> scheduler.skill_expand  # PR1B-a, uses JobService + SkillExpandJobRunner
       - wiki_research -> scheduler.wiki_research  # PR1B-b, uses JobService + ScheduledBackgroundJobRunner
@@ -449,22 +453,37 @@ invariants:
       - auto_dream -> scheduler.auto_dream  # final leg, enqueue + ScheduledBackgroundJobRunner (was dream.run router.ask(lane=research) inline, no explicit timeout)
       - learning_consolidate -> scheduler.learning_consolidate  # final leg, enqueue + ScheduledBackgroundJobRunner, added _maintenance_skip kill-switch (was router.ask(lane=judge) inline, no skip gate)
       - learning_soul_suggestions -> scheduler.learning_soul_suggestions  # final leg, enqueue + ScheduledBackgroundJobRunner (was router.ask(lane=judge) inline)
-    pending_migration: []  # CORE INVARIANT 1 CLOSED — no heavy scheduler handler runs inline in daemon.tick
+    pending_migration: []  # CORE INVARIANT 1 CLOSED for migrated heavy autonomous jobs.
+    inline_blocking_residual:
+      - heartbeat  # legacy agent-registry heartbeat write; bounded local residual
+      - daemon_heartbeat  # authoritative liveness sink still scheduler-tick driven until R2.3
+      - fitness_reminder  # existing local stamp write + Telegram send; not part of R2.0
+      - morning_brief  # brief rendering/notification remains inline until R2.2
+      - evening_brief  # brief rendering/notification remains inline until R2.2
+      - notebooklm_orchestration_poll  # NotebookLM orchestration poll remains inline until R2.2
+      - nlm_wiki_sync  # NotebookLM-to-wiki sync remains inline until R2.2
     inline_bounded_local_maintenance:
       - durable_retention_prune -> two bounded local SQLite DELETE paths
         (`JobService.prune_terminal`, `TaskLedger.prune_terminal`) plus env
         parsing only; no provider, subprocess, LLM, VACUUM, or unbounded scan.
         This is the same allowed class as observe_prune, not a slow autonomous
         scheduler job.
-    enforced_by: tests/test_architecture_invariants.py::test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick
-                 (deny-by-default sweep at production default; _PENDING_INLINE_MIGRATION is now empty and may only stay empty)
+    enforced_by:
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_tripwire_has_teeth
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_residual_is_explicit_and_minimal
+      - `_PENDING_INLINE_MIGRATION` is empty and may only stay empty.
+      - `_ALLOWED_INLINE_BLOCKING_CRON_JOBS` names the current R2.0 residual.
     why: CronScheduler.run_due() invokes handlers synchronously. Any provider
          call, code generation, verifier, subprocess, or research workload left
          inline would freeze the daemon tick and delay heartbeat / reconciliation
-         observability. Core Invariant 1 is now CLOSED: every slow/provider/
-         subprocess/codegen scheduler job enqueues a durable agent_job and
-         executes in a ClawDaemon background runner off-tick. The backstop fails
-         if any future job re-introduces inline heavy work.
+         observability. Audit 2026-07-04 found the old backstop was blind to
+         direct HTTP/filesystem/blocking calls even though most heavy jobs were
+         already off-tick. Core Invariant 1 is now CLOSED for migrated slow/
+         provider/subprocess/codegen scheduler jobs: each enqueues a durable
+         agent_job and executes in a ClawDaemon background runner off-tick. The
+         R2.0 backstop fails if any future handler re-introduces inline heavy or
+         blocking work outside the named residual.
 
   startup_recovery_is_seeded_from_running_agent_tasks_not_phase_checkpoints:
     rule: Startup recovery roots come from `agent_tasks` records that are

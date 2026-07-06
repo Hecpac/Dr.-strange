@@ -6,6 +6,7 @@ import os
 import tempfile
 import textwrap
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -62,6 +63,53 @@ SLOW_SCHEDULER_AGENT_JOBS = {
 # Invariant 1 is fully closed, and the backstop below fails if ANY scheduler
 # job (including a newly-added one) runs heavy work inline in daemon.tick.
 _PENDING_INLINE_MIGRATION: frozenset[str] = frozenset()
+
+# R2.0: these are the only scheduler jobs that are still known to perform
+# blocking/FS/network/CDP/LLM work inline. This is not a migration list; it is a
+# narrow, named residual so the tripwire can fail closed for any new inline
+# blocking cron work while R2.x migrates the residual off-tick.
+_ALLOWED_INLINE_BLOCKING_CRON_JOBS: dict[str, str] = {
+    "heartbeat": "legacy heartbeat emits the agent registry inline; bounded local residual",
+    "daemon_heartbeat": "authoritative liveness sink is still scheduler-tick driven until R2.3",
+    "fitness_reminder": "existing local stamp write plus Telegram send; not part of R2.0",
+    "morning_brief": "brief rendering/notification remains inline until R2.2",
+    "evening_brief": "brief rendering/notification remains inline until R2.2",
+    "notebooklm_orchestration_poll": "NotebookLM orchestration poll remains inline until R2.2",
+    "nlm_wiki_sync": "NotebookLM-to-wiki sync remains inline until R2.2",
+}
+_BLOCKING_HANDLER_ATTRIBUTES = frozenset({"emit", "run_if_due"})
+_BLOCKING_CRON_CALL_NAMES = frozenset(
+    {
+        "_run_osascript",
+        "ingest_from_notebooklm",
+        "open",
+        "poll_orchestrations",
+        "run_external_summary_command",
+        "run_subprocess_bounded",
+        "runtime_db_write_probe",
+        "write_liveness_heartbeat_record",
+    }
+)
+_BLOCKING_FILESYSTEM_METHODS = frozenset(
+    {
+        "mkdir",
+        "open",
+        "read_bytes",
+        "read_text",
+        "replace",
+        "rename",
+        "rmdir",
+        "touch",
+        "unlink",
+        "write_bytes",
+        "write_text",
+    }
+)
+_BLOCKING_SUBPROCESS_METHODS = frozenset({"call", "check_call", "check_output", "Popen", "run"})
+_BLOCKING_HTTP_METHODS = frozenset(
+    {"delete", "get", "head", "options", "patch", "post", "put", "request", "stream"}
+)
+_BLOCKING_WAIT_METHODS = frozenset({"join", "sleep", "wait"})
 
 
 # F1.1b read-lock discipline (RAÍZ #1) -----------------------------------------
@@ -671,6 +719,85 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIn("is_audit_critical_event", emit_source)
         self.assertIn("audit_critical", spill_source)
 
+    def test_cron_inline_blocking_tripwire_has_teeth(self) -> None:
+        source = textwrap.dedent(
+            """
+            import httpx
+            import subprocess
+            import time
+            from pathlib import Path
+
+            from claw_v2.cron import ScheduledJob
+
+            def _wrap_job_handler(*, name, observe, handler, skip_if=None):
+                return handler
+
+            def _bad_http():
+                httpx.get("https://example.com", timeout=5)
+
+            def _bad_filesystem():
+                marker_path = Path("marker")
+                marker_path.write_text("x")
+
+            def _bad_subprocess():
+                subprocess.run(["true"], timeout=1)
+
+            def _bad_blocking():
+                time.sleep(1)
+
+            scheduler.register(ScheduledJob(name="bad_http", interval_seconds=60, handler=_bad_http))
+            scheduler.register(
+                ScheduledJob(name="bad_filesystem", interval_seconds=60, handler=_bad_filesystem)
+            )
+            scheduler.register(
+                ScheduledJob(name="bad_subprocess", interval_seconds=60, handler=_bad_subprocess)
+            )
+            scheduler.register(
+                ScheduledJob(name="bad_blocking", interval_seconds=60, handler=_bad_blocking)
+            )
+            scheduler.register(
+                ScheduledJob(
+                    name="bad_wrapped_http",
+                    interval_seconds=60,
+                    handler=_wrap_job_handler(
+                        name="bad_wrapped_http",
+                        observe=None,
+                        handler=lambda: httpx.post("https://example.com", timeout=5),
+                    ),
+                )
+            )
+            """
+        )
+
+        offenders = _cron_inline_blocking_offenders_from_sources({"synthetic.py": source})
+
+        self.assertEqual(
+            set(offenders),
+            {
+                "bad_blocking",
+                "bad_filesystem",
+                "bad_http",
+                "bad_subprocess",
+                "bad_wrapped_http",
+            },
+        )
+        flattened = "\n".join("\n".join(reasons) for reasons in offenders.values())
+        for expected in ("httpx.get", "Path.write_text", "subprocess.run", "time.sleep"):
+            self.assertIn(expected, flattened)
+
+    def test_cron_inline_blocking_residual_is_explicit_and_minimal(self) -> None:
+        sources = {
+            str(path.relative_to(REPO_ROOT)): path.read_text(encoding="utf-8")
+            for path in _package_python_files()
+        }
+
+        detected = _cron_inline_blocking_offenders_from_sources(sources)
+        self.assertEqual(set(detected), set(_ALLOWED_INLINE_BLOCKING_CRON_JOBS))
+        for job_name, reason in _ALLOWED_INLINE_BLOCKING_CRON_JOBS.items():
+            with self.subTest(job_name=job_name):
+                self.assertGreater(len(reason), 20)
+                self.assertTrue(detected[job_name], f"{job_name} allowlist is stale")
+
     def test_no_default_on_scheduler_job_runs_heavy_work_inline_in_daemon_tick(self) -> None:
         """Deny-by-default backstop for Core Invariant 1.
 
@@ -678,7 +805,9 @@ class ArchitectureInvariantTests(unittest.TestCase):
         override) and sweeps EVERY registered scheduler job, invoking each
         handler under sentinels on the heavy chokepoints (provider LLM via
         ``router.ask``, the self-improve experiment loop, sub-agent dispatch,
-        and any subprocess). A job that trips a sentinel ran heavy work inline
+        and any subprocess). The static tripwire above covers direct HTTP,
+        filesystem, and blocking/sleep calls that this runtime sweep cannot
+        safely patch globally. A job that trips a sentinel ran heavy work inline
         in ``daemon.tick`` (``tick -> run_due -> job.handler()``). The only
         permitted offenders are those explicitly documented in
         ``_PENDING_INLINE_MIGRATION``; anything else — including a newly added
@@ -1394,6 +1523,161 @@ def _node_mentions(node: ast.AST, names: set[str]) -> bool:
         if isinstance(child, ast.Attribute) and child.attr in names:
             return True
     return False
+
+
+def _cron_inline_blocking_offenders_from_sources(
+    sources: Mapping[str, str],
+) -> dict[str, list[str]]:
+    offenders: dict[str, list[str]] = {}
+    for rel_path, source in sources.items():
+        tree = ast.parse(source, filename=rel_path)
+        functions = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for call in (node for node in ast.walk(tree) if _is_scheduled_job_call(node)):
+            assert isinstance(call, ast.Call)
+            job_name = _literal_string(_keyword_value(call, "name"))
+            handler = _keyword_value(call, "handler")
+            if not job_name or handler is None:
+                continue
+            reasons = _blocking_cron_handler_reasons(handler, functions)
+            if reasons:
+                offenders.setdefault(job_name, []).extend(
+                    f"{rel_path}:{call.lineno}:{reason}" for reason in reasons
+                )
+    return offenders
+
+
+def _blocking_cron_handler_reasons(
+    handler: ast.AST,
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+) -> list[str]:
+    if isinstance(handler, ast.Call) and _call_name(handler) == "_wrap_job_handler":
+        wrapped = _keyword_value(handler, "handler")
+        if wrapped is None:
+            return ["_wrap_job_handler missing handler keyword"]
+        return _blocking_cron_handler_reasons(wrapped, functions)
+    if isinstance(handler, ast.Name):
+        target = functions.get(handler.id)
+        if target is None:
+            return []
+        return _blocking_reasons_in_nodes(target.body)
+    if isinstance(handler, ast.Lambda):
+        return _blocking_reasons_in_nodes([handler.body])
+    if isinstance(handler, ast.Attribute) and handler.attr in _BLOCKING_HANDLER_ATTRIBUTES:
+        return [f"handler attribute {handler.attr}"]
+    return _blocking_reasons_in_nodes([handler])
+
+
+def _is_scheduled_job_call(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and _call_name(node) in {"ScheduledJob", "_SJ"}
+
+
+def _blocking_reasons_in_nodes(nodes: list[ast.AST]) -> list[str]:
+    reasons: list[str] = []
+    path_names = _path_like_names(nodes)
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.Call):
+            reason = _blocking_cron_call_reason(node, path_names=path_names)
+            if reason is not None:
+                reasons.append(reason)
+        stack.extend(ast.iter_child_nodes(node))
+    return sorted(set(reasons))
+
+
+def _path_like_names(nodes: list[ast.AST]) -> set[str]:
+    names: set[str] = set()
+    for node in nodes:
+        for child in ast.walk(node):
+            value: ast.AST | None = None
+            targets: list[ast.AST] = []
+            if isinstance(child, ast.Assign):
+                value = child.value
+                targets = list(child.targets)
+            elif isinstance(child, ast.AnnAssign):
+                value = child.value
+                targets = [child.target]
+            if value is None or not _expr_is_path_like(value, names):
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+    return names
+
+
+def _expr_is_path_like(node: ast.AST, path_names: set[str]) -> bool:
+    if isinstance(node, ast.Call) and _call_name(node) == "Path":
+        return True
+    if isinstance(node, ast.Name):
+        return node.id in path_names or _name_looks_path_like(node.id)
+    if isinstance(node, ast.Attribute):
+        return node.attr in {"parent", "path", "stamp_path"} and _expr_is_path_like(
+            node.value, path_names
+        )
+    return False
+
+
+def _blocking_cron_call_reason(node: ast.Call, *, path_names: set[str]) -> str | None:
+    dotted = _dotted_call_name(node)
+    call_name = _call_name(node)
+    attr_name = node.func.attr if isinstance(node.func, ast.Attribute) else ""
+    if dotted.startswith("httpx.") and attr_name in _BLOCKING_HTTP_METHODS:
+        return dotted
+    if dotted.startswith("requests.") and attr_name in _BLOCKING_HTTP_METHODS:
+        return dotted
+    if dotted in {"urllib.request.urlopen", "urlopen"} or call_name == "urlopen":
+        return "urllib.request.urlopen"
+    if dotted.startswith("subprocess.") and attr_name in _BLOCKING_SUBPROCESS_METHODS:
+        return dotted
+    if call_name in _BLOCKING_CRON_CALL_NAMES:
+        return call_name
+    if call_name == "open":
+        return "open"
+    if attr_name in _BLOCKING_FILESYSTEM_METHODS and _looks_like_path_filesystem_call(
+        node, path_names
+    ):
+        return f"Path.{attr_name}"
+    if dotted in {"time.sleep", "asyncio.run"}:
+        return dotted
+    if attr_name in _BLOCKING_WAIT_METHODS and _looks_like_blocking_wait_call(node):
+        return f"blocking.{attr_name}"
+    return None
+
+
+def _dotted_call_name(node: ast.Call) -> str:
+    parts: list[str] = []
+    value: ast.AST = node.func
+    while isinstance(value, ast.Attribute):
+        parts.append(value.attr)
+        value = value.value
+    if isinstance(value, ast.Name):
+        parts.append(value.id)
+    return ".".join(reversed(parts))
+
+
+def _looks_like_path_filesystem_call(node: ast.Call, path_names: set[str]) -> bool:
+    if not isinstance(node.func, ast.Attribute):
+        return False
+    return _expr_is_path_like(node.func.value, path_names)
+
+
+def _name_looks_path_like(name: str) -> bool:
+    return name.endswith(("_path", "_stamp", "stamp", "path")) or name.startswith("_")
+
+
+def _looks_like_blocking_wait_call(node: ast.Call) -> bool:
+    if not isinstance(node.func, ast.Attribute):
+        return False
+    if node.func.attr == "sleep":
+        return True
+    target = node.func.value
+    return isinstance(target, ast.Name) and target.id in {"thread", "process", "proc"}
 
 
 class RuntimeDbReadLockDisciplineTests(unittest.TestCase):
