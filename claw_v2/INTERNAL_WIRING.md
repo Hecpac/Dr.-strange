@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice scheduler-independent-liveness-sink (2026-07-06, R2.3): the authoritative liveness.json writer now runs from ClawDaemon's independent liveness loop, not CronScheduler, with bounded single-flight writer calls while preserving db_write_probe_status and runtime_health."
-doc_version: 2.86
+describes_commit: "slice r2.2a-cdp-cron-off-tick (2026-07-06, R2.2a): notebooklm_orchestration_poll and nlm_wiki_sync now enqueue ScheduledBackgroundJobRunner work with bounded timeouts instead of running CDP/NotebookLM body work inline in CronScheduler."
+doc_version: 2.87
 last_verified: 2026-07-06
-verification_method: "R2.3 local: tests/test_daemon_liveness_sink.py::DaemonLivenessLoopSamplingTests proves liveness.json refreshes with db_write_probe_status/runtime_health while a cron handler blocks, runs without observe when a writer is configured, and bounds writer stalls without unbounded retries; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_liveness_sink_is_not_scheduler_starved locks the wiring; full tests/test_architecture_invariants.py preserves prior invariants."
+verification_method: "R2.2a local: tests/test_scheduled_background_jobs.py proves notebooklm_orchestration_poll and nlm_wiki_sync cron handlers enqueue only, registered background runners execute the body off-tick, and runner timeout failures are observable; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_cron_inline_blocking_residual_is_explicit_and_minimal verifies the R2.0 residual allowlist no longer includes the CDP NotebookLM jobs."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -480,14 +480,14 @@ invariants:
       - auto_dream -> scheduler.auto_dream  # final leg, enqueue + ScheduledBackgroundJobRunner (was dream.run router.ask(lane=research) inline, no explicit timeout)
       - learning_consolidate -> scheduler.learning_consolidate  # final leg, enqueue + ScheduledBackgroundJobRunner, added _maintenance_skip kill-switch (was router.ask(lane=judge) inline, no skip gate)
       - learning_soul_suggestions -> scheduler.learning_soul_suggestions  # final leg, enqueue + ScheduledBackgroundJobRunner (was router.ask(lane=judge) inline)
+      - notebooklm_orchestration_poll -> scheduler.notebooklm_orchestration_poll  # R2.2a, enqueue + ScheduledBackgroundJobRunner with timeout (was NotebookLM orchestration poll inline)
+      - nlm_wiki_sync -> scheduler.nlm_wiki_sync  # R2.2a, enqueue + ScheduledBackgroundJobRunner with timeout (was NotebookLM chat/wiki ingest inline)
     pending_migration: []  # CORE INVARIANT 1 CLOSED for migrated heavy autonomous jobs.
     inline_blocking_residual:
       - heartbeat  # legacy agent-registry heartbeat write; bounded local residual
       - fitness_reminder  # existing local stamp write + Telegram send; not part of R2.0
       - morning_brief  # brief rendering/notification remains inline until R2.2
       - evening_brief  # brief rendering/notification remains inline until R2.2
-      - notebooklm_orchestration_poll  # NotebookLM orchestration poll remains inline until R2.2
-      - nlm_wiki_sync  # NotebookLM-to-wiki sync remains inline until R2.2
       - wiki_lint  # existing local wiki filesystem scan/log via attribute handler
       - wiki_confidence  # existing local wiki filesystem recompute/log via attribute handler
     inline_bounded_local_maintenance:

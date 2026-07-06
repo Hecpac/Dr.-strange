@@ -83,6 +83,100 @@ def finalize_terminal_notification(
     return True
 
 
+def wire_notebooklm_scheduler_jobs(runtime: Any, nlm_service: NotebookLMService) -> None:
+    """Wire NotebookLM cron jobs as enqueue-only handlers with off-tick runners."""
+    from claw_v2.cron import ScheduledJob
+    from claw_v2.scheduled_background_jobs import (
+        NLM_WIKI_SYNC_JOB_KIND,
+        NLM_WIKI_SYNC_RESUME_KEY,
+        NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,
+        NOTEBOOKLM_ORCHESTRATION_POLL_RESUME_KEY,
+        ScheduledBackgroundJobRunner,
+        enqueue_scheduled_background_job,
+        nlm_wiki_sync_result_summary,
+        notebooklm_orchestration_poll_result_summary,
+        safe_non_negative_int,
+    )
+
+    timeout_seconds = float(getattr(runtime.config, "notebooklm_cli_long_timeout_seconds", 1200.0))
+    if runtime.daemon is not None and runtime.job_service is not None:
+        orchestration_poll_runner = ScheduledBackgroundJobRunner(
+            job_name="notebooklm_orchestration_poll",
+            job_kind=NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,
+            job_service=runtime.job_service,
+            handler=lambda payload: nlm_service.poll_orchestrations(
+                limit=safe_non_negative_int(payload.get("limit"), default=3)
+            ),
+            observe=runtime.observe,
+            worker_id="notebooklm-orchestration-poll-runner",
+            result_summary=notebooklm_orchestration_poll_result_summary,
+            timeout_seconds=timeout_seconds,
+        )
+        runtime.daemon.register_background_job_runner(
+            name="notebooklm_orchestration_poll",
+            handler=lambda: orchestration_poll_runner.run_available(limit=1),
+        )
+
+    runtime.scheduler.register(
+        ScheduledJob(
+            name="notebooklm_orchestration_poll",
+            interval_seconds=60,
+            handler=lambda: enqueue_scheduled_background_job(
+                job_name="notebooklm_orchestration_poll",
+                job_kind=NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,
+                resume_key=NOTEBOOKLM_ORCHESTRATION_POLL_RESUME_KEY,
+                job_service=runtime.job_service,
+                observe=runtime.observe,
+                payload={"limit": 3},
+                max_attempts=1,
+            ),
+        )
+    )
+
+    # Also let Kairos trigger NotebookLM work on demand; this is independent of
+    # whether the optional wiki integration is configured.
+    runtime.kairos.nlm_service = nlm_service
+
+    wiki = runtime.bot.wiki
+    if wiki is None:
+        return
+    if runtime.daemon is not None and runtime.job_service is not None:
+        wiki_sync_runner = ScheduledBackgroundJobRunner(
+            job_name="nlm_wiki_sync",
+            job_kind=NLM_WIKI_SYNC_JOB_KIND,
+            job_service=runtime.job_service,
+            handler=lambda payload: wiki.ingest_from_notebooklm(
+                nlm_service,
+                max_notebooks=safe_non_negative_int(payload.get("max_notebooks"), default=3),
+                questions_per_nb=safe_non_negative_int(payload.get("questions_per_nb"), default=2),
+            ),
+            observe=runtime.observe,
+            worker_id="nlm-wiki-sync-runner",
+            result_summary=nlm_wiki_sync_result_summary,
+            timeout_seconds=timeout_seconds,
+        )
+        runtime.daemon.register_background_job_runner(
+            name="nlm_wiki_sync",
+            handler=lambda: wiki_sync_runner.run_available(limit=1),
+        )
+
+    runtime.scheduler.register(
+        ScheduledJob(
+            name="nlm_wiki_sync",
+            interval_seconds=43200,
+            handler=lambda: enqueue_scheduled_background_job(
+                job_name="nlm_wiki_sync",
+                job_kind=NLM_WIKI_SYNC_JOB_KIND,
+                resume_key=NLM_WIKI_SYNC_RESUME_KEY,
+                job_service=runtime.job_service,
+                observe=runtime.observe,
+                payload={"max_notebooks": 3, "questions_per_nb": 2},
+                max_attempts=1,
+            ),
+        )
+    )
+
+
 def should_notify_task_ledger_terminal(payload: dict, notified_task_ids: set[str]) -> bool:
     session_id = str(payload.get("session_id") or "")
     task_id = str(payload.get("task_id") or "")
@@ -721,29 +815,7 @@ async def run() -> int:
         )
         runtime.bot.notebooklm = nlm_service
 
-        runtime.scheduler.register(
-            _SJ(
-                name="notebooklm_orchestration_poll",
-                interval_seconds=60,
-                handler=lambda: nlm_service.poll_orchestrations(limit=3),
-            )
-        )
-
-        # NotebookLM → Wiki sync (every 12h)
-        if runtime.bot.wiki is not None:
-            from claw_v2.cron import ScheduledJob
-
-            _wiki_ref = runtime.bot.wiki
-            _nlm_ref = nlm_service
-            runtime.scheduler.register(
-                ScheduledJob(
-                    name="nlm_wiki_sync",
-                    interval_seconds=43200,
-                    handler=lambda: _wiki_ref.ingest_from_notebooklm(_nlm_ref),
-                )
-            )
-            # Also let Kairos trigger it on demand
-            runtime.kairos.nlm_service = _nlm_ref
+        wire_notebooklm_scheduler_jobs(runtime, nlm_service)
 
         # Daily fitness reminder at ~5 AM
         import random as _rnd

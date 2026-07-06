@@ -88,8 +88,6 @@ _ALLOWED_INLINE_BLOCKING_CRON_JOBS: dict[str, tuple[str, ...]] = {
         "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:MorningBriefService.build_message:claw_v2/morning_brief.py:MorningBriefService._render_via_llm:router.ask",
         "claw_v2/morning_brief.py:MorningBriefService.run_if_due:claw_v2/morning_brief.py:should_send_morning_brief:Path.read_text",
     ),
-    "notebooklm_orchestration_poll@claw_v2/lifecycle.py": ("poll_orchestrations",),
-    "nlm_wiki_sync@claw_v2/lifecycle.py": ("ingest_from_notebooklm",),
     "wiki_lint@claw_v2/main.py": (
         "claw_v2/wiki.py:WikiService.lint:Path.read_text",
         "claw_v2/wiki.py:WikiService.lint:claw_v2/wiki.py:WikiService._append_log:Path.open",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import tempfile
 import time
 import unittest
@@ -18,6 +19,10 @@ from claw_v2.main import build_runtime
 from claw_v2.scheduled_background_jobs import (
     KAIROS_TICK_JOB_KIND,
     KAIROS_TICK_RESUME_KEY,
+    NLM_WIKI_SYNC_JOB_KIND,
+    NLM_WIKI_SYNC_RESUME_KEY,
+    NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,
+    NOTEBOOKLM_ORCHESTRATION_POLL_RESUME_KEY,
     PERF_OPTIMIZER_JOB_KIND,
     PERF_OPTIMIZER_RESUME_KEY,
     WIKI_RESEARCH_JOB_KIND,
@@ -27,6 +32,8 @@ from claw_v2.scheduled_background_jobs import (
     ScheduledBackgroundJobRunner,
     enqueue_scheduled_background_job,
     kairos_tick_result_summary,
+    nlm_wiki_sync_result_summary,
+    notebooklm_orchestration_poll_result_summary,
     safe_non_negative_int,
     wiki_research_result_summary,
     wiki_scrape_result_summary,
@@ -34,6 +41,46 @@ from claw_v2.scheduled_background_jobs import (
 
 
 class ScheduledBackgroundJobTests(unittest.TestCase):
+    def test_notebooklm_job_kinds_have_isolated_resume_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(Path(tmpdir) / "claw.db")
+
+            poll_first = enqueue_scheduled_background_job(
+                job_name="notebooklm_orchestration_poll",
+                job_kind=NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,
+                resume_key=NOTEBOOKLM_ORCHESTRATION_POLL_RESUME_KEY,
+                job_service=jobs,
+                payload={"limit": 3},
+            )
+            poll_second = enqueue_scheduled_background_job(
+                job_name="notebooklm_orchestration_poll",
+                job_kind=NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,
+                resume_key=NOTEBOOKLM_ORCHESTRATION_POLL_RESUME_KEY,
+                job_service=jobs,
+                payload={"limit": 3},
+            )
+            sync_first = enqueue_scheduled_background_job(
+                job_name="nlm_wiki_sync",
+                job_kind=NLM_WIKI_SYNC_JOB_KIND,
+                resume_key=NLM_WIKI_SYNC_RESUME_KEY,
+                job_service=jobs,
+            )
+            sync_second = enqueue_scheduled_background_job(
+                job_name="nlm_wiki_sync",
+                job_kind=NLM_WIKI_SYNC_JOB_KIND,
+                resume_key=NLM_WIKI_SYNC_RESUME_KEY,
+                job_service=jobs,
+            )
+
+            self.assertEqual(poll_first, poll_second)
+            self.assertEqual(sync_first, sync_second)
+            self.assertNotEqual(poll_first, sync_first)
+            self.assertEqual(
+                len(jobs.list(kinds=(NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,), limit=10)),
+                1,
+            )
+            self.assertEqual(len(jobs.list(kinds=(NLM_WIKI_SYNC_JOB_KIND,), limit=10)), 1)
+
     def test_wiki_research_enqueue_does_not_run_inline_and_dedupes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = MagicMock()
@@ -303,6 +350,19 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
         summary = kairos_tick_result_summary(decision)
 
         self.assertEqual(summary["action"], "unknown")
+
+    def test_notebooklm_result_summaries_are_bounded(self) -> None:
+        poll_summary = notebooklm_orchestration_poll_result_summary(2)
+        self.assertEqual(poll_summary, {"processed": 2})
+
+        sync_summary = nlm_wiki_sync_result_summary(
+            {
+                "notebooks_scanned": 3,
+                "pages_written": 2,
+                "raw_response": "must not persist",
+            }
+        )
+        self.assertEqual(sync_summary, {"notebooks_scanned": 3, "pages_written": 2})
 
     def test_stale_running_perf_optimizer_job_is_reclaimed_and_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -589,8 +649,240 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
                 self.assertEqual(job.status, "queued")
                 handler.assert_not_called()
 
+    def test_runner_timeout_fails_observably_without_waiting_for_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = MagicMock()
+            jobs = JobService(Path(tmpdir) / "claw.db")
+
+            def blocking_handler(_payload: dict) -> int:
+                time.sleep(0.2)
+                return 1
+
+            enqueue_scheduled_background_job(
+                job_name="notebooklm_orchestration_poll",
+                job_kind=NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,
+                resume_key=NOTEBOOKLM_ORCHESTRATION_POLL_RESUME_KEY,
+                job_service=jobs,
+                max_attempts=1,
+            )
+            runner = ScheduledBackgroundJobRunner(
+                job_name="notebooklm_orchestration_poll",
+                job_kind=NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,
+                job_service=jobs,
+                handler=blocking_handler,
+                observe=observe,
+                timeout_seconds=0.01,
+            )
+
+            started = time.monotonic()
+            self.assertTrue(runner.run_once())
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 0.15)
+            job = jobs.list(kinds=(NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "failed")
+            self.assertIn("timed out", job.error)
+            failed_events = [
+                call.kwargs["payload"]
+                for call in observe.emit.call_args_list
+                if call.args[0] == "notebooklm_orchestration_poll_job_failed"
+            ]
+            self.assertEqual(len(failed_events), 1)
+            self.assertEqual(failed_events[0]["error_type"], "TimeoutError")
+
+    def test_runner_timeout_is_single_flight_until_prior_handler_returns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            started = threading.Event()
+            release = threading.Event()
+            call_count = 0
+
+            def blocking_handler(_payload: dict) -> int:
+                nonlocal call_count
+                call_count += 1
+                started.set()
+                release.wait(timeout=1.0)
+                return 1
+
+            runner = ScheduledBackgroundJobRunner(
+                job_name="notebooklm_orchestration_poll",
+                job_kind=NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,
+                job_service=jobs,
+                handler=blocking_handler,
+                timeout_seconds=0.01,
+            )
+            try:
+                enqueue_scheduled_background_job(
+                    job_name="notebooklm_orchestration_poll",
+                    job_kind=NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,
+                    resume_key=NOTEBOOKLM_ORCHESTRATION_POLL_RESUME_KEY,
+                    job_service=jobs,
+                    max_attempts=1,
+                )
+
+                self.assertTrue(runner.run_once())
+                self.assertTrue(started.wait(timeout=0.1))
+                self.assertEqual(call_count, 1)
+                enqueue_scheduled_background_job(
+                    job_name="notebooklm_orchestration_poll",
+                    job_kind=NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,
+                    resume_key=NOTEBOOKLM_ORCHESTRATION_POLL_RESUME_KEY,
+                    job_service=jobs,
+                    max_attempts=1,
+                )
+
+                self.assertTrue(runner.run_once())
+
+                self.assertEqual(call_count, 1)
+                rows = jobs.list(kinds=(NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,), limit=10)
+                self.assertEqual([row.status for row in rows], ["failed", "failed"])
+                self.assertTrue(
+                    any("still running after a prior timeout" in row.error for row in rows)
+                )
+            finally:
+                release.set()
+
 
 class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def _notebooklm_runtime(
+        self,
+        tmpdir: str,
+        *,
+        timeout_seconds: float = 0.5,
+        wiki_available: bool = True,
+    ):
+        from claw_v2.lifecycle import wire_notebooklm_scheduler_jobs
+
+        root = Path(tmpdir)
+        observe = MagicMock()
+        job_service = JobService(root / "claw.db")
+        scheduler = CronScheduler()
+        registered: dict[str, object] = {}
+
+        class _Daemon:
+            def register_background_job_runner(self, *, name, handler, interval=60.0):
+                registered[name] = SimpleNamespace(name=name, handler=handler, interval=interval)
+
+        wiki = SimpleNamespace(ingest_from_notebooklm=MagicMock()) if wiki_available else None
+        runtime = SimpleNamespace(
+            scheduler=scheduler,
+            job_service=job_service,
+            observe=observe,
+            daemon=_Daemon(),
+            config=SimpleNamespace(notebooklm_cli_long_timeout_seconds=timeout_seconds),
+            bot=SimpleNamespace(wiki=wiki),
+            kairos=SimpleNamespace(),
+        )
+        nlm_service = SimpleNamespace(poll_orchestrations=MagicMock())
+        wire_notebooklm_scheduler_jobs(runtime, nlm_service)
+        return runtime, nlm_service, wiki, registered
+
+    def test_lifecycle_notebooklm_handlers_enqueue_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime, nlm_service, wiki, registered = self._notebooklm_runtime(tmpdir)
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+            self.assertIn("notebooklm_orchestration_poll", jobs)
+            self.assertIn("nlm_wiki_sync", jobs)
+            self.assertEqual(jobs["notebooklm_orchestration_poll"].interval_seconds, 60)
+            self.assertEqual(jobs["nlm_wiki_sync"].interval_seconds, 43200)
+            self.assertIn("notebooklm_orchestration_poll", registered)
+            self.assertIn("nlm_wiki_sync", registered)
+
+            started = time.monotonic()
+            jobs["notebooklm_orchestration_poll"].handler()
+            jobs["nlm_wiki_sync"].handler()
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 0.1)
+            nlm_service.poll_orchestrations.assert_not_called()
+            wiki.ingest_from_notebooklm.assert_not_called()
+            poll_rows = runtime.job_service.list(
+                kinds=(NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,), limit=10
+            )
+            sync_rows = runtime.job_service.list(kinds=(NLM_WIKI_SYNC_JOB_KIND,), limit=10)
+            self.assertEqual(len(poll_rows), 1)
+            self.assertEqual(poll_rows[0].status, "queued")
+            self.assertEqual(poll_rows[0].payload["limit"], 3)
+            self.assertEqual(len(sync_rows), 1)
+            self.assertEqual(sync_rows[0].status, "queued")
+
+    def test_lifecycle_notebooklm_kairos_service_assigned_without_wiki(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime, nlm_service, wiki, registered = self._notebooklm_runtime(
+                tmpdir,
+                wiki_available=False,
+            )
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+
+            self.assertIsNone(wiki)
+            self.assertIs(runtime.kairos.nlm_service, nlm_service)
+            self.assertIn("notebooklm_orchestration_poll", jobs)
+            self.assertNotIn("nlm_wiki_sync", jobs)
+            self.assertIn("notebooklm_orchestration_poll", registered)
+            self.assertNotIn("nlm_wiki_sync", registered)
+
+    def test_lifecycle_notebooklm_runners_execute_body_off_tick(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime, nlm_service, wiki, registered = self._notebooklm_runtime(tmpdir)
+            nlm_service.poll_orchestrations.return_value = 2
+            wiki.ingest_from_notebooklm.return_value = {
+                "notebooks_scanned": 1,
+                "pages_written": 1,
+            }
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+            jobs["notebooklm_orchestration_poll"].handler()
+            jobs["nlm_wiki_sync"].handler()
+
+            self.assertEqual(registered["notebooklm_orchestration_poll"].handler(), 1)
+            self.assertEqual(registered["nlm_wiki_sync"].handler(), 1)
+
+            nlm_service.poll_orchestrations.assert_called_once_with(limit=3)
+            wiki.ingest_from_notebooklm.assert_called_once_with(
+                nlm_service,
+                max_notebooks=3,
+                questions_per_nb=2,
+            )
+            poll_rows = runtime.job_service.list(
+                kinds=(NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,), limit=10
+            )
+            sync_rows = runtime.job_service.list(kinds=(NLM_WIKI_SYNC_JOB_KIND,), limit=10)
+            self.assertEqual(poll_rows[0].status, "completed")
+            self.assertEqual(poll_rows[0].result, {"processed": 2})
+            self.assertEqual(sync_rows[0].status, "completed")
+            self.assertEqual(sync_rows[0].result, {"notebooks_scanned": 1, "pages_written": 1})
+
+    def test_lifecycle_notebooklm_runner_timeout_reports_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime, nlm_service, _wiki, registered = self._notebooklm_runtime(
+                tmpdir, timeout_seconds=0.01
+            )
+
+            def blocked_poll(*, limit: int) -> int:
+                time.sleep(0.2)
+                return limit
+
+            nlm_service.poll_orchestrations.side_effect = blocked_poll
+            jobs = {job.name: job for job in runtime.scheduler.list_jobs()}
+            jobs["notebooklm_orchestration_poll"].handler()
+
+            started = time.monotonic()
+            self.assertEqual(registered["notebooklm_orchestration_poll"].handler(), 1)
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 0.15)
+            rows = runtime.job_service.list(
+                kinds=(NOTEBOOKLM_ORCHESTRATION_POLL_JOB_KIND,), limit=10
+            )
+            self.assertEqual(rows[0].status, "failed")
+            self.assertIn("timed out", rows[0].error)
+            failed_events = [
+                call.kwargs["payload"]
+                for call in runtime.observe.emit.call_args_list
+                if call.args[0] == "notebooklm_orchestration_poll_job_failed"
+            ]
+            self.assertEqual(len(failed_events), 1)
+            self.assertEqual(failed_events[0]["error_type"], "TimeoutError")
+
     def test_runtime_scheduler_handlers_enqueue_only(self) -> None:
         def fake_anthropic(req: LLMRequest) -> LLMResponse:
             return LLMResponse(
@@ -901,6 +1193,7 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "WORKER_PROVIDER": "anthropic",
                 "CLAW_AUTONOMOUS_MAINTENANCE": "false",
                 "CLAW_AUTONOMOUS_MAINTENANCE_ENABLED": "false",
+                "CLAW_BRANCH_INTEGRITY_CHECK": "0",
                 "EVAL_ON_SELF_IMPROVE": "false",
             }
 
@@ -962,6 +1255,7 @@ class ScheduledBackgroundRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "WORKER_PROVIDER": "anthropic",
                 "CLAW_AUTONOMOUS_MAINTENANCE": "false",
                 "CLAW_AUTONOMOUS_MAINTENANCE_ENABLED": "false",
+                "CLAW_BRANCH_INTEGRITY_CHECK": "0",
                 "EVAL_ON_SELF_IMPROVE": "false",
             }
 
