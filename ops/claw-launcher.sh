@@ -51,7 +51,13 @@ EOF
 
 CLAW_DB_PATH="${DB_PATH:-data/claw.db}"
 HALT_MARKER="$(dirname "$CLAW_DB_PATH")/runtime_db_halt.json"
+# Non-numeric would kill sleep under set -e (recreating the crash-loop this
+# guard exists to stop) and 0 would tight-loop the preflight — floor to 5s.
 HALT_RECHECK_S="${CLAW_DB_HALT_RECHECK_S:-300}"
+case "$HALT_RECHECK_S" in
+  '' | *[!0-9]*) HALT_RECHECK_S=300 ;;
+esac
+(( HALT_RECHECK_S >= 5 )) || HALT_RECHECK_S=5
 hold_cycles=0
 while [[ -f "$HALT_MARKER" ]]; do
   if (( hold_cycles % 6 == 0 )); then

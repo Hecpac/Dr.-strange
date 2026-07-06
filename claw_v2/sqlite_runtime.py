@@ -53,8 +53,24 @@ def write_runtime_db_halt_marker(
         "created_at": time.time(),
     }
     tmp = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    data = json.dumps(payload, indent=2).encode("utf-8")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     os.replace(tmp, marker)
+    # The marker's whole job is surviving the power-loss/crash window — fsync
+    # the parent directory so the rename itself is durable (best-effort).
+    try:
+        dir_fd = os.open(str(marker.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        logger.debug("halt marker parent dir fsync failed", exc_info=True)
     return marker
 
 
