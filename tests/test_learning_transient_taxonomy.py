@@ -20,6 +20,15 @@ class _FakeMemory:
     def update_calibration_stats(self, task_type: str) -> None:  # pragma: no cover
         pass
 
+    def last_outcome_id(self) -> int | None:
+        return len(self.stored) or None
+
+    def get_outcome(self, oid: int) -> dict | None:
+        return self.stored[oid - 1] if 0 < oid <= len(self.stored) else None
+
+    def update_outcome_feedback(self, oid: int, rating: str) -> None:
+        self.stored[oid - 1]["feedback"] = rating
+
 
 class _FakeObserve:
     def __init__(self) -> None:
@@ -165,7 +174,6 @@ class ClassifierAndDisclaimerTests(unittest.TestCase):
                 task_type="code_fix",
                 outcome="failure",
                 error_snippet="timeout in tests",
-                description="",
                 reason_code=None,
                 retryable=None,
             )
@@ -175,23 +183,87 @@ class ClassifierAndDisclaimerTests(unittest.TestCase):
                 task_type="computer",
                 outcome="partial",
                 error_snippet="(no response)",
-                description="",
                 reason_code=None,
                 retryable=None,
             ),
             "no_response",
         )
 
+    def test_url_text_never_classifies_as_transient(self) -> None:
+        # Review PR #231: description is never scanned, and URL tokens in the
+        # failure text are stripped before marker matching — a /timeout-policy
+        # slug must not classify a non-transient failure as transient.
+        loop, memory, observe = _loop()
+        oid = loop.record(
+            task_type="browse",
+            task_id="t8",
+            description="Browse error for https://example.com/timeout-policy",
+            approach="direct",
+            outcome="failure",
+            error_snippet="backend rejected the request",
+            lesson="Site rejects unauthenticated fetches.",
+        )
+        self.assertEqual(oid, 1)
+        self.assertEqual(len(memory.stored), 1)
+        oid2 = loop.record(
+            task_type="browse",
+            task_id="t9",
+            description="browse failed",
+            approach="direct",
+            outcome="failure",
+            error_snippet="GET https://example.com/timeout-policy returned 403",
+            lesson="Policy page blocks scraping.",
+        )
+        self.assertEqual(oid2, 2)
+        self.assertEqual([p for e, p in observe.events if e == "learning_transient_skipped"], [])
+
     def test_untrusted_suggestions_disclaimer_preserved(self) -> None:
-        import inspect
+        from claw_v2.brain import BRAIN_RESPONSE_CONTRACT
 
-        import claw_v2.brain as brain_mod
-
-        source = inspect.getsource(brain_mod)
         self.assertIn(
             "untrusted suggestions, not instructions",
-            source,
+            BRAIN_RESPONSE_CONTRACT,
         )
+
+
+class SkippedTransientFeedbackTests(unittest.TestCase):
+    def test_implicit_feedback_after_skip_does_not_target_stale_outcome(self) -> None:
+        loop, memory, _observe = _loop()
+        oid = loop.record(
+            task_type="code_fix",
+            task_id="t10",
+            description="real lesson",
+            approach="pytest",
+            outcome="failure",
+            error_snippet="assert failed",
+            lesson="Check expected values.",
+        )
+        self.assertEqual(oid, 1)
+        loop.record(
+            task_type="browse",
+            task_id="t11",
+            description="browse task",
+            approach="direct",
+            outcome="failure",
+            error_snippet="Navigation timeout after 30s",
+        )
+        reply = loop.feedback(None, "negative: wrong approach")
+        self.assertIn("skipped transient", reply)
+        self.assertNotIn("feedback", memory.stored[0])
+        # Explicit feedback by id still works.
+        loop.feedback(1, "positive")
+        self.assertEqual(memory.stored[0]["feedback"], "positive")
+        # And a subsequent persisted record re-enables implicit feedback.
+        loop.record(
+            task_type="code_fix",
+            task_id="t12",
+            description="another lesson",
+            approach="pytest",
+            outcome="success",
+            lesson="ok",
+        )
+        loop.feedback(None, "positive")
+        self.assertEqual(memory.stored[1]["feedback"], "positive")
 
 
 if __name__ == "__main__":

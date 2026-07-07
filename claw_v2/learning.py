@@ -65,19 +65,25 @@ _TRANSIENT_FAILURE_MARKERS = (
 )
 
 
+_URL_TOKEN_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+
+
 def _classify_transient_automation_failure(
     *,
     task_type: str,
     outcome: str,
     error_snippet: str | None,
-    description: str,
     reason_code: str | None,
     retryable: bool | None,
 ) -> str | None:
     """Return an enum-slug transient reason, or None when the outcome may
     persist as a lesson. Success never gates; an explicitly non-retryable
     failure is not transient; a typed transient reason_code gates regardless
-    of task type; marker sniffing applies only to automation task types."""
+    of task type. Marker sniffing applies only to automation task types and
+    scans ONLY the controlled failure text (error_snippet) with URL tokens
+    stripped — never the description, which carries raw URLs/object text
+    (review PR #231: a URL slug like /timeout-policy must not classify a
+    non-transient failure as transient)."""
     if outcome == "success":
         return None
     if retryable is False:
@@ -87,7 +93,7 @@ def _classify_transient_automation_failure(
         return normalized_code
     if task_type not in _TRANSIENT_AUTOMATION_TASK_TYPES:
         return None
-    haystack = f"{error_snippet or ''}\n{description or ''}".lower()
+    haystack = _URL_TOKEN_RE.sub(" ", error_snippet or "").lower()
     for marker, slug in _TRANSIENT_FAILURE_MARKERS:
         if marker in haystack:
             return slug
@@ -109,6 +115,10 @@ class LearningLoop:
     router: LLMRouter | None = None
     observe: ObserveStream | None = None
     _last_outcome_id: int | None = field(default=None, repr=False)
+    # A3.9 review: when the last record() call skipped a transient, implicit
+    # feedback (outcome_id=None) must not fall through to a STALE previous
+    # outcome (_last_outcome_id or the DB's last row). Explicit ids still work.
+    _last_record_transient_skipped: bool = field(default=False, repr=False)
 
     # --- Record ---
 
@@ -139,10 +149,10 @@ class LearningLoop:
             task_type=task_type,
             outcome=outcome,
             error_snippet=error_snippet,
-            description=description,
             reason_code=reason_code,
             retryable=retryable,
         )
+        self._last_record_transient_skipped = transient_reason is not None
         if transient_reason is not None:
             if self.observe is not None:
                 try:
@@ -373,6 +383,11 @@ class LearningLoop:
 
     def feedback(self, outcome_id: int | None, rating: str) -> str:
         """Attach user feedback (positive/negative/note) to the most recent or specified outcome."""
+        if outcome_id is None and self._last_record_transient_skipped:
+            return (
+                "Last outcome was a skipped transient automation failure; "
+                "nothing was recorded to rate. Pass an explicit outcome id."
+            )
         oid = outcome_id or self._last_outcome_id or self.memory.last_outcome_id()
         if not oid:
             return "No outcomes recorded yet."
