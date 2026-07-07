@@ -78,7 +78,7 @@ MISSING_DOMAIN_GRANT_INTERACTIVE_MSG = (
 )
 MISSING_DOMAIN_GRANT_DELEGATED_MSG = (
     "No puedo ejecutar la tarea de navegador: falta un dominio aprobado para "
-    "acotar browser_use. Reintenta la delegación incluyendo la URL o el "
+    "acotar la sesión. Reintenta la delegación incluyendo la URL o el "
     "dominio del sitio en el objetivo (por ejemplo: «en https://ejemplo.com, "
     "revisa la página y repórtame»)."
 )

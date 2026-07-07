@@ -104,6 +104,21 @@ class DesktopGuiObjectiveRecognizerTests(unittest.TestCase):
         ):
             self.assertTrue(_looks_like_desktop_gui_objective(objective), objective)
 
+    def test_generic_computer_use_is_not_browser_work(self) -> None:
+        # Gate item 2: no phrasing of "computer use" may classify as browser
+        # work in the delegation router — the regex carries no computer-use
+        # token, in any of its spellings, for any browser-executor mode.
+        from claw_v2.bot_helpers import _should_use_browser_executor
+
+        for objective in (
+            "usa computer-use para abrir la Calculadora",
+            "usa computer use para automatizar el reporte",
+            "ejecuta computer_use y abre la app Notas",
+        ):
+            for mode in ("ops", "publish"):
+                self.assertFalse(_should_use_browser_executor(mode, objective), (mode, objective))
+            self.assertTrue(_looks_like_desktop_gui_objective(objective), objective)
+
     def test_non_desktop_objectives_fall_through(self) -> None:
         # A miss must fall through to today's behavior (coordinator), never to
         # a false decline: filesystem/terminal ops are coordinator-executable.
@@ -282,6 +297,17 @@ class PromptSurfaceHonestyTests(unittest.TestCase):
         self.assertIn("inline with the computer tools", _COMPUTER_USE_DRIVE_NUDGE)
         self.assertIn("delegate_task refuses", _COMPUTER_USE_DRIVE_NUDGE)
 
+    def test_delegate_task_tool_schema_does_not_advertise_desktop(self) -> None:
+        # Gate item 1: the tool description the brain reads EVERY turn is a
+        # prompt surface too. It must not list GUI/computer-use as delegable
+        # work, and must state the honest refusal + the inline path.
+        from claw_v2.adapters.anthropic_options import _DELEGATE_TASK_TOOL_DESCRIPTION
+
+        self.assertNotIn("GUI/computer-use", _DELEGATE_TASK_TOOL_DESCRIPTION)
+        self.assertIn("no delegated lane", _DELEGATE_TASK_TOOL_DESCRIPTION)
+        self.assertIn("refused", _DELEGATE_TASK_TOOL_DESCRIPTION)
+        self.assertIn("inline", _DELEGATE_TASK_TOOL_DESCRIPTION)
+
 
 class MissingDomainGrantGuidanceTests(unittest.TestCase):
     def test_delegated_message_names_cause_and_action(self) -> None:
@@ -298,6 +324,80 @@ class MissingDomainGrantGuidanceTests(unittest.TestCase):
         self.assertIn("instagram.com", MISSING_DOMAIN_GRANT_INTERACTIVE_MSG)
         # It must not be the old vague "needs approval" copy with no lever.
         self.assertNotIn("needs approval", MISSING_DOMAIN_GRANT_INTERACTIVE_MSG)
+
+    def test_messages_leak_no_internals(self) -> None:
+        # Gate item 3: user-safe means naming the missing grant WITHOUT
+        # internal package/backend/protocol identifiers or runtime ids.
+        for message in (
+            MISSING_DOMAIN_GRANT_DELEGATED_MSG,
+            MISSING_DOMAIN_GRANT_INTERACTIVE_MSG,
+        ):
+            for internal_token in (
+                "browser_use",
+                "browser-use",
+                "CDP",
+                "cdp",
+                "backend",
+                "playwright",
+                "task_id",
+                "session_id",
+                "approval_id",
+                "instruction_hash",
+            ):
+                self.assertNotIn(internal_token, message, internal_token)
+
+
+class ApprovalDenialsAreNotRetryableTests(unittest.TestCase):
+    """Gate item 5: approval/security denials must never become replan/retry
+    fuel. Three independent locks: the replan reason-code allowlist carries
+    only transient classes, an approval pause is not replan-recommended, and a
+    session parked awaiting approval is structurally excluded from replan."""
+
+    def test_replan_codes_contain_no_approval_or_policy_classes(self) -> None:
+        from claw_v2.computer_handler import _COMPUTER_REPLAN_REASON_CODES
+
+        for code in _COMPUTER_REPLAN_REASON_CODES:
+            for forbidden in ("approval", "policy", "denied", "grant", "permission"):
+                self.assertNotIn(forbidden, code, code)
+
+    def test_pending_approval_outcome_is_not_replan_recommended(self) -> None:
+        from claw_v2.computer import ComputerUseOutcome
+        from claw_v2.computer_handler import _COMPUTER_REPLAN_REASON_CODES
+
+        outcome = ComputerUseOutcome.pending_approval("Action needs approval.")
+        self.assertFalse(outcome.replan_recommended)
+        self.assertNotIn(outcome.reason_code, _COMPUTER_REPLAN_REASON_CODES)
+
+    def test_awaiting_approval_session_is_never_replanned(self) -> None:
+        import types
+
+        from claw_v2.computer import ComputerUseOutcome
+        from claw_v2.computer_handler import ComputerHandler
+
+        # Even with a maximally replannable outcome, a session parked on an
+        # approval (pending_action set, not "done") must not re-enter replan.
+        outcome = ComputerUseOutcome(
+            status="failed",
+            reason_code="timeout",
+            retryable=True,
+            user_safe_summary="boom",
+            replan_recommended=True,
+            replan_reason_code="timeout",
+        )
+        session = types.SimpleNamespace(
+            status="awaiting_approval",
+            pending_action={"action": "codex_computer_task"},
+        )
+        self.assertFalse(ComputerHandler()._should_attempt_computer_replan(session, outcome))
+
+    def test_desktop_decline_creates_no_retryable_task_state(self) -> None:
+        # Covered end-to-end by DesktopDelegationGuardTests
+        # (no ledger row, no queue entry, no autonomous_task_started event) —
+        # the decline is terminal for the turn, not a retriable task failure.
+        from claw_v2.task_handler import _NO_DESKTOP_LANE_BLOCKER
+
+        self.assertIn("/computer", _NO_DESKTOP_LANE_BLOCKER)
+        self.assertNotIn("reintent", _NO_DESKTOP_LANE_BLOCKER.lower())
 
 
 if __name__ == "__main__":

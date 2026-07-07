@@ -36,6 +36,18 @@ logger = logging.getLogger(__name__)
 # planned_phases_for_mode + _build_coordinator_tasks can execute.
 _DELEGATE_TASK_MODES = frozenset({"coding", "research", "ops", "publish", "browse"})
 
+# CB1 (ADR CB0): the tool schema the brain reads every turn must NOT advertise
+# GUI/computer-use as delegable — no delegated desktop executor exists and the
+# TaskHandler guard refuses those objectives with a blocker. Module-level so
+# tests can lock the claim (tests/test_cb1_routing_honesty.py).
+_DELEGATE_TASK_TOOL_DESCRIPTION = (
+    "Delegate long-running work (browser sessions, publishing, multi-step "
+    "jobs) to the durable autonomous-task lane. Desktop-GUI / computer-use "
+    "has no delegated lane and is refused — run short desktop actions inline "
+    "with the computer tools. Returns an acknowledgement with the task id; "
+    "the result is delivered to the user when the task finishes."
+)
+
 
 def build_delegation_mcp_server(sdk: Any, request: LLMRequest) -> Any:
     """In-process MCP server exposing `delegate_task` to brain-lane turns.
@@ -49,12 +61,7 @@ def build_delegation_mcp_server(sdk: Any, request: LLMRequest) -> Any:
 
     @sdk.tool(
         "delegate_task",
-        (
-            "Delegate long-running work (GUI/computer-use, browser sessions, "
-            "publishing, multi-step jobs) to the durable autonomous-task lane. "
-            "Returns an acknowledgement with the task id; the result is "
-            "delivered to the user when the task finishes."
-        ),
+        _DELEGATE_TASK_TOOL_DESCRIPTION,
         {
             "type": "object",
             "properties": {
