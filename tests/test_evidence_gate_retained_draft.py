@@ -73,6 +73,7 @@ class RetainedDraftRecorderTests(unittest.TestCase):
         self.assertLessEqual(len(proposal.get("objective") or ""), 500)
 
     def test_secret_shaped_draft_is_not_preserved(self) -> None:
+        # Case 1: known prefix (caught by _contains_sensitive_redaction).
         synthetic_secret = "sk-" + "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
         _record_retention(self.memory, "s2", draft=f"Arranqué con la key {synthetic_secret}")
 
@@ -82,6 +83,18 @@ class RetainedDraftRecorderTests(unittest.TestCase):
             "pending_action_meta",
             state.get("active_object") or {},
         )
+
+    def test_embedded_high_entropy_token_in_multiword_draft_is_not_preserved(self) -> None:
+        # gemini review #221 (HIGH): _is_secret_shaped_token returns False on
+        # whitespace, so a multi-word draft with an embedded secret must be
+        # checked per-token, not on the whole draft.
+        entropy_token = "8eyt8R1Hp008liTCA98a"
+        _record_retention(
+            self.memory, "s2b", draft=f"Arranqué exportando el token {entropy_token} al deploy"
+        )
+
+        state = self.memory.get_session_state("s2b")
+        self.assertFalse((state.get("pending_action") or "").strip())
 
     def test_empty_draft_is_noop(self) -> None:
         _record_retention(self.memory, "s3", draft="   ")
@@ -155,6 +168,25 @@ class RetainedDraftExecutionTests(unittest.TestCase):
             assert isinstance(shortcut, _BrainShortcut)
             self.assertIn(_DRAFT, shortcut.text)
             self.assertIn("Continúa con esta acción pendiente", shortcut.text)
+
+    def test_conversation_that_moved_on_expires_retained_draft(self) -> None:
+        # coderabbit review #221: reactivation must not happen after the
+        # conversation moved on. The message-delta guard (not topic cosine —
+        # the original ask lingers in history and keeps the vector high) is
+        # the drift protection: once the owner sends more than the delta of
+        # messages past the retention, «ejecútalo» expires and re-derives.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            memory = MemoryStore(Path(tmpdir) / "claw.db")
+            handler = StateHandler(brain_memory=memory, task_handler=_TaskHandler())
+            memory.store_message("s1", "user", _USER_ASK)
+            _record_retention(memory, "s1")
+            for _ in range(5):
+                memory.store_message("s1", "assistant", "otro tema intermedio")
+                memory.store_message("s1", "user", "hablemos de otra cosa distinta")
+
+            result = handler.maybe_resolve_stateful_followup("dale", session_id="s1")
+
+            self.assertNotIsInstance(result, _BrainShortcut)
 
 
 if __name__ == "__main__":

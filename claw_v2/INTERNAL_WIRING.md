@@ -959,11 +959,19 @@ invariants:
           EVIDENCE_GATE_RETAINED_DRAFT_TTL_SECONDS (30min), created_message_id,
           task_id}, so the EXISTING continuation resolver executes the real
           plan on «ejecútalo» instead of re-deriving from the canned message.
-          Secret-shaped drafts are never preserved (PR 0D parity); the
+          Secret-shaped drafts are never preserved — the whole draft is
+          scanned per-token (a single-token check misses secrets embedded in
+          multi-word text) plus the redaction check (PR 0D parity). The
           read-path keeps its TTL, message-delta, sensitivity, and
-          destructive-objective guards (topic-cosine coherence is
-          short-circuited for this source only — the directive boilerplate
-          dilutes the vector). The retention itself is NOT weakened: the gate
+          destructive-objective guards; topic-cosine coherence for this source
+          scores against the stored original ask (topic), not the boilerplate
+          directive that would dilute the vector, and the message-delta guard
+          (not cosine — the original ask lingers in history) is the drift
+          protection that expires reactivation once the conversation moves on.
+          Both the StateHandler resolver and the Telegram continuation path
+          honor pending_action_meta freshness for this source (the Telegram
+          path does not call the resolver, so it checks freshness inline
+          before using the slot). The retention itself is NOT weakened: the gate
           still replaces the outgoing reply (F4-B1), and no automatic
           re-prompt is introduced (that is the separate F4-B2 forced-action
           follow-up). Expiry degrades honestly to today's re-derive behavior.
@@ -971,7 +979,8 @@ invariants:
       - bot.BotService._build_retained_draft_directive  # full draft + refusals
       - bot.BotService._record_evidence_gate_explicit_blocker  # single state write, meta ttl
       - state_handler.StateHandler._pending_action_still_fresh  # honors meta ttl_seconds
-      - state_handler.StateHandler._pending_action_is_coherent  # gate-source short-circuit
+      - state_handler.StateHandler._pending_action_is_coherent  # scores against original ask topic
+      - bot.BotService._maybe_resolve_telegram_continuation  # inline freshness for the retained-draft slot
     enforced_by:
       - tests/test_evidence_gate_retained_draft.py
     why: «ejecútalo» after a retention re-derived from scratch — the draft was

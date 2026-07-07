@@ -7198,7 +7198,13 @@ class BotService:
         draft = (blocked_content or "").strip()
         if not draft:
             return None
-        if _is_secret_shaped_token(draft) or _contains_sensitive_redaction(draft):
+        # _is_secret_shaped_token validates a SINGLE high-entropy token and
+        # returns False on any whitespace, so it must run per-token — a
+        # multi-word draft with an embedded secret would otherwise slip
+        # through (PR 0D parity, gemini review #221).
+        if _contains_sensitive_redaction(draft) or any(
+            _is_secret_shaped_token(token) for token in draft.split()
+        ):
             return None
         request = _compact_summary(source_text, limit=200) or "la petición previa"
         return (
@@ -9314,13 +9320,27 @@ class BotService:
 
         pending_action = str(state.get("pending_action") or "").strip()
         if pending_action:
-            return self._telegram_continuation_shortcut(
-                session_id,
-                text,
-                pending_action,
-                source="pending_action",
-                state=state,
-            ), "pending_action"
+            # F4-B2a: a retained evidence-gate draft lives in this generic slot
+            # but carries a TTL/message-delta guard in pending_action_meta. The
+            # Telegram continuation path does not run StateHandler's freshness
+            # check, so honor it here — otherwise a stale retained draft could
+            # execute via `continúa`/`procede` instead of expiring and
+            # re-deriving as the invariant promises (codex review #221).
+            meta = (state.get("active_object") or {}).get("pending_action_meta") or {}
+            if meta.get("source") == "evidence_gate_retained_draft" and not (
+                self._state_handler._pending_action_still_fresh(state, session_id=session_id)
+            ):
+                self._state_handler._expire_pending_action(
+                    session_id, state, reason="evidence_gate_retained_draft_stale"
+                )
+            else:
+                return self._telegram_continuation_shortcut(
+                    session_id,
+                    text,
+                    pending_action,
+                    source="pending_action",
+                    state=state,
+                ), "pending_action"
 
         proposal = self._last_actionable_proposal(state)
         if proposal:

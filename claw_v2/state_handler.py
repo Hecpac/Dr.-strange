@@ -858,14 +858,17 @@ class StateHandler:
         meta = active_object.get("pending_action_meta") if isinstance(active_object, dict) else None
         if not isinstance(meta, dict):
             return True
-        if meta.get("source") == "evidence_gate_retained_draft":
-            # F4-B2a: a gate-preserved draft was retained in THIS conversation
-            # and is already bounded by TTL + created_message_id delta. The
-            # topic-cosine heuristic (built for organically-extracted
-            # proposals) gets diluted by the directive boilerplate and would
-            # wrongly degrade «ejecútalo» to a re-confirmation.
-            return True
-        pending_action = str(state.get("pending_action") or "").strip()
+        is_retained_draft = meta.get("source") == "evidence_gate_retained_draft"
+        if is_retained_draft:
+            # F4-B2a: the pending_action for a retained draft is the full
+            # execute-don't-narrate directive + draft; scoring it directly
+            # dilutes the topic vector with boilerplate and wrongly degrades
+            # «ejecútalo» to a re-confirmation. Score against the stored topic
+            # (the original user ask) instead of the directive text, so a
+            # genuine topic change is still caught (coderabbit review #221).
+            pending_action = ""
+        else:
+            pending_action = str(state.get("pending_action") or "").strip()
         topic = str(meta.get("topic") or "").strip()
         pending_topic = " ".join(part for part in (topic, pending_action) if part)
         if len(_topic_tokens(pending_topic)) < 2:
