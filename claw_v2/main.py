@@ -2390,13 +2390,17 @@ def _setup_scheduler(
 
 
 def _restart_backup_dir(db_path: Path) -> Path:
-    """Backup dir the restart preflight writes to, honoring the same env the
-    shell reads (CLAW_RESTART_DB_BACKUP_DIR, default <db-parent>/backups/restart)
-    so the missing-DB signal never forks a parallel literal from restart.sh."""
+    """Backup dir the restart preflight writes to, computed EXACTLY as the shell
+    does: CLAW_RESTART_DB_BACKUP_DIR, else data/backups/restart relative to the
+    repo root the daemon runs from (restart.sh:15 / claw-launcher.sh:69). The
+    default is decoupled from DB_PATH — deriving it from db_path.parent would
+    diverge from the shell when DB_PATH is customized, missing real backups and
+    silently recreating an empty DB (Codex #225 P1)."""
     env = os.getenv("CLAW_RESTART_DB_BACKUP_DIR")
     if env:
         return Path(env)
-    return Path(db_path).parent / "backups" / "restart"
+    repo_root = Path(__file__).resolve().parents[1]
+    return repo_root / "data" / "backups" / "restart"
 
 
 def _alert_runtime_db_halt(config: Any, message: str) -> None:
@@ -2447,8 +2451,28 @@ def _ensure_runtime_db_boot_health(config: Any) -> None:
     backup_dir = _restart_backup_dir(db_path)
     try:
         backups = sorted(backup_dir.glob("*.db")) if backup_dir.is_dir() else []
-    except OSError:
-        backups = []
+    except OSError as exc:
+        # Cannot confirm the ABSENCE of backups (permissions, broken mount, FS
+        # error) — that is not the same as confirming there are none. Fail
+        # closed: halt rather than boot a fresh schema on a possibly-recoverable
+        # loss (CodeRabbit/Codex #225). A genuinely-absent dir returns
+        # is_dir()==False without raising, so a real clean install still boots.
+        detail = f"cannot inspect backup dir {backup_dir} to confirm clean first boot: {exc}"
+        marker = write_runtime_db_halt_marker(
+            db_path, detail, source="build_runtime", reason="runtime_db_backup_dir_unreadable"
+        )
+        logger.critical(
+            "runtime DB backup dir unreadable; halt marker written: %s (%s)", marker, detail
+        )
+        _alert_runtime_db_halt(
+            config,
+            (
+                "🛑 Claw no arrancó: la DB de runtime está ausente/vacía y no pude inspeccionar "
+                f"el dir de backups ({backup_dir}: {exc}) para confirmar un primer boot limpio. "
+                f"Marca de halt en {marker}; el boot queda en hold. Revisa el dir de backups."
+            ),
+        )
+        raise RuntimeDatabaseError(detail)
     if not backups:
         # Legitimate clean first boot: no DB and no backups. Proceed silently
         # so an actual fresh install works.

@@ -231,15 +231,22 @@ class MissingDbBootHaltTests(unittest.TestCase):
         backup_dir.mkdir(parents=True, exist_ok=True)
         _make_healthy_db(backup_dir / "claw-20260707-120000.db")
 
-    def test_missing_db_with_backups_halts(self) -> None:
+    def _run(self, config, backup_dir: Path):
+        # The default backup dir is now repo-root-relative (matches the shell),
+        # so tests pin it explicitly via the env override — the shared contract.
         from claw_v2.main import _ensure_runtime_db_boot_health
 
+        with patch.dict("os.environ", {"CLAW_RESTART_DB_BACKUP_DIR": str(backup_dir)}):
+            _ensure_runtime_db_boot_health(config)
+
+    def test_missing_db_with_backups_halts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "claw.db"  # absent
-            self._seed_backup(Path(tmpdir) / "backups" / "restart")
+            backup_dir = Path(tmpdir) / "backups" / "restart"
+            self._seed_backup(backup_dir)
 
             with self.assertRaises(RuntimeDatabaseError):
-                _ensure_runtime_db_boot_health(self._config(db_path))
+                self._run(self._config(db_path), backup_dir)
 
             marker = runtime_db_halt_marker_path(db_path)
             self.assertTrue(marker.exists())
@@ -248,68 +255,79 @@ class MissingDbBootHaltTests(unittest.TestCase):
             self.assertEqual(payload["source"], "build_runtime")
 
     def test_empty_db_with_backups_halts(self) -> None:
-        from claw_v2.main import _ensure_runtime_db_boot_health
-
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "claw.db"
             db_path.write_bytes(b"")  # size 0
-            self._seed_backup(Path(tmpdir) / "backups" / "restart")
+            backup_dir = Path(tmpdir) / "backups" / "restart"
+            self._seed_backup(backup_dir)
 
             with self.assertRaises(RuntimeDatabaseError):
-                _ensure_runtime_db_boot_health(self._config(db_path))
+                self._run(self._config(db_path), backup_dir)
             self.assertTrue(runtime_db_halt_marker_path(db_path).exists())
 
     def test_missing_db_without_backups_is_clean_first_boot(self) -> None:
-        from claw_v2.main import _ensure_runtime_db_boot_health
-
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "claw.db"  # absent, no backups dir
+            db_path = Path(tmpdir) / "claw.db"  # absent
+            backup_dir = Path(tmpdir) / "backups" / "restart"  # never created
 
-            _ensure_runtime_db_boot_health(self._config(db_path))  # must NOT raise
+            self._run(self._config(db_path), backup_dir)  # must NOT raise
 
             self.assertFalse(runtime_db_halt_marker_path(db_path).exists())
 
     def test_valid_db_with_backups_boots_normally(self) -> None:
-        from claw_v2.main import _ensure_runtime_db_boot_health
-
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "claw.db"
             _make_healthy_db(db_path)
-            self._seed_backup(Path(tmpdir) / "backups" / "restart")
+            backup_dir = Path(tmpdir) / "backups" / "restart"
+            self._seed_backup(backup_dir)
 
-            _ensure_runtime_db_boot_health(self._config(db_path))  # must NOT raise
+            self._run(self._config(db_path), backup_dir)  # must NOT raise
             self.assertFalse(runtime_db_halt_marker_path(db_path).exists())
 
-    def test_backup_dir_honors_env_override(self) -> None:
+    def test_unreadable_backup_dir_fails_closed(self) -> None:
+        # CodeRabbit/Codex #225: an OSError listing the backup dir must NOT be
+        # treated as "no backups" (silent fresh schema) — it must halt.
         from claw_v2.main import _ensure_runtime_db_boot_health
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "claw.db"  # absent
-            alt_backup = Path(tmpdir) / "elsewhere"
-            self._seed_backup(alt_backup)
+            backup_dir = Path(tmpdir) / "backups" / "restart"
+            backup_dir.mkdir(parents=True)
 
-            with patch.dict("os.environ", {"CLAW_RESTART_DB_BACKUP_DIR": str(alt_backup)}):
-                with self.assertRaises(RuntimeDatabaseError):
-                    _ensure_runtime_db_boot_health(self._config(db_path))
-            self.assertTrue(runtime_db_halt_marker_path(db_path).exists())
+            def _boom(self, pattern):
+                raise OSError("simulated FS error listing backups")
+
+            with patch.dict("os.environ", {"CLAW_RESTART_DB_BACKUP_DIR": str(backup_dir)}):
+                with patch.object(Path, "glob", _boom):
+                    with self.assertRaises(RuntimeDatabaseError):
+                        _ensure_runtime_db_boot_health(self._config(db_path))
+
+            marker = runtime_db_halt_marker_path(db_path)
+            self.assertTrue(marker.exists())
+            self.assertEqual(
+                json.loads(marker.read_text(encoding="utf-8"))["reason"],
+                "runtime_db_backup_dir_unreadable",
+            )
 
     def test_missing_db_halt_alerts_owner(self) -> None:
         from claw_v2 import main as main_module
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "claw.db"
-            self._seed_backup(Path(tmpdir) / "backups" / "restart")
+            backup_dir = Path(tmpdir) / "backups" / "restart"
+            self._seed_backup(backup_dir)
             config = SimpleNamespace(
                 db_path=db_path, telegram_bot_token="t", telegram_allowed_user_id="c"
             )
             sent: list[tuple[str, str, str]] = []
-            with patch.object(
-                main_module,
-                "send_telegram_message",
-                side_effect=lambda tok, ch, txt: sent.append((tok, ch, txt)),
-            ):
-                with self.assertRaises(RuntimeDatabaseError):
-                    main_module._ensure_runtime_db_boot_health(config)
+            with patch.dict("os.environ", {"CLAW_RESTART_DB_BACKUP_DIR": str(backup_dir)}):
+                with patch.object(
+                    main_module,
+                    "send_telegram_message",
+                    side_effect=lambda tok, ch, txt: sent.append((tok, ch, txt)),
+                ):
+                    with self.assertRaises(RuntimeDatabaseError):
+                        main_module._ensure_runtime_db_boot_health(config)
             self.assertEqual(len(sent), 1)
             self.assertIn("DESAPARECIÓ", sent[0][2])
 

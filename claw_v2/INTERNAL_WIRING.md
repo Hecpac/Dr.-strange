@@ -1096,9 +1096,13 @@ invariants:
           launcher hold-loop and clear-on-restore (Slice 2a plumbing) take over
           verbatim — hold until a backup is restored to the DB path. A genuine
           clean first boot (no DB AND no backups) proceeds silently so a fresh
-          install works. The backup dir is read from CLAW_RESTART_DB_BACKUP_DIR
-          (default <db-parent>/backups/restart), the same env the shell reads,
-          not a parallel literal. NAMED RESIDUAL: a DB created then deleted
+          install works. The backup dir is read from CLAW_RESTART_DB_BACKUP_DIR,
+          else data/backups/restart relative to the repo root — computed
+          EXACTLY as the shell does (decoupled from DB_PATH, not db_path.parent,
+          which would diverge under a custom DB_PATH). An OSError inspecting the
+          backup dir FAILS CLOSED (halt), because "cannot confirm the backups
+          are absent" is not "confirmed absent" — only an is_dir()==False
+          (genuinely-absent dir) proceeds as a clean boot. NAMED RESIDUAL: a DB created then deleted
           BEFORE its first restart-backup ever existed has 0 backups → treated
           as clean first boot (the narrow window a sibling provisioned-marker
           would close; accepted as rare).
