@@ -1048,8 +1048,11 @@ invariants:
           carries no computer-use token), and a delegated desktop-GUI objective
           — mode ops/publish, no browser signal, unambiguous literal desktop
           marker per bot_helpers._looks_like_desktop_gui_objective (computer-use
-          by name, qualified app-launch phrasing, or escritorio/desktop tied to
-          a GUI noun/verb; a miss falls through to the coordinator, never to a
+          by name, qualified app-launch phrasing, an instrumental "usa el
+          escritorio / use the desktop", or escritorio/desktop tied to a GUI
+          NOUN — never bare open verbs, so a file-destination "al/en el
+          escritorio" with an unrelated abre/open elsewhere stays with the
+          coordinator; a miss falls through to the coordinator, never to a
           false decline) — is DECLINED synchronously at
           TaskHandler.start_autonomous_task with the user-safe
           _NO_DESKTOP_LANE_BLOCKER (names the inline /computer path) BEFORE any

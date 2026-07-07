@@ -218,15 +218,30 @@ _X_BROWSER_ACTION_RE = re.compile(
 # matching these is declined honestly at TaskHandler.start_autonomous_task
 # instead of silently landing in the GUI-less Codex coordinator. Per the
 # Routing Contract, capture only what is unambiguous from the literal text:
-# "computer-use" by name, or desktop/escritorio tied to a GUI noun/verb. Bare
-# "escritorio"/"desktop" alone is NOT a signal — "guarda el archivo en el
-# escritorio" is a filesystem op the coordinator CAN run. Matching happens on
+# "computer-use" by name, an instrumental "usa el escritorio / use the
+# desktop", or desktop/escritorio tied to a GUI NOUN. Bare
+# "escritorio"/"desktop" alone is NOT a signal, and neither are generic open
+# verbs (CodeRabbit, PR #230): "sube el archivo al escritorio y abre un PR" is
+# a filesystem/coordinator task — the location adverbial ("al/en el
+# escritorio") plus an unrelated "abre/open" elsewhere must not read as GUI
+# intent. App launching is detected ONLY through the curated
+# _APP_LAUNCH_ACTION_TOKENS phrasings. Matching happens on
 # _normalize_command_text output (lowercased, accents folded).
 _COMPUTER_USE_TOKEN_RE = re.compile(r"\bcomputer[-_\s]?use\b")
 _DESKTOP_HOST_TOKEN_RE = re.compile(r"\b(?:escritorio|desktop)\b")
 _DESKTOP_GUI_QUALIFIER_RE = re.compile(
     r"\b(?:apps?|aplicacion(?:es)?|programas?|ventanas?|windows?|gui|mouse|raton|"
-    r"teclados?|keyboards?|click|clic|pantallas?|screenshots?|abre|abrir|open)\b"
+    r"teclados?|keyboards?|click|clic|pantallas?|screenshots?)\b"
+)
+# Instrumental construction: the desktop as the tool being driven ("usa el
+# escritorio para..."), not a file destination. Curated, like the app-launch
+# tokens — never bare verbs.
+_DESKTOP_INSTRUMENT_TOKENS = (
+    "usa el escritorio",
+    "usar el escritorio",
+    "usando el escritorio",
+    "use the desktop",
+    "using the desktop",
 )
 _X_PLATFORM_RE = re.compile(
     r"\b(?:x/twitter|twitter|x\.com)\b"
@@ -2385,6 +2400,8 @@ def _looks_like_desktop_gui_objective(text: str) -> bool:
     if _COMPUTER_USE_TOKEN_RE.search(normalized):
         return True
     if any(token in normalized for token in _APP_LAUNCH_ACTION_TOKENS):
+        return True
+    if any(token in normalized for token in _DESKTOP_INSTRUMENT_TOKENS):
         return True
     return (
         _DESKTOP_HOST_TOKEN_RE.search(normalized) is not None

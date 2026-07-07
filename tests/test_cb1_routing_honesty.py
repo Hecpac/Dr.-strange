@@ -131,6 +131,23 @@ class DesktopGuiObjectiveRecognizerTests(unittest.TestCase):
         ):
             self.assertFalse(_looks_like_desktop_gui_objective(objective), objective)
 
+    def test_desktop_as_file_destination_with_open_verb_elsewhere_is_not_gui(self) -> None:
+        # CodeRabbit (PR #230): generic open verbs were qualifiers, so a
+        # filesystem/coordinator task mentioning the desktop as a LOCATION plus
+        # an unrelated "abre/open" elsewhere read as desktop-GUI and got
+        # falsely declined. The location adverbial ("al/en el escritorio") is
+        # not GUI intent; app launching is detected only through the curated
+        # _APP_LAUNCH_ACTION_TOKENS, the desktop-as-instrument only through
+        # _DESKTOP_INSTRUMENT_TOKENS.
+        for objective in (
+            "sube el archivo al escritorio y abre un PR",
+            "abre el reporte de ventas y guarda una copia en el escritorio",
+            "open a PR and save the export to the desktop folder",
+            "copia el log al escritorio y abre un issue en el repo",
+            "descarga el CSV, muévelo al escritorio y abre el ticket",
+        ):
+            self.assertFalse(_looks_like_desktop_gui_objective(objective), objective)
+
 
 class DesktopDelegationGuardTests(unittest.TestCase):
     def _handler(self, coordinator, root: Path) -> tuple[TaskHandler, MemoryStore, ObserveStream]:
