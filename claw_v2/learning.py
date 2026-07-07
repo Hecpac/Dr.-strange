@@ -21,6 +21,84 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# A3.9 (2026-07-07): transient-vs-replayable taxonomy. A transient
+# browser/computer failure (timeout, iteration limit, no result, scope drift,
+# backend unavailable) is telemetry, not knowledge — replaying it as a
+# <learned_lesson> poisons future turns with stale one-off noise. Scoped to
+# GENERIC transients on automation task types (plus explicitly typed transient
+# reason codes from callers); coding/pipeline lessons — where "timeout" in a
+# pytest snippet IS a real lesson — and user/task corrections are untouched.
+_TRANSIENT_AUTOMATION_TASK_TYPES = frozenset({"browse", "browser", "computer"})
+_TRANSIENT_REASON_CODES = frozenset(
+    {
+        "timeout",
+        "iteration_limit",
+        "no_result",
+        "no_response",
+        "empty_result",
+        "scope_drift",
+        "browser_unavailable",
+        "cdp_unavailable",
+        "browser_transient_failure",
+        "computer_transient_failure",
+        "transient_failure",
+    }
+)
+# marker -> enum-slug reason (telemetry carries the slug, never free text).
+_TRANSIENT_FAILURE_MARKERS = (
+    ("timed out", "timeout"),
+    ("timeout", "timeout"),
+    ("iteration limit", "iteration_limit"),
+    ("iteration_limit", "iteration_limit"),
+    ("(no result)", "no_result"),
+    ("no result", "no_result"),
+    ("(no response)", "no_response"),
+    ("no response", "no_response"),
+    ("scope drift", "scope_drift"),
+    ("scope_drift", "scope_drift"),
+    ("browser unavailable", "browser_unavailable"),
+    ("browser_use unavailable", "browser_unavailable"),
+    ("browser_unavailable", "browser_unavailable"),
+    ("cdp unavailable", "cdp_unavailable"),
+    ("cdp_unavailable", "cdp_unavailable"),
+    ("transient", "transient_failure"),
+)
+
+
+_URL_TOKEN_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+
+
+def _classify_transient_automation_failure(
+    *,
+    task_type: str,
+    outcome: str,
+    error_snippet: str | None,
+    reason_code: str | None,
+    retryable: bool | None,
+) -> str | None:
+    """Return an enum-slug transient reason, or None when the outcome may
+    persist as a lesson. Success never gates; an explicitly non-retryable
+    failure is not transient; a typed transient reason_code gates regardless
+    of task type. Marker sniffing applies only to automation task types and
+    scans ONLY the controlled failure text (error_snippet) with URL tokens
+    stripped — never the description, which carries raw URLs/object text
+    (review PR #231: a URL slug like /timeout-policy must not classify a
+    non-transient failure as transient)."""
+    if outcome == "success":
+        return None
+    if retryable is False:
+        return None
+    normalized_code = (reason_code or "").strip().lower()
+    if normalized_code in _TRANSIENT_REASON_CODES:
+        return normalized_code
+    if task_type not in _TRANSIENT_AUTOMATION_TASK_TYPES:
+        return None
+    haystack = _URL_TOKEN_RE.sub(" ", error_snippet or "").lower()
+    for marker, slug in _TRANSIENT_FAILURE_MARKERS:
+        if marker in haystack:
+            return slug
+    return None
+
 
 @dataclass(slots=True)
 class SparsityMetrics:
@@ -37,6 +115,10 @@ class LearningLoop:
     router: LLMRouter | None = None
     observe: ObserveStream | None = None
     _last_outcome_id: int | None = field(default=None, repr=False)
+    # A3.9 review: when the last record() call skipped a transient, implicit
+    # feedback (outcome_id=None) must not fall through to a STALE previous
+    # outcome (_last_outcome_id or the DB's last row). Explicit ids still work.
+    _last_record_transient_skipped: bool = field(default=False, repr=False)
 
     # --- Record ---
 
@@ -53,8 +135,45 @@ class LearningLoop:
         lesson: str | None = None,
         tags: list[str] | None = None,
         predicted_confidence: float | None = None,
-    ) -> int:
-        """Record a task outcome with embedding. Derives lesson+tags via LLM if not provided."""
+        reason_code: str | None = None,
+        retryable: bool | None = None,
+    ) -> int | None:
+        """Record a task outcome with embedding. Derives lesson+tags via LLM if not provided.
+
+        A3.9: a transient automation failure (typed transient ``reason_code``,
+        or generic transient markers on browse/browser/computer task types) is
+        NOT persisted as a replayable lesson — it emits
+        ``learning_transient_skipped`` and returns None.
+        """
+        transient_reason = _classify_transient_automation_failure(
+            task_type=task_type,
+            outcome=outcome,
+            error_snippet=error_snippet,
+            reason_code=reason_code,
+            retryable=retryable,
+        )
+        self._last_record_transient_skipped = transient_reason is not None
+        if transient_reason is not None:
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "learning_transient_skipped",
+                        payload={
+                            "task_type": task_type,
+                            "outcome": outcome,
+                            "reason": transient_reason,
+                            "reason_code": (reason_code or "").strip().lower() or None,
+                        },
+                    )
+                except Exception:
+                    logger.debug("learning_transient_skipped emit failed", exc_info=True)
+            logger.info(
+                "Learning loop skipped transient %s outcome (%s/%s)",
+                transient_reason,
+                task_type,
+                outcome,
+            )
+            return None
         if not lesson:
             lesson, derived_tags = self._derive_outcome_metadata(
                 description,
@@ -264,6 +383,11 @@ class LearningLoop:
 
     def feedback(self, outcome_id: int | None, rating: str) -> str:
         """Attach user feedback (positive/negative/note) to the most recent or specified outcome."""
+        if outcome_id is None and self._last_record_transient_skipped:
+            return (
+                "Last outcome was a skipped transient automation failure; "
+                "nothing was recorded to rate. Pass an explicit outcome id."
+            )
         oid = outcome_id or self._last_outcome_id or self.memory.last_outcome_id()
         if not oid:
             return "No outcomes recorded yet."
