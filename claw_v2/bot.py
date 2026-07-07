@@ -17,7 +17,7 @@ from claw_v2.agents import AutoResearchAgentService
 from claw_v2.agent_handler import AgentHandler
 from claw_v2.browse_handler import BrowseHandler
 from claw_v2.task_handler import TaskHandler
-from claw_v2.approval import ApprovalManager
+from claw_v2.approval import ApprovalManager, PendingApproval
 from claw_v2.approval_gate import ApprovalPending, approved_tool_invocation
 from claw_v2.brain import BrainService
 from claw_v2.bot_commands import BotCommand, CommandContext, dispatch_commands
@@ -43,7 +43,13 @@ from claw_v2.computer_handler import ComputerHandler
 from claw_v2.design_handler import DesignHandler
 from claw_v2.nlm_handler import NlmHandler
 from claw_v2.natural_language_renderer import NaturalLanguageRenderer
-from claw_v2.state_handler import StateHandler, _BrainShortcut, reply_context_fresh
+from claw_v2.state_handler import (
+    PENDING_ACTION_MAX_MESSAGE_DELTA,
+    StateHandler,
+    _BrainShortcut,
+    _contains_sensitive_redaction,
+    reply_context_fresh,
+)
 from claw_v2.semantic_turn import SemanticTurn, classify_semantic_turn
 from claw_v2.terminal_handler import TerminalHandler
 from claw_v2.task_ledger import TERMINAL_STATUSES
@@ -118,7 +124,19 @@ _BACKGROUND_MONITOR_PROMISE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsobreviv[ae]\s+(?:a\s+)?interrupciones?\b", re.IGNORECASE),
     re.compile(r"\bmonitore(?:ar|o|ando|aré|are|e|é)\b", re.IGNORECASE),
     re.compile(r"\bte\s+aviso\s+cuando\b", re.IGNORECASE),
-    re.compile(r"\blo\s+dejo\s+(?:corriendo|trabajando|en\s+background)\b", re.IGNORECASE),
+    # Bot breakage diagnosis 2026-07-06: the brain claimed a task was still
+    # going ("La que está corriendo (tg-…)", "Lo dejé corriendo", "Te aviso al
+    # cerrar") over a task that had already FAILED, and this recognizer's
+    # blindness to those phrasings let the guard exit before its evidence
+    # check. Only TASK-REFERENCE / left-running / notification-promise phrases
+    # are added — NOT a bare "está en marcha / está corriendo", which collides
+    # with a truthful app-launch/process-start status ("La Calculadora ya está
+    # en marcha") and would nuke a legitimate confirmation (CodeRabbit #222,
+    # the same false-positive class Hector flagged). Completion claims
+    # (listo/ya quedó/hecho) stay excluded — those are the evidence gate's.
+    re.compile(r"\bla\s+que\s+est[aá]\s+corriendo\b", re.IGNORECASE),
+    re.compile(r"\bte\s+aviso\s+al\s+(?:cerrar|terminar|acabar)\b", re.IGNORECASE),
+    re.compile(r"\blo\s+dej(?:o|é|e)\s+(?:corriendo|trabajando|en\s+background)\b", re.IGNORECASE),
     re.compile(r"\bsin\s+intervenci[oó]n\s+tuya\b", re.IGNORECASE),
     re.compile(r"\bno\s+necesit[aá]s\s+hacer\s+nada\b", re.IGNORECASE),
     re.compile(r"\bpolling\b|\bpoll(?:ea|ear|ando|ando)\b", re.IGNORECASE),
@@ -142,6 +160,12 @@ _BRAIN_TOOLUSE_VERIFIED_ACTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\blisto\s+(?:logueado|loggeado|logged\s+in)\b", re.IGNORECASE),
     re.compile(r"\b(?:arranca|arrancar|empieza|inicia)\s+con\s+(?:el\s+)?plan\b", re.IGNORECASE),
 )
+# F4-B2a: window for executing a retained draft via «ejecútalo». Longer than
+# the native pending-action TTL (the owner's observed pattern is repeat →
+# pivot → come back); the resolver honors this via pending_action_meta
+# ttl_seconds, so no read-path change is needed.
+EVIDENCE_GATE_RETAINED_DRAFT_TTL_SECONDS = 30 * 60
+
 _BACKGROUND_MONITOR_ACTIVE_JOB_STATUSES = ("queued", "running", "waiting_approval", "retrying")
 _BACKGROUND_MONITOR_ACTIVE_TASK_STATUSES = ("queued", "running")
 _NOTEBOOKLM_UUID_RE = re.compile(
@@ -801,6 +825,26 @@ def _format_approval_pending(exc: ApprovalPending) -> str:
         )
     else:
         lines.append(f"Comando: `/approve {exc.approval_id} {exc.token}`")
+    return "\n\n".join(lines)
+
+
+def _format_approval_reissued(reissued: PendingApproval) -> str:
+    """Telegram-ready instructions for a reissued approval (Slice 1a): the
+    original request message never reached Hector, so resend the command with
+    the rotated token. Mirrors `_format_approval_pending`'s confirmation
+    branch — sensitive approvals surface the exact confirmation, never the token."""
+    lines = [
+        f"🔁 Token re-emitido para `{reissued.approval_id}` — ventana TTL reiniciada.",
+        f"Resumen: {reissued.summary}",
+    ]
+    if reissued.required_confirmation:
+        lines.append(f"Risk code: `{reissued.risk_code}`")
+        lines.append(
+            f"Confirmación exacta: `/approve {reissued.approval_id} "
+            f"{reissued.required_confirmation}`"
+        )
+    else:
+        lines.append(f"Comando: `/approve {reissued.approval_id} {reissued.token}`")
     return "\n\n".join(lines)
 
 
@@ -2328,15 +2372,24 @@ class BotService:
             )
         stripped = self._strip_unsupported_background_monitor_claims(content)
         if stripped != content and stripped and not self._claims_background_monitor(stripped):
+            # Bot breakage diagnosis 2026-07-06 decision #2: don't silently drop
+            # the false "ya está en marcha" — correct it with the truth. If the
+            # session's task terminalized as failed/blocked, name it and offer a
+            # retry so the owner learns their request died instead of re-asking
+            # into silence (the Calculadora incident: re-asked 4× over a task
+            # that had already failed).
+            note = self._background_monitor_failed_task_note(session_id)
+            corrected = f"{stripped}\n\n{note}".strip() if note else stripped
             self._emit_safe(
                 "background_monitor_claim_stripped",
                 {
                     "session_id": session_id,
                     "user_text_preview": user_text[:120],
                     "reason": evidence.get("reason") or "no_durable_monitor",
+                    "truth_corrected": bool(note),
                 },
             )
-            return stripped
+            return corrected
         if stripped == content and not durable_dispatch_claim:
             # No single line carried the monitor claim: the only trigger was the
             # cross-line DOTALL promise pattern matching over otherwise-unrelated
@@ -2359,6 +2412,33 @@ class BotService:
             reason=evidence.get("reason") or "no_durable_monitor",
         )
 
+    def _background_monitor_failed_task_note(self, session_id: str) -> str:
+        """Truth-correction context for a stripped background-monitor promise.
+
+        If the session's active_task terminalized as failed/blocked, name it and
+        offer a retry so the stripped false promise is replaced by the real
+        state instead of silence (bot breakage diagnosis 2026-07-06 decision #2).
+        Returns "" when there is no failed task to reference.
+        """
+        try:
+            state = self.brain.memory.get_session_state(session_id)
+        except Exception:
+            return ""
+        active_object = state.get("active_object") if isinstance(state, dict) else None
+        active_task = active_object.get("active_task") if isinstance(active_object, dict) else None
+        if not isinstance(active_task, dict):
+            return ""
+        status = str(active_task.get("status") or "").lower()
+        if status not in {"failed", "blocked"}:
+            return ""
+        status_str = self._public_operational_task_state(status)
+        objective = _compact_summary(str(active_task.get("objective") or ""), limit=120)
+        tail = f" («{objective}»)" if objective else ""
+        return (
+            f"Para ser claro: la tarea anterior{tail} terminó {status_str} y no hay "
+            "nada corriendo en background. Dime si la reintento."
+        )
+
     def _background_monitor_replacement(
         self,
         *,
@@ -2372,12 +2452,19 @@ class BotService:
             "en background. Para dejarlo corriendo hace falta crear un job "
             "durable o reanudarlo manualmente."
         )
+        # Decision #2 (bot breakage 2026-07-06): if a task terminalized as
+        # failed, name it and offer a retry so the correction is the truth, not
+        # a generic "nothing registered".
+        note = self._background_monitor_failed_task_note(session_id)
+        if note:
+            replacement = f"{replacement}\n\n{note}"
         self._emit_safe(
             "background_monitor_claim_rejected",
             {
                 "session_id": session_id,
                 "user_text_preview": user_text[:120],
                 "reason": reason,
+                "truth_corrected": bool(note),
             },
         )
         return replacement
@@ -4785,8 +4872,14 @@ class BotService:
             BotCommand(
                 "approvals",
                 self._handle_approvals_command,
-                exact=("/approvals",),
-                prefixes=("/approval_status ", "/approve ", "/task_approve ", "/task_abort "),
+                exact=("/approvals", "/reissue"),
+                prefixes=(
+                    "/approval_status ",
+                    "/approve ",
+                    "/reissue ",
+                    "/task_approve ",
+                    "/task_abort ",
+                ),
             ),
             BotCommand(
                 "traces",
@@ -5501,6 +5594,19 @@ class BotService:
                 return "usage: /approve <approval_id> <token|CONFIRMO risk_code>"
             approved = self.approvals.approve(parts[1], parts[2])
             return "approval recorded" if approved else "approval rejected"
+        if stripped == "/reissue" or stripped.startswith("/reissue "):
+            parts = stripped.split(maxsplit=1)
+            if len(parts) != 2:
+                return "usage: /reissue <approval_id>"
+            approval_id = parts[1].strip()
+            try:
+                reissued = self.approvals.reissue(approval_id)
+            except FileNotFoundError:
+                return f"approval not found: {approval_id}"
+            if reissued is None:
+                status = self.approvals.status(approval_id)
+                return f"reissue rejected: approval {approval_id} is {status}"
+            return _format_approval_reissued(reissued)
         if stripped.startswith("/task_approve "):
             parts = stripped.split(maxsplit=2)
             if len(parts) != 3:
@@ -7129,6 +7235,40 @@ class BotService:
             "No marco la accion como completada sin ejecucion verificable."
         )
 
+    def _build_retained_draft_directive(
+        self,
+        *,
+        source_text: str,
+        blocked_content: str,
+        reason: str,
+    ) -> str | None:
+        """F4-B2a: turn the FULL retained draft into an executable pending action.
+
+        «ejecútalo» after a retention used to re-derive from scratch because the
+        draft was overwritten with the canned message. Refuses secret-shaped
+        drafts (PR 0D parity with the state write-path); the continuation
+        read-path re-checks sensitivity, TTL, topic coherence, and the
+        destructive-objective guard before executing.
+        """
+        draft = (blocked_content or "").strip()
+        if not draft:
+            return None
+        # _is_secret_shaped_token validates a SINGLE high-entropy token and
+        # returns False on any whitespace, so it must run per-token — a
+        # multi-word draft with an embedded secret would otherwise slip
+        # through (PR 0D parity, gemini review #221).
+        if _contains_sensitive_redaction(draft) or any(
+            _is_secret_shaped_token(token) for token in draft.split()
+        ):
+            return None
+        request = _compact_summary(source_text, limit=200) or "la petición previa"
+        return (
+            "Ejecuta AHORA, con tools reales o delegate_task, lo que este borrador "
+            f"retenido prometía para «{request}» — no lo narres: hazlo y muestra "
+            f"evidencia. El evidence gate lo retuvo por {reason}. Borrador retenido:\n"
+            f"---\n{draft}"
+        )
+
     def _record_evidence_gate_explicit_blocker(
         self,
         *,
@@ -7191,6 +7331,42 @@ class BotService:
             "reason": reason,
             "updated_at": time.time(),
         }
+        # F4-B2a: preserve the full retained draft as the session's pending
+        # action so the existing continuation resolver executes the REAL plan
+        # on «ejecútalo» instead of re-deriving from the canned message. The
+        # post-turn state write preserves it (the canned reply matches no
+        # pending-action extractor pattern) and the resolver honors the meta
+        # ttl_seconds, so no parallel store or TTL literal is introduced.
+        state_update: dict[str, Any] = {}
+        retained_directive = self._build_retained_draft_directive(
+            source_text=source_text,
+            blocked_content=blocked_content,
+            reason=reason,
+        )
+        if retained_directive is not None:
+            last_message_id = 0
+            try:
+                last_message_id = int(self.brain.memory.last_message_id(session_id))
+            except Exception:
+                last_message_id = 0
+            now = time.time()
+            active_object["pending_action_meta"] = {
+                "created_at": now,
+                "created_message_id": last_message_id,
+                "max_message_delta": PENDING_ACTION_MAX_MESSAGE_DELTA,
+                "source": "evidence_gate_retained_draft",
+                "ttl_seconds": EVIDENCE_GATE_RETAINED_DRAFT_TTL_SECONDS,
+                "tier_hint": "unknown",
+                "topic": _compact_summary(source_text, limit=140) or "",
+                "task_id": task_id,
+            }
+            active_object["last_actionable_proposal"] = {
+                "objective": retained_directive[:500],
+                "source": "evidence_gate_retained_draft",
+                "created_at": now,
+                "created_message_id": last_message_id,
+            }
+            state_update["pending_action"] = retained_directive
         self.brain.memory.update_session_state(
             session_id,
             verification_status="blocked",
@@ -7201,6 +7377,7 @@ class BotService:
                 "task_id": task_id,
                 "reason": reason,
             },
+            **state_update,
         )
         self._emit_safe(
             "evidence_gate_explicit_blocker_recorded",
@@ -7208,14 +7385,15 @@ class BotService:
                 "session_id": session_id,
                 "task_id": task_id,
                 "reason": reason,
+                "retained_draft_preserved": retained_directive is not None,
             },
         )
         return task_id
 
     def _pending_evidence_response(self, task_id: str | None = None) -> str:
         return (
-            "Retuve mi respuesta: afirmaba un resultado sin evidencia de ejecución "
-            "en este turno. Dime «ejecútalo» y lo corro con evidencia, o "
+            "Retuve mi respuesta: afirmaba un resultado sin evidencia en este turno. "
+            "Dime «ejecútalo» y ejecuto lo que el borrador prometía, o "
             "«usa tu conocimiento» y te respondo directo."
         )
 
@@ -7230,7 +7408,7 @@ class BotService:
     def _unexecuted_start_response(self, task_id: str | None = None) -> str:
         return (
             "No ejecuté nada aún: mi respuesta afirmaba un arranque sin evidencia. "
-            "Dime «ejecútalo» y lo disparo con evidencia real."
+            "Dime «ejecútalo» y ejecuto lo que ese borrador prometía, con evidencia real."
         )
 
     def _emit_identity_capability_binding_guard(
@@ -9197,13 +9375,27 @@ class BotService:
 
         pending_action = str(state.get("pending_action") or "").strip()
         if pending_action:
-            return self._telegram_continuation_shortcut(
-                session_id,
-                text,
-                pending_action,
-                source="pending_action",
-                state=state,
-            ), "pending_action"
+            # F4-B2a: a retained evidence-gate draft lives in this generic slot
+            # but carries a TTL/message-delta guard in pending_action_meta. The
+            # Telegram continuation path does not run StateHandler's freshness
+            # check, so honor it here — otherwise a stale retained draft could
+            # execute via `continúa`/`procede` instead of expiring and
+            # re-deriving as the invariant promises (codex review #221).
+            meta = (state.get("active_object") or {}).get("pending_action_meta") or {}
+            if meta.get("source") == "evidence_gate_retained_draft" and not (
+                self._state_handler._pending_action_still_fresh(state, session_id=session_id)
+            ):
+                self._state_handler._expire_pending_action(
+                    session_id, state, reason="evidence_gate_retained_draft_stale"
+                )
+            else:
+                return self._telegram_continuation_shortcut(
+                    session_id,
+                    text,
+                    pending_action,
+                    source="pending_action",
+                    state=state,
+                ), "pending_action"
 
         proposal = self._last_actionable_proposal(state)
         if proposal:

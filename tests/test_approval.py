@@ -483,5 +483,126 @@ diff --git a/package-lock.json b/package-lock.json
             self.assertEqual(len(manager.list_pending()), 1)
 
 
+class ApprovalReissueTests(unittest.TestCase):
+    """Slice 1a (blind-spot pass 2026-07-06): a failed Telegram send left the
+    raw token unrecoverable (hash-only on disk by design). ``reissue`` rotates
+    the token of a still-pending record and restarts its TTL window without
+    weakening hash-only persistence or single-use resolution."""
+
+    def test_reissue_rotates_token_and_restarts_ttl_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            pending = manager.create("deploy", "Deploy to production")
+            path = Path(tmpdir) / f"{pending.approval_id}.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            aged_created = time.time() - (APPROVAL_TTL_SECONDS - 10)
+            payload["created_at"] = aged_created
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            reissued = manager.reissue(pending.approval_id)
+
+            assert reissued is not None
+            self.assertEqual(reissued.approval_id, pending.approval_id)
+            self.assertNotEqual(reissued.token, pending.token)
+            record = manager.read(pending.approval_id)
+            self.assertEqual(record["status"], "pending")
+            self.assertGreater(record["created_at"], aged_created + APPROVAL_TTL_SECONDS / 2)
+            self.assertAlmostEqual(record["first_created_at"], aged_created, delta=1.0)
+            self.assertEqual(record["reissue_count"], 1)
+            self.assertTrue(manager.approve(pending.approval_id, reissued.token))
+
+    def test_old_token_is_invalid_immediately_after_reissue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            pending = manager.create("deploy", "Deploy to production")
+
+            reissued = manager.reissue(pending.approval_id)
+
+            assert reissued is not None
+            # Existing wrong-token semantics: the stale token resolves the
+            # record to rejected — it can never authorize the action.
+            self.assertFalse(manager.approve(pending.approval_id, pending.token))
+            self.assertEqual(manager.status(pending.approval_id), "rejected")
+            # Single-use is preserved: the new token cannot flip a resolved record.
+            self.assertFalse(manager.approve(pending.approval_id, reissued.token))
+            self.assertEqual(manager.status(pending.approval_id), "rejected")
+
+    def test_reissue_refuses_terminal_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            for terminal in ("approved", "rejected", "archived", "expired"):
+                with self.subTest(terminal=terminal):
+                    pending = manager.create("deploy", f"Deploy {terminal}")
+                    path = Path(tmpdir) / f"{pending.approval_id}.json"
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    payload["status"] = terminal
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+
+                    self.assertIsNone(manager.reissue(pending.approval_id))
+                    record = manager.read(pending.approval_id)
+                    self.assertEqual(record["status"], terminal)
+                    self.assertEqual(record["token_hash"], payload["token_hash"])
+                    self.assertNotIn("reissue_count", record)
+
+    def test_reissue_on_ttl_expired_pending_expires_instead_of_rescuing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret", ttl_seconds=60)
+            pending = manager.create("deploy", "Deploy to production")
+            path = Path(tmpdir) / f"{pending.approval_id}.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["created_at"] = time.time() - 120
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            self.assertIsNone(manager.reissue(pending.approval_id))
+            record = manager.read(pending.approval_id)
+            self.assertEqual(record["status"], "expired")
+            self.assertEqual(record["resolved_by"], "expired")
+
+    def test_reissue_missing_record_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            with self.assertRaises(FileNotFoundError):
+                manager.reissue("does-not-exist")
+
+    def test_reissue_emits_event_without_raw_token(self) -> None:
+        class _Observe:
+            def __init__(self) -> None:
+                self.events: list[tuple[str, dict]] = []
+
+            def emit(self, event_type: str, payload: dict) -> None:
+                self.events.append((event_type, payload))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = _Observe()
+            manager = ApprovalManager(Path(tmpdir), "secret", observe=observe)
+            pending = manager.create("deploy", "Deploy to production")
+
+            reissued = manager.reissue(pending.approval_id)
+
+            assert reissued is not None
+            events = [e for e in observe.events if e[0] == "approval_reissued"]
+            self.assertEqual(len(events), 1)
+            serialized = json.dumps(events[0][1])
+            self.assertIn(pending.approval_id, serialized)
+            self.assertNotIn(reissued.token, serialized)
+            self.assertNotIn(pending.token, serialized)
+
+    def test_reissue_preserves_required_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            pending = manager.create(
+                "pipeline:HEC-1",
+                "Approval gate change",
+                diff="diff --git a/claw_v2/approval.py b/claw_v2/approval.py\n",
+            )
+            required = manager.read(pending.approval_id)["metadata"]["required_confirmation"]
+
+            reissued = manager.reissue(pending.approval_id)
+
+            assert reissued is not None
+            self.assertEqual(reissued.required_confirmation, required)
+            self.assertTrue(manager.approve(pending.approval_id, required))
+
+
 if __name__ == "__main__":
     unittest.main()

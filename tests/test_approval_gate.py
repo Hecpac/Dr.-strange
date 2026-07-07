@@ -211,6 +211,86 @@ class BotFormatterTests(unittest.TestCase):
         self.assertIn("[REDACTED]", msg)
         self.assertNotIn("tok-xyz", msg)
 
+    def test_format_approval_reissued_contains_new_command(self) -> None:
+        from claw_v2.approval import PendingApproval
+        from claw_v2.bot import _format_approval_reissued
+
+        reissued = PendingApproval(
+            approval_id="abc123",
+            action="tool:Deploy",
+            summary="Deploy(env)",
+            token="tok-new",
+        )
+        msg = _format_approval_reissued(reissued)
+        self.assertIn("/approve abc123 tok-new", msg)
+        self.assertIn("TTL", msg)
+
+    def test_format_approval_reissued_sensitive_uses_confirmation_not_token(self) -> None:
+        from claw_v2.approval import PendingApproval
+        from claw_v2.bot import _format_approval_reissued
+
+        reissued = PendingApproval(
+            approval_id="abc123",
+            action="pipeline:HEC-1",
+            summary="Approval gate change",
+            token="tok-new",
+            risk_code="RISK-1234ABCD",
+            required_confirmation="CONFIRMO RISK-1234ABCD",
+        )
+        msg = _format_approval_reissued(reissued)
+        self.assertIn("/approve abc123 CONFIRMO RISK-1234ABCD", msg)
+        self.assertNotIn("tok-new", msg)
+
+
+class ApprovalsCommandReissueTests(unittest.TestCase):
+    """Slice 1a: the `/reissue <id>` surface recovers a pending approval whose
+    original send never reached the owner — without resurfacing the old token."""
+
+    @staticmethod
+    def _run_command(manager: ApprovalManager, text: str) -> str:
+        from types import SimpleNamespace
+
+        from claw_v2.bot import BotService
+
+        fake = SimpleNamespace(approvals=manager)
+        context = SimpleNamespace(stripped=text)
+        return BotService._handle_approvals_command(fake, context)  # type: ignore[arg-type]
+
+    def test_reissue_command_replies_with_fresh_approve_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            pending = manager.create("tool:Deploy", "Deploy to production")
+
+            msg = self._run_command(manager, f"/reissue {pending.approval_id}")
+
+            self.assertIn(f"/approve {pending.approval_id} ", msg)
+            self.assertNotIn(pending.token, msg)
+            new_token = msg.split(f"/approve {pending.approval_id} ")[1].split("`")[0].strip()
+            self.assertTrue(manager.approve(pending.approval_id, new_token))
+
+    def test_reissue_command_unknown_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            msg = self._run_command(manager, "/reissue nope123")
+            self.assertIn("not found", msg)
+
+    def test_reissue_command_refuses_resolved_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            pending = manager.create("tool:Deploy", "Deploy to production")
+            self.assertTrue(manager.approve(pending.approval_id, pending.token))
+
+            msg = self._run_command(manager, f"/reissue {pending.approval_id}")
+
+            self.assertIn("approved", msg)
+            self.assertNotIn("/approve ", msg)
+
+    def test_reissue_command_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ApprovalManager(Path(tmpdir), "secret")
+            msg = self._run_command(manager, "/reissue ")
+            self.assertIn("usage", msg)
+
 
 class DaemonContextModeTests(unittest.TestCase):
     """Point 3: `system_approval_mode` flips the shared executor to auto-approve."""

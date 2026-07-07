@@ -84,6 +84,52 @@ def finalize_terminal_notification(
     return True
 
 
+def enqueue_owner_notification(
+    job_service: Any,
+    *,
+    session_id: str,
+    message: str,
+    notification_key: str | None,
+) -> bool:
+    """Persist a terminal-task notification whose Telegram send failed.
+
+    Slice 1b (blind-spot pass 2026-07-06 finding #6): the send callback used to
+    drop the notice with a warning-only log; a durable ``owner_notification``
+    job lets the off-tick drain retry until delivered or stale. The message
+    text is already sanitized by the terminal formatters before it reaches the
+    send path, so persisting it verbatim writes no secrets.
+    """
+    if job_service is None or notification_key is None or not message:
+        return False
+    if not session_id.startswith("tg-"):
+        return False
+    chat_id = session_id.removeprefix("tg-")
+    if not chat_id.isdigit():
+        return False
+    from claw_v2.daemon import (
+        OWNER_NOTIFICATION_JOB_KIND,
+        OWNER_NOTIFICATION_MAX_ATTEMPTS,
+        OWNER_NOTIFICATION_RESUME_PREFIX,
+    )
+
+    try:
+        job_service.enqueue(
+            kind=OWNER_NOTIFICATION_JOB_KIND,
+            payload={
+                "session_id": session_id,
+                "chat_id": chat_id,
+                "message": message,
+                "notification_key": notification_key,
+            },
+            resume_key=f"{OWNER_NOTIFICATION_RESUME_PREFIX}{notification_key}",
+            max_attempts=OWNER_NOTIFICATION_MAX_ATTEMPTS,
+        )
+    except Exception:
+        logger.exception("failed to enqueue owner notification %s", notification_key)
+        return False
+    return True
+
+
 def wire_notebooklm_scheduler_jobs(runtime: Any, nlm_service: NotebookLMService) -> None:
     """Wire NotebookLM cron jobs as enqueue-only handlers with off-tick runners."""
     from claw_v2.cron import ScheduledJob
@@ -665,13 +711,25 @@ async def run() -> int:
             notified_task_ids: set[str] | None = None,
             pending_task_ids: set[str] | None = None,
         ) -> bool:
-            if not session_id.startswith("tg-") or not transport._app:
+            if not session_id.startswith("tg-"):
                 return False
             chat_id_raw = session_id.removeprefix("tg-")
             try:
                 chat_id = int(chat_id_raw)
             except ValueError:
                 logger.warning("Cannot notify non-numeric Telegram session id: %s", session_id)
+                return False
+            if not transport._app:
+                # Transport not started (boot race / telegram disabled): a
+                # terminal-task notification is still owed — queue it for the
+                # durable drain instead of dropping it.
+                if notification_key is not None:
+                    enqueue_owner_notification(
+                        runtime.job_service,
+                        session_id=session_id,
+                        message=message,
+                        notification_key=notification_key,
+                    )
                 return False
             future = asyncio.run_coroutine_threadsafe(
                 transport.send_text(chat_id=chat_id, text=message),
@@ -685,6 +743,8 @@ async def run() -> int:
                     notification_key=notification_key,
                     notified_task_ids=notified_task_ids,
                     pending_task_ids=pending_task_ids,
+                    session_id=session_id,
+                    message=message,
                 )
             )
             return True
@@ -695,6 +755,8 @@ async def run() -> int:
             notification_key: str | None = None,
             notified_task_ids: set[str] | None = None,
             pending_task_ids: set[str] | None = None,
+            session_id: str = "",
+            message: str = "",
         ) -> None:
             try:
                 if (
@@ -709,7 +771,19 @@ async def run() -> int:
                         pending_task_ids=pending_task_ids,
                     )
                     if not delivered:
-                        logger.warning("Telegram session notification was not delivered")
+                        queued = enqueue_owner_notification(
+                            runtime.job_service,
+                            session_id=session_id,
+                            message=message,
+                            notification_key=notification_key,
+                        )
+                        if queued:
+                            logger.warning(
+                                "Telegram session notification was not delivered; "
+                                "queued for durable retry"
+                            )
+                        else:
+                            logger.warning("Telegram session notification was not delivered")
                     return
                 exc = done.exception()
             except Exception as callback_exc:

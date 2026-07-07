@@ -266,6 +266,55 @@ class ApprovalManager:
         self._emit_resolution_event(result, resolved_at=now)
         return approved
 
+    def reissue(self, approval_id: str) -> PendingApproval | None:
+        """Rotate the token of a still-pending approval and restart its TTL
+        window. Recovery path for a request message that never reached the
+        owner: the raw token only ever lives in the outbound send (hash-only
+        on disk, AH1), so a failed send left Tier 3 blocked until expiry.
+        Pending-only — a terminal record is never resurrected, and a pending
+        record already past its TTL is expired here, not rescued. The old
+        token is invalid the moment the hash is replaced."""
+        now = time.time()
+        token = secrets.token_urlsafe(12)
+
+        def _do_reissue(payload: dict) -> None:
+            if payload.get("status") != "pending":
+                payload["_result"] = False
+                return
+            created = _coerce_timestamp(payload.get("created_at", 0))
+            if now - created > self.ttl_seconds:
+                payload["status"] = "expired"
+                payload["resolved_by"] = RESOLVED_BY_EXPIRED
+                payload["resolved_at"] = now
+                payload["_result"] = False
+                return
+            payload["token_hash"] = self._digest(token)
+            # TTL restart is an explicit owner action; keep the original
+            # creation time for audit.
+            payload.setdefault("first_created_at", created)
+            payload["created_at"] = now
+            payload["reissued_at"] = now
+            payload["reissue_count"] = int(payload.get("reissue_count") or 0) + 1
+            payload["_result"] = True
+
+        result = self._locked_update(approval_id, _do_reissue)
+        reissued = result.pop("_result", False)
+        if not reissued:
+            self._emit_resolution_event(result, resolved_at=now)
+            return None
+        event_payload = _approval_event_payload(result)
+        event_payload["reissue_count"] = result.get("reissue_count")
+        self._emit("approval_reissued", event_payload)
+        metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        return PendingApproval(
+            approval_id=str(result.get("approval_id")),
+            action=str(result.get("action") or ""),
+            summary=str(result.get("summary") or ""),
+            token=token,
+            risk_code=metadata.get("risk_code"),
+            required_confirmation=metadata.get("required_confirmation"),
+        )
+
     def reject(self, approval_id: str) -> bool:
         now = time.time()
 
