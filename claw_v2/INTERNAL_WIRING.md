@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice f4b2a-retained-draft-executable (2026-07-06, breakage diagnosis #1): an evidence-gate retention preserves the FULL blocked draft as an executable pending_action (30min TTL via meta), so «ejecútalo» resumes the real plan through the existing continuation resolver instead of re-deriving from the canned message."
-doc_version: 2.94
-last_verified: 2026-07-06
-verification_method: "F4-B2a local: tests/test_evidence_gate_retained_draft.py covers full-draft preservation with meta source/ttl, secret-shaped refusal, empty-draft noop, survival of the post-turn state write, meta-ttl governance past the native 600s, staleness past 1800s, and «ejecútalo» seeding the brain with the verbatim draft; coherence short-circuit for the gate source is covered by the execution test (the cosine heuristic rejected the boilerplate-diluted directive before the fix)."
+describes_commit: "slice bgmonitor-phrase-widen (2026-07-07, breakage diagnosis dedup finding): the background-monitor promise recognizer covers the ongoing-work conjugation family (ya está en marcha / sigue corriendo / lo dejé corriendo / te aviso al terminar) so the guard no longer passes a false 'ya está en marcha' over an already-failed task; an unbacked promise over a failed task is corrected by naming it and offering a retry, and completion claims stay excluded."
+doc_version: 2.95
+last_verified: 2026-07-07
+verification_method: "bgmonitor local: tests/test_brain_tooluse_ledger.py covers the widened recognizer truth-correcting a 'ya está en marcha' over a failed active_task (naming it + offering retry), non-regression that a genuinely-active task leaves the reply intact, non-regression that a 'listo/ya quedó' completion claim is not matched, and the pre-existing mixed-response strip; full file 43 passed."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1490,6 +1490,41 @@ invariants:
          content as source_text, so a trigger phrase inside those files could
          authorize the turn. Operator-only surface; fix is passing
          memory_text=<user-typed instruction> in those handlers (C3 hygiene).
+
+  background_monitor_promise_recognizer_covers_ongoing_work_conjugations:
+    rule: _claims_background_monitor recognizes TASK-REFERENCE / left-running /
+          notification-promise phrasings (la que está corriendo / lo
+          dejo|dejé|deje corriendo / te aviso al cerrar|terminar|acabar), not
+          just the original narrow set — the blindness let the guard exit
+          before its evidence check and pass a false ongoing-task claim over an
+          already-FAILED task (breakage diagnosis 2026-07-06, Calculadora
+          re-asked 4×). It must NOT match a BARE running status ("La
+          Calculadora ya está en marcha" / "el script está corriendo") — that
+          collides with a truthful app-launch/process-start confirmation and
+          would nuke it (CodeRabbit #222), nor completion claims (listo / ya
+          quedó / hecho / terminé), which are the evidence gate's class and
+          whose inclusion nuked a legitimate confirm before. The guard's backing-check is unchanged: a promise backed by a
+          genuinely active (queued/running) task is left intact; only an
+          unbacked promise is corrected. When the session's active_task
+          terminalized as failed/blocked, the correction names it and offers a
+          retry (_background_monitor_failed_task_note) instead of a silent strip
+          or a generic template.
+    chokepoints:
+      - bot._BACKGROUND_MONITOR_PROMISE_PATTERNS  # ongoing-work family, not completion
+      - bot.BotService._background_monitor_failed_task_note  # truth correction naming the failed task
+      - bot.BotService._enforce_background_monitor_contract  # backing-check gate unchanged
+    enforced_by:
+      - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_ya_esta_en_marcha_over_failed_task_is_truth_corrected
+      - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_esta_corriendo_with_real_active_task_is_left_intact
+      - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_completion_claim_listo_ya_quedo_is_not_matched
+      - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_bare_app_launch_status_is_not_matched
+      - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_background_monitor_claim_is_stripped_from_mixed_response
+    why: The recognizer's blindness to common conjugations let the brain claim
+         "ya está en marcha" over a task that had already failed while the owner
+         re-asked into silence (breakage diagnosis 2026-07-06). Widening it is
+         safe because the guard only corrects an UNBACKED promise; the
+         completion-claim exclusion preserves the false-positive fix Hector
+         flagged ("Listo ya quedó" must never be nuked).
 
   coordinator_verifier_echo_not_critical:
     rule: The CRITICAL-worker sentinel (_critical_worker_result) is NOT applied

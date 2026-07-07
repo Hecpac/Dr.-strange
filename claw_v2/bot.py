@@ -124,7 +124,19 @@ _BACKGROUND_MONITOR_PROMISE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsobreviv[ae]\s+(?:a\s+)?interrupciones?\b", re.IGNORECASE),
     re.compile(r"\bmonitore(?:ar|o|ando|aré|are|e|é)\b", re.IGNORECASE),
     re.compile(r"\bte\s+aviso\s+cuando\b", re.IGNORECASE),
-    re.compile(r"\blo\s+dejo\s+(?:corriendo|trabajando|en\s+background)\b", re.IGNORECASE),
+    # Bot breakage diagnosis 2026-07-06: the brain claimed a task was still
+    # going ("La que está corriendo (tg-…)", "Lo dejé corriendo", "Te aviso al
+    # cerrar") over a task that had already FAILED, and this recognizer's
+    # blindness to those phrasings let the guard exit before its evidence
+    # check. Only TASK-REFERENCE / left-running / notification-promise phrases
+    # are added — NOT a bare "está en marcha / está corriendo", which collides
+    # with a truthful app-launch/process-start status ("La Calculadora ya está
+    # en marcha") and would nuke a legitimate confirmation (CodeRabbit #222,
+    # the same false-positive class Hector flagged). Completion claims
+    # (listo/ya quedó/hecho) stay excluded — those are the evidence gate's.
+    re.compile(r"\bla\s+que\s+est[aá]\s+corriendo\b", re.IGNORECASE),
+    re.compile(r"\bte\s+aviso\s+al\s+(?:cerrar|terminar|acabar)\b", re.IGNORECASE),
+    re.compile(r"\blo\s+dej(?:o|é|e)\s+(?:corriendo|trabajando|en\s+background)\b", re.IGNORECASE),
     re.compile(r"\bsin\s+intervenci[oó]n\s+tuya\b", re.IGNORECASE),
     re.compile(r"\bno\s+necesit[aá]s\s+hacer\s+nada\b", re.IGNORECASE),
     re.compile(r"\bpolling\b|\bpoll(?:ea|ear|ando|ando)\b", re.IGNORECASE),
@@ -2360,15 +2372,24 @@ class BotService:
             )
         stripped = self._strip_unsupported_background_monitor_claims(content)
         if stripped != content and stripped and not self._claims_background_monitor(stripped):
+            # Bot breakage diagnosis 2026-07-06 decision #2: don't silently drop
+            # the false "ya está en marcha" — correct it with the truth. If the
+            # session's task terminalized as failed/blocked, name it and offer a
+            # retry so the owner learns their request died instead of re-asking
+            # into silence (the Calculadora incident: re-asked 4× over a task
+            # that had already failed).
+            note = self._background_monitor_failed_task_note(session_id)
+            corrected = f"{stripped}\n\n{note}".strip() if note else stripped
             self._emit_safe(
                 "background_monitor_claim_stripped",
                 {
                     "session_id": session_id,
                     "user_text_preview": user_text[:120],
                     "reason": evidence.get("reason") or "no_durable_monitor",
+                    "truth_corrected": bool(note),
                 },
             )
-            return stripped
+            return corrected
         if stripped == content and not durable_dispatch_claim:
             # No single line carried the monitor claim: the only trigger was the
             # cross-line DOTALL promise pattern matching over otherwise-unrelated
@@ -2391,6 +2412,33 @@ class BotService:
             reason=evidence.get("reason") or "no_durable_monitor",
         )
 
+    def _background_monitor_failed_task_note(self, session_id: str) -> str:
+        """Truth-correction context for a stripped background-monitor promise.
+
+        If the session's active_task terminalized as failed/blocked, name it and
+        offer a retry so the stripped false promise is replaced by the real
+        state instead of silence (bot breakage diagnosis 2026-07-06 decision #2).
+        Returns "" when there is no failed task to reference.
+        """
+        try:
+            state = self.brain.memory.get_session_state(session_id)
+        except Exception:
+            return ""
+        active_object = state.get("active_object") if isinstance(state, dict) else None
+        active_task = active_object.get("active_task") if isinstance(active_object, dict) else None
+        if not isinstance(active_task, dict):
+            return ""
+        status = str(active_task.get("status") or "").lower()
+        if status not in {"failed", "blocked"}:
+            return ""
+        status_str = self._public_operational_task_state(status)
+        objective = _compact_summary(str(active_task.get("objective") or ""), limit=120)
+        tail = f" («{objective}»)" if objective else ""
+        return (
+            f"Para ser claro: la tarea anterior{tail} terminó {status_str} y no hay "
+            "nada corriendo en background. Dime si la reintento."
+        )
+
     def _background_monitor_replacement(
         self,
         *,
@@ -2404,12 +2452,19 @@ class BotService:
             "en background. Para dejarlo corriendo hace falta crear un job "
             "durable o reanudarlo manualmente."
         )
+        # Decision #2 (bot breakage 2026-07-06): if a task terminalized as
+        # failed, name it and offer a retry so the correction is the truth, not
+        # a generic "nothing registered".
+        note = self._background_monitor_failed_task_note(session_id)
+        if note:
+            replacement = f"{replacement}\n\n{note}"
         self._emit_safe(
             "background_monitor_claim_rejected",
             {
                 "session_id": session_id,
                 "user_text_preview": user_text[:120],
                 "reason": reason,
+                "truth_corrected": bool(note),
             },
         )
         return replacement

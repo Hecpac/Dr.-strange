@@ -1117,6 +1117,103 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
         self.assertIn("background_monitor_claim_stripped", events)
         self.assertNotIn("background_monitor_claim_rejected", events)
 
+    def test_ya_esta_en_marcha_over_failed_task_is_truth_corrected(self) -> None:
+        # Bot breakage diagnosis 2026-07-06: the brain said "ya está en marcha"
+        # over a task that had already FAILED (Calculadora, re-asked 4×). The
+        # widened recognizer must catch the phrase AND, with no active backing,
+        # replace it with the truth referencing the failed task.
+        observe = _RecordingObserve()
+        state = {
+            "active_object": {
+                "active_task": {
+                    "task_id": "tg-test:1783367298267927000",
+                    "objective": "abrir la app Calculadora del Mac",
+                    "status": "failed",
+                }
+            }
+        }
+        bot = _make_bot(observe, self.ledger, state=state)
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="usa computer-use para abrir la Calculadora",
+            content=(
+                "Eso es prácticamente el mismo pedido. La que está corriendo "
+                "(tg-…367, modo ops) abre la Calculadora.\n\nTe aviso al cerrar."
+            ),
+            raw_content="La que está corriendo abre la Calculadora.",
+        )
+
+        self.assertNotIn("La que está corriendo", rendered)
+        self.assertIn("terminó fallida", rendered)
+        self.assertIn("reintento", rendered)
+        self.assertIn("Calculadora", rendered)
+        events = [name for name, _ in observe.events]
+        # Whole-reply false claim → corrected via the replacement (rejected);
+        # a partial reply would strip. Either way the truth note is present.
+        self.assertTrue(
+            "background_monitor_claim_rejected" in events
+            or "background_monitor_claim_stripped" in events
+        )
+
+    def test_esta_corriendo_with_real_active_task_is_left_intact(self) -> None:
+        # Non-regression: the widened phrases must NOT nuke a reply whose claim
+        # is backed by a genuinely active (queued/running) task.
+        observe = _RecordingObserve()
+        bot = _make_bot(observe, self.ledger)
+        self.ledger.create(
+            task_id="tg-test:live",
+            session_id="tg-test",
+            objective="barrido de noticias",
+            runtime="coordinator",
+            mode="research",
+            status="running",
+            notify_policy="done_only",
+        )
+        content = "Listo, la tarea está corriendo. Te aviso al terminar."
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="haz el barrido",
+            content=content,
+            raw_content=content,
+        )
+
+        self.assertEqual(rendered, content)
+        events = [name for name, _ in observe.events]
+        self.assertNotIn("background_monitor_claim_stripped", events)
+        self.assertNotIn("background_monitor_claim_rejected", events)
+
+    def test_bare_app_launch_status_is_not_matched(self) -> None:
+        # CodeRabbit #222: a truthful bare status of an app/process just started
+        # inline ("La Calculadora ya está en marcha") has no durable task and
+        # must NOT be treated as a background-monitor promise — otherwise the
+        # guard would nuke a legitimate success confirmation.
+        for content in (
+            "La Calculadora ya está en marcha, la ves abierta en pantalla.",
+            "El script está corriendo y terminó sin errores.",
+        ):
+            with self.subTest(content=content):
+                self.assertFalse(BotService._claims_background_monitor(content))
+
+    def test_completion_claim_listo_ya_quedo_is_not_matched(self) -> None:
+        # Non-regression of Hector's prior burn: a pure completion claim
+        # ("listo / ya quedó / hecho") is the evidence gate's class, NOT a
+        # background-monitor promise — the widened recognizer must not touch it.
+        observe = _RecordingObserve()
+        bot = _make_bot(observe, self.ledger)
+        content = "Listo, ya quedó. Hecho y confirmado."
+
+        rendered = bot._enforce_background_monitor_contract(
+            session_id="tg-test",
+            user_text="arréglalo",
+            content=content,
+            raw_content=content,
+        )
+
+        self.assertEqual(rendered, content)
+        self.assertFalse(BotService._claims_background_monitor(content))
+
     def test_background_monitor_claim_in_raw_trace_only_is_not_blocked(self) -> None:
         observe = _RecordingObserve()
         bot = _make_bot(observe, self.ledger)
