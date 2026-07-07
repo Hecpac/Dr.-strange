@@ -42,11 +42,18 @@ def write_runtime_db_halt_marker(
     error: object,
     *,
     source: str,
+    reason: str = "runtime_db_corruption",
 ) -> Path:
-    """Persist the reason boot must refuse this DB (atomic tmp + rename)."""
+    """Persist the reason boot must refuse this DB (atomic tmp + rename).
+
+    ``reason`` classifies WHY the boot is held: the default corruption case
+    (Slice 2a) or, from Slice 2b, ``runtime_db_missing_with_backups`` when the
+    DB vanished but verified backups exist. The launcher hold-loop keys only on
+    the marker's existence, so both reasons share the same recovery path.
+    """
     marker = runtime_db_halt_marker_path(db_path)
     payload = {
-        "reason": "runtime_db_corruption",
+        "reason": reason,
         "error": str(error)[:500],
         "db_path": str(db_path),
         "source": source,
