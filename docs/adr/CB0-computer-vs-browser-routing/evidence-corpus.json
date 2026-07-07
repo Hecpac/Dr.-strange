@@ -2,10 +2,10 @@
   "_meta": {
     "purpose": "CB0 evidence gate \u2014 redacted routing telemetry corpus",
     "source": "prod observe_stream (read-only)",
-    "window_start": "2026-07-06 17:10:36",
-    "window_end": "2026-07-07 15:46:57",
-    "total_events_in_window": 51085,
-    "redaction": "structural-allowlist projection; identifiers and user-content fields dropped (see test_cb0_corpus_privacy for the enforced allowlist)",
+    "window_start": "2026-07-06 17:52:44",
+    "window_end": "2026-07-07 16:05:58",
+    "total_events_in_window": 50205,
+    "redaction": "structural-allowlist projection: only allowlisted KEYS whose VALUES are enum/slug (no spaces, bounded). Free-text fields (LLM reasons) and identifiers dropped. See test_cb0_corpus_privacy.",
     "caveat": "LOW N \u2014 computer-use exercised a handful of times, mostly test-driven; not a statistical sample."
   },
   "counts": {
@@ -14,6 +14,7 @@
     "brain_delegation_requested": 5,
     "brain_tooluse_ledger_blocked_unverified_action": 4,
     "shadow_delegation_gap": 3,
+    "brain_inline_browser_drive_blocked": 0,
     "f4b2_auto_reprompt_issued": 0,
     "f4b2_auto_reprompt_result": 0,
     "f4b2_auto_reprompt_failed": 0,
@@ -25,6 +26,8 @@
     "deterministic_browser_task_started": 1,
     "deterministic_browser_task_completed": 1,
     "computer_session_started": 1,
+    "computer_session_completed": 0,
+    "computer_session_failed": 0,
     "computer_backend_selected": 1,
     "computer_screenshot_captured": 3,
     "computer_approval_pending": 1,
@@ -67,16 +70,13 @@
     ],
     "brain_delegation_requested": [
       {
-        "mode": "ops",
-        "reason": "Abrir una app de escritorio y describir la pantalla es control de GUI/computer-use; no cabe inline en el turno y debe ir a la lane durable."
+        "mode": "ops"
       },
       {
-        "mode": "browse",
-        "reason": "Hector pidi\u00f3 \"\u00e1brela\" refiri\u00e9ndose a la demo interactiva de Neuronpedia que report\u00e9 como no abierta; abrir/navegar en Chrome es browse, no cabe inline."
+        "mode": "browse"
       },
       {
-        "mode": "ops",
-        "reason": "Hector pidi\u00f3 tomar un screenshot del escritorio y que se lo env\u00ede a Telegram: capturar pantalla es acci\u00f3n de escritorio y el env\u00edo del archivo lo hace el sistema tras verificar (deliver_to_owner)."
+        "mode": "ops"
       }
     ],
     "brain_tooluse_ledger_blocked_unverified_action": [
@@ -170,11 +170,13 @@
     "browser_has_delegation_pipeline": true,
     "computer_has_delegation_pipeline": false,
     "computer_runs_inline_only": true,
+    "computer_action_ever_completed_in_window": false,
     "observed_computer_failures_are_lane_related": false,
     "observed_computer_failure_modes": [
       "computer_browser_use_missing_domain_grant (browser_use scoping)",
       "computer_approval_resume_blocked/screenshot_changed (approval guard)"
     ],
-    "blocked_unverified_action_from_computer_use": false
+    "blocked_unverified_action_from_computer_use": false,
+    "computer_use_token_in_browser_signal_regex": true
   }
 }

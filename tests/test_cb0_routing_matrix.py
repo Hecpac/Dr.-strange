@@ -31,6 +31,18 @@ class CB0RoutingMatrixTests(unittest.TestCase):
         ):
             self.assertFalse(_should_use_browser_executor("ops", objective), objective)
 
+    def test_computer_use_phrase_misroutes_a_desktop_task_to_browser(self) -> None:
+        # KNOWN mis-route (recon 2026-07-07): _BROWSER_OPERATION_SIGNAL_RE
+        # (bot_helpers.py:183) contains the literal "computer[-_\\s]?use", so a
+        # delegated DESKTOP objective phrased with "computer-use" — the exact
+        # phrase the brain's DELEGATION_CONTRACT (brain.py:312) uses to describe
+        # desktop work — routes to the Chrome CDP browser executor, the WRONG
+        # surface. Locked so CB1's fix (dropping the token from the regex) is a
+        # deliberate, test-visible change, not a silent one.
+        self.assertTrue(
+            _should_use_browser_executor("ops", "usa computer-use para abrir la Calculadora")
+        )
+
     def test_browser_is_delegable_but_computer_use_is_not(self) -> None:
         # The locked asymmetry the ADR rests on: the computer handler runs
         # delegated BROWSER tasks (browser is delegable), but there is no

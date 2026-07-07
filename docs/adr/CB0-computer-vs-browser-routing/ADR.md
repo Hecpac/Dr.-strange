@@ -55,8 +55,34 @@ Anchors (verbatim, `~/srv/claw-daemon` @ `6f2210d`):
 **The gap, named precisely:** the prompt tells the brain to *delegate*
 computer-use, but there is **no delegation destination that can execute it**. A
 delegated desktop objective lands in the Codex coordinator (sandboxed, no GUI)
-or — if it happens to mention browser words — the browser executor (wrong
-tool). It is BOTH a missing lane AND a prompt that routes to nowhere.
+or — if it mentions browser words — the browser executor (wrong tool). It is
+BOTH a missing lane (root) AND a prompt that routes to nowhere (symptom).
+
+**Concrete mis-route (verbatim):** `_BROWSER_OPERATION_SIGNAL_RE`
+(`bot_helpers.py:183`) contains the literal token `computer[-_\s]?use`. So a
+`mode=ops` objective phrased with **"computer-use"** — the exact phrase the
+brain's DELEGATION_CONTRACT (`brain.py:312`) uses to describe desktop work —
+routes to the Chrome CDP browser executor. Verified: `_should_use_browser_executor("ops", "usa computer-use para abrir la Calculadora")` → `True`.
+The word that means "desktop" sends the task to the browser.
+
+**Already named by the codebase:** the invariant
+`computer_app_launch_is_an_action_not_a_read` (INTERNAL_WIRING §1) `why:` clause
+already flags "la mis-route natural-language delegation-to-browser (token
+'computer-use' en `_BROWSER_OPERATION_SIGNAL_RE`) y el ausente lane
+codex-desktop delegado son un follow-up más profundo, no este slice." CB0 is
+that follow-up's evidence gate — this is an understood, deferred item, not a new
+fire.
+
+**Feasibility constraint on the lane (the reason it is NOT a simple port of the
+browser executor):** `run_delegated_browser_task` is delegable *because CDP is a
+localhost socket* — a Codex worker or an off-tick runner reaches it over TCP. A
+desktop executor needs **WindowServer / accessibility access to a live display**,
+not a socket. And the display probe (`_probe_pyautogui_display`, `main.py:529`)
+runs **only for backend `openai`**, never for `codex` (this host's backend) — so
+boot verifies the CLI binary exists (`main.py:578`) but **never that the backend
+can drive the screen**. Whether an off-tick runner in the daemon process even
+inherits a usable display session is an open question a design spike must answer
+before any lane code.
 
 ### 2. What the telemetry actually shows (redacted corpus)
 
@@ -81,6 +107,16 @@ structural-allowlist projection, no identifiers/user-text):
   the `web-entrevista-diag` / `web-smoke-f4b2` diagnostic sessions — **none from
   computer-use**.
 - `f4b2_auto_reprompt_*`: 0 organic events yet (deployed today 10:14).
+- **The codex-desktop backend is UNPROVEN on this host:** the single computer
+  *action* attempt (`/computer abre la app Calculadora …`) reached
+  `computer_approval_pending` (a Tier-3 `codex_computer_task`) and produced
+  **zero `computer_session_completed`** — it stalled at approval. Reads work (3×
+  `computer_screenshot_captured`); a completed desktop *action* was never
+  observed. Building a delegated lane on a backend not shown to complete an
+  action inline would be doubly speculative. (Also: the one attempt went to
+  approval despite `CLAW_COMPUTER_AUTO_APPROVE=1` in memory — auto-approve may
+  cover only browser_use, not `codex_computer_task`; a lane's Tier-3 policy is
+  itself an open question.)
 
 **Caveat (in the corpus, kept honest):** LOW N — computer-use was exercised a
 handful of times, mostly test-driven. This is not a statistical sample.
@@ -129,18 +165,26 @@ Until such a signal exists, the lane is speculative.
 
 ## Next slice
 
-- **If NO-GO (recommended) → CB1:** fix the prompt/routing honesty. Either stop
-  instructing the brain to "delegate computer-use" (there is no home) and steer
-  it to run `/computer` inline for short desktop tasks + report a concrete
-  blocker for long ones; or add a routing guard that detects a delegated
-  *desktop* objective and returns a clear "no computer-use lane" blocker instead
-  of silently landing it in the coordinator. Small docs/prompt/guard change,
-  test-locked. Separately, address `missing_domain_grant` UX (the real observed
-  friction).
-- **If GO → CB2 (design spike, not implementation):** a design gate for the
-  `codex-desktop` worker (drives `mcp__computer-use__*` under the approval gate,
-  off the brain turn), preserving triple-AND + the max-1 F4-B2 re-prompt. Still
-  an evidence/design gate before any lane code.
+- **If NO-GO (recommended) → CB1** (small, docs/prompt/guard, test-locked), in
+  order of value:
+  1. **Drop the `computer[-_\s]?use` token from `_BROWSER_OPERATION_SIGNAL_RE`**
+     (`bot_helpers.py:183`) so "computer-use" stops mis-routing desktop work to
+     Chrome CDP. Half-fix on its own (it then falls to the GUI-less coordinator),
+     so pair it with (2).
+  2. **Honest blocker over silent mis-route:** a routing guard that detects a
+     delegated *desktop* objective (no browser signal) and returns a clear "no
+     computer-use delegation lane; run `/computer` inline for short tasks" blocker
+     instead of silently landing it in the coordinator. The brain then stops
+     being told to delegate into a void (align `brain.py:312/324`).
+  3. Address `computer_browser_use_missing_domain_grant` UX (the real observed
+     friction) — separately.
+- **If GO → CB2 (design spike, NOT implementation):** a design gate for the
+  `codex-desktop` worker that must first answer the open feasibility UNKNOWNs —
+  display/WindowServer access off-tick, whether the codex backend completes a
+  real action at all on this host, and the Tier-3 approval policy — before any
+  lane code. It also implies splitting the overloaded `mode=ops`
+  (terminal, which the coordinator *can* do) from `mode=desktop` (GUI, which it
+  cannot). Preserve triple-AND + the max-1 F4-B2 re-prompt.
 
 ## Invariants locked by this slice
 

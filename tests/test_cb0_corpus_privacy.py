@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -56,6 +57,24 @@ class CB0CorpusPrivacyTests(unittest.TestCase):
                     set(),
                     f"{event_type} sample leaked non-structural keys: {sorted(leaked)}",
                 )
+
+    def test_sample_string_values_are_enum_slugs_not_freetext(self) -> None:
+        # The key check: an allowlisted key is NOT enough — some keys (e.g.
+        # `reason`) are an enum slug for one event type ("fall_through_all_21")
+        # but a free-text LLM justification carrying user content for another
+        # ("Hector pidió abrir la demo…"). Every string VALUE must be an
+        # enum/slug (no spaces, bounded), so a free-text field can never ride in.
+        slug = re.compile(r"^[\w.:\-/]{0,48}$")
+        corpus = self._corpus()
+        for event_type, samples in corpus.get("samples", {}).items():
+            for sample in samples:
+                for key, value in sample.items():
+                    if isinstance(value, str):
+                        self.assertRegex(
+                            value,
+                            slug,
+                            f"{event_type}.{key} is free text (spaces/len) — may carry PII: {value!r}",
+                        )
 
     def test_no_identifiers_leak_in_samples_or_counts(self) -> None:
         corpus = self._corpus()
