@@ -1492,16 +1492,18 @@ invariants:
          memory_text=<user-typed instruction> in those handlers (C3 hygiene).
 
   background_monitor_promise_recognizer_covers_ongoing_work_conjugations:
-    rule: _claims_background_monitor recognizes the ongoing-work promise family
-          (ya está en marcha / está|sigue corriendo / lo dejé|dejo corriendo /
-          la que está corriendo / te aviso al|cuando cerrar|terminar|acabar|
-          termine), not just the original narrow set — the blindness let the
-          guard exit before its evidence check and pass a false "ya está en
-          marcha" over an already-FAILED task (breakage diagnosis 2026-07-06,
-          Calculadora re-asked 4×). The recognizer must NOT match completion
-          claims (listo / ya quedó / hecho / terminé) — those are the evidence
-          gate's class, and adding them is what nuked a legitimate confirm
-          before. The guard's backing-check is unchanged: a promise backed by a
+    rule: _claims_background_monitor recognizes TASK-REFERENCE / left-running /
+          notification-promise phrasings (la que está corriendo / lo
+          dejo|dejé|deje corriendo / te aviso al cerrar|terminar|acabar), not
+          just the original narrow set — the blindness let the guard exit
+          before its evidence check and pass a false ongoing-task claim over an
+          already-FAILED task (breakage diagnosis 2026-07-06, Calculadora
+          re-asked 4×). It must NOT match a BARE running status ("La
+          Calculadora ya está en marcha" / "el script está corriendo") — that
+          collides with a truthful app-launch/process-start confirmation and
+          would nuke it (CodeRabbit #222), nor completion claims (listo / ya
+          quedó / hecho / terminé), which are the evidence gate's class and
+          whose inclusion nuked a legitimate confirm before. The guard's backing-check is unchanged: a promise backed by a
           genuinely active (queued/running) task is left intact; only an
           unbacked promise is corrected. When the session's active_task
           terminalized as failed/blocked, the correction names it and offers a
@@ -1515,6 +1517,7 @@ invariants:
       - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_ya_esta_en_marcha_over_failed_task_is_truth_corrected
       - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_esta_corriendo_with_real_active_task_is_left_intact
       - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_completion_claim_listo_ya_quedo_is_not_matched
+      - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_bare_app_launch_status_is_not_matched
       - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_background_monitor_claim_is_stripped_from_mixed_response
     why: The recognizer's blindness to common conjugations let the brain claim
          "ya está en marcha" over a task that had already failed while the owner

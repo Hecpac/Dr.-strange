@@ -124,22 +124,19 @@ _BACKGROUND_MONITOR_PROMISE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsobreviv[ae]\s+(?:a\s+)?interrupciones?\b", re.IGNORECASE),
     re.compile(r"\bmonitore(?:ar|o|ando|aré|are|e|é)\b", re.IGNORECASE),
     re.compile(r"\bte\s+aviso\s+cuando\b", re.IGNORECASE),
-    # Bot breakage diagnosis 2026-07-06: the brain claimed "ya está en marcha"
-    # / "La que está corriendo" / "Lo dejé corriendo" over a task that had
-    # already FAILED, and this recognizer's blindness to those conjugations let
-    # the guard exit before checking evidence. These are all promise-of-ongoing
-    # -work phrases; the guard's backing-check still protects a reply with a
-    # genuinely active task. Completion claims (listo/ya quedó/hecho) are NOT
-    # added here — those are the evidence gate's class, and adding them is what
-    # nuked a legitimate confirm before (2026, see _background_monitor_replacement).
-    re.compile(r"\bya\s+est[aá]\s+en\s+marcha\b", re.IGNORECASE),
-    re.compile(r"\b(?:ya\s+)?(?:est[aá]|sigue)\s+corriendo\b", re.IGNORECASE),
-    re.compile(r"\blo\s+dej[eé]\s+(?:corriendo|trabajando|en\s+background)\b", re.IGNORECASE),
+    # Bot breakage diagnosis 2026-07-06: the brain claimed a task was still
+    # going ("La que está corriendo (tg-…)", "Lo dejé corriendo", "Te aviso al
+    # cerrar") over a task that had already FAILED, and this recognizer's
+    # blindness to those phrasings let the guard exit before its evidence
+    # check. Only TASK-REFERENCE / left-running / notification-promise phrases
+    # are added — NOT a bare "está en marcha / está corriendo", which collides
+    # with a truthful app-launch/process-start status ("La Calculadora ya está
+    # en marcha") and would nuke a legitimate confirmation (CodeRabbit #222,
+    # the same false-positive class Hector flagged). Completion claims
+    # (listo/ya quedó/hecho) stay excluded — those are the evidence gate's.
     re.compile(r"\bla\s+que\s+est[aá]\s+corriendo\b", re.IGNORECASE),
-    re.compile(
-        r"\bte\s+aviso\s+(?:al|cuando)\s+(?:cerrar|terminar|acabar|termine)\b", re.IGNORECASE
-    ),
-    re.compile(r"\blo\s+dejo\s+(?:corriendo|trabajando|en\s+background)\b", re.IGNORECASE),
+    re.compile(r"\bte\s+aviso\s+al\s+(?:cerrar|terminar|acabar)\b", re.IGNORECASE),
+    re.compile(r"\blo\s+dej(?:o|é|e)\s+(?:corriendo|trabajando|en\s+background)\b", re.IGNORECASE),
     re.compile(r"\bsin\s+intervenci[oó]n\s+tuya\b", re.IGNORECASE),
     re.compile(r"\bno\s+necesit[aá]s\s+hacer\s+nada\b", re.IGNORECASE),
     re.compile(r"\bpolling\b|\bpoll(?:ea|ear|ando|ando)\b", re.IGNORECASE),
@@ -2434,10 +2431,11 @@ class BotService:
         status = str(active_task.get("status") or "").lower()
         if status not in {"failed", "blocked"}:
             return ""
+        status_str = self._public_operational_task_state(status)
         objective = _compact_summary(str(active_task.get("objective") or ""), limit=120)
         tail = f" («{objective}»)" if objective else ""
         return (
-            f"Para ser claro: la tarea anterior{tail} terminó en estado {status} y no hay "
+            f"Para ser claro: la tarea anterior{tail} terminó {status_str} y no hay "
             "nada corriendo en background. Dime si la reintento."
         )
 

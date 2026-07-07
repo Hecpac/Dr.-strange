@@ -1138,14 +1138,14 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
             session_id="tg-test",
             user_text="usa computer-use para abrir la Calculadora",
             content=(
-                "Eso ya está en marcha — es prácticamente el mismo pedido, así que "
-                "no disparo una tarea duplicada.\n\nTe aviso cuando termine."
+                "Eso es prácticamente el mismo pedido. La que está corriendo "
+                "(tg-…367, modo ops) abre la Calculadora.\n\nTe aviso al cerrar."
             ),
-            raw_content="ya está en marcha",
+            raw_content="La que está corriendo abre la Calculadora.",
         )
 
-        self.assertNotIn("ya está en marcha", rendered)
-        self.assertIn("terminó en estado failed", rendered)
+        self.assertNotIn("La que está corriendo", rendered)
+        self.assertIn("terminó fallida", rendered)
         self.assertIn("reintento", rendered)
         self.assertIn("Calculadora", rendered)
         events = [name for name, _ in observe.events]
@@ -1183,6 +1183,18 @@ class BrainToolUseLedgerEdgeCasesTests(unittest.TestCase):
         events = [name for name, _ in observe.events]
         self.assertNotIn("background_monitor_claim_stripped", events)
         self.assertNotIn("background_monitor_claim_rejected", events)
+
+    def test_bare_app_launch_status_is_not_matched(self) -> None:
+        # CodeRabbit #222: a truthful bare status of an app/process just started
+        # inline ("La Calculadora ya está en marcha") has no durable task and
+        # must NOT be treated as a background-monitor promise — otherwise the
+        # guard would nuke a legitimate success confirmation.
+        for content in (
+            "La Calculadora ya está en marcha, la ves abierta en pantalla.",
+            "El script está corriendo y terminó sin errores.",
+        ):
+            with self.subTest(content=content):
+                self.assertFalse(BotService._claims_background_monitor(content))
 
     def test_completion_claim_listo_ya_quedo_is_not_matched(self) -> None:
         # Non-regression of Hector's prior burn: a pure completion claim
