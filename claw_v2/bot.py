@@ -3184,6 +3184,105 @@ class BotService:
             content = cleaned
         return self._sanitize_visible_chat_response(session_id, content)
 
+    def _maybe_auto_reprompt_unexecuted_action(
+        self,
+        *,
+        session_id: str,
+        source_text: str,
+        response: Any,
+        link_analysis_context: dict[str, Any] | None = None,
+        prefetched_evidence_context: dict[str, Any] | None = None,
+    ) -> Any:
+        """F4-B2 (breakage diagnosis, autonomous 2026-07-07): when the brain
+        narrates a start/completion action but ran no verifying tool and made no
+        durable delegation, re-prompt ONCE to force real execution/delegation
+        before the response is finalized — instead of the turn closing
+        blocked_unverified_action or being retained by the evidence gate with
+        only an «ejecútalo» hint (F4-B2a stays as the fallback if the re-prompt
+        still narrates).
+
+        Bounded to ONE re-prompt per turn (structural: this runs once per
+        _brain_text_response and issues at most one; it never re-enters itself).
+        Every gate is preserved — the re-prompt is an ordinary
+        brain.handle_message, so a Tier-3 tool still raises ApprovalPending to
+        the caller, and denied / user-authority / plan-status / already-verified
+        turns never trigger (the same classifiers the evidence gate uses).
+        """
+        if response is None:
+            return response
+        content = response.content or ""
+        is_start = self._start_claim_lacks_evidence(
+            session_id=session_id, source_text=source_text, content=content, response=response
+        )
+        is_completion = False
+        if not is_start:
+            is_completion = self._completion_claim_lacks_evidence(
+                session_id=session_id,
+                source_text=source_text,
+                content=content,
+                response=response,
+                link_analysis_context=link_analysis_context,
+                prefetched_evidence_context=prefetched_evidence_context,
+            )
+        if not (is_start or is_completion):
+            return response
+        claim_type = "start" if is_start else "completion"
+        self._emit_safe(
+            "f4b2_auto_reprompt_issued",
+            {"session_id": session_id, "claim_type": claim_type},
+        )
+        directive = (
+            "Tu respuesta anterior afirmó "
+            + ("que arrancaste" if is_start else "que completaste")
+            + " una acción, pero en este turno no ejecutaste ninguna herramienta "
+            "ni delegaste una tarea durable. EJECUTA AHORA lo que prometiste: usa "
+            "una herramienta real (Bash/Read/Write/…) o delegate_task y muestra la "
+            "evidencia — o, si no puedes, di el bloqueador concreto en una frase. "
+            "No vuelvas a narrar sin actuar.\n\n"
+            f"Petición original del usuario: {source_text}"
+        )
+        # CodeRabbit #228 P2: the first turn already persisted the narrated
+        # reply. Drop it before re-prompting so the misleading "voy a…" claim
+        # does not linger in the transcript (F4-B2 exists to STOP narration).
+        # Restored on failure so the downstream render/replace flow still finds
+        # an assistant message to operate on.
+        narrated_dropped = False
+        try:
+            narrated_dropped = bool(self.brain.memory.delete_last_messages(session_id, 1))
+        except Exception:
+            narrated_dropped = False
+        try:
+            reprompted = self.brain.handle_message(
+                session_id, directive, memory_text=source_text, task_type="telegram_message"
+            )
+        except ApprovalPending:
+            # A Tier-3 tool during the forced execution: propagate to the
+            # caller's approval path (gates preserved).
+            raise
+        except Exception:
+            # The extra re-prompt call must never break a turn that already had
+            # a (narrated) reply — restore the narration and keep the original.
+            if narrated_dropped:
+                try:
+                    self.brain.memory.store_message(session_id, "assistant", content)
+                except Exception:
+                    logger.debug("F4-B2 narration restore failed", exc_info=True)
+            logger.warning("F4-B2 auto re-prompt failed; keeping the original reply", exc_info=True)
+            self._emit_safe(
+                "f4b2_auto_reprompt_failed",
+                {"session_id": session_id, "claim_type": claim_type},
+            )
+            return response
+        self._emit_safe(
+            "f4b2_auto_reprompt_result",
+            {
+                "session_id": session_id,
+                "claim_type": claim_type,
+                "executed": self._response_has_evidence_signal(reprompted),
+            },
+        )
+        return reprompted
+
     def _start_claim_lacks_evidence(
         self,
         *,
@@ -5977,6 +6076,18 @@ class BotService:
                 prompt_text,
                 memory_text=source_text,
                 task_type="telegram_message",
+            )
+            # F4-B2 (autonomous 2026-07-07): if the brain narrated an action
+            # without executing/delegating, force one bounded re-prompt before
+            # the response is finalized. A Tier-3 tool during the forced
+            # execution raises ApprovalPending here and flows through the same
+            # approval path below (gates preserved).
+            response = self._maybe_auto_reprompt_unexecuted_action(
+                session_id=session_id,
+                source_text=source_text,
+                response=response,
+                link_analysis_context=link_analysis_context,
+                prefetched_evidence_context=prefetched_evidence_context,
             )
         except ApprovalPending as exc:
             self._record_pending_tool_approval(
