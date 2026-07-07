@@ -858,6 +858,13 @@ class StateHandler:
         meta = active_object.get("pending_action_meta") if isinstance(active_object, dict) else None
         if not isinstance(meta, dict):
             return True
+        if meta.get("source") == "evidence_gate_retained_draft":
+            # F4-B2a: a gate-preserved draft was retained in THIS conversation
+            # and is already bounded by TTL + created_message_id delta. The
+            # topic-cosine heuristic (built for organically-extracted
+            # proposals) gets diluted by the directive boilerplate and would
+            # wrongly degrade «ejecútalo» to a re-confirmation.
+            return True
         pending_action = str(state.get("pending_action") or "").strip()
         topic = str(meta.get("topic") or "").strip()
         pending_topic = " ".join(part for part in (topic, pending_action) if part)
