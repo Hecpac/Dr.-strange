@@ -879,7 +879,56 @@ class ComputerHandlerOutcomeTests(unittest.TestCase):
             config=types.SimpleNamespace(computer_auto_approve=True, sensitive_urls=[]),
             observe=FakeObserve(),
         )
-        session = ComputerSession(task="inspect browser")
+        session = ComputerSession(task="inspect browser", current_url="https://start.example")
+        session.pending_action = {"action": "browser_use_task", "backend": "browser_use"}
+        handler._sessions["s1"] = session
+
+        calls: list[str] = []
+        urls_seen: list[str | None] = []
+
+        def browser_run(sess):
+            calls.append(sess.task)
+            urls_seen.append(sess.current_url)
+            sess.status = "done"
+            sess.pending_action = None
+            if len(calls) == 1:
+                sess.browser_final_url = "https://end.example/results"
+                return "(no result)"
+            return "browser replanned success"
+
+        with patch.object(handler, "_run_browser_use_session", side_effect=browser_run):
+            result = handler._run_session("s1")
+
+        self.assertEqual(result, "browser replanned success")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("Recovery replan (no_result)", calls[1])
+        # The rerun re-evaluates approval against the browser's verified final
+        # URL, never the stale pre-run one (Codex review P1).
+        self.assertEqual(urls_seen, ["https://start.example", "https://end.example/results"])
+        self.assertEqual(session.current_url, "https://end.example/results")
+        replans = [payload for event, payload in events if event == "computer_replan_started"]
+        self.assertEqual(len(replans), 1)
+        self.assertEqual(replans[0]["backend"], "browser_use")
+        completed = [payload for event, payload in events if event == "computer_session_completed"]
+        self.assertEqual(completed[-1]["outcome_status"], "succeeded")
+
+    def test_handler_browser_replan_declined_when_final_url_unverified(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        events: list[tuple[str, dict]] = []
+
+        class FakeObserve:
+            def emit(self, event_type, payload=None):
+                events.append((event_type, payload or {}))
+
+        handler = ComputerHandler(
+            browser_use=object(),
+            config=types.SimpleNamespace(computer_auto_approve=True, sensitive_urls=[]),
+            observe=FakeObserve(),
+        )
+        session = ComputerSession(task="inspect browser", current_url="https://start.example")
         session.pending_action = {"action": "browser_use_task", "backend": "browser_use"}
         handler._sessions["s1"] = session
 
@@ -889,19 +938,53 @@ class ComputerHandlerOutcomeTests(unittest.TestCase):
             calls.append(sess.task)
             sess.status = "done"
             sess.pending_action = None
-            return "(no result)" if len(calls) == 1 else "browser replanned success"
+            return "(no result)"
 
         with patch.object(handler, "_run_browser_use_session", side_effect=browser_run):
             result = handler._run_session("s1")
 
-        self.assertEqual(result, "browser replanned success")
-        self.assertEqual(len(calls), 2)
-        self.assertIn("Recovery replan (no_result)", calls[1])
+        # Without a verified final URL the replan is declined fail-closed: the
+        # stale pre-run URL must never gate a second silent auto-approved pass.
+        self.assertEqual(len(calls), 1)
+        self.assertIn("no result", result)
+        skipped = [payload for event, payload in events if event == "computer_replan_skipped"]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["skip_reason"], "browser_final_url_unverified")
+        self.assertEqual(skipped[0]["backend"], "browser_use")
         replans = [payload for event, payload in events if event == "computer_replan_started"]
-        self.assertEqual(len(replans), 1)
-        self.assertEqual(replans[0]["backend"], "browser_use")
-        completed = [payload for event, payload in events if event == "computer_session_completed"]
-        self.assertEqual(completed[-1]["outcome_status"], "succeeded")
+        self.assertEqual(replans, [])
+        failed = [payload for event, payload in events if event == "computer_session_failed"]
+        self.assertEqual(failed[-1]["outcome_status"], "no_result")
+
+    def test_replan_reset_clears_stale_screenshot_path(self) -> None:
+        outer = self
+
+        class FakeComputer:
+            codex_backend = None
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run_agent_loop_outcome(self, *, session, **kwargs):
+                self.calls += 1
+                session.status = "done"
+                if self.calls == 1:
+                    session.screenshot_path = "/tmp/run1.png"
+                    return ComputerUseOutcome.no_result("(no response)", reason_code="no_response")
+                # The rerun must never report the prior run's capture as its
+                # own (Gemini review).
+                outer.assertIsNone(session.screenshot_path)
+                return ComputerUseOutcome.succeeded("clean rerun")
+
+        events: list[tuple[str, dict]] = []
+        computer = FakeComputer()
+        handler = self._handler_with_computer(computer, events)
+        handler._sessions["s1"] = ComputerSession(task="inspect page")
+
+        result = handler._run_session("s1")
+
+        self.assertEqual(result, "clean rerun")
+        self.assertEqual(computer.calls, 2)
 
     def test_handler_browser_no_result_is_typed_no_result_failure(self) -> None:
         import types
@@ -2051,16 +2134,19 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
         class FakeBrowserUse:
             def __init__(self):
                 self.last_artifact_path = None
+                self.last_final_url = None
 
             async def run_task(self, task, **kwargs):
                 self.last_artifact_path = "/tmp/img-A.png"
+                self.last_final_url = "https://end.example/page"
                 return "ok"
 
         handler = ComputerHandler(browser_use=FakeBrowserUse(), config=None)
-        session = types.SimpleNamespace(task="hola", screenshot_path=None)
+        session = types.SimpleNamespace(task="hola", screenshot_path=None, browser_final_url=None)
         result = handler._run_browser_use_task(session)
         self.assertEqual(result, "ok")
         self.assertEqual(session.screenshot_path, "/tmp/img-A.png")
+        self.assertEqual(session.browser_final_url, "https://end.example/page")
 
     def test_browser_use_policy_interrupt_becomes_pending_approval(self) -> None:
         import types

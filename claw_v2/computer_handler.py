@@ -670,6 +670,24 @@ class ComputerHandler:
         original_task = str(getattr(session, "task", "") or "")
         setattr(session, "_computer_replan_attempted", True)
         setattr(session, "_computer_original_task", original_task)
+        if backend == "browser_use":
+            # A browser replan re-evaluates auto-approval, so it must see where
+            # the browser actually ended up — not the pre-run URL. Without a
+            # verified final URL, a run that drifted onto a sensitive domain
+            # could get a second silent pass; decline fail-closed instead.
+            final_url = str(getattr(session, "browser_final_url", "") or "").strip()
+            if not final_url:
+                self._emit(
+                    "computer_replan_skipped",
+                    {
+                        "session_id": session_id,
+                        "backend": backend,
+                        "skip_reason": "browser_final_url_unverified",
+                        **_computer_outcome_event_payload(outcome),
+                    },
+                )
+                return outcome
+            session.current_url = final_url
         self._reset_session_for_computer_replan(session, backend, outcome)
         self._emit(
             "computer_replan_started",
@@ -713,6 +731,8 @@ class ComputerHandler:
         session.visual_checks = 0
         session.last_screenshot_hash = None
         session.last_visual_changed = None
+        session.screenshot_path = None
+        session.browser_final_url = None
         if backend == "browser_use":
             session.pending_action = {
                 "action": "browser_use_task",
@@ -1281,6 +1301,7 @@ class ComputerHandler:
             # the thread-local last_artifact_path was just set — avoids the
             # shared-state race across concurrent sessions.
             session.screenshot_path = getattr(self.browser_use, "last_artifact_path", None)
+            session.browser_final_url = getattr(self.browser_use, "last_final_url", None)
             return result
 
         try:

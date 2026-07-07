@@ -885,7 +885,13 @@ invariants:
           transient outcomes may trigger one bounded replan; approvals,
           destructive/pending approval paths, cancellations, auth/policy/user
           denials, ambiguous actions, and capability-unavailable paths must not
-          silently replan.
+          silently replan. A browser_use replan re-evaluates auto-approval, so
+          it must see where the browser actually ended up: `_run_browser_use_task`
+          binds the thread-local `last_final_url` to the session in-worker,
+          `_run_computer_replan` refreshes `session.current_url` from it before
+          the rerun, and declines the replan (`computer_replan_skipped`) when
+          the final URL cannot be verified; replan resets clear the prior run's
+          `screenshot_path` so early-exit reruns never report a stale capture.
     enforced_by:
       - tests/test_computer.py::ComputerUseOutcomeTests
       - tests/test_computer.py::ComputerHandlerOutcomeTests

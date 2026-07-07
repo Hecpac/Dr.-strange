@@ -91,7 +91,7 @@ class ComputerUseOutcome:
             raise ValueError("ComputerUseOutcome.reason_code is required")
         if not self.user_safe_summary.strip():
             raise ValueError("ComputerUseOutcome.user_safe_summary is required")
-        if self.replan_recommended and not str(self.replan_reason_code or "").strip():
+        if self.replan_recommended and not (self.replan_reason_code or "").strip():
             raise ValueError(
                 "ComputerUseOutcome.replan_reason_code is required when replan is recommended"
             )
@@ -320,6 +320,7 @@ class ComputerSession:
     visual_checks: int = 0
     last_screenshot_hash: str | None = None
     last_visual_changed: bool | None = None
+    browser_final_url: str | None = None
     _cancelled: bool = False
 
 
