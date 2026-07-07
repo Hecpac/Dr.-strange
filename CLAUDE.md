@@ -19,12 +19,23 @@ skill `fase-0-recon`.
 
 ## Regla de cierre (siempre activa)
 No cierres, marques hecho ni declares "listo" un trabajo no trivial sin un
-**smoke en vivo**: reinicia el daemon con `./scripts/restart.sh`, confirma boot
-limpio en `~/.claw/claw.stderr.log` (sin traceback, sin `RuntimeDatabaseError`,
-watchdog `com.pachano.claw-watchdog` sin flapear, puerto 8765 escuchando), y
-ejerce el camino que cambiaste por la superficie real (web / Telegram / CLI) con
-evidencia capturada. Pytest en verde **NO** es cierre. Procedimiento completo:
-skill `smoke-verify`.
+**smoke en vivo**: reinicia el daemon con `./scripts/restart.sh` y confirma boot
+limpio, luego ejerce el camino que cambiaste por la superficie real (web /
+Telegram / CLI) con evidencia capturada. Pytest en verde **NO** es cierre.
+
+**Señal de boot limpio** (Slice 4, 2026-07-07 — el stderr dejó de ser señal
+positiva confiable): la señal POSITIVA autoritativa es `observe_stream`, no
+`claw.stderr.log`. Confirma en la DB, scoped por el pid del proceso actual:
+`.venv/bin/python -m claw_v2.cli.think tail --type startup_healthcheck_ok` (12
+probes al boot) y `--type agent_startup_context` (lleva el pid). Los checks
+NEGATIVOS siguen en `~/.claw/claw.stderr.log` (sin traceback, sin
+`RuntimeDatabaseError`) porque las excepciones y WARNING+ llegan ahí por el
+handler propio del daemon (`configure_daemon_logging`); además el daemon emite
+una línea `Claw boot complete: pid=… web_port=…` a stderr como conveniencia
+para un `tail` plano. El resto del criterio sigue: watchdog
+`com.pachano.claw-watchdog` sin flapear, puerto 8765 escuchando.
+
+Procedimiento completo: skill `smoke-verify`.
 
 ## Regla entre slices (siempre activa)
 En un bloque de remediación por slices: entre un slice y el siguiente corre

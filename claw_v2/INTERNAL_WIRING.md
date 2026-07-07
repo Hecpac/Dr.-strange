@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice 2b-db-missing-halt (2026-07-07, blind-spot pass #2b): a vanished/empty runtime DB with verified backups present halts the boot (shared 2a halt marker, reason runtime_db_missing_with_backups) instead of silently booting a fresh schema; a genuine clean first boot (no DB and no backups) proceeds silently."
-doc_version: 2.99
+describes_commit: "slice 4-daemon-logging (2026-07-07, blind-spot pass #4): the daemon installs its own WARNING root log handler (configure_daemon_logging) + a redaction-safe boot-complete stderr marker so boot leaves a reliable trace independent of browser_use's lazy INFO handler; the closure rule's authoritative positive boot signal moves to observe_stream (startup_healthcheck_ok / agent_startup_context)."
+doc_version: 3.00
 last_verified: 2026-07-07
-verification_method: "Slice 2b local: tests/test_runtime_db_halt.py::MissingDbBootHaltTests covers missing/empty DB with backups halting (reason runtime_db_missing_with_backups), clean first boot without backups proceeding, valid DB booting, the CLAW_RESTART_DB_BACKUP_DIR env override, and the owner alert; tests/test_architecture_invariants.py::test_runtime_db_corruption_halts_boot_persistently extended to lock the shared-marker reuse + env-read. Slice 3's ObservationWindowLoadDegradedTests and the 2a halt tests remain green."
+verification_method: "Slice 4 local: tests/test_daemon_logging.py covers configure_daemon_logging installing a WARNING root handler, INFO staying silent while WARNING reaches stderr, and the lifecycle boot-complete marker being redaction-safe (pid+port only). Slices 2b/3 and the 2a halt tests remain green; the closure rule in CLAUDE.md now points the positive boot signal at observe_stream."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1085,6 +1085,33 @@ invariants:
          the result sat unread in the DB (blind-spot pass 2026-07-06, finding
          #6; the drain-pass promise in finalize_terminal_notification's
          docstring had no implementation for succeeded tasks).
+
+  daemon_configures_own_logging_boot_signal_is_observe_stream:
+    rule: The daemon installs its OWN root log handler at WARNING
+          (configure_daemon_logging, top of main() before any browser_use
+          import) so tracebacks, RuntimeDatabaseError, and a redaction-safe
+          "Claw boot complete: pid=… web_port=…" marker reach stderr reliably —
+          not via lastResort, and not contingent on browser_use's lazy INFO
+          handler. WARNING, never INFO global: raw logger.* to stderr bypasses
+          observe_stream redaction, so INFO-global would risk leaking
+          interpolated secrets and would spam per-request. The AUTHORITATIVE
+          positive boot signal is observe_stream (startup_healthcheck_ok /
+          agent_startup_context, pid-scoped via
+          diagnostics._find_current_startup_event), which is redacted and
+          durable; the stderr marker is a convenience for a plain tail. The
+          closure rule (CLAUDE.md) points positive verification at observe_stream
+          and keeps the negative checks on stderr.
+    chokepoints:
+      - main.configure_daemon_logging  # WARNING root handler, installed first
+      - lifecycle.run  # the boot-complete marker (pid + port only, no secrets)
+    enforced_by:
+      - tests/test_daemon_logging.py
+    why: The INFO lines in claw.stderr.log were an incidental side effect of
+         importing browser_use (root INFO handler in its __init__); with no
+         browser task the import never fired and stderr went mute, so the
+         closure rule's "boot limpio en claw.stderr.log" was reading a stale
+         file (blind-spot pass 2026-07-06 finding #4). Own logging restores a
+         reliable negative signal + boot marker; observe_stream is the positive.
 
   runtime_db_missing_with_backups_halts_boot:
     rule: A missing/empty runtime DB that passes the health check as
