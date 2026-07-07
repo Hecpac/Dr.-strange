@@ -1,13 +1,17 @@
 # ADR CB0 — Computer-vs-browser routing: does deep routing need a new lane?
 
-- **Status:** Proposed (evidence gate — decision for Hector)
+- **Status:** **Accepted** (Hector, 2026-07-07).
 - **Date:** 2026-07-07
 - **Context slice:** CB0 (autonomous, frozen spec). Docs/tests/invariants only —
   no lane built, no browser-direct atomics, no BotService strangler, no live
   browser/CDP smoke.
-- **Recommendation:** **NO-GO (defer)** on building a `codex-desktop` delegated
-  lane now. Ship the cheap prompt/routing honesty fix (CB1) instead, and define
-  the telemetry trigger that would flip this to GO.
+- **Decision:** **NO-GO on the `codex-desktop` delegated lane for now.** The next
+  action is **CB1** — the cheap prompt/routing honesty fix (drop the
+  `computer-use` token from the browser-signal regex + an honest "no desktop
+  delegation lane" blocker) plus the `computer_browser_use_missing_domain_grant`
+  UX. The lane is revisited only when the telemetry **GO-trigger** below fires;
+  that trigger, and the CB2 design spike that must answer the display /
+  backend-completion / approval UNKNOWNs, are the ratified path to reconsider.
 
 ---
 
