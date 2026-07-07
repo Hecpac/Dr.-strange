@@ -921,6 +921,19 @@ async def run() -> int:
                 observe=runtime.observe, notify=_send_observability_telegram_message
             )
 
+        # Slice 3 (blind-spot pass #3): if the observation window loaded
+        # degraded (corrupt/unreadable state file), surface it NOW — after the
+        # alert router is installed — so it reaches Telegram. Emitting during
+        # _load_state (construction) would only land in observe_stream because
+        # the router subscribes live without backfill.
+        if runtime.observation_window is not None and getattr(
+            runtime.observation_window, "loaded_degraded", None
+        ):
+            runtime.observe.emit(
+                "observation_window_load_degraded",
+                payload=dict(runtime.observation_window.loaded_degraded),
+            )
+
         def _nlm_research_fallback(query: str) -> str | None:
             wiki = runtime.bot.wiki
             if wiki is None:

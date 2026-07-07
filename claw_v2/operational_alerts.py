@@ -41,6 +41,11 @@ DEFAULT_ALERT_RULES: dict[str, AlertRule] = {
         notify_user=False,
     ),
     "session_resume_failed": AlertRule("Provider session resume failed", cooldown_seconds=1800),
+    "observation_window_load_degraded": AlertRule(
+        "Observation window state corrupt — booted fail-open, a manual freeze may be lost",
+        severity="critical",
+        cooldown_seconds=1800,
+    ),
     "llm_circuit_open": AlertRule(
         "LLM provider circuit opened", severity="critical", cooldown_seconds=1800
     ),

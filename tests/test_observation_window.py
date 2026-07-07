@@ -752,5 +752,52 @@ class ObservationWindowAtomicWriteTests(unittest.TestCase):
             self.assertEqual(data["reason"], "frozen-with-short-writes")
 
 
+class ObservationWindowLoadDegradedTests(unittest.TestCase):
+    """Slice 3 (blind-spot pass #3): a corrupt/unreadable state file is no
+    longer swallowed silently. Boot proceeds fail-open (unfrozen), but the
+    degrade is recorded (loaded_degraded) so lifecycle can surface it — while a
+    legitimate first boot (no file) stays silent."""
+
+    def test_absent_file_is_silent_first_boot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            window = ObservationWindowState(state_path=Path(tmpdir) / "window.json")
+            self.assertIsNone(window.loaded_degraded)
+            self.assertFalse(window.frozen)
+
+    def test_corrupt_json_records_degraded_and_boots_fail_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "window.json"
+            state_path.write_text("{ this is not valid json ", encoding="utf-8")
+
+            window = ObservationWindowState(state_path=state_path)
+
+            self.assertIsNotNone(window.loaded_degraded)
+            self.assertEqual(window.loaded_degraded["kind"], "corrupt_json")
+            self.assertEqual(window.loaded_degraded["state_path"], str(state_path))
+            # Fail-open: boots unfrozen rather than bricking.
+            self.assertFalse(window.frozen)
+
+    def test_non_object_json_records_degraded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "window.json"
+            state_path.write_text("[1, 2, 3]", encoding="utf-8")
+            window = ObservationWindowState(state_path=state_path)
+            self.assertIsNotNone(window.loaded_degraded)
+            self.assertEqual(window.loaded_degraded["kind"], "not_an_object")
+
+    def test_valid_frozen_state_still_loads_and_is_not_degraded(self) -> None:
+        # Non-regression: a valid persisted freeze must still restore, unaffected.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "window.json"
+            first = ObservationWindowState(state_path=state_path)
+            first.freeze(reason="manual_telegram", actor="telegram:owner")
+
+            second = ObservationWindowState(state_path=state_path)
+
+            self.assertIsNone(second.loaded_degraded)
+            self.assertTrue(second.frozen)
+            self.assertEqual(second.freeze_reason, "manual_telegram")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -89,6 +89,11 @@ class ObservationWindowState:
         self._freeze_actor = ""
         self._freeze_updated_at: float | None = None
         self._token_soft_limit_active = False
+        # Slice 3 (blind-spot pass #3): set when _load_state finds the state
+        # file present-but-unusable (corrupt JSON / unreadable). Boot proceeds
+        # fail-open (unfrozen) but lifecycle surfaces this to the operator after
+        # the alert router is installed, so a lost /freeze is never silent.
+        self.loaded_degraded: dict[str, Any] | None = None
         self._load_state()
 
     @property
@@ -495,8 +500,22 @@ class ObservationWindowState:
 
     def _load_state(self) -> None:
         try:
-            data = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            raw = self.state_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            # Legitimate first boot: no state file yet. Silent by design —
+            # nothing was persisted, so nothing is lost. FileNotFoundError is
+            # caught FIRST because it subclasses OSError.
+            return
+        except OSError as exc:
+            self._record_load_degraded("unreadable", str(exc))
+            return
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            self._record_load_degraded("corrupt_json", str(exc))
+            return
+        if not isinstance(data, dict):
+            self._record_load_degraded("not_an_object", type(data).__name__)
             return
         self._frozen = bool(data.get("frozen"))
         self._freeze_reason = str(data.get("reason") or "")
@@ -533,6 +552,29 @@ class ObservationWindowState:
                         "ttl_seconds": ttl_seconds,
                     },
                 )
+
+    def _record_load_degraded(self, kind: str, detail: str) -> None:
+        """Slice 3 (blind-spot pass #3): the state file is present but unusable.
+
+        Boot proceeds fail-open (unfrozen, per instruction) — the freeze verdict
+        is the only persisted state, and rolling windows reset on every restart
+        anyway — but the degrade is no longer swallowed silently: it is logged
+        (survives to stderr via lastResort even before logging is configured)
+        and lifecycle re-surfaces it to Telegram once the alert router is up.
+        A manual /freeze that was in effect is lost here; the operator is told so
+        they can re-apply it.
+        """
+        self.loaded_degraded = {
+            "kind": kind,
+            "detail": str(detail)[:200],
+            "state_path": str(self.state_path),
+        }
+        logger.critical(
+            "observation_window load degraded (%s): %s — booting fail-open (unfrozen); "
+            "a manual /freeze may have been lost, re-apply with /freeze if needed",
+            kind,
+            str(detail)[:200],
+        )
 
     def _persist_state_locked(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
