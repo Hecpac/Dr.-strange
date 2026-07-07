@@ -132,9 +132,18 @@ handful of times, mostly test-driven. This is not a statistical sample.
    `mcp__computer-use__*` under approval, off the brain's 300s turn) on a
    handful of test-driven invocations is premature — the spec itself flags it as
    "architectural, not a bug fix."
-3. **The real defect is cheap and latent, not the lane.** The prompt/routing
-   mismatch (brain told to delegate computer-use → silently lands nowhere) is a
-   small honesty fix, not a lane.
+3. **Two separable problems; only one is urgent.** The OBSERVED friction is the
+   *silent mis-route* (brain told to delegate computer-use → lands in the wrong
+   place with no error) — cheap to fix honestly (CB1). The *missing capability*
+   (desktop work has no delegated executor) is the lane — the structural root,
+   but not evidenced as needed (works inline for short tasks; low N) and not yet
+   proven feasible (unproven backend, unknown display access). **Reconciliation
+   with the routing recon** (which correctly calls the lane "load-bearing"):
+   yes, the lane is the only thing that makes desktop *delegation* actually
+   work — CB1 does NOT make it work, it makes the failure HONEST. We defer the
+   lane not because it is the wrong fix but because building it now means
+   building on unproven feasibility for an unevidenced need. That is what the
+   GO-trigger + the CB2 design spike are for.
 4. **F4-B2 already covers narration-without-execution.** If computer-use starts
    narrating-without-acting, F4-B2 re-prompts. (Known limitation: with no
    delegation home, the re-prompt can only push toward the inline path — which
