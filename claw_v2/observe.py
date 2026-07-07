@@ -84,6 +84,7 @@ AUDIT_CRITICAL_OBSERVE_EVENTS = frozenset(
         "brain_tooluse_ledger_verification_failed",
         "f4b2_auto_reprompt_issued",
         "f4b2_auto_reprompt_result",
+        "f4b2_auto_reprompt_failed",
         "tool_pivot",
         "critical_action_execution",
         "critical_action_verification",

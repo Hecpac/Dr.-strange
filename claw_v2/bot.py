@@ -3208,7 +3208,9 @@ class BotService:
         the caller, and denied / user-authority / plan-status / already-verified
         turns never trigger (the same classifiers the evidence gate uses).
         """
-        content = (response.content or "") if response is not None else ""
+        if response is None:
+            return response
+        content = response.content or ""
         is_start = self._start_claim_lacks_evidence(
             session_id=session_id, source_text=source_text, content=content, response=response
         )
@@ -3239,9 +3241,38 @@ class BotService:
             "No vuelvas a narrar sin actuar.\n\n"
             f"Petición original del usuario: {source_text}"
         )
-        reprompted = self.brain.handle_message(
-            session_id, directive, memory_text=source_text, task_type="telegram_message"
-        )
+        # CodeRabbit #228 P2: the first turn already persisted the narrated
+        # reply. Drop it before re-prompting so the misleading "voy a…" claim
+        # does not linger in the transcript (F4-B2 exists to STOP narration).
+        # Restored on failure so the downstream render/replace flow still finds
+        # an assistant message to operate on.
+        narrated_dropped = False
+        try:
+            narrated_dropped = bool(self.brain.memory.delete_last_messages(session_id, 1))
+        except Exception:
+            narrated_dropped = False
+        try:
+            reprompted = self.brain.handle_message(
+                session_id, directive, memory_text=source_text, task_type="telegram_message"
+            )
+        except ApprovalPending:
+            # A Tier-3 tool during the forced execution: propagate to the
+            # caller's approval path (gates preserved).
+            raise
+        except Exception:
+            # The extra re-prompt call must never break a turn that already had
+            # a (narrated) reply — restore the narration and keep the original.
+            if narrated_dropped:
+                try:
+                    self.brain.memory.store_message(session_id, "assistant", content)
+                except Exception:
+                    logger.debug("F4-B2 narration restore failed", exc_info=True)
+            logger.warning("F4-B2 auto re-prompt failed; keeping the original reply", exc_info=True)
+            self._emit_safe(
+                "f4b2_auto_reprompt_failed",
+                {"session_id": session_id, "claim_type": claim_type},
+            )
+            return response
         self._emit_safe(
             "f4b2_auto_reprompt_result",
             {

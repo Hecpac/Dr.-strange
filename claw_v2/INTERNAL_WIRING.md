@@ -1031,7 +1031,11 @@ invariants:
           knowledge / plan-status turns, and replies that already carry tool
           evidence never trigger. Every gate is preserved: the re-prompt is an
           ordinary brain.handle_message, so a Tier-3 tool raises ApprovalPending
-          to the same approval path. If the re-prompt STILL narrates without
+          to the same approval path. A NON-approval failure of the re-prompt
+          (API error/timeout) never breaks the turn: the narration is restored
+          and the original reply is kept (f4b2_auto_reprompt_failed). The first
+          narrated reply is dropped from memory before the re-prompt so it does
+          not linger in the transcript. If the re-prompt STILL narrates without
           acting, its reply flows through the evidence gate, which retains it
           via F4-B2a (retained-draft + «ejecútalo») — the honest fallback that
           surfaces the blocked state clearly instead of a re-prompt loop.

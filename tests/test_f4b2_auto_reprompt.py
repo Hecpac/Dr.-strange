@@ -3,20 +3,41 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from claw_v2.approval_gate import ApprovalPending
 from claw_v2.bot import BotService
 
 
+class _StubMemory:
+    def __init__(self):
+        self.deleted = 0
+        self.restored: list[tuple[str, str]] = []
+
+    def get_session_state(self, sid):
+        return {}
+
+    def delete_last_messages(self, session_id, count):
+        self.deleted += count
+        return count
+
+    def store_message(self, session_id, role, content, **kwargs):
+        self.restored.append((role, content))
+        return 1
+
+
 class _StubBrain:
-    """Records handle_message calls and returns queued responses."""
+    """Records handle_message calls and returns queued responses (or raises)."""
 
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls: list[str] = []
-        self.memory = SimpleNamespace(get_session_state=lambda sid: {})
+        self.memory = _StubMemory()
 
     def handle_message(self, session_id, message, *, memory_text=None, task_type=None):
         self.calls.append(message)
-        return self._responses.pop(0)
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 def _resp(content, *, tools=None):
@@ -128,6 +149,34 @@ class F4B2AutoRepromptTests(unittest.TestCase):
         )
         self.assertIsNone(out)
         self.assertEqual(brain.calls, [])
+
+    def test_reprompt_api_failure_keeps_original_and_restores_narration(self) -> None:
+        # Gemini/CodeRabbit #228: an API error on the re-prompt must not break a
+        # turn that already had a (narrated) reply — keep the original and put
+        # the dropped narration back so the downstream flow stays consistent.
+        brain = _StubBrain([RuntimeError("provider 500")])
+        bot = _bot(brain, evidence_signal_for=[])
+        original = _resp(_NARRATED)
+
+        out = bot._maybe_auto_reprompt_unexecuted_action(
+            session_id="tg-1", source_text=_ASK, response=original
+        )
+
+        self.assertIs(out, original)  # graceful fallback to the original reply
+        self.assertEqual(brain.memory.restored, [("assistant", _NARRATED)])  # narration restored
+        self.assertIn("f4b2_auto_reprompt_failed", [e for e, _ in bot._events])
+
+    def test_reprompt_approval_pending_propagates(self) -> None:
+        # A Tier-3 tool during the forced execution raises ApprovalPending — it
+        # must propagate to the caller's approval path, not be swallowed.
+        exc = ApprovalPending(approval_id="a1", token="t", tool="Deploy", summary="Deploy(env)")
+        brain = _StubBrain([exc])
+        bot = _bot(brain)
+
+        with self.assertRaises(ApprovalPending):
+            bot._maybe_auto_reprompt_unexecuted_action(
+                session_id="tg-1", source_text=_ASK, response=_resp(_NARRATED)
+            )
 
 
 if __name__ == "__main__":
