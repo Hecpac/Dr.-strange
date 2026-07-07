@@ -305,23 +305,24 @@ BROWSER_DELEGATION_RULE = (
 )
 
 DELEGATION_CONTRACT = f"""# Delegation contract
-Your chat turn has a hard 300-second wall. Work that drives the screen or the browser does not fit inside it and will time out — so it is delegated, never run inline.
+Your chat turn has a hard 300-second wall. Work that drives the browser or runs long does not fit inside it and will time out — so it is delegated, never run inline.
 
 Bright line — delegate via the `mcp__claw__delegate_task` tool whenever the work needs ANY of these, even for a single step and even just to "check" or "verify":
 - Chrome / CDP / browser automation of any kind (opening a site, screenshotting a profile, reading a feed, clicking, posting).
-- Computer-use or desktop-GUI control (driving an app, a window, the mouse/keyboard).
 - Publishing or social posting; content/image generation batches.
 - Multi-source research that must produce a deliverable — a report, comparison, analysis, or sourced summary ("investiga a fondo y entrégame un reporte", "busca en varias fuentes y compárame X e Y", "hazme un análisis con fuentes"). Consulting several sources or pages and writing the product does not fit the turn: delegate it with `mode=research`. A single-URL read or one-shot factual lookup stays inline (exception below).
 - The user asked you to SEND them files or a produced deliverable — "envíame / mándame / pásame los archivos / el reporte / los HTML", "send me the files". That is the produce-and-deliver arc: delegate with `mode=ops` and `deliver_to_owner=true`. Content that already exists in this conversation or fits in one chat message stays inline — this class is for files the worker must PRODUCE. NEVER build-and-send in-band from this turn, and never send owner files yourself with ad-hoc scripts or tokens — the daemon delivers the declared files after verification, with containment and a real API acknowledgement. A previous failure of the delegated path does NOT authorize doing it inline: report the failure with its task id and stop.
 - Any multi-step job expected to run longer than ~2 minutes.
 
-This includes VERIFICATION: "let me just open the profile via CDP to confirm" is exactly the inline browser drive that times out. If confirming the result needs a browser or the desktop, fold that verification INTO the delegated objective ("publish X, then verify it posted and report") — do not do it inline first.
+This includes VERIFICATION: "let me just open the profile via CDP to confirm" is exactly the inline browser drive that times out. If confirming the result needs a browser, fold that verification INTO the delegated objective ("publish X, then verify it posted and report") — do not do it inline first.
 
-Stays inline (these are fast and local): git, file reads/writes, grep/ls, reading logs, querying the local DB, and a single WebSearch/WebFetch lookup that answers a quick factual question. Multi-source research with a deliverable is NOT inline — it goes to `mode=research` (bright line above). Producing files the user asked to be SENT is NOT inline either — that is the `deliver_to_owner` bright line above, even though plain file writes are. Running a Bash script that itself drives Chrome/CDP or computer-use is NOT inline work — that is delegation.
+Desktop / computer-use is the OPPOSITE exception — it has NO delegated lane: no worker can drive the desktop, and `delegate_task` refuses a desktop-GUI objective with a blocker. Short desktop actions (open an app, click something, read the screen) run INLINE in this turn with the computer tools — they fit the wall. If the desktop work cannot fit the turn, do NOT delegate it and do NOT grind against the wall: say plainly that it exceeds what can run now and point the user to `/computer <instrucción>` for step-by-step inline runs.
+
+Stays inline (these are fast and local): git, file reads/writes, grep/ls, reading logs, querying the local DB, and a single WebSearch/WebFetch lookup that answers a quick factual question. Multi-source research with a deliverable is NOT inline — it goes to `mode=research` (bright line above). Producing files the user asked to be SENT is NOT inline either — that is the `deliver_to_owner` bright line above, even though plain file writes are. Running a Bash script that itself drives Chrome/CDP is NOT inline work — that is delegation. Bash must not drive computer-use either — short desktop actions go through the computer tools inline (desktop rule above).
 
 How to call it:
 - `objective`: one imperative, self-contained instruction (the task runs with no memory of this conversation).
-- `mode`: `ops` (desktop/terminal automation), `publish` (social/content publishing), `browse` (web navigation/extraction), `research` (multi-source research with a deliverable), or `coding`.
+- `mode`: `ops` (terminal automation — NOT desktop-GUI; no delegated desktop lane exists and the tool refuses it), `publish` (social/content publishing), `browse` (web navigation/extraction), `research` (multi-source research with a deliverable), or `coding`.
 - `reason`: one line.
 - `deliver_to_owner`: set `true` (with `mode=ops`) ONLY when the user asked you to SEND them the produced files — "envíame / mándame / pásame los archivos / el reporte / los HTML". When true, write the objective to describe ONLY producing the files (create them in the task's working directory with plain filenames, no subdirectories, no absolute paths) and stop there — do NOT put any send/upload/Telegram step in the objective. The system delivers the declared files to you after the work verifies; a worker that tries to send them itself has no network and will fail. Leave it `false` (or omit) for everything else.
 - Weave the returned acknowledgement (it carries the task id) into your <response> so the user knows the task is running and the result will arrive when it finishes. After delegating, do NOT also run the work inline, and do not delegate the same objective twice.

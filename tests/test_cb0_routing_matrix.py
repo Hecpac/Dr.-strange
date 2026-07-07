@@ -31,15 +31,14 @@ class CB0RoutingMatrixTests(unittest.TestCase):
         ):
             self.assertFalse(_should_use_browser_executor("ops", objective), objective)
 
-    def test_computer_use_phrase_misroutes_a_desktop_task_to_browser(self) -> None:
-        # KNOWN mis-route (recon 2026-07-07): _BROWSER_OPERATION_SIGNAL_RE
-        # (bot_helpers.py:183) contains the literal "computer[-_\\s]?use", so a
-        # delegated DESKTOP objective phrased with "computer-use" — the exact
-        # phrase the brain's DELEGATION_CONTRACT (brain.py:312) uses to describe
-        # desktop work — routes to the Chrome CDP browser executor, the WRONG
-        # surface. Locked so CB1's fix (dropping the token from the regex) is a
-        # deliberate, test-visible change, not a silent one.
-        self.assertTrue(
+    def test_computer_use_phrase_no_longer_misroutes_to_browser(self) -> None:
+        # CB1 (2026-07-07) — the deliberate, test-visible flip this test was
+        # written to force: the literal "computer[-_\\s]?use" token was dropped
+        # from _BROWSER_OPERATION_SIGNAL_RE, so the word that means "desktop"
+        # no longer sends a delegated objective to the Chrome CDP browser
+        # executor. The objective is now declined honestly at
+        # TaskHandler.start_autonomous_task (tests/test_cb1_routing_honesty.py).
+        self.assertFalse(
             _should_use_browser_executor("ops", "usa computer-use para abrir la Calculadora")
         )
 

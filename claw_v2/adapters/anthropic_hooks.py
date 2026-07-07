@@ -26,8 +26,10 @@ logger = logging.getLogger(__name__)
 
 # Backstop for the delegation contract: high-confidence signals that a Bash
 # command is about to drive Chrome/CDP, a browser, or desktop computer-use.
-# Such work does not fit the brain turn's 300s wall and must be delegated.
-# Worker lanes (delegated coordinator tasks) are NOT gated by this.
+# Neither fits the brain turn's 300s wall; both are denied. The nudge differs
+# (CB1, ADR CB0): browser work IS delegable, desktop computer-use is NOT — it
+# has no delegated lane, so the honest guidance is the inline computer tools,
+# never "delegate it". Worker lanes (delegated coordinator tasks) are NOT gated.
 _INLINE_BROWSER_DRIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bpeekaboo\b", re.IGNORECASE),
     re.compile(r"\bplaywright\b", re.IGNORECASE),
@@ -37,7 +39,20 @@ _INLINE_BROWSER_DRIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"webSocketDebuggerUrl"),
     re.compile(r"/json/(?:list|version)\b"),
     re.compile(r":9(?:250|222)\b"),  # Chrome CDP debug ports used by the workspace
-    re.compile(r"\bcomputer[-_]use\b", re.IGNORECASE),
+)
+_INLINE_COMPUTER_USE_PATTERN = re.compile(r"\bcomputer[-_]use\b", re.IGNORECASE)
+_BROWSER_DRIVE_REASON = "inline browser/CDP drive in a chat turn"
+_COMPUTER_USE_DRIVE_REASON = "inline computer-use drive in a chat turn"
+_BROWSER_DRIVE_NUDGE = (
+    "Browser/CDP drive cannot run inline in a chat turn (300s wall). "
+    "Delegate it with the delegate_task tool (mode=ops/publish/browse) — fold any "
+    "verification into the delegated objective — instead of running it here."
+)
+_COMPUTER_USE_DRIVE_NUDGE = (
+    "Bash must not drive computer-use from a chat turn, and desktop work has NO "
+    "delegated lane — delegate_task refuses desktop-GUI objectives. Run short "
+    "desktop actions inline with the computer tools; if the work cannot fit the "
+    "300s turn, tell the user honestly instead of delegating it."
 )
 # Absolute python script paths inside a command; their contents are folded into
 # the scan so `python3 /path/_ig_publish.py` (CDP inside the script) is caught.
@@ -115,7 +130,9 @@ def _inline_browser_drive_reason(tool_name: str, tool_input: dict[str, Any] | No
     blob = "\n".join(haystacks)
     for pattern in _INLINE_BROWSER_DRIVE_PATTERNS:
         if pattern.search(blob):
-            return "inline browser/CDP/computer-use drive in a chat turn"
+            return _BROWSER_DRIVE_REASON
+    if _INLINE_COMPUTER_USE_PATTERN.search(blob):
+        return _COMPUTER_USE_DRIVE_REASON
     return None
 
 
@@ -186,9 +203,9 @@ def make_pre_tool_use_hook(
             )
             if drive_reason:
                 nudge = (
-                    "Browser/CDP/computer-use cannot run inline in a chat turn (300s wall). "
-                    "Delegate it with the delegate_task tool (mode=ops/publish/browse) — fold any "
-                    "verification into the delegated objective — instead of running it here."
+                    _COMPUTER_USE_DRIVE_NUDGE
+                    if drive_reason == _COMPUTER_USE_DRIVE_REASON
+                    else _BROWSER_DRIVE_NUDGE
                 )
                 if observe is not None:
                     try:
@@ -253,9 +270,7 @@ def make_pre_tool_use_hook(
                         "permissionDecisionReason": nudge,
                     },
                 }
-            sdk_agent_reason = _sdk_agent_dispatch_reason(
-                str(input_data.get("tool_name", ""))
-            )
+            sdk_agent_reason = _sdk_agent_dispatch_reason(str(input_data.get("tool_name", "")))
             if sdk_agent_reason:
                 nudge = (
                     "The Agent tool is the SDK's unmonitored subagent dispatcher and is "

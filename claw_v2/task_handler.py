@@ -34,6 +34,7 @@ from claw_v2.bot_helpers import (
     _format_coordinator_response,
     _format_task_approval_response,
     _infer_session_mode,
+    _looks_like_desktop_gui_objective,
     _looks_like_proceed_request,
     _normalize_command_text,
     _should_use_browser_executor,
@@ -70,6 +71,19 @@ _PETRI_DIMENSIONS_ROOT = Path(__file__).parent / "verification" / "dimensions"
 # this many times before it is forced to a terminal "failed"
 # (verification_stalled) instead of looping forever.
 _MAX_VERIFICATION_DEFERRALS = 5
+
+# CB1 (ADR CB0, 2026-07-07): user-safe decline for delegated desktop-GUI work.
+# There is no delegated desktop executor (no run_delegated_computer_task, no
+# codex-desktop lane) — the honest failure names the inline path instead of
+# silently landing the objective in the GUI-less Codex coordinator.
+_NO_DESKTOP_LANE_BLOCKER = (
+    "No puedo delegar trabajo de escritorio/computer-use: no existe un lane "
+    "delegado que pueda ejecutarlo (los workers corren en sandbox, sin acceso "
+    "a la pantalla). Para una tarea corta de escritorio usa `/computer "
+    "<instrucción>`, que corre inline. Si en realidad es trabajo de "
+    "navegador/web, reformula el objetivo mencionando el sitio o la URL "
+    "explícita."
+)
 
 
 def _max_task_redrives() -> int:
@@ -477,6 +491,43 @@ class TaskHandler:
                 )
         return True
 
+    def _reject_desktop_objective_without_lane(
+        self, objective: str, *, session_id: str, mode: str, source: str
+    ) -> bool:
+        """CB1 (ADR CB0, 2026-07-07): honest decline over silent mis-route.
+
+        A delegated desktop-GUI objective has no executor that can run it: the
+        browser executor drives Chrome CDP (wrong surface) and the Codex
+        coordinator runs --sandbox workspace-write (no GUI). Mirrors the PR-0B
+        guard above so every caller of `start_autonomous_task` is covered.
+        Browser-signal objectives keep their valid browser-executor route;
+        anything not unambiguously desktop falls through to today's behavior.
+        """
+        if mode not in {"ops", "publish"}:
+            return False
+        if _should_use_browser_executor(mode, objective):
+            return False
+        if not _looks_like_desktop_gui_objective(objective):
+            return False
+        if self.observe is not None:
+            try:
+                self.observe.emit(
+                    "delegated_desktop_objective_blocked",
+                    payload={
+                        "session_id": session_id,
+                        "source": source,
+                        "mode": mode,
+                        "reason": "no_desktop_delegation_lane",
+                        "objective_preview": objective[:200],
+                    },
+                )
+            except Exception:
+                logger.debug(
+                    "delegated_desktop_objective_blocked emit failed",
+                    exc_info=True,
+                )
+        return True
+
     def maybe_run_coordinated_task(self, session_id: str, text: str) -> str | None:
         if self.coordinator is None or not text or text.startswith("/"):
             return None
@@ -539,6 +590,10 @@ class TaskHandler:
                 '"implementa el fix" o "aplica el patch").'
             )
         mode = mode or _infer_session_mode(objective)
+        if self._reject_desktop_objective_without_lane(
+            objective, session_id=session_id, mode=mode, source="start_autonomous_task"
+        ):
+            return _NO_DESKTOP_LANE_BLOCKER
         task_id = f"{session_id}:{time.time_ns()}"
         checkpoint = {
             "summary": f"Autonomous task started: {objective[:180]}",

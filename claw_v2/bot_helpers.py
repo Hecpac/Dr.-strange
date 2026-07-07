@@ -179,8 +179,12 @@ _LONG_BROWSER_OPERATION_TIMEOUT_SECONDS = 1200.0
 _BROWSER_OPERATION_SIGNAL_RE = re.compile(
     # instagram/reel: the IG publish path (claw_v2/instagram_publish.py) drives
     # CDP Chrome, but objectives say "Instagram"/"reel", not "Chrome/CDP".
+    # CB1 (ADR CB0, 2026-07-07): "computer-use" is NOT a browser signal — the
+    # word that means "desktop" used to send delegated desktop objectives to
+    # the Chrome CDP browser executor. Desktop-GUI objectives are recognized by
+    # _looks_like_desktop_gui_objective and declined honestly (no lane exists).
     r"\b(?:cdp|chrome|chromium|playwright|selenium|chromedriver|notebooklm"
-    r"|instagram|reels?|twitter|computer[-_\s]?use)\b"
+    r"|instagram|reels?|twitter)\b"
     r"|x/twitter\b"
     r"|localhost:9(?:250|222)\b"
     r"|127\.0\.0\.1:9(?:250|222)\b"
@@ -207,6 +211,37 @@ _SOCIAL_BROWSER_ACTION_RE = re.compile(
 _X_BROWSER_ACTION_RE = re.compile(
     r"\b(?:repaso|sweep|timeline|feed|posts?|captura|capturar|lee|leer|revisa|review|analiza|abre|navega)\b",
     re.IGNORECASE,
+)
+# CB1 (ADR CB0, 2026-07-07): unambiguous desktop-GUI markers for DELEGATED
+# objectives. There is no delegated desktop executor (no
+# run_delegated_computer_task, no codex-desktop lane), so a delegated objective
+# matching these is declined honestly at TaskHandler.start_autonomous_task
+# instead of silently landing in the GUI-less Codex coordinator. Per the
+# Routing Contract, capture only what is unambiguous from the literal text:
+# "computer-use" by name, an instrumental "usa el escritorio / use the
+# desktop", or desktop/escritorio tied to a GUI NOUN. Bare
+# "escritorio"/"desktop" alone is NOT a signal, and neither are generic open
+# verbs (CodeRabbit, PR #230): "sube el archivo al escritorio y abre un PR" is
+# a filesystem/coordinator task — the location adverbial ("al/en el
+# escritorio") plus an unrelated "abre/open" elsewhere must not read as GUI
+# intent. App launching is detected ONLY through the curated
+# _APP_LAUNCH_ACTION_TOKENS phrasings. Matching happens on
+# _normalize_command_text output (lowercased, accents folded).
+_COMPUTER_USE_TOKEN_RE = re.compile(r"\bcomputer[-_\s]?use\b")
+_DESKTOP_HOST_TOKEN_RE = re.compile(r"\b(?:escritorio|desktop)\b")
+_DESKTOP_GUI_QUALIFIER_RE = re.compile(
+    r"\b(?:apps?|aplicacion(?:es)?|programas?|ventanas?|windows?|gui|mouse|raton|"
+    r"teclados?|keyboards?|click|clic|pantallas?|screenshots?)\b"
+)
+# Instrumental construction: the desktop as the tool being driven ("usa el
+# escritorio para..."), not a file destination. Curated, like the app-launch
+# tokens — never bare verbs.
+_DESKTOP_INSTRUMENT_TOKENS = (
+    "usa el escritorio",
+    "usar el escritorio",
+    "usando el escritorio",
+    "use the desktop",
+    "using the desktop",
 )
 _X_PLATFORM_RE = re.compile(
     r"\b(?:x/twitter|twitter|x\.com)\b"
@@ -277,7 +312,7 @@ _BROWSE_OPEN_TOKENS = (
     "navega",
     "browse",
 )
-_COMPUTER_ACTION_TOKENS = (
+_COMPUTER_BASIC_ACTION_TOKENS = (
     "haz click",
     "haz clic",
     "dale click",
@@ -305,15 +340,20 @@ _COMPUTER_ACTION_TOKENS = (
     "arrastra la",
     "abre el menu",
     "open the menu",
-    # Bot breakage diagnosis 2026-07-06: launching a native app is an ACTION,
-    # not a read. "/computer abre la app Calculadora y dime qué ves" used to be
-    # classified as a read (screenshot only) because no action token matched,
-    # so the app never launched. These are QUALIFIED app-launch phrasings
-    # (app/aplicación/programa) — bare verbs are intentionally NOT added: bare
-    # "abre" collides with reads ("abre la pagina actual") and bare "launch "
-    # collides with ordinary prompts ("draft a launch plan" / "prelaunch
-    # checklist"), and this classifier runs on general non-slash messages too
-    # (bot._maybe_handle_shortcut), not only /computer (CodeRabbit/Codex #223).
+)
+# Bot breakage diagnosis 2026-07-06: launching a native app is an ACTION,
+# not a read. "/computer abre la app Calculadora y dime qué ves" used to be
+# classified as a read (screenshot only) because no action token matched,
+# so the app never launched. These are QUALIFIED app-launch phrasings
+# (app/aplicación/programa) — bare verbs are intentionally NOT added: bare
+# "abre" collides with reads ("abre la pagina actual") and bare "launch "
+# collides with ordinary prompts ("draft a launch plan" / "prelaunch
+# checklist"), and this classifier runs on general non-slash messages too
+# (bot._maybe_handle_shortcut), not only /computer (CodeRabbit/Codex #223).
+# CB1: named separately so the delegated desktop-GUI recognizer
+# (_looks_like_desktop_gui_objective) reuses the same curated phrasings
+# instead of a parallel literal list.
+_APP_LAUNCH_ACTION_TOKENS = (
     "abre la app",
     "abre la aplicacion",
     "abre el programa",
@@ -327,6 +367,7 @@ _COMPUTER_ACTION_TOKENS = (
     "lanza la aplicacion",
     "lanza el programa",
 )
+_COMPUTER_ACTION_TOKENS = _COMPUTER_BASIC_ACTION_TOKENS + _APP_LAUNCH_ACTION_TOKENS
 _COMPUTER_READ_TOKENS = (
     "revisa la pagina actual",
     "revisa la pantalla",
@@ -2190,8 +2231,10 @@ def _build_coordinator_tasks(
         long_operation_directive = _long_operation_directive(operation_timeout)
         flavor = {
             "ops": (
-                "Execute the operation with the workspace tools (shell scripts, local CLIs, "
-                "desktop/computer automation already available in the workspace)."
+                # CB1: do not advertise desktop/computer automation — coordinator
+                # workers run sandboxed (no GUI) and no delegated desktop lane exists.
+                "Execute the operation with the workspace tools (shell scripts and "
+                "local CLIs already available in the workspace)."
             ),
             "publish": (
                 "Prepare and publish the content using the local CLIs/automation already "
@@ -2342,6 +2385,27 @@ def _looks_like_social_browser_request(text: str) -> bool:
     return (
         _SOCIAL_BROWSER_PLATFORM_RE.search(normalized) is not None
         and _SOCIAL_BROWSER_ACTION_RE.search(normalized) is not None
+    )
+
+
+def _looks_like_desktop_gui_objective(text: str) -> bool:
+    """True when a delegated objective unambiguously asks for desktop-GUI work.
+
+    CB1 (ADR CB0): desktop/computer-use has NO delegation home — the caller
+    (TaskHandler.start_autonomous_task) declines these honestly instead of
+    routing them to the GUI-less Codex coordinator. Deliberately narrow: a miss
+    falls through to today's behavior (coordinator), never to a false decline.
+    """
+    normalized = _normalize_command_text(text)
+    if _COMPUTER_USE_TOKEN_RE.search(normalized):
+        return True
+    if any(token in normalized for token in _APP_LAUNCH_ACTION_TOKENS):
+        return True
+    if any(token in normalized for token in _DESKTOP_INSTRUMENT_TOKENS):
+        return True
+    return (
+        _DESKTOP_HOST_TOKEN_RE.search(normalized) is not None
+        and _DESKTOP_GUI_QUALIFIER_RE.search(normalized) is not None
     )
 
 

@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice cb0-routing-evidence (2026-07-07, evidence gate): documents+test-locks the computer-vs-browser routing asymmetry (browser delegable via run_delegated_browser_task; computer-use inline-only, no delegation home) and the redacted ADR evidence corpus. Docs/tests/invariants only — no lane, no runtime change. ADR recommends NO-GO on a codex-desktop lane with a defined telemetry trigger."
-doc_version: 3.03
+describes_commit: "slice cb1-routing-honesty (2026-07-07): computer-use prompt/routing honesty per the CB0 ADR's NO-GO. 'computer-use' dropped from _BROWSER_OPERATION_SIGNAL_RE (no longer a browser signal); a delegated desktop-GUI objective (ops/publish, no browser signal, unambiguous literal marker) is declined synchronously at TaskHandler.start_autonomous_task with a user-safe blocker + delegated_desktop_objective_blocked(reason=no_desktop_delegation_lane) BEFORE any task state; DELEGATION_CONTRACT / ops coordinator flavor / PreToolUse backstop nudge stop advertising a delegated desktop executor; both computer_browser_use_missing_domain_grant returns now name the cause and the lever (put the site/URL in the instruction). No lane built; inline /computer path untouched."
+doc_version: 3.04
 last_verified: 2026-07-07
-verification_method: "F4-B2 local: tests/test_f4b2_auto_reprompt.py covers a narrated-without-action reply triggering exactly one re-prompt, the re-prompt executing/delegating stopping the loop, a second narration returning unchanged (no loop; falls to the evidence gate), and normal answers / already-has-tool-evidence / None responses not triggering. Prior slices' tests (evidence gate, ledger, halt) remain green (110 passed)."
+verification_method: "CB1 local: tests/test_cb1_routing_honesty.py (recognizer matrix, decline-with-blocker e2e incl. no-task-state + telemetry reason, guard mode/browser-signal scoping, prompt-surface honesty, missing_domain_grant guidance) + flipped tests/test_cb0_routing_matrix.py mis-route lock + hardened tests/test_anthropic_hooks.py nudge split. Focused gate green: 375 passed + 33 subtests (test_computer, test_bot_helpers, test_task_handler, test_brain_core, test_task_deliverables, test_shadow_delegation_gap, test_architecture_invariants) + 40 passed (cb0/cb1/anthropic_hooks)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1025,20 +1025,60 @@ invariants:
           bot_helpers._should_use_browser_executor when the objective signals
           browser/CDP work), but computer-use / desktop-GUI work is INLINE-ONLY:
           there is no run_delegated_computer_task and no codex-desktop worker.
-          A delegated desktop objective with no browser signal routes to the
-          Codex coordinator (--sandbox workspace-write: no network, no GUI),
-          which cannot execute it. This asymmetry is the CB0 evidence gate's
-          premise; adding a computer-use delegation home must be a deliberate,
-          test-visible change (see docs/adr/CB0-computer-vs-browser-routing).
+          Since CB1, a delegated desktop objective with no browser signal is
+          DECLINED honestly at start (see
+          cb1_desktop_delegation_declines_honestly) instead of silently landing
+          in the GUI-less Codex coordinator. This asymmetry is the CB0 evidence
+          gate's premise; adding a computer-use delegation home must be a
+          deliberate, test-visible change (see
+          docs/adr/CB0-computer-vs-browser-routing).
     chokepoints:
       - bot_helpers._should_use_browser_executor  # browser-only delegation trigger
       - computer_handler.ComputerHandler.run_delegated_browser_task  # browser has a runner; computer has none
     enforced_by:
       - tests/test_cb0_routing_matrix.py
-    why: brain.py:320 instructs the brain to DELEGATE computer-use, but no
-         delegation destination can execute it — a latent mis-route the ADR
-         decided (NO-GO on a lane for now) with a defined telemetry trigger to
-         revisit. Locking the asymmetry keeps the decision honest if routing drifts.
+    why: The brain's contract used to instruct DELEGATING computer-use with no
+         destination that could execute it — a latent mis-route the ADR decided
+         (NO-GO on a lane for now, telemetry GO-trigger to revisit). CB1 aligned
+         the prompts (desktop is inline-only + honest refusal); locking the
+         asymmetry keeps the decision honest if routing drifts.
+
+  cb1_desktop_delegation_declines_honestly:
+    rule: '"computer-use" is NOT a browser signal (_BROWSER_OPERATION_SIGNAL_RE
+          carries no computer-use token), and a delegated desktop-GUI objective
+          — mode ops/publish, no browser signal, unambiguous literal desktop
+          marker per bot_helpers._looks_like_desktop_gui_objective (computer-use
+          by name, qualified app-launch phrasing, an instrumental "usa el
+          escritorio / use the desktop", or escritorio/desktop tied to a GUI
+          NOUN — never bare open verbs, so a file-destination "al/en el
+          escritorio" with an unrelated abre/open elsewhere stays with the
+          coordinator; a miss falls through to the coordinator, never to a
+          false decline) — is DECLINED synchronously at
+          TaskHandler.start_autonomous_task with the user-safe
+          _NO_DESKTOP_LANE_BLOCKER (names the inline /computer path) BEFORE any
+          ledger/queue/session task state is created, emitting
+          delegated_desktop_objective_blocked with
+          reason=no_desktop_delegation_lane. No prompt surface may advertise a
+          delegated desktop executor while none exists: the brain
+          DELEGATION_CONTRACT (desktop = inline computer tools, delegate_task
+          refuses it), the ops coordinator flavor (no "desktop/computer
+          automation" claim), and the PreToolUse backstop nudge (computer-use
+          denial points to inline computer tools, never "Delegate it").'
+    chokepoints:
+      - bot_helpers._BROWSER_OPERATION_SIGNAL_RE  # no computer-use token
+      - bot_helpers._looks_like_desktop_gui_objective
+      - task_handler.TaskHandler._reject_desktop_objective_without_lane
+      - brain.DELEGATION_CONTRACT
+      - adapters.anthropic_hooks._COMPUTER_USE_DRIVE_NUDGE
+    enforced_by:
+      - tests/test_cb1_routing_honesty.py
+      - tests/test_cb0_routing_matrix.py
+      - tests/test_anthropic_hooks.py
+    why: CB0 measured the silent mis-route (the word that means "desktop" sent
+         delegated work to Chrome CDP; signal-less desktop objectives sank into
+         a sandbox with no GUI). Until the ADR's GO-trigger fires and CB2
+         designs a real lane, the honest failure is a synchronous decline that
+         names the inline path — never a prompt that routes work into a void.
 
   cb0_evidence_corpus_is_redacted:
     rule: The CB0 routing evidence corpus
