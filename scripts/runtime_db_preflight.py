@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 import time
@@ -63,10 +64,45 @@ def _unique_backup_path(path: Path) -> Path:
     raise RuntimeDatabaseError(f"could not allocate unique backup path under {path.parent}")
 
 
+BACKUP_KEEP_DEFAULT = 15
+
+
+def prune_old_backups(backup_dir: Path, db_stem: str, keep: int) -> list[Path]:
+    """Keep the most-recent ``keep`` ``<db_stem>-*.db`` backups, remove older.
+
+    The restart preflight created a verified backup on every restart with no
+    rotation, so the dir grew unbounded (blind-spot pass 2026-07-06 finding #8:
+    ~2.6G / 54 copies). Filenames carry a YYYYMMDD-HHMMSS stamp, so lexical
+    sort == chronological; we drop everything but the newest ``keep`` (the one
+    just written is the newest, so it is never removed). A non-positive ``keep``
+    disables pruning.
+    """
+    if keep <= 0:
+        return []
+    backup_dir = Path(backup_dir)
+    backups = sorted(backup_dir.glob(f"{db_stem}-*.db"))
+    to_remove = backups[:-keep] if len(backups) > keep else []
+    removed: list[Path] = []
+    for path in to_remove:
+        try:
+            path.unlink()
+            removed.append(path)
+        except OSError:
+            # Never fail the restart on a stuck backup file; just skip it.
+            pass
+    return removed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Verify and back up the Claw runtime DB.")
     parser.add_argument("--db", default="data/claw.db", type=Path)
     parser.add_argument("--backup-dir", default="data/backups/restart", type=Path)
+    parser.add_argument(
+        "--keep-backups",
+        type=int,
+        default=int(os.getenv("CLAW_BACKUP_KEEP", str(BACKUP_KEEP_DEFAULT))),
+        help="how many most-recent restart backups to retain (0 disables pruning)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -110,6 +146,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Runtime DB preflight OK: no backup needed for {args.db}")
     else:
         print(f"Runtime DB preflight OK: verified backup {backup_path}")
+        pruned = prune_old_backups(args.backup_dir, args.db.stem, args.keep_backups)
+        if pruned:
+            # No silent caps: say exactly what was dropped.
+            print(f"Pruned {len(pruned)} old backup(s), keeping the newest {args.keep_backups}")
     return 0
 
 
