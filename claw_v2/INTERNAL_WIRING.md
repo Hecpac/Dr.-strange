@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice computer-applaunch-action (2026-07-07, breakage diagnosis Turn B): a native-app launch instruction on the /computer path classifies as an ACTION (routes to the codex-desktop loop and launches) instead of a screenshot-only read; bare 'abre' stays excluded so reads are unaffected."
-doc_version: 2.96
+describes_commit: "slice a3.7-computer-use-replan-outcomes (2026-07-07, A3.7): retryable iteration-limit, no-result, scope-drift, and explicitly transient computer/browser outcomes carry typed replan metadata and get at most one safe replan attempt; a browser replan refreshes session.current_url from the browser's verified final URL (thread-local last_final_url bound in-worker) and is declined fail-closed when that URL cannot be verified."
+doc_version: 2.97
 last_verified: 2026-07-07
-verification_method: "applaunch local: tests/test_computer_applaunch_action.py covers app-launch phrasings classifying as actions, pure reads staying reads, bare 'abre la pagina actual' not promoted, and the exact Calculadora Turn B mixed instruction launching; tests/test_browse.py 40 passed (non-regression of the 'abre la app' URL-candidate path)."
+verification_method: "A3.7 local: tests/test_computer.py::ComputerUseOutcomeTests covers success, approval, no-result, cancellation, scope-drift, timeout coercion, and retryable iteration-limit typed outcomes with replan metadata; tests/test_computer.py::ComputerHandlerOutcomeTests proves downstream events use typed status/reason/retryable/replan fields, one bounded replan runs for iteration-limit/no-result/scope-drift/explicit transient failure, browser replans refresh current_url from the verified final URL and are skipped (computer_replan_skipped) when it is unverifiable, replan resets clear stale screenshot_path, approvals/destructive waits, cancellations, auth/policy/user denials, and ambiguous actions do not replan, MagicMock legacy fallback and CDP unavailable paths stay typed; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes locks the typed outcome and bounded-replan chokepoint."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -876,19 +876,32 @@ invariants:
   computer_use_task_outcomes_are_typed:
     rule: Computer/browser task execution returns a typed
           `ComputerUseOutcome` at the service/handler boundary. Downstream
-          handler decisions and observe events use `status`, `reason_code`, and
-          `retryable`; `user_safe_summary` is the only field used to preserve
-          legacy user-facing text. Do not infer completion/failure/approval
-          from summary substrings in `ComputerHandler._run_session`.
+          handler decisions and observe events use `status`, `reason_code`,
+          `retryable`, `replan_recommended`, and `replan_reason_code`;
+          `user_safe_summary` is the only field used to preserve legacy
+          user-facing text. Do not infer completion/failure/approval/replan from
+          summary substrings in `ComputerHandler._run_session`. Retryable
+          iteration-limit, no-result, scope-drift, and explicitly typed
+          transient outcomes may trigger one bounded replan; approvals,
+          destructive/pending approval paths, cancellations, auth/policy/user
+          denials, ambiguous actions, and capability-unavailable paths must not
+          silently replan. A browser_use replan re-evaluates auto-approval, so
+          it must see where the browser actually ended up: `_run_browser_use_task`
+          binds the thread-local `last_final_url` to the session in-worker,
+          `_run_computer_replan` refreshes `session.current_url` from it before
+          the rerun, and declines the replan (`computer_replan_skipped`) when
+          the final URL cannot be verified; replan resets clear the prior run's
+          `screenshot_path` so early-exit reruns never report a stale capture.
     enforced_by:
       - tests/test_computer.py::ComputerUseOutcomeTests
       - tests/test_computer.py::ComputerHandlerOutcomeTests
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes
     why: A3.6 closes the ambiguity where iteration limits, no-result browser
          runs, approval waits, exceptions, and success all collapsed into
-         plain strings. That made downstream handling brittle and could mark a
-         failed/no-result automation as completed if the human-readable text
-         did not match an expected phrase.
+         plain strings. A3.7 builds on that typed chokepoint so recoverable
+         automation exhaustion or explicitly classified transient failure can
+         replan once with a changed non-destructive tactic instead of becoming a
+         generic failure or an unbounded retry.
 
   subprocess_bounded_execution:
     rule: Runtime subprocess execution must be time-bounded. New synchronous
