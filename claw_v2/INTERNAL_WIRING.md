@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice obswindow-failopen-alert (2026-07-07, blind-spot pass #3): a corrupt/unreadable observation_window state file is surfaced (loaded_degraded + deferred observation_window_load_degraded alert after the router installs) instead of swallowed silently; boot proceeds fail-open (unfrozen) per instruction, distinguishing a legitimate first boot (FileNotFoundError) from corruption."
-doc_version: 2.98
+describes_commit: "slice 2b-db-missing-halt (2026-07-07, blind-spot pass #2b): a vanished/empty runtime DB with verified backups present halts the boot (shared 2a halt marker, reason runtime_db_missing_with_backups) instead of silently booting a fresh schema; a genuine clean first boot (no DB and no backups) proceeds silently."
+doc_version: 2.99
 last_verified: 2026-07-07
-verification_method: "Slice 3 local: tests/test_observation_window.py::ObservationWindowLoadDegradedTests covers absent-file silent first boot, corrupt-JSON and non-object recording loaded_degraded and booting fail-open (unfrozen), and non-regression that a valid persisted freeze still restores; the pre-existing ObservationWindowAtomicWriteTests still prove the write path is atomic. Prior A3.7 verification (typed computer replan outcomes) remains locked by tests/test_computer.py and tests/test_architecture_invariants.py::test_computer_handler_uses_typed_computer_use_outcomes."
+verification_method: "Slice 2b local: tests/test_runtime_db_halt.py::MissingDbBootHaltTests covers missing/empty DB with backups halting (reason runtime_db_missing_with_backups), clean first boot without backups proceeding, valid DB booting, the CLAW_RESTART_DB_BACKUP_DIR env override, and the owner alert; tests/test_architecture_invariants.py::test_runtime_db_corruption_halts_boot_persistently extended to lock the shared-marker reuse + env-read. Slice 3's ObservationWindowLoadDegradedTests and the 2a halt tests remain green."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1085,6 +1085,37 @@ invariants:
          the result sat unread in the DB (blind-spot pass 2026-07-06, finding
          #6; the drain-pass promise in finalize_terminal_notification's
          docstring had no implementation for succeeded tasks).
+
+  runtime_db_missing_with_backups_halts_boot:
+    rule: A missing/empty runtime DB that passes the health check as
+          "empty_or_missing" is NOT booted silently with a fresh schema when
+          verified backups exist — that combination means the DB had data and
+          vanished (deploy/disk/rm), a total memory loss. _ensure_runtime_db_boot_health
+          writes the SHARED runtime_db_halt.json marker (reason
+          "runtime_db_missing_with_backups") + alerts + re-raises, so the
+          launcher hold-loop and clear-on-restore (Slice 2a plumbing) take over
+          verbatim — hold until a backup is restored to the DB path. A genuine
+          clean first boot (no DB AND no backups) proceeds silently so a fresh
+          install works. The backup dir is read from CLAW_RESTART_DB_BACKUP_DIR,
+          else data/backups/restart relative to the repo root — computed
+          EXACTLY as the shell does (decoupled from DB_PATH, not db_path.parent,
+          which would diverge under a custom DB_PATH). An OSError inspecting the
+          backup dir FAILS CLOSED (halt), because "cannot confirm the backups
+          are absent" is not "confirmed absent" — only an is_dir()==False
+          (genuinely-absent dir) proceeds as a clean boot. NAMED RESIDUAL: a DB created then deleted
+          BEFORE its first restart-backup ever existed has 0 backups → treated
+          as clean first boot (the narrow window a sibling provisioned-marker
+          would close; accepted as rare).
+    chokepoints:
+      - main._ensure_runtime_db_boot_health  # empty_or_missing + backups-exist detection
+      - main._restart_backup_dir  # reads CLAW_RESTART_DB_BACKUP_DIR, no parallel literal
+      - sqlite_runtime.write_runtime_db_halt_marker  # reason param, shared marker with 2a
+    enforced_by:
+      - tests/test_runtime_db_halt.py::MissingDbBootHaltTests
+    why: A vanished claw.db passed the health check as empty_or_missing and
+         booted with a fresh empty schema — total loss with no alarm (blind-spot
+         pass 2026-07-06 finding #2, the case Slice 2a explicitly deferred).
+         Reuses 2a's marker + hold-loop rather than a parallel mechanism.
 
   runtime_db_corruption_halts_boot_persistently:
     rule: Detected runtime-DB corruption leaves a persistent halt marker

@@ -504,6 +504,11 @@ class ArchitectureInvariantTests(unittest.TestCase):
             launcher_source.index('while [[ -f "$HALT_MARKER" ]]'),
             launcher_source.index('exec "$REPO_ROOT/.venv/bin/python" -m claw_v2.main'),
         )
+        # Slice 2b: the vanished-DB case reuses the SAME marker (reason param),
+        # not a parallel mechanism, and reads the backup dir from the env.
+        self.assertIn("runtime_db_missing_with_backups", main_source)
+        self.assertIn("_restart_backup_dir", main_source)
+        self.assertIn("CLAW_RESTART_DB_BACKUP_DIR", main_source)
 
     def test_owner_notification_outbox_stays_wired_into_runtime(self) -> None:
         # Slice 1b (blind-spot pass 2026-07-06 finding #6): a terminal-task

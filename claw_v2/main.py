@@ -2389,14 +2389,42 @@ def _setup_scheduler(
     return scheduler, dream, wiki, skill_registry, a2a
 
 
+def _restart_backup_dir(db_path: Path) -> Path:
+    """Backup dir the restart preflight writes to, computed EXACTLY as the shell
+    does: CLAW_RESTART_DB_BACKUP_DIR, else data/backups/restart relative to the
+    repo root the daemon runs from (restart.sh:15 / claw-launcher.sh:69). The
+    default is decoupled from DB_PATH — deriving it from db_path.parent would
+    diverge from the shell when DB_PATH is customized, missing real backups and
+    silently recreating an empty DB (Codex #225 P1)."""
+    env = os.getenv("CLAW_RESTART_DB_BACKUP_DIR")
+    if env:
+        return Path(env)
+    repo_root = Path(__file__).resolve().parents[1]
+    return repo_root / "data" / "backups" / "restart"
+
+
+def _alert_runtime_db_halt(config: Any, message: str) -> None:
+    if config.telegram_bot_token and config.telegram_allowed_user_id:
+        try:
+            send_telegram_message(
+                config.telegram_bot_token, config.telegram_allowed_user_id, message
+            )
+        except Exception:
+            logger.exception("runtime DB halt alert could not be delivered")
+
+
 def _ensure_runtime_db_boot_health(config: Any) -> None:
-    """Run the thorough boot health check; on corruption, leave a trace.
+    """Run the thorough boot health check; on corruption OR a vanished DB,
+    leave a persistent halt marker so the launcher holds instead of booting.
 
     Slice 2a (blind-spot pass 2026-07-06 finding #2): an uncaught
     RuntimeDatabaseError here exits the process and launchd KeepAlive
-    relaunches it in a crash-boot loop with no record of why. Persist the
-    halt marker (which the launcher honors by holding instead of exec'ing)
-    and alert the owner before re-raising.
+    relaunches it in a crash-boot loop with no record of why. Slice 2b (finding
+    #2b): a MISSING/empty DB passes the health check as "empty_or_missing" and
+    boots silently with a fresh schema — total memory loss with no alarm. When
+    verified backups exist (this DB had data before), that is a disaster, not a
+    clean first boot: halt (reuse 2a's marker + hold-loop) rather than boot on
+    empty memory.
     """
     try:
         check_runtime_sqlite_health(config.db_path, thorough=True)
@@ -2405,20 +2433,68 @@ def _ensure_runtime_db_boot_health(config: Any) -> None:
         logger.critical(
             "runtime DB failed boot health check; halt marker written: %s (%s)", marker, exc
         )
-        if config.telegram_bot_token and config.telegram_allowed_user_id:
-            try:
-                send_telegram_message(
-                    config.telegram_bot_token,
-                    config.telegram_allowed_user_id,
-                    (
-                        "🛑 Claw no arrancó: la DB de runtime falló el integrity check "
-                        f"({exc}). Marca de halt escrita en {marker}; el boot queda en "
-                        "hold hasta restaurar un backup verificado de data/backups/restart/."
-                    ),
-                )
-            except Exception:
-                logger.exception("runtime DB halt alert could not be delivered")
+        _alert_runtime_db_halt(
+            config,
+            (
+                "🛑 Claw no arrancó: la DB de runtime falló el integrity check "
+                f"({exc}). Marca de halt escrita en {marker}; el boot queda en "
+                "hold hasta restaurar un backup verificado de data/backups/restart/."
+            ),
+        )
         raise
+
+    # Slice 2b: the DB passed the check because it is valid OR absent/empty.
+    db_path = Path(config.db_path)
+    is_empty_or_missing = not db_path.exists() or db_path.stat().st_size == 0
+    if not is_empty_or_missing:
+        return
+    backup_dir = _restart_backup_dir(db_path)
+    try:
+        backups = sorted(backup_dir.glob("*.db")) if backup_dir.is_dir() else []
+    except OSError as exc:
+        # Cannot confirm the ABSENCE of backups (permissions, broken mount, FS
+        # error) — that is not the same as confirming there are none. Fail
+        # closed: halt rather than boot a fresh schema on a possibly-recoverable
+        # loss (CodeRabbit/Codex #225). A genuinely-absent dir returns
+        # is_dir()==False without raising, so a real clean install still boots.
+        detail = f"cannot inspect backup dir {backup_dir} to confirm clean first boot: {exc}"
+        marker = write_runtime_db_halt_marker(
+            db_path, detail, source="build_runtime", reason="runtime_db_backup_dir_unreadable"
+        )
+        logger.critical(
+            "runtime DB backup dir unreadable; halt marker written: %s (%s)", marker, detail
+        )
+        _alert_runtime_db_halt(
+            config,
+            (
+                "🛑 Claw no arrancó: la DB de runtime está ausente/vacía y no pude inspeccionar "
+                f"el dir de backups ({backup_dir}: {exc}) para confirmar un primer boot limpio. "
+                f"Marca de halt en {marker}; el boot queda en hold. Revisa el dir de backups."
+            ),
+        )
+        raise RuntimeDatabaseError(detail)
+    if not backups:
+        # Legitimate clean first boot: no DB and no backups. Proceed silently
+        # so an actual fresh install works.
+        return
+    detail = (
+        f"runtime DB missing/empty at {db_path} but {len(backups)} verified "
+        f"backup(s) exist in {backup_dir} — refusing to boot on empty memory"
+    )
+    marker = write_runtime_db_halt_marker(
+        db_path, detail, source="build_runtime", reason="runtime_db_missing_with_backups"
+    )
+    logger.critical("runtime DB vanished; halt marker written: %s (%s)", marker, detail)
+    _alert_runtime_db_halt(
+        config,
+        (
+            "🛑 Claw no arrancó: la DB de runtime DESAPARECIÓ o está vacía, pero hay "
+            f"{len(backups)} backup(s) verificados en {backup_dir}. Marca de halt escrita "
+            f"en {marker}; el boot queda en hold hasta restaurar un backup a {db_path} "
+            "(o borra la marca a mano si el wipe fue intencional)."
+        ),
+    )
+    raise RuntimeDatabaseError(detail)
 
 
 def build_runtime(
