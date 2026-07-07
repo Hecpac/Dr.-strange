@@ -8,7 +8,7 @@
 ## meta
 
 ```yaml
-describes_commit: "slice b41-botservice-rails (2026-07-07): B4.1/B4.2 migration rails, tests/docs only — top-level pre-brain dispatch order in _handle_text_body test-locked (13 handlers) and bot.py size ratcheted (baseline 12172 + 150). Also heals the meta drift from slice a39-transient-learning-taxonomy (PR #231, merged 634a528: transient automation failures gated at LearningLoop.record, telemetry-only via learning_transient_skipped; invariant learning_taxonomy_excludes_generic_transients) whose commit bumped doc_version without refreshing this field. No runtime behavior change in b41."
+describes_commit: "slice b41-botservice-rails (2026-07-07): B4.1/B4.2 migration rails, tests/docs only — top-level pre-brain dispatch order in _handle_text_body test-locked (19 top-level dispatch/capture calls, AST-extracted) and bot.py size ratcheted (baseline 12172 + 150). Also heals the meta drift from slice a39-transient-learning-taxonomy (PR #231, merged 634a528: transient automation failures gated at LearningLoop.record, telemetry-only via learning_transient_skipped; invariant learning_taxonomy_excludes_generic_transients) whose commit bumped doc_version without refreshing this field. No runtime behavior change in b41."
 doc_version: 3.06
 last_verified: 2026-07-07
 verification_method: "CB1 local: tests/test_cb1_routing_honesty.py (recognizer matrix, decline-with-blocker e2e incl. no-task-state + telemetry reason, guard mode/browser-signal scoping, prompt-surface honesty, missing_domain_grant guidance) + flipped tests/test_cb0_routing_matrix.py mis-route lock + hardened tests/test_anthropic_hooks.py nudge split. Focused gate green: 375 passed + 33 subtests (test_computer, test_bot_helpers, test_task_handler, test_brain_core, test_task_deliverables, test_shadow_delegation_gap, test_architecture_invariants) + 40 passed (cb0/cb1/anthropic_hooks)."
@@ -1105,8 +1105,9 @@ invariants:
           deterministic → task-intent → change-status → capability-route →
           tool-approval grant → autonomy grant → stateful followup →
           shortcut → coordinated-task) is behavior and is locked by test;
-          NLM/wiki short-circuits are nested inside _maybe_handle_shortcut and
-          locked transitively. Reordering, removing, or inserting a top-level
+          NLM/wiki dispatch is delegated to NlmHandler inside the
+          _maybe_handle_shortcut subtree and is NOT individually order-locked
+          by this rail — only the shortcut call's top-level position is. Reordering, removing, or inserting a top-level
           handler requires deliberately editing EXPECTED_PRE_BRAIN_ORDER and
           §5.1 in the same commit. Precondition for any strangler/migration.'
     chokepoints:

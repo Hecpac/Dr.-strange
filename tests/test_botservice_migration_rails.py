@@ -15,9 +15,10 @@ from claw_v2.bot import BotService
 
 # FULL top-level dispatch/capture sequence in BotService._handle_text_body,
 # extracted via AST (source order, closures excluded — the method defines
-# local helpers whose bodies would otherwise pollute the flow order). NLM/wiki
-# short-circuits have no top-level call of their own: they are nested inside
-# _maybe_handle_shortcut and are locked transitively by its position.
+# local helpers whose bodies would otherwise pollute the flow order). Scope
+# precision (PR #232 review): NLM/wiki dispatch is delegated to NlmHandler
+# inside the _maybe_handle_shortcut subtree — this rail locks the shortcut
+# call's top-level position, NOT the NLM-internal order.
 EXPECTED_PRE_BRAIN_ORDER = [
     "_maybe_handle_brain_first_new_task",
     "_handle_pending_computer_approval_response",
