@@ -1,0 +1,182 @@
+{
+  "_meta": {
+    "purpose": "CB0 evidence gate \u2014 redacted routing telemetry corpus",
+    "source": "prod observe_stream (read-only)",
+    "window_start": "2026-07-06 17:52:44",
+    "window_end": "2026-07-07 16:05:58",
+    "total_events_in_window": 50205,
+    "redaction": "structural-allowlist projection: only allowlisted KEYS whose VALUES are enum/slug (no spaces, bounded). Free-text fields (LLM reasons) and identifiers dropped. See test_cb0_corpus_privacy.",
+    "caveat": "LOW N \u2014 computer-use exercised a handful of times, mostly test-driven; not a statistical sample."
+  },
+  "counts": {
+    "dispatch_decision": 49,
+    "owner_delegation_no_match": 42,
+    "brain_delegation_requested": 5,
+    "brain_tooluse_ledger_blocked_unverified_action": 4,
+    "shadow_delegation_gap": 3,
+    "brain_inline_browser_drive_blocked": 0,
+    "f4b2_auto_reprompt_issued": 0,
+    "f4b2_auto_reprompt_result": 0,
+    "f4b2_auto_reprompt_failed": 0,
+    "browser_executor_started": 2,
+    "browser_executor_completed": 2,
+    "browser_capability_preflight_started": 2,
+    "browser_capability_preflight_ok": 2,
+    "delegated_browser_task_started": 1,
+    "deterministic_browser_task_started": 1,
+    "deterministic_browser_task_completed": 1,
+    "computer_session_started": 1,
+    "computer_session_completed": 0,
+    "computer_session_failed": 0,
+    "computer_backend_selected": 1,
+    "computer_screenshot_captured": 3,
+    "computer_approval_pending": 1,
+    "computer_approval_screenshot_captured": 1,
+    "computer_approval_resume_blocked": 1,
+    "computer_browser_use_missing_domain_grant": 1
+  },
+  "samples": {
+    "dispatch_decision": [
+      {
+        "selected_handler": null,
+        "selected_route": "fall_through",
+        "explicit_command": false,
+        "handler": null,
+        "route": "fall_through",
+        "reason": "fall_through_all_21",
+        "captured": false,
+        "matched_pattern": null
+      },
+      {
+        "selected_handler": null,
+        "selected_route": "fall_through",
+        "explicit_command": false,
+        "handler": null,
+        "route": "fall_through",
+        "reason": "fall_through_all_21",
+        "captured": false,
+        "matched_pattern": null
+      },
+      {
+        "selected_handler": null,
+        "selected_route": "fall_through",
+        "explicit_command": false,
+        "handler": null,
+        "route": "fall_through",
+        "reason": "fall_through_all_21",
+        "captured": false,
+        "matched_pattern": null
+      }
+    ],
+    "brain_delegation_requested": [
+      {
+        "mode": "ops"
+      },
+      {
+        "mode": "browse"
+      },
+      {
+        "mode": "ops"
+      }
+    ],
+    "brain_tooluse_ledger_blocked_unverified_action": [
+      {
+        "task_status": "failed",
+        "verification_status": "blocked",
+        "tools_count": 1
+      },
+      {
+        "task_status": "failed",
+        "verification_status": "blocked",
+        "tools_count": 4
+      },
+      {
+        "task_status": "failed",
+        "verification_status": "blocked",
+        "tools_count": 11
+      }
+    ],
+    "shadow_delegation_gap": [
+      {
+        "reason": "no_action"
+      },
+      {
+        "reason": "no_action"
+      },
+      {
+        "reason": "no_action"
+      }
+    ],
+    "browser_executor_started": [
+      {
+        "mode": "ops"
+      },
+      {
+        "mode": "browse"
+      }
+    ],
+    "browser_executor_completed": [
+      {
+        "status": "failed"
+      },
+      {
+        "status": "passed"
+      }
+    ],
+    "delegated_browser_task_started": [
+      {
+        "mode": "ops"
+      }
+    ],
+    "deterministic_browser_task_started": [
+      {
+        "mode": "browse"
+      }
+    ],
+    "deterministic_browser_task_completed": [
+      {
+        "mode": "browse"
+      }
+    ],
+    "computer_session_started": [
+      {
+        "backend": "codex"
+      }
+    ],
+    "computer_backend_selected": [
+      {
+        "backend": "codex",
+        "status": "running"
+      }
+    ],
+    "computer_approval_pending": [
+      {
+        "backend": "codex"
+      }
+    ],
+    "computer_approval_resume_blocked": [
+      {
+        "reason": "screenshot_changed"
+      }
+    ],
+    "computer_browser_use_missing_domain_grant": [
+      {
+        "backend": "browser_use",
+        "mode": "ops"
+      }
+    ]
+  },
+  "asymmetry": {
+    "browser_has_delegation_pipeline": true,
+    "computer_has_delegation_pipeline": false,
+    "computer_runs_inline_only": true,
+    "computer_action_ever_completed_in_window": false,
+    "observed_computer_failures_are_lane_related": false,
+    "observed_computer_failure_modes": [
+      "computer_browser_use_missing_domain_grant (browser_use scoping)",
+      "computer_approval_resume_blocked/screenshot_changed (approval guard)"
+    ],
+    "blocked_unverified_action_from_computer_use": false,
+    "computer_use_token_in_browser_signal_regex": true
+  }
+}

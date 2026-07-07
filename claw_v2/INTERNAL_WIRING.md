@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: "slice f4b2-auto-reprompt (2026-07-07, breakage diagnosis): when the brain narrates a start/completion action without executing/delegating, _brain_text_response issues one bounded auto re-prompt forcing execute/delegate/ask before the reply is finalized; if it still narrates, F4-B2a retention is the fallback."
-doc_version: 3.02
+describes_commit: "slice cb0-routing-evidence (2026-07-07, evidence gate): documents+test-locks the computer-vs-browser routing asymmetry (browser delegable via run_delegated_browser_task; computer-use inline-only, no delegation home) and the redacted ADR evidence corpus. Docs/tests/invariants only — no lane, no runtime change. ADR recommends NO-GO on a codex-desktop lane with a defined telemetry trigger."
+doc_version: 3.03
 last_verified: 2026-07-07
 verification_method: "F4-B2 local: tests/test_f4b2_auto_reprompt.py covers a narrated-without-action reply triggering exactly one re-prompt, the re-prompt executing/delegating stopping the loop, a second narration returning unchanged (no loop; falls to the evidence gate), and normal answers / already-has-tool-evidence / None responses not triggering. Prior slices' tests (evidence gate, ledger, halt) remain green (110 passed)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -1018,6 +1018,43 @@ invariants:
          with no recovery path (blind-spot pass 2026-07-06, finding #1).
          Reissue restores delivery without weakening hash-only persistence,
          single-use resolution, or the forged-record signature floor.
+
+  cb0_computer_use_has_no_delegation_home:
+    rule: Browser work is delegable (TaskHandler.browser_executor ==
+          ComputerHandler.run_delegated_browser_task, selected by
+          bot_helpers._should_use_browser_executor when the objective signals
+          browser/CDP work), but computer-use / desktop-GUI work is INLINE-ONLY:
+          there is no run_delegated_computer_task and no codex-desktop worker.
+          A delegated desktop objective with no browser signal routes to the
+          Codex coordinator (--sandbox workspace-write: no network, no GUI),
+          which cannot execute it. This asymmetry is the CB0 evidence gate's
+          premise; adding a computer-use delegation home must be a deliberate,
+          test-visible change (see docs/adr/CB0-computer-vs-browser-routing).
+    chokepoints:
+      - bot_helpers._should_use_browser_executor  # browser-only delegation trigger
+      - computer_handler.ComputerHandler.run_delegated_browser_task  # browser has a runner; computer has none
+    enforced_by:
+      - tests/test_cb0_routing_matrix.py
+    why: brain.py:320 instructs the brain to DELEGATE computer-use, but no
+         delegation destination can execute it — a latent mis-route the ADR
+         decided (NO-GO on a lane for now) with a defined telemetry trigger to
+         revisit. Locking the asymmetry keeps the decision honest if routing drifts.
+
+  cb0_evidence_corpus_is_redacted:
+    rule: The CB0 routing evidence corpus
+          (docs/adr/CB0-computer-vs-browser-routing/evidence-corpus.json), being
+          derived from prod observe_stream and committed to the repo, carries
+          ONLY allowlisted structural routing keys (route/reason/handler/backend/
+          status/verification_status/tools_count/…) in its samples — never a
+          session id, turn/approval/task id, instruction hash, current_url, or
+          message text.
+    chokepoints:
+      - docs/adr/CB0-computer-vs-browser-routing/evidence-corpus.json
+    enforced_by:
+      - tests/test_cb0_corpus_privacy.py
+    why: An ADR that commits redacted prod telemetry must not leak PII/secrets
+         into git history; the allowlist projection is the redaction contract,
+         test-locked so a future corpus refresh can't regain an identifier.
 
   f4b2_auto_reprompt_forces_execution_once:
     rule: When the brain narrates a start/completion action but ran no verifying
