@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "hygiene backup-rotation (2026-07-07, blind-spot pass #8): the restart preflight prunes old verified backups to the newest N (CLAW_BACKUP_KEEP/--keep-backups, default 15) after each backup, bounding the previously-unbounded data/backups/restart (~2.6G/54)."
-doc_version: 3.01
+describes_commit: "slice f4b2-auto-reprompt (2026-07-07, breakage diagnosis): when the brain narrates a start/completion action without executing/delegating, _brain_text_response issues one bounded auto re-prompt forcing execute/delegate/ask before the reply is finalized; if it still narrates, F4-B2a retention is the fallback."
+doc_version: 3.02
 last_verified: 2026-07-07
-verification_method: "Hygiene local: tests/test_runtime_db_preflight.py covers prune_old_backups keeping newest N, keep=0 disabling, under-limit no-op, and the preflight pruning after a verified backup. Time Machine exclusion of the live DB applied out-of-band (tmutil addexclusion). Slices 2b/3/4 and the 2a halt tests remain green."
+verification_method: "F4-B2 local: tests/test_f4b2_auto_reprompt.py covers a narrated-without-action reply triggering exactly one re-prompt, the re-prompt executing/delegating stopping the loop, a second narration returning unchanged (no loop; falls to the evidence gate), and normal answers / already-has-tool-evidence / None responses not triggering. Prior slices' tests (evidence gate, ledger, halt) remain green (110 passed)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1018,6 +1018,33 @@ invariants:
          with no recovery path (blind-spot pass 2026-07-06, finding #1).
          Reissue restores delivery without weakening hash-only persistence,
          single-use resolution, or the forged-record signature floor.
+
+  f4b2_auto_reprompt_forces_execution_once:
+    rule: When the brain narrates a start/completion action but ran no verifying
+          tool and made no durable delegation, _brain_text_response issues ONE
+          bounded auto re-prompt (_maybe_auto_reprompt_unexecuted_action, right
+          after brain.handle_message) that forces execute/delegate/ask, before
+          the response is finalized. Bounded to a single re-prompt per turn
+          (structural: called once, never re-enters itself). The trigger reuses
+          the evidence-gate classifiers (_start_claim_lacks_evidence /
+          _completion_claim_lacks_evidence), so normal answers, user-authority /
+          knowledge / plan-status turns, and replies that already carry tool
+          evidence never trigger. Every gate is preserved: the re-prompt is an
+          ordinary brain.handle_message, so a Tier-3 tool raises ApprovalPending
+          to the same approval path. If the re-prompt STILL narrates without
+          acting, its reply flows through the evidence gate, which retains it
+          via F4-B2a (retained-draft + «ejecútalo») — the honest fallback that
+          surfaces the blocked state clearly instead of a re-prompt loop.
+    chokepoints:
+      - bot.BotService._maybe_auto_reprompt_unexecuted_action  # single forced re-prompt
+      - bot.BotService._brain_text_response  # wires it after handle_message, inside the ApprovalPending try
+    enforced_by:
+      - tests/test_f4b2_auto_reprompt.py
+    why: A narrated-without-action turn closed blocked_unverified_action (or was
+         retained with only an «ejecútalo» hint), leaving the owner to re-ask —
+         the observed cost was sub-delegation, not a tool-surface gap (recon
+         2026-07-07 disconfirmed the tool-surface framing). F4-B2 automatic is
+         the forced-action follow-up to F4-B2a, which stays as its fallback.
 
   evidence_gate_retained_draft_is_executable:
     rule: When the evidence gate retains a brain reply (start/completion claim
