@@ -60,6 +60,60 @@ class RuntimeDbPreflightTests(unittest.TestCase):
 
             self.assertFalse(list(backup_dir.glob("*")) if backup_dir.exists() else False)
 
+    def test_prune_old_backups_keeps_newest_n(self) -> None:
+        # Hygiene (blind-spot pass finding #8): restart backups grew unbounded
+        # (~2.6G / 54 copies, no rotation). Keep the newest N, drop older.
+        module = _load_preflight_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backup_dir = Path(tmpdir)
+            names = [f"claw-2026070{d}-120000.db" for d in range(1, 8)]  # 7 chronological
+            for name in names:
+                (backup_dir / name).write_bytes(b"x")
+
+            removed = module.prune_old_backups(backup_dir, "claw", keep=3)
+
+            self.assertEqual(len(removed), 4)
+            survivors = sorted(p.name for p in backup_dir.glob("claw-*.db"))
+            self.assertEqual(survivors, names[-3:])  # newest 3 kept
+
+    def test_prune_zero_keep_disables(self) -> None:
+        module = _load_preflight_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backup_dir = Path(tmpdir)
+            (backup_dir / "claw-20260701-120000.db").write_bytes(b"x")
+            self.assertEqual(module.prune_old_backups(backup_dir, "claw", keep=0), [])
+            self.assertEqual(len(list(backup_dir.glob("claw-*.db"))), 1)
+
+    def test_prune_under_limit_removes_nothing(self) -> None:
+        module = _load_preflight_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backup_dir = Path(tmpdir)
+            for d in range(1, 4):
+                (backup_dir / f"claw-2026070{d}-120000.db").write_bytes(b"x")
+            self.assertEqual(module.prune_old_backups(backup_dir, "claw", keep=15), [])
+            self.assertEqual(len(list(backup_dir.glob("claw-*.db"))), 3)
+
+    def test_preflight_prunes_after_backup(self) -> None:
+        module = _load_preflight_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            db_path = root / "claw.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("CREATE TABLE t(id INTEGER)")
+                conn.commit()
+            backup_dir = root / "backups"
+            backup_dir.mkdir()
+            # Seed 5 old backups; keep=2 → after the new backup, keep newest 2.
+            for d in range(1, 6):
+                (backup_dir / f"claw-2026070{d}-000000.db").write_bytes(b"x")
+
+            rc = module.main(
+                ["--db", str(db_path), "--backup-dir", str(backup_dir), "--keep-backups", "2"]
+            )
+
+            self.assertEqual(rc, 0)
+            self.assertLessEqual(len(list(backup_dir.glob("claw-*.db"))), 2)
+
     def test_restart_script_runs_db_preflight_before_launchctl_kickstart(self) -> None:
         source = (REPO_ROOT / "scripts" / "restart.sh").read_text(encoding="utf-8")
 

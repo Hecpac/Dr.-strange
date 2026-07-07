@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice 4-daemon-logging (2026-07-07, blind-spot pass #4): the daemon installs its own WARNING root log handler (configure_daemon_logging) + a redaction-safe boot-complete stderr marker so boot leaves a reliable trace independent of browser_use's lazy INFO handler; the closure rule's authoritative positive boot signal moves to observe_stream (startup_healthcheck_ok / agent_startup_context)."
-doc_version: 3.00
+describes_commit: "hygiene backup-rotation (2026-07-07, blind-spot pass #8): the restart preflight prunes old verified backups to the newest N (CLAW_BACKUP_KEEP/--keep-backups, default 15) after each backup, bounding the previously-unbounded data/backups/restart (~2.6G/54)."
+doc_version: 3.01
 last_verified: 2026-07-07
-verification_method: "Slice 4 local: tests/test_daemon_logging.py covers configure_daemon_logging installing a WARNING root handler, INFO staying silent while WARNING reaches stderr, and the lifecycle boot-complete marker being redaction-safe (pid+port only). Slices 2b/3 and the 2a halt tests remain green; the closure rule in CLAUDE.md now points the positive boot signal at observe_stream."
+verification_method: "Hygiene local: tests/test_runtime_db_preflight.py covers prune_old_backups keeping newest N, keep=0 disabling, under-limit no-op, and the preflight pruning after a verified backup. Time Machine exclusion of the live DB applied out-of-band (tmutil addexclusion). Slices 2b/3/4 and the 2a halt tests remain green."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1085,6 +1085,24 @@ invariants:
          the result sat unread in the DB (blind-spot pass 2026-07-06, finding
          #6; the drain-pass promise in finalize_terminal_notification's
          docstring had no implementation for succeeded tasks).
+
+  restart_backups_are_bounded_by_keep_n_rotation:
+    rule: The restart preflight prunes old verified backups after writing a new
+          one, keeping the newest N (CLAW_BACKUP_KEEP / --keep-backups, default
+          15). Filenames carry a YYYYMMDD-HHMMSS stamp so lexical sort ==
+          chronological; the just-written backup is newest and never pruned. A
+          non-positive keep disables pruning. Pruning is best-effort (a stuck
+          file never fails the restart) and never silent — the count dropped is
+          printed.
+    chokepoints:
+      - scripts/runtime_db_preflight.py:prune_old_backups  # keep-newest-N
+      - scripts/runtime_db_preflight.py:main  # prune after a verified backup, logs the count
+    enforced_by:
+      - tests/test_runtime_db_preflight.py::RuntimeDbPreflightTests::test_prune_old_backups_keeps_newest_n
+      - tests/test_runtime_db_preflight.py::RuntimeDbPreflightTests::test_preflight_prunes_after_backup
+    why: The preflight created a ~50MB verified backup on EVERY restart with no
+         rotation, so data/backups/restart grew unbounded (~2.6G / 54 copies;
+         blind-spot pass 2026-07-06 finding #8) with no disk-space guard.
 
   daemon_configures_own_logging_boot_signal_is_observe_stream:
     rule: The daemon installs its OWN root log handler at WARNING
