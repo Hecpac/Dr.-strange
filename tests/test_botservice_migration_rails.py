@@ -1,37 +1,43 @@
 from __future__ import annotations
 
+import ast
 import inspect
-import re
 import unittest
 from pathlib import Path
 
-import claw_v2.bot as bot_module
 from claw_v2.bot import BotService
 
-# B4.1/B4.2 — BotService migration rails (2026-07-07). These are the
-# preconditions the audit requires BEFORE any strangler/migration work on
-# BotService: the pre-brain dispatch order is behavior (WIRING §5.1: "Order
-# matters"), and the god-module must stop growing while it awaits migration.
-# Changing either is a DELIBERATE, test-visible edit — never a side effect.
+# B4.1/B4.2 — BotService migration rails (2026-07-07, hardened per PR #232
+# review). Preconditions for any strangler/migration work on BotService: the
+# pre-brain dispatch order is behavior (WIRING §5.1: "Order matters"), and the
+# god-module must stop growing while it awaits migration. Changing either is a
+# DELIBERATE, test-visible edit — never a side effect.
 
-# Top-level handler call order in BotService._handle_text_body, first
-# occurrence wins. Nested dispatchers (e.g. operational alert / boot-context
-# inside grouped handlers) are inside these calls; the rail locks the
-# top-level sequence a migration would reorder.
+# FULL top-level dispatch/capture sequence in BotService._handle_text_body,
+# extracted via AST (source order, closures excluded — the method defines
+# local helpers whose bodies would otherwise pollute the flow order). NLM/wiki
+# short-circuits have no top-level call of their own: they are nested inside
+# _maybe_handle_shortcut and are locked transitively by its position.
 EXPECTED_PRE_BRAIN_ORDER = [
     "_maybe_handle_brain_first_new_task",
     "_handle_pending_computer_approval_response",
+    "_handle_pending_tasks_query",
     "_maybe_handle_operational_failure_summary",
     "_maybe_handle_operational_status",
     "_maybe_handle_cleanup_status_query",
     "_maybe_handle_owner_delegation_request",
     "_maybe_handle_telegram_imperative_request",
+    "_handle_stateful_brain_shortcut",
     "_maybe_handle_actionable_task_request",
     "_maybe_handle_f4_deterministic_delegation",
     "_maybe_handle_task_intent",
     "_maybe_handle_change_status_question",
     "_maybe_handle_capability_route",
+    "_handle_pending_tool_approval_grant_response",
+    "_handle_autonomy_grant_response",
+    "_maybe_resolve_stateful_followup",
     "_maybe_handle_shortcut",
+    "maybe_run_coordinated_task",
 ]
 
 # B4.2 size-ratchet: baseline measured at merge 634a528 (12172 lines) plus an
@@ -41,16 +47,53 @@ EXPECTED_PRE_BRAIN_ORDER = [
 BOTSERVICE_LINE_BASELINE = 12172
 BOTSERVICE_LINE_ALLOWANCE = 150
 
-_HANDLER_CALL_RE = re.compile(
-    r"self\.(_maybe_handle_\w+|_handle_pending_computer_approval_response)\("
-)
+
+def _botservice_source_path() -> Path:
+    source_file = inspect.getsourcefile(BotService)
+    assert source_file is not None, "BotService source file not resolvable"
+    return Path(source_file)
+
+
+def _is_dispatch_call_name(name: str) -> bool:
+    # Capture/dispatch handlers only — bookkeeping (_remember_*, _emit_*,
+    # _flush_*, guards, renderers) stays out by prefix. Any receiver counts
+    # (maybe_run_coordinated_task is called on the task handler, not self).
+    return (
+        name.startswith(("_maybe_handle_", "_maybe_resolve_", "_handle_"))
+        or name == "maybe_run_coordinated_task"
+    )
+
+
+def _walk_excluding_closures(node: ast.AST):
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        yield child
+        yield from _walk_excluding_closures(child)
 
 
 def _top_level_handler_order() -> list[str]:
-    source = inspect.getsource(BotService._handle_text_body)
+    """AST-based (PR #232 review): parse the real source file, take
+    _handle_text_body's top-level statements (nested helper defs excluded),
+    and return dispatch-call names in true source order, first occurrence."""
+    source = _botservice_source_path().read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    fn = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_handle_text_body"
+    )
+    calls: list[tuple[int, int, str]] = []
+    for stmt in fn.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in (stmt, *_walk_excluding_closures(stmt)):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                calls.append((node.lineno, node.col_offset, node.func.attr))
+    calls.sort()
     ordered: list[str] = []
-    for name in _HANDLER_CALL_RE.findall(source):
-        if name not in ordered:
+    for _, _, name in calls:
+        if _is_dispatch_call_name(name) and name not in ordered:
             ordered.append(name)
     return ordered
 
@@ -61,15 +104,14 @@ class PreBrainOrderLockTests(unittest.TestCase):
             _top_level_handler_order(),
             EXPECTED_PRE_BRAIN_ORDER,
             "Pre-brain dispatch order changed. WIRING §5.1: order IS behavior. "
-            "If this reorder is intentional (e.g. a migration step), update "
-            "EXPECTED_PRE_BRAIN_ORDER and §5.1 in the same commit.",
+            "If this reorder/insertion is intentional (e.g. a migration step), "
+            "update EXPECTED_PRE_BRAIN_ORDER and §5.1 in the same commit.",
         )
 
     def test_representative_ordering_decisions_hold(self) -> None:
-        # Decisions the order encodes, named so a future reorder reviews them:
         order = _top_level_handler_order()
         idx = {name: i for i, name in enumerate(order)}
-        # brain-first semantic routing outruns every literal matcher.
+        # Brain-first semantic routing outruns every literal matcher.
         self.assertEqual(idx["_maybe_handle_brain_first_new_task"], 0)
         # A pending computer approval must be resolved before any imperative
         # matcher can steal the turn (grant words look like imperatives).
@@ -77,23 +119,47 @@ class PreBrainOrderLockTests(unittest.TestCase):
             idx["_handle_pending_computer_approval_response"],
             idx["_maybe_handle_telegram_imperative_request"],
         )
+        # Pending-tasks queries capture before the operational group.
+        self.assertLess(
+            idx["_handle_pending_tasks_query"],
+            idx["_maybe_handle_operational_failure_summary"],
+        )
         # F4-B1 deterministic delegation captures BEFORE the broad task-intent
         # router (exactly-once contract on the message id).
         self.assertLess(
             idx["_maybe_handle_f4_deterministic_delegation"],
             idx["_maybe_handle_task_intent"],
         )
-        # The generic shortcut is the LAST capture before the brain default.
-        self.assertEqual(order[-1], "_maybe_handle_shortcut")
+        # Approval/autonomy grant resolution precedes the stateful followup
+        # resolver, and both precede the generic shortcut.
+        self.assertLess(
+            idx["_handle_pending_tool_approval_grant_response"],
+            idx["_maybe_resolve_stateful_followup"],
+        )
+        self.assertLess(
+            idx["_handle_autonomy_grant_response"],
+            idx["_maybe_resolve_stateful_followup"],
+        )
+        self.assertLess(idx["_maybe_resolve_stateful_followup"], idx["_maybe_handle_shortcut"])
+        # The generic shortcut is the last _maybe_handle_* capture; the
+        # autonomous coordinated-task path is the FINAL capture before the
+        # brain default.
+        self.assertEqual(
+            [n for n in order if n.startswith("_maybe_handle_")][-1],
+            "_maybe_handle_shortcut",
+        )
+        self.assertEqual(order[-1], "maybe_run_coordinated_task")
 
-    def test_every_locked_handler_still_exists(self) -> None:
+    def test_every_locked_self_handler_still_exists(self) -> None:
         for name in EXPECTED_PRE_BRAIN_ORDER:
+            if name == "maybe_run_coordinated_task":
+                continue  # lives on TaskHandler, asserted by the order lock
             self.assertTrue(hasattr(BotService, name), name)
 
 
 class BotServiceSizeRatchetTests(unittest.TestCase):
     def test_botservice_module_does_not_grow(self) -> None:
-        lines = len(Path(bot_module.__file__).read_text(encoding="utf-8").splitlines())
+        lines = len(_botservice_source_path().read_text(encoding="utf-8").splitlines())
         limit = BOTSERVICE_LINE_BASELINE + BOTSERVICE_LINE_ALLOWANCE
         self.assertLessEqual(
             lines,

@@ -1097,14 +1097,18 @@ invariants:
          test-locked so a future corpus refresh can't regain an identifier.
 
   botservice_pre_brain_order_is_locked:
-    rule: 'B4.1 migration rail. The TOP-LEVEL pre-brain handler call order in
-          BotService._handle_text_body (13 handlers, brain-first →
-          computer-approval → operational group → owner/imperative →
-          actionable → F4 deterministic → task-intent → change-status →
-          capability-route → shortcut) is behavior and is locked by test:
-          reordering, removing, or inserting a top-level handler requires
-          deliberately editing EXPECTED_PRE_BRAIN_ORDER and §5.1 in the same
-          commit. Precondition for any strangler/migration of BotService.'
+    rule: 'B4.1 migration rail. The FULL top-level dispatch/capture order in
+          BotService._handle_text_body (19 calls, AST-extracted in source
+          order with nested helper defs excluded: brain-first →
+          computer-approval → pending-tasks → operational group →
+          owner/imperative → stateful brain shortcut → actionable → F4
+          deterministic → task-intent → change-status → capability-route →
+          tool-approval grant → autonomy grant → stateful followup →
+          shortcut → coordinated-task) is behavior and is locked by test;
+          NLM/wiki short-circuits are nested inside _maybe_handle_shortcut and
+          locked transitively. Reordering, removing, or inserting a top-level
+          handler requires deliberately editing EXPECTED_PRE_BRAIN_ORDER and
+          §5.1 in the same commit. Precondition for any strangler/migration.'
     chokepoints:
       - bot.BotService._handle_text_body
     enforced_by:
