@@ -854,13 +854,16 @@ invariants:
           app X", "open the app X", "lanza la app X") classifies as an ACTION
           via _computer_instruction_requires_actions, so it routes to
           action_response (codex-desktop loop) and launches the app — not to
-          the screenshot-only read path. Bare "abre" is intentionally excluded
-          (it collides with reads like "abre la pagina actual"); only
-          app/aplicación/programa phrasings are added. Pure reads ("dime qué
-          ves", "revisa la pantalla") stay reads.
+          the screenshot-only read path. Only QUALIFIED app/aplicación/programa
+          phrasings are added; bare verbs are excluded — bare "abre" collides
+          with reads ("abre la pagina actual") and bare "launch " collides with
+          ordinary prompts ("draft a launch plan"), and the classifier also
+          runs on general non-slash messages (bot._maybe_handle_shortcut), not
+          only /computer. Pure reads ("dime qué ves", "revisa la pantalla")
+          stay reads.
     chokepoints:
-      - bot_helpers._COMPUTER_ACTION_TOKENS  # app-launch phrasings added, bare "abre" excluded
-      - bot_helpers._computer_instruction_requires_actions  # desktop-only classifier (both callers are computer)
+      - bot_helpers._COMPUTER_ACTION_TOKENS  # qualified app-launch phrasings only, bare verbs excluded
+      - bot_helpers._computer_instruction_requires_actions  # also runs on general non-slash messages, not only /computer
     enforced_by:
       - tests/test_computer_applaunch_action.py
     why: "/computer abre la app Calculadora y dime qué ves" was classified as a

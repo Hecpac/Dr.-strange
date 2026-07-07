@@ -21,11 +21,25 @@ class ComputerAppLaunchActionTests(unittest.TestCase):
             "abre la aplicación Finder",
             "abre el programa Vista Previa",
             "open the app Calculator",
-            "launch Calculator",
+            "open the application Calculator",
+            "open the program Preview",
+            "launch the app Calculator",
             "lanza la app Notas",
         ):
             with self.subTest(text=text):
                 self.assertTrue(_computer_instruction_requires_actions(text))
+
+    def test_bare_launch_verb_does_not_hijack_ordinary_prompts(self) -> None:
+        # Codex #223: the classifier runs on general non-slash messages, so a
+        # bare "launch " token would mis-route ordinary prompts to computer
+        # control. Only qualified app/application/program launches match.
+        for text in (
+            "draft a launch plan for the campaign",
+            "prelaunch checklist review",
+            "cuándo es el launch del producto",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(_computer_instruction_requires_actions(text))
 
     def test_reads_stay_reads(self) -> None:
         # A pure read must NOT be promoted to an action by the new tokens.

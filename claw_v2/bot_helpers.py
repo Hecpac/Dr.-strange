@@ -308,15 +308,21 @@ _COMPUTER_ACTION_TOKENS = (
     # Bot breakage diagnosis 2026-07-06: launching a native app is an ACTION,
     # not a read. "/computer abre la app Calculadora y dime qué ves" used to be
     # classified as a read (screenshot only) because no action token matched,
-    # so the app never launched. These are unambiguous app-launch phrasings —
-    # bare "abre" is intentionally NOT added (it collides with reads like
-    # "abre la pagina actual"). Only reachable via the desktop-control path
-    # (both callers of _computer_instruction_requires_actions are computer).
+    # so the app never launched. These are QUALIFIED app-launch phrasings
+    # (app/aplicación/programa) — bare verbs are intentionally NOT added: bare
+    # "abre" collides with reads ("abre la pagina actual") and bare "launch "
+    # collides with ordinary prompts ("draft a launch plan" / "prelaunch
+    # checklist"), and this classifier runs on general non-slash messages too
+    # (bot._maybe_handle_shortcut), not only /computer (CodeRabbit/Codex #223).
     "abre la app",
     "abre la aplicacion",
     "abre el programa",
     "open the app",
-    "launch ",
+    "open the application",
+    "open the program",
+    "launch the app",
+    "launch the application",
+    "launch the program",
     "lanza la app",
     "lanza la aplicacion",
     "lanza el programa",
