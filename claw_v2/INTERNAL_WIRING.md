@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice 2a-db-halt-marker (2026-07-06, blind-spot pass finding #2): runtime-DB corruption writes a persistent halt marker honored by preflight/restart/launcher/boot, so a corrupt DB holds the boot with an owner alert instead of crash-looping under launchd KeepAlive; auto-clear only after an existing DB re-passes integrity."
-doc_version: 2.93
+describes_commit: "slice f4b2a-retained-draft-executable (2026-07-06, breakage diagnosis #1): an evidence-gate retention preserves the FULL blocked draft as an executable pending_action (30min TTL via meta), so «ejecútalo» resumes the real plan through the existing continuation resolver instead of re-deriving from the canned message."
+doc_version: 2.94
 last_verified: 2026-07-06
-verification_method: "Slice 2a local: tests/test_runtime_db_halt.py covers marker write atomicity/content, verified_healthy clear tripwire, rename-for-audit clearing, preflight corruption exit 1 + marker, healthy auto-clear, missing-DB no-marker and missing-DB-never-clears guards, and _ensure_runtime_db_boot_health marker+alert+re-raise; tests/test_runtime_db_preflight.py locks the restart.sh rc-abort-before-kickstart order; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_db_corruption_halts_boot_persistently locks all four chokepoints."
+verification_method: "F4-B2a local: tests/test_evidence_gate_retained_draft.py covers full-draft preservation with meta source/ttl, secret-shaped refusal, empty-draft noop, survival of the post-turn state write, meta-ttl governance past the native 600s, staleness past 1800s, and «ejecútalo» seeding the brain with the verbatim draft; coherence short-circuit for the gate source is covered by the execution test (the cosine heuristic rejected the boilerplate-diluted directive before the fix)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -949,6 +949,45 @@ invariants:
          with no recovery path (blind-spot pass 2026-07-06, finding #1).
          Reissue restores delivery without weakening hash-only persistence,
          single-use resolution, or the forged-record signature floor.
+
+  evidence_gate_retained_draft_is_executable:
+    rule: When the evidence gate retains a brain reply (start/completion claim
+          without evidence), the FULL blocked draft is preserved as the
+          session's pending_action — wrapped in an execute-don't-narrate
+          directive — with pending_action_meta {source
+          evidence_gate_retained_draft, ttl_seconds
+          EVIDENCE_GATE_RETAINED_DRAFT_TTL_SECONDS (30min), created_message_id,
+          task_id}, so the EXISTING continuation resolver executes the real
+          plan on «ejecútalo» instead of re-deriving from the canned message.
+          Secret-shaped drafts are never preserved — the whole draft is
+          scanned per-token (a single-token check misses secrets embedded in
+          multi-word text) plus the redaction check (PR 0D parity). The
+          read-path keeps its TTL, message-delta, sensitivity, and
+          destructive-objective guards; topic-cosine coherence for this source
+          scores against the stored original ask (topic), not the boilerplate
+          directive that would dilute the vector, and the message-delta guard
+          (not cosine — the original ask lingers in history) is the drift
+          protection that expires reactivation once the conversation moves on.
+          Both the StateHandler resolver and the Telegram continuation path
+          honor pending_action_meta freshness for this source (the Telegram
+          path does not call the resolver, so it checks freshness inline
+          before using the slot). The retention itself is NOT weakened: the gate
+          still replaces the outgoing reply (F4-B1), and no automatic
+          re-prompt is introduced (that is the separate F4-B2 forced-action
+          follow-up). Expiry degrades honestly to today's re-derive behavior.
+    chokepoints:
+      - bot.BotService._build_retained_draft_directive  # full draft + refusals
+      - bot.BotService._record_evidence_gate_explicit_blocker  # single state write, meta ttl
+      - state_handler.StateHandler._pending_action_still_fresh  # honors meta ttl_seconds
+      - state_handler.StateHandler._pending_action_is_coherent  # scores against original ask topic
+      - bot.BotService._maybe_resolve_telegram_continuation  # inline freshness for the retained-draft slot
+    enforced_by:
+      - tests/test_evidence_gate_retained_draft.py
+    why: «ejecútalo» after a retention re-derived from scratch — the draft was
+         truncated to 500 chars in a ledger artifact nobody read back, and the
+         conversation memory was overwritten with the canned message (breakage
+         diagnosis 2026-07-06, pain #1: the owner repeated "Crea el plan"
+         through two retentions and a frustration deflection until giving up).
 
   owner_notification_outbox_durable_delivery:
     rule: A terminal-task notification whose Telegram send fails is never
