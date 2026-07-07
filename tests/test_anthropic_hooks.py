@@ -133,9 +133,19 @@ class PreToolUseBackstopTests(unittest.IsolatedAsyncioTestCase):
                 {"tool_name": "Bash", "tool_input": {"command": command}}, "tu-1", None
             )
             decision = result.get("hookSpecificOutput", {})
+            reason = decision.get("permissionDecisionReason", "")
             self.assertEqual(decision.get("permissionDecision"), "deny", command)
-            self.assertIn("delegate_task", decision.get("permissionDecisionReason", ""), command)
+            self.assertIn("delegate_task", reason, command)
             self.assertIn("Tool invocation blocked", result.get("systemMessage", ""), command)
+            # CB1 honesty split: browser drive nudges TOWARD delegation
+            # ("Delegate it"); computer-use has no delegated lane, so its nudge
+            # must NOT tell the brain to delegate the work — it points to the
+            # inline computer tools instead.
+            if "computer_use" in command:
+                self.assertNotIn("Delegate it", reason, command)
+                self.assertIn("inline with the computer tools", reason, command)
+            else:
+                self.assertIn("Delegate it", reason, command)
         self.assertEqual(policy.calls, [], "denied calls must never reach runtime policy")
 
     async def test_worker_lanes_allow_backstop_patterns(self) -> None:
@@ -560,9 +570,7 @@ class SdkHarnessToolGatingTests(unittest.IsolatedAsyncioTestCase):
             hook = make_pre_tool_use_hook(
                 _request("brain"), runtime_policy=self._engine(workspace), observe=observe
             )
-            await hook(
-                {"tool_name": "totally.unknown.tool", "tool_input": {}}, "tu-1", None
-            )
+            await hook({"tool_name": "totally.unknown.tool", "tool_input": {}}, "tu-1", None)
         emitted = [call.args[0] for call in observe.emit.call_args_list]
         self.assertIn("runtime_policy_tool_not_declared", emitted)
         not_declared_call = next(
@@ -570,9 +578,7 @@ class SdkHarnessToolGatingTests(unittest.IsolatedAsyncioTestCase):
             for call in observe.emit.call_args_list
             if call.args[0] == "runtime_policy_tool_not_declared"
         )
-        self.assertEqual(
-            not_declared_call.kwargs["payload"]["tool_name"], "totally.unknown.tool"
-        )
+        self.assertEqual(not_declared_call.kwargs["payload"]["tool_name"], "totally.unknown.tool")
 
 
 if __name__ == "__main__":

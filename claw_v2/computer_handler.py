@@ -66,6 +66,22 @@ _COMPUTER_REPLAN_REASON_CODES = {
     "timeout",
     "transient_failure",
 }
+# CB1 (ADR CB0, 2026-07-07): missing_domain_grant was the top OBSERVED
+# computer/browser friction in the CB0 corpus. The user-facing text must say
+# what was missing and what unblocks it — the domain grant derives from the
+# instruction/objective text, so naming the site or URL there IS the lever.
+MISSING_DOMAIN_GRANT_INTERACTIVE_MSG = (
+    "No pude acotar la sesión de navegador: la instrucción no menciona ningún "
+    "sitio o URL que autorizar, y sin un dominio no puedo auto-aprobarla. "
+    "Reenvía la instrucción incluyendo el sitio explícito (por ejemplo: "
+    "«abre instagram.com y revisa el feed»)."
+)
+MISSING_DOMAIN_GRANT_DELEGATED_MSG = (
+    "No puedo ejecutar la tarea de navegador: falta un dominio aprobado para "
+    "acotar browser_use. Reintenta la delegación incluyendo la URL o el "
+    "dominio del sitio en el objetivo (por ejemplo: «en https://ejemplo.com, "
+    "revisa la página y repórtame»)."
+)
 _LOGIN_WALL_MARKERS = (
     "accounts/login",
     "iniciar sesión",
@@ -1136,14 +1152,12 @@ class ComputerHandler:
                             "computer_browser_use_missing_domain_grant",
                             {
                                 "backend": "browser_use",
+                                "reason": "missing_domain_grant",
                                 "current_url": getattr(session, "current_url", None),
                                 "instruction_hash": _instruction_hash(getattr(session, "task", "")),
                             },
                         )
-                        return (
-                            "Browser automation needs approval before executing authenticated "
-                            "browser actions."
-                        )
+                        return MISSING_DOMAIN_GRANT_INTERACTIVE_MSG
                 with self._browser_use_lock:
                     self._ensure_browser_use_service(cdp_endpoint)
                     self._set_browser_use_cdp_url(cdp_endpoint)
@@ -1413,15 +1427,13 @@ class ComputerHandler:
                         "computer_browser_use_missing_domain_grant",
                         {
                             "backend": "browser_use",
+                            "reason": "missing_domain_grant",
                             "task_id": task_id,
                             "mode": mode,
                             "instruction_hash": _instruction_hash(objective_for_agent),
                         },
                     )
-                    return (
-                        "No puedo ejecutar la tarea de navegador: falta un dominio "
-                        "aprobado para acotar browser_use."
-                    )
+                    return MISSING_DOMAIN_GRANT_DELEGATED_MSG
                 session = _types.SimpleNamespace(
                     task=objective_for_agent,
                     screenshot_path=prelude.screenshot_path if prelude is not None else None,
