@@ -21,6 +21,78 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# A3.9 (2026-07-07): transient-vs-replayable taxonomy. A transient
+# browser/computer failure (timeout, iteration limit, no result, scope drift,
+# backend unavailable) is telemetry, not knowledge — replaying it as a
+# <learned_lesson> poisons future turns with stale one-off noise. Scoped to
+# GENERIC transients on automation task types (plus explicitly typed transient
+# reason codes from callers); coding/pipeline lessons — where "timeout" in a
+# pytest snippet IS a real lesson — and user/task corrections are untouched.
+_TRANSIENT_AUTOMATION_TASK_TYPES = frozenset({"browse", "browser", "computer"})
+_TRANSIENT_REASON_CODES = frozenset(
+    {
+        "timeout",
+        "iteration_limit",
+        "no_result",
+        "no_response",
+        "empty_result",
+        "scope_drift",
+        "browser_unavailable",
+        "cdp_unavailable",
+        "browser_transient_failure",
+        "computer_transient_failure",
+        "transient_failure",
+    }
+)
+# marker -> enum-slug reason (telemetry carries the slug, never free text).
+_TRANSIENT_FAILURE_MARKERS = (
+    ("timed out", "timeout"),
+    ("timeout", "timeout"),
+    ("iteration limit", "iteration_limit"),
+    ("iteration_limit", "iteration_limit"),
+    ("(no result)", "no_result"),
+    ("no result", "no_result"),
+    ("(no response)", "no_response"),
+    ("no response", "no_response"),
+    ("scope drift", "scope_drift"),
+    ("scope_drift", "scope_drift"),
+    ("browser unavailable", "browser_unavailable"),
+    ("browser_use unavailable", "browser_unavailable"),
+    ("browser_unavailable", "browser_unavailable"),
+    ("cdp unavailable", "cdp_unavailable"),
+    ("cdp_unavailable", "cdp_unavailable"),
+    ("transient", "transient_failure"),
+)
+
+
+def _classify_transient_automation_failure(
+    *,
+    task_type: str,
+    outcome: str,
+    error_snippet: str | None,
+    description: str,
+    reason_code: str | None,
+    retryable: bool | None,
+) -> str | None:
+    """Return an enum-slug transient reason, or None when the outcome may
+    persist as a lesson. Success never gates; an explicitly non-retryable
+    failure is not transient; a typed transient reason_code gates regardless
+    of task type; marker sniffing applies only to automation task types."""
+    if outcome == "success":
+        return None
+    if retryable is False:
+        return None
+    normalized_code = (reason_code or "").strip().lower()
+    if normalized_code in _TRANSIENT_REASON_CODES:
+        return normalized_code
+    if task_type not in _TRANSIENT_AUTOMATION_TASK_TYPES:
+        return None
+    haystack = f"{error_snippet or ''}\n{description or ''}".lower()
+    for marker, slug in _TRANSIENT_FAILURE_MARKERS:
+        if marker in haystack:
+            return slug
+    return None
+
 
 @dataclass(slots=True)
 class SparsityMetrics:
@@ -53,8 +125,45 @@ class LearningLoop:
         lesson: str | None = None,
         tags: list[str] | None = None,
         predicted_confidence: float | None = None,
-    ) -> int:
-        """Record a task outcome with embedding. Derives lesson+tags via LLM if not provided."""
+        reason_code: str | None = None,
+        retryable: bool | None = None,
+    ) -> int | None:
+        """Record a task outcome with embedding. Derives lesson+tags via LLM if not provided.
+
+        A3.9: a transient automation failure (typed transient ``reason_code``,
+        or generic transient markers on browse/browser/computer task types) is
+        NOT persisted as a replayable lesson — it emits
+        ``learning_transient_skipped`` and returns None.
+        """
+        transient_reason = _classify_transient_automation_failure(
+            task_type=task_type,
+            outcome=outcome,
+            error_snippet=error_snippet,
+            description=description,
+            reason_code=reason_code,
+            retryable=retryable,
+        )
+        if transient_reason is not None:
+            if self.observe is not None:
+                try:
+                    self.observe.emit(
+                        "learning_transient_skipped",
+                        payload={
+                            "task_type": task_type,
+                            "outcome": outcome,
+                            "reason": transient_reason,
+                            "reason_code": (reason_code or "").strip().lower() or None,
+                        },
+                    )
+                except Exception:
+                    logger.debug("learning_transient_skipped emit failed", exc_info=True)
+            logger.info(
+                "Learning loop skipped transient %s outcome (%s/%s)",
+                transient_reason,
+                task_type,
+                outcome,
+            )
+            return None
         if not lesson:
             lesson, derived_tags = self._derive_outcome_metadata(
                 description,

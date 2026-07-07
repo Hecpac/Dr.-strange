@@ -9,7 +9,7 @@
 
 ```yaml
 describes_commit: "slice cb1-routing-honesty (2026-07-07): computer-use prompt/routing honesty per the CB0 ADR's NO-GO. 'computer-use' dropped from _BROWSER_OPERATION_SIGNAL_RE (no longer a browser signal); a delegated desktop-GUI objective (ops/publish, no browser signal, unambiguous literal marker) is declined synchronously at TaskHandler.start_autonomous_task with a user-safe blocker + delegated_desktop_objective_blocked(reason=no_desktop_delegation_lane) BEFORE any task state; DELEGATION_CONTRACT / ops coordinator flavor / PreToolUse backstop nudge stop advertising a delegated desktop executor; both computer_browser_use_missing_domain_grant returns now name the cause and the lever (put the site/URL in the instruction). No lane built; inline /computer path untouched."
-doc_version: 3.04
+doc_version: 3.05
 last_verified: 2026-07-07
 verification_method: "CB1 local: tests/test_cb1_routing_honesty.py (recognizer matrix, decline-with-blocker e2e incl. no-task-state + telemetry reason, guard mode/browser-signal scoping, prompt-surface honesty, missing_domain_grant guidance) + flipped tests/test_cb0_routing_matrix.py mis-route lock + hardened tests/test_anthropic_hooks.py nudge split. Focused gate green: 375 passed + 33 subtests (test_computer, test_bot_helpers, test_task_handler, test_brain_core, test_task_deliverables, test_shadow_delegation_gap, test_architecture_invariants) + 40 passed (cb0/cb1/anthropic_hooks)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -1095,6 +1095,33 @@ invariants:
     why: An ADR that commits redacted prod telemetry must not leak PII/secrets
          into git history; the allowlist projection is the redaction contract,
          test-locked so a future corpus refresh can't regain an identifier.
+
+  learning_taxonomy_excludes_generic_transients:
+    rule: 'A transient automation failure never persists as a replayable
+          lesson. LearningLoop.record is the single chokepoint: an outcome is
+          skipped (telemetry-only, event learning_transient_skipped with
+          enum-slug reason) when its typed reason_code is transient (timeout /
+          iteration_limit / no_result / no_response / empty_result /
+          scope_drift / browser_unavailable / cdp_unavailable /
+          *_transient_failure), or when task_type is an automation type
+          (browse/browser/computer) and the snippet/description carries a
+          generic transient marker. Success outcomes and explicitly
+          non-retryable failures always may persist; coding/pipeline task
+          types are NEVER marker-gated (a pytest timeout IS a real lesson);
+          user preference / task corrections persist untouched. The
+          <learned_lesson> untrusted-suggestions disclaimer in the brain
+          prompt is load-bearing and stays.'
+    chokepoints:
+      - learning._classify_transient_automation_failure
+      - learning.LearningLoop.record
+    enforced_by:
+      - tests/test_learning_transient_taxonomy.py
+    why: A3.9 — browse_handler recorded a hardcoded lesson on EVERY failed
+         browse, and cycle post-mortems turned any "timeout" snippet into a
+         durable heuristic lesson; retrieve_lessons replays lessons (with a
+         recent-failures fallback) into future turns, so one-off transient
+         noise poisoned prompts. Scoped to generic transients per the audit —
+         no bridge built for dead reason-code paths.
 
   f4b2_auto_reprompt_forces_execution_once:
     rule: When the brain narrates a start/completion action but ran no verifying
