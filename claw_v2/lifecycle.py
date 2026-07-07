@@ -652,6 +652,17 @@ async def run() -> int:
         if runtime.config.web_chat_enabled:
             await web_transport.start()
 
+        # Slice 4 (blind-spot pass #4): an explicit boot-complete marker on
+        # stderr — a POSITIVE boot signal the closure-rule smoke can grep,
+        # independent of browser_use's lazy INFO handler. WARNING level so it
+        # reaches the daemon's own root handler (configure_daemon_logging).
+        # Redaction-safe by construction: only pid and port, no secrets.
+        logger.warning(
+            "Claw boot complete: pid=%s web_port=%s",
+            os.getpid(),
+            runtime.config.web_chat_port if runtime.config.web_chat_enabled else "disabled",
+        )
+
         # Wire NotebookLM with Telegram notify callback
         _loop = asyncio.get_running_loop()
         observability_telegram_enabled = should_route_observability_telegram_notifications(

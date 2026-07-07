@@ -2772,8 +2772,37 @@ def build_runtime(
     )
 
 
+def configure_daemon_logging() -> None:
+    """Slice 4 (blind-spot pass #4): the daemon configures its own logging so
+    boot always leaves a legible trace on stderr, independent of browser_use.
+
+    The INFO lines that used to appear in claw.stderr.log were a side effect of
+    importing browser_use (its __init__ installs a root INFO StreamHandler), and
+    that import is lazy — a session with no browser task left stderr mute. This
+    installs a real root handler at WARNING so tracebacks, RuntimeDatabaseError,
+    and the boot-complete marker reach stderr reliably (not via lastResort).
+
+    WARNING, not INFO, on purpose: raw logger.* to stderr bypasses
+    observe_stream's redaction, so an INFO-global config would risk leaking any
+    interpolated token/PII to the file, and would spam per-request. The positive
+    boot signal is a single redaction-safe marker (see lifecycle) plus
+    observe_stream's startup_healthcheck_ok / agent_startup_context. browser_use
+    respects a pre-existing root handler (returns early), so daemon-first wins
+    with no double-log.
+    """
+    import logging as _logging
+
+    _logging.basicConfig(
+        level=_logging.WARNING,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+
+
 def main() -> int:
     import asyncio
+
+    configure_daemon_logging()
 
     from claw_v2.lifecycle import run
 
