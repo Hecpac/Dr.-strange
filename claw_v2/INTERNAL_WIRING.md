@@ -8,8 +8,8 @@
 ## meta
 
 ```yaml
-describes_commit: "slice cb1-routing-honesty (2026-07-07): computer-use prompt/routing honesty per the CB0 ADR's NO-GO. 'computer-use' dropped from _BROWSER_OPERATION_SIGNAL_RE (no longer a browser signal); a delegated desktop-GUI objective (ops/publish, no browser signal, unambiguous literal marker) is declined synchronously at TaskHandler.start_autonomous_task with a user-safe blocker + delegated_desktop_objective_blocked(reason=no_desktop_delegation_lane) BEFORE any task state; DELEGATION_CONTRACT / ops coordinator flavor / PreToolUse backstop nudge stop advertising a delegated desktop executor; both computer_browser_use_missing_domain_grant returns now name the cause and the lever (put the site/URL in the instruction). No lane built; inline /computer path untouched."
-doc_version: 3.05
+describes_commit: "slice b41-botservice-rails (2026-07-07): B4.1/B4.2 migration rails, tests/docs only — top-level pre-brain dispatch order in _handle_text_body test-locked (19 top-level dispatch/capture calls, AST-extracted) and bot.py size ratcheted (baseline 12172 + 150). Also heals the meta drift from slice a39-transient-learning-taxonomy (PR #231, merged 634a528: transient automation failures gated at LearningLoop.record, telemetry-only via learning_transient_skipped; invariant learning_taxonomy_excludes_generic_transients) whose commit bumped doc_version without refreshing this field. No runtime behavior change in b41."
+doc_version: 3.06
 last_verified: 2026-07-07
 verification_method: "CB1 local: tests/test_cb1_routing_honesty.py (recognizer matrix, decline-with-blocker e2e incl. no-task-state + telemetry reason, guard mode/browser-signal scoping, prompt-surface honesty, missing_domain_grant guidance) + flipped tests/test_cb0_routing_matrix.py mis-route lock + hardened tests/test_anthropic_hooks.py nudge split. Focused gate green: 375 passed + 33 subtests (test_computer, test_bot_helpers, test_task_handler, test_brain_core, test_task_deliverables, test_shadow_delegation_gap, test_architecture_invariants) + 40 passed (cb0/cb1/anthropic_hooks)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -1095,6 +1095,44 @@ invariants:
     why: An ADR that commits redacted prod telemetry must not leak PII/secrets
          into git history; the allowlist projection is the redaction contract,
          test-locked so a future corpus refresh can't regain an identifier.
+
+  botservice_pre_brain_order_is_locked:
+    rule: 'B4.1 migration rail. The FULL top-level dispatch/capture order in
+          BotService._handle_text_body (19 calls, AST-extracted in source
+          order with nested helper defs excluded: brain-first →
+          computer-approval → pending-tasks → operational group →
+          owner/imperative → stateful brain shortcut → actionable → F4
+          deterministic → task-intent → change-status → capability-route →
+          tool-approval grant → autonomy grant → stateful followup →
+          shortcut → coordinated-task) is behavior and is locked by test;
+          NLM/wiki dispatch is delegated to NlmHandler inside the
+          _maybe_handle_shortcut subtree and is NOT individually order-locked
+          by this rail — only the shortcut call's top-level position is. Reordering, removing, or inserting a top-level
+          handler requires deliberately editing EXPECTED_PRE_BRAIN_ORDER and
+          §5.1 in the same commit. Precondition for any strangler/migration.'
+    chokepoints:
+      - bot.BotService._handle_text_body
+    enforced_by:
+      - tests/test_botservice_migration_rails.py
+    why: §5.1 said "Order matters; no test enforces it" — a migration that
+         silently reorders capture (e.g. imperative before a pending computer
+         approval) changes routing behavior with no test failing. The rail
+         makes order drift visible before the migration starts.
+
+  botservice_size_is_ratcheted:
+    rule: 'B4.2 migration rail. claw_v2/bot.py must not grow past
+          BOTSERVICE_LINE_BASELINE (12172 @ 634a528) + BOTSERVICE_LINE_ALLOWANCE
+          (150, surgical-fix headroom). New functionality lands in extracted
+          modules; raising the baseline is a deliberate edit of
+          tests/test_botservice_migration_rails.py under review — never a side
+          effect of a feature.'
+    chokepoints:
+      - tests/test_botservice_migration_rails.py  # BOTSERVICE_LINE_BASELINE
+    enforced_by:
+      - tests/test_botservice_migration_rails.py
+    why: The god-module keeps absorbing features (12k+ lines) while its
+         migration waits; without a ratchet the migration target grows faster
+         than any strangler can drain it.
 
   learning_taxonomy_excludes_generic_transients:
     rule: 'A transient automation failure never persists as a replayable
@@ -2757,7 +2795,10 @@ Each *records* its decision into a turn-scoped accumulator
 (`dispatch_decision_accumulator`, `claw_v2/turn_context.py`);
 `_handle_text_body` then emits a SINGLE consolidated `dispatch_decision`
 event per turn (F0.3c — `_flush_dispatch_decision`, idempotent), instead
-of ~15 rows/turn. Order matters; no test enforces it. The real call sites
+of ~15 rows/turn. Order matters; since B4.1 the TOP-LEVEL call order is
+test-locked (`tests/test_botservice_migration_rails.py`,
+`botservice_pre_brain_order_is_locked`) — reordering is a deliberate,
+test-visible edit. The real call sites
 in `_handle_text_body` (verified 2026-06-10):
 
 | # | Handler symbol | Trigger / contract |
