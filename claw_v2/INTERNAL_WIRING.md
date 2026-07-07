@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice a3.7-computer-use-replan-outcomes (2026-07-07, A3.7): retryable iteration-limit, no-result, scope-drift, and explicitly transient computer/browser outcomes carry typed replan metadata and get at most one safe replan attempt; a browser replan refreshes session.current_url from the browser's verified final URL (thread-local last_final_url bound in-worker) and is declined fail-closed when that URL cannot be verified."
-doc_version: 2.97
+describes_commit: "slice obswindow-failopen-alert (2026-07-07, blind-spot pass #3): a corrupt/unreadable observation_window state file is surfaced (loaded_degraded + deferred observation_window_load_degraded alert after the router installs) instead of swallowed silently; boot proceeds fail-open (unfrozen) per instruction, distinguishing a legitimate first boot (FileNotFoundError) from corruption."
+doc_version: 2.98
 last_verified: 2026-07-07
-verification_method: "A3.7 local: tests/test_computer.py::ComputerUseOutcomeTests covers success, approval, no-result, cancellation, scope-drift, timeout coercion, and retryable iteration-limit typed outcomes with replan metadata; tests/test_computer.py::ComputerHandlerOutcomeTests proves downstream events use typed status/reason/retryable/replan fields, one bounded replan runs for iteration-limit/no-result/scope-drift/explicit transient failure, browser replans refresh current_url from the verified final URL and are skipped (computer_replan_skipped) when it is unverifiable, replan resets clear stale screenshot_path, approvals/destructive waits, cancellations, auth/policy/user denials, and ambiguous actions do not replan, MagicMock legacy fallback and CDP unavailable paths stay typed; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes locks the typed outcome and bounded-replan chokepoint."
+verification_method: "Slice 3 local: tests/test_observation_window.py::ObservationWindowLoadDegradedTests covers absent-file silent first boot, corrupt-JSON and non-object recording loaded_degraded and booting fail-open (unfrozen), and non-regression that a valid persisted freeze still restores; the pre-existing ObservationWindowAtomicWriteTests still prove the write path is atomic. Prior A3.7 verification (typed computer replan outcomes) remains locked by tests/test_computer.py and tests/test_architecture_invariants.py::test_computer_handler_uses_typed_computer_use_outcomes."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -230,6 +230,38 @@ invariants:
       - Prompt-injection results in structured quarantine payload
       - Kairos errors emit kairos_decide_failed with classified error_kind
     why: Silent failure produces wrong actions taken with confidence.
+
+  observation_window_corrupt_load_is_visible_not_silent:
+    rule: A present-but-unusable observation_window state file (corrupt JSON,
+          non-object, or unreadable OSError) is NOT swallowed silently.
+          _load_state distinguishes FileNotFoundError (legitimate first boot →
+          silent return, nothing was persisted) from corruption (→ sets
+          loaded_degraded + logs critical), and lifecycle emits
+          observation_window_load_degraded AFTER install_operational_alerts so
+          it reaches Telegram (an event emitted during construction only lands
+          in observe_stream — the router subscribes live without backfill). Boot
+          proceeds FAIL-OPEN (unfrozen) per the operator instruction — the
+          freeze verdict is the only persisted state and rolling windows reset
+          each restart regardless; the alert lets the operator re-apply a lost
+          /freeze. NOTE: fail-open trades away preservation of a manual freeze;
+          the fail-closed alternative (assume-frozen with reason state_corrupt,
+          which keeps chat alive and is recoverable via /unfreeze) or
+          last-known-good (.bak via _atomic_write_text) would preserve it — a
+          low-cost flip if the posture is revisited. The writer is already
+          atomic + fsynced (ObservationWindowAtomicWriteTests) so corruption is
+          externally caused, not a write-path bug.
+    chokepoints:
+      - observation_window.ObservationWindowState._load_state  # FileNotFoundError vs corruption split
+      - observation_window.ObservationWindowState._record_load_degraded  # sets loaded_degraded + critical log
+      - lifecycle.run  # deferred emit after install_operational_alerts
+      - operational_alerts.DEFAULT_ALERT_RULES  # observation_window_load_degraded = critical
+    enforced_by:
+      - tests/test_observation_window.py::ObservationWindowLoadDegradedTests
+    why: A corrupt observation_window used to be swallowed with a bare return,
+         booting default-open silently — a manual /freeze the operator set was
+         re-enabled without a signal (blind-spot pass 2026-07-06 finding #3).
+         no_silent_degrade requires the degrade be visible; fail-open keeps the
+         daemon usable while the alert makes the lost freeze recoverable.
 
   runtime_db_degraded_is_actionable:
     rule: Production `RuntimeDb` degradation emits `runtime_db_degraded` through
