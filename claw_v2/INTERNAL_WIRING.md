@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice bgmonitor-phrase-widen (2026-07-07, breakage diagnosis dedup finding): the background-monitor promise recognizer covers the ongoing-work conjugation family (ya está en marcha / sigue corriendo / lo dejé corriendo / te aviso al terminar) so the guard no longer passes a false 'ya está en marcha' over an already-failed task; an unbacked promise over a failed task is corrected by naming it and offering a retry, and completion claims stay excluded."
-doc_version: 2.95
+describes_commit: "slice computer-applaunch-action (2026-07-07, breakage diagnosis Turn B): a native-app launch instruction on the /computer path classifies as an ACTION (routes to the codex-desktop loop and launches) instead of a screenshot-only read; bare 'abre' stays excluded so reads are unaffected."
+doc_version: 2.96
 last_verified: 2026-07-07
-verification_method: "bgmonitor local: tests/test_brain_tooluse_ledger.py covers the widened recognizer truth-correcting a 'ya está en marcha' over a failed active_task (naming it + offering retry), non-regression that a genuinely-active task leaves the reply intact, non-regression that a 'listo/ya quedó' completion claim is not matched, and the pre-existing mixed-response strip; full file 43 passed."
+verification_method: "applaunch local: tests/test_computer_applaunch_action.py covers app-launch phrasings classifying as actions, pure reads staying reads, bare 'abre la pagina actual' not promoted, and the exact Calculadora Turn B mixed instruction launching; tests/test_browse.py 40 passed (non-regression of the 'abre la app' URL-candidate path)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -848,6 +848,27 @@ invariants:
          profile lock. That allowed delegated CDP navigation or a second
          browser_use session to mutate the shared BrowserUseService/CDP profile
          while an interactive browser agent was active.
+
+  computer_app_launch_is_an_action_not_a_read:
+    rule: A native-app launch instruction on the desktop-control path ("abre la
+          app X", "open the app X", "lanza la app X") classifies as an ACTION
+          via _computer_instruction_requires_actions, so it routes to
+          action_response (codex-desktop loop) and launches the app — not to
+          the screenshot-only read path. Bare "abre" is intentionally excluded
+          (it collides with reads like "abre la pagina actual"); only
+          app/aplicación/programa phrasings are added. Pure reads ("dime qué
+          ves", "revisa la pantalla") stay reads.
+    chokepoints:
+      - bot_helpers._COMPUTER_ACTION_TOKENS  # app-launch phrasings added, bare "abre" excluded
+      - bot_helpers._computer_instruction_requires_actions  # desktop-only classifier (both callers are computer)
+    enforced_by:
+      - tests/test_computer_applaunch_action.py
+    why: "/computer abre la app Calculadora y dime qué ves" was classified as a
+         read (no action token matched), so it only screenshotted and never
+         launched the app (breakage diagnosis 2026-07-06 Turn B). The separate
+         natural-language delegation-to-browser mis-route (§2, "computer-use"
+         token in _BROWSER_OPERATION_SIGNAL_RE) and the absent delegated
+         codex-desktop lane are a deeper follow-up, not this slice.
 
   computer_use_task_outcomes_are_typed:
     rule: Computer/browser task execution returns a typed

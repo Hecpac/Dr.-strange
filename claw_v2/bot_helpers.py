@@ -305,6 +305,21 @@ _COMPUTER_ACTION_TOKENS = (
     "arrastra la",
     "abre el menu",
     "open the menu",
+    # Bot breakage diagnosis 2026-07-06: launching a native app is an ACTION,
+    # not a read. "/computer abre la app Calculadora y dime qué ves" used to be
+    # classified as a read (screenshot only) because no action token matched,
+    # so the app never launched. These are unambiguous app-launch phrasings —
+    # bare "abre" is intentionally NOT added (it collides with reads like
+    # "abre la pagina actual"). Only reachable via the desktop-control path
+    # (both callers of _computer_instruction_requires_actions are computer).
+    "abre la app",
+    "abre la aplicacion",
+    "abre el programa",
+    "open the app",
+    "launch ",
+    "lanza la app",
+    "lanza la aplicacion",
+    "lanza el programa",
 )
 _COMPUTER_READ_TOKENS = (
     "revisa la pagina actual",
