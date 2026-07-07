@@ -379,6 +379,8 @@ class ComputerUseOutcomeTests(unittest.TestCase):
         self.assertEqual(outcome.status, "failed")
         self.assertEqual(outcome.reason_code, "iteration_limit")
         self.assertTrue(outcome.retryable)
+        self.assertTrue(outcome.replan_recommended)
+        self.assertEqual(outcome.replan_reason_code, "iteration_limit")
         self.assertEqual(outcome.user_safe_summary, "Computer Use iteration limit reached.")
 
     def test_agent_loop_outcome_approval_and_no_result_are_typed(self) -> None:
@@ -424,6 +426,8 @@ class ComputerUseOutcomeTests(unittest.TestCase):
         self.assertEqual(no_result_outcome.status, "no_result")
         self.assertEqual(no_result_outcome.reason_code, "no_response")
         self.assertTrue(no_result_outcome.retryable)
+        self.assertTrue(no_result_outcome.replan_recommended)
+        self.assertEqual(no_result_outcome.replan_reason_code, "no_response")
 
     def test_agent_loop_outcome_cancelled_by_user_is_not_retryable(self) -> None:
         svc = ComputerUseService(display_width=1280, display_height=800)
@@ -443,6 +447,26 @@ class ComputerUseOutcomeTests(unittest.TestCase):
         self.assertEqual(outcome.status, "cancelled")
         self.assertEqual(outcome.reason_code, "user_cancelled")
         self.assertFalse(outcome.retryable)
+        self.assertFalse(outcome.replan_recommended)
+
+    def test_scope_drift_outcome_enables_safe_replan(self) -> None:
+        outcome = ComputerUseOutcome.scope_drift("Computer task drifted outside requested scope.")
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(outcome.reason_code, "scope_drift")
+        self.assertTrue(outcome.retryable)
+        self.assertTrue(outcome.replan_recommended)
+        self.assertEqual(outcome.replan_reason_code, "scope_drift")
+
+    def test_coerced_timeout_remains_typed_retryable_without_summary_parsing(self) -> None:
+        from claw_v2.computer import coerce_computer_use_outcome
+
+        outcome = coerce_computer_use_outcome("browser use timed out")
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(outcome.reason_code, "timeout")
+        self.assertTrue(outcome.retryable)
+        self.assertFalse(outcome.replan_recommended)
 
 
 class ComputerHandlerOutcomeTests(unittest.TestCase):
@@ -574,6 +598,8 @@ class ComputerHandlerOutcomeTests(unittest.TestCase):
         pending = [payload for event, payload in events if event == "computer_approval_pending"]
         self.assertEqual(pending[-1]["outcome_status"], "pending_approval")
         self.assertEqual(pending[-1]["reason_code"], "approval_required")
+        replans = [payload for event, payload in events if event == "computer_replan_started"]
+        self.assertEqual(replans, [])
 
     def test_handler_exception_returns_typed_failure_event(self) -> None:
         class FakeComputer:
@@ -616,6 +642,349 @@ class ComputerHandlerOutcomeTests(unittest.TestCase):
         self.assertEqual(failed[-1]["outcome_status"], "cancelled")
         self.assertEqual(failed[-1]["reason_code"], "user_cancelled")
         self.assertFalse(failed[-1]["retryable"])
+        replans = [payload for event, payload in events if event == "computer_replan_started"]
+        self.assertEqual(replans, [])
+
+    def test_handler_replans_once_after_iteration_limit_and_returns_success(self) -> None:
+        outer = self
+
+        class FakeComputer:
+            codex_backend = None
+
+            def __init__(self) -> None:
+                self.tasks: list[str] = []
+
+            def run_agent_loop_outcome(self, *, session, **kwargs):
+                self.tasks.append(session.task)
+                session.status = "done"
+                if len(self.tasks) == 1:
+                    session.iteration = 30
+                    return ComputerUseOutcome.failed(
+                        "Computer Use iteration limit reached.",
+                        reason_code="iteration_limit",
+                        retryable=True,
+                        replan_recommended=True,
+                        replan_reason_code="iteration_limit",
+                    )
+                outer.assertEqual(session.iteration, 0)
+                outer.assertEqual(session.messages, [])
+                outer.assertIn("Recovery replan (iteration_limit)", session.task)
+                return ComputerUseOutcome.succeeded("replanned success")
+
+        events: list[tuple[str, dict]] = []
+        computer = FakeComputer()
+        handler = self._handler_with_computer(computer, events)
+        handler._sessions["s1"] = ComputerSession(task="finish the form")
+
+        result = handler._run_session("s1")
+
+        self.assertEqual(result, "replanned success")
+        self.assertEqual(len(computer.tasks), 2)
+        replans = [payload for event, payload in events if event == "computer_replan_started"]
+        self.assertEqual(len(replans), 1)
+        self.assertEqual(replans[0]["reason_code"], "iteration_limit")
+        self.assertEqual(replans[0]["replan_reason_code"], "iteration_limit")
+        completed = [payload for event, payload in events if event == "computer_session_completed"]
+        self.assertEqual(completed[-1]["outcome_status"], "succeeded")
+
+    def test_handler_replans_no_result_once_without_infinite_loop(self) -> None:
+        class FakeComputer:
+            codex_backend = None
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run_agent_loop_outcome(self, *, session, **kwargs):
+                self.calls += 1
+                session.status = "done"
+                return ComputerUseOutcome.no_result("(no response)", reason_code="no_response")
+
+        events: list[tuple[str, dict]] = []
+        computer = FakeComputer()
+        handler = self._handler_with_computer(computer, events)
+        handler._sessions["s1"] = ComputerSession(task="inspect page")
+
+        result = handler._run_session("s1")
+
+        self.assertEqual(result, "(no response)")
+        self.assertEqual(computer.calls, 2)
+        replans = [payload for event, payload in events if event == "computer_replan_started"]
+        self.assertEqual(len(replans), 1)
+        failed = [payload for event, payload in events if event == "computer_session_failed"]
+        self.assertEqual(failed[-1]["outcome_status"], "no_result")
+        self.assertEqual(failed[-1]["reason_code"], "no_response")
+        self.assertTrue(failed[-1]["replan_recommended"])
+
+    def test_handler_replans_scope_drift_once(self) -> None:
+        class FakeComputer:
+            codex_backend = None
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run_agent_loop_outcome(self, *, session, **kwargs):
+                self.calls += 1
+                session.status = "done"
+                if self.calls == 1:
+                    return ComputerUseOutcome.scope_drift("Computer task drifted scope.")
+                return ComputerUseOutcome.succeeded("back in scope")
+
+        events: list[tuple[str, dict]] = []
+        computer = FakeComputer()
+        handler = self._handler_with_computer(computer, events)
+        handler._sessions["s1"] = ComputerSession(task="stay on example.com")
+
+        result = handler._run_session("s1")
+
+        self.assertEqual(result, "back in scope")
+        self.assertEqual(computer.calls, 2)
+        replans = [payload for event, payload in events if event == "computer_replan_started"]
+        self.assertEqual(len(replans), 1)
+        self.assertEqual(replans[0]["reason_code"], "scope_drift")
+        completed = [payload for event, payload in events if event == "computer_replan_completed"]
+        self.assertEqual(completed[-1]["final_outcome_status"], "succeeded")
+
+    def test_handler_replans_explicit_retryable_transient_failure_once(self) -> None:
+        class FakeComputer:
+            codex_backend = None
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run_agent_loop_outcome(self, *, session, **kwargs):
+                self.calls += 1
+                session.status = "done"
+                if self.calls == 1:
+                    return ComputerUseOutcome.failed(
+                        "Temporary computer failure.",
+                        reason_code="transient_failure",
+                        retryable=True,
+                        replan_recommended=True,
+                        replan_reason_code="transient_failure",
+                    )
+                return ComputerUseOutcome.succeeded("transient recovered")
+
+        events: list[tuple[str, dict]] = []
+        computer = FakeComputer()
+        handler = self._handler_with_computer(computer, events)
+        handler._sessions["s1"] = ComputerSession(task="inspect transient state")
+
+        result = handler._run_session("s1")
+
+        self.assertEqual(result, "transient recovered")
+        self.assertEqual(computer.calls, 2)
+        replans = [payload for event, payload in events if event == "computer_replan_started"]
+        self.assertEqual(len(replans), 1)
+        self.assertEqual(replans[0]["reason_code"], "transient_failure")
+        completed = [payload for event, payload in events if event == "computer_replan_completed"]
+        self.assertEqual(completed[-1]["original_reason_code"], "transient_failure")
+
+    def test_handler_does_not_replan_approval_required_or_destructive_path(self) -> None:
+        class FakeComputer:
+            codex_backend = None
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def capture_screenshot(self):
+                return {
+                    "data": base64.b64encode(b"approval-state").decode("ascii"),
+                    "media_type": "image/png",
+                }
+
+            def run_agent_loop_outcome(self, *, session, **kwargs):
+                self.calls += 1
+                session.status = "awaiting_approval"
+                session.pending_action = {"action": "click", "x": 10, "y": 20}
+                return ComputerUseOutcome.pending_approval("Action needs approval.")
+
+        import types
+
+        events: list[tuple[str, dict]] = []
+        computer = FakeComputer()
+        handler = self._handler_with_computer(computer, events)
+        handler.approvals.create.return_value = types.SimpleNamespace(
+            approval_id="approval-1", token="token-1"
+        )
+        handler._sessions["s1"] = ComputerSession(task="click destructive control")
+
+        result = handler._run_session("s1")
+
+        self.assertIn("Necesito tu autorización", result)
+        self.assertEqual(computer.calls, 1)
+        replans = [payload for event, payload in events if event == "computer_replan_started"]
+        self.assertEqual(replans, [])
+
+    def test_handler_does_not_replan_denied_policy_or_ambiguous_outcomes(self) -> None:
+        denied_reason_codes = [
+            "user_denied",
+            "approval_required",
+            "auth_denied",
+            "policy_denied",
+            "destructive_action",
+            "ambiguous_action",
+        ]
+
+        for reason_code in denied_reason_codes:
+            with self.subTest(reason_code=reason_code):
+
+                class FakeComputer:
+                    codex_backend = None
+
+                    def __init__(self) -> None:
+                        self.calls = 0
+
+                    def run_agent_loop_outcome(self, *, session, **kwargs):
+                        self.calls += 1
+                        session.status = "done"
+                        return ComputerUseOutcome.failed(
+                            "Action is not allowed.",
+                            reason_code=reason_code,
+                            retryable=True,
+                            replan_recommended=True,
+                            replan_reason_code=reason_code,
+                        )
+
+                events: list[tuple[str, dict]] = []
+                computer = FakeComputer()
+                handler = self._handler_with_computer(computer, events)
+                handler._sessions["s1"] = ComputerSession(task=f"denied {reason_code}")
+
+                result = handler._run_session("s1")
+
+                self.assertEqual(result, "Action is not allowed.")
+                self.assertEqual(computer.calls, 1)
+                replans = [
+                    payload for event, payload in events if event == "computer_replan_started"
+                ]
+                self.assertEqual(replans, [])
+                failed = [
+                    payload for event, payload in events if event == "computer_session_failed"
+                ]
+                self.assertEqual(failed[-1]["reason_code"], reason_code)
+
+    def test_handler_browser_no_result_replans_once_with_browser_backend(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        events: list[tuple[str, dict]] = []
+
+        class FakeObserve:
+            def emit(self, event_type, payload=None):
+                events.append((event_type, payload or {}))
+
+        handler = ComputerHandler(
+            browser_use=object(),
+            config=types.SimpleNamespace(computer_auto_approve=True, sensitive_urls=[]),
+            observe=FakeObserve(),
+        )
+        session = ComputerSession(task="inspect browser", current_url="https://start.example")
+        session.pending_action = {"action": "browser_use_task", "backend": "browser_use"}
+        handler._sessions["s1"] = session
+
+        calls: list[str] = []
+        urls_seen: list[str | None] = []
+
+        def browser_run(sess):
+            calls.append(sess.task)
+            urls_seen.append(sess.current_url)
+            sess.status = "done"
+            sess.pending_action = None
+            if len(calls) == 1:
+                sess.browser_final_url = "https://end.example/results"
+                return "(no result)"
+            return "browser replanned success"
+
+        with patch.object(handler, "_run_browser_use_session", side_effect=browser_run):
+            result = handler._run_session("s1")
+
+        self.assertEqual(result, "browser replanned success")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("Recovery replan (no_result)", calls[1])
+        # The rerun re-evaluates approval against the browser's verified final
+        # URL, never the stale pre-run one (Codex review P1).
+        self.assertEqual(urls_seen, ["https://start.example", "https://end.example/results"])
+        self.assertEqual(session.current_url, "https://end.example/results")
+        replans = [payload for event, payload in events if event == "computer_replan_started"]
+        self.assertEqual(len(replans), 1)
+        self.assertEqual(replans[0]["backend"], "browser_use")
+        completed = [payload for event, payload in events if event == "computer_session_completed"]
+        self.assertEqual(completed[-1]["outcome_status"], "succeeded")
+
+    def test_handler_browser_replan_declined_when_final_url_unverified(self) -> None:
+        import types
+
+        from claw_v2.computer_handler import ComputerHandler
+
+        events: list[tuple[str, dict]] = []
+
+        class FakeObserve:
+            def emit(self, event_type, payload=None):
+                events.append((event_type, payload or {}))
+
+        handler = ComputerHandler(
+            browser_use=object(),
+            config=types.SimpleNamespace(computer_auto_approve=True, sensitive_urls=[]),
+            observe=FakeObserve(),
+        )
+        session = ComputerSession(task="inspect browser", current_url="https://start.example")
+        session.pending_action = {"action": "browser_use_task", "backend": "browser_use"}
+        handler._sessions["s1"] = session
+
+        calls: list[str] = []
+
+        def browser_run(sess):
+            calls.append(sess.task)
+            sess.status = "done"
+            sess.pending_action = None
+            return "(no result)"
+
+        with patch.object(handler, "_run_browser_use_session", side_effect=browser_run):
+            result = handler._run_session("s1")
+
+        # Without a verified final URL the replan is declined fail-closed: the
+        # stale pre-run URL must never gate a second silent auto-approved pass.
+        self.assertEqual(len(calls), 1)
+        self.assertIn("no result", result)
+        skipped = [payload for event, payload in events if event == "computer_replan_skipped"]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["skip_reason"], "browser_final_url_unverified")
+        self.assertEqual(skipped[0]["backend"], "browser_use")
+        replans = [payload for event, payload in events if event == "computer_replan_started"]
+        self.assertEqual(replans, [])
+        failed = [payload for event, payload in events if event == "computer_session_failed"]
+        self.assertEqual(failed[-1]["outcome_status"], "no_result")
+
+    def test_replan_reset_clears_stale_screenshot_path(self) -> None:
+        outer = self
+
+        class FakeComputer:
+            codex_backend = None
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def run_agent_loop_outcome(self, *, session, **kwargs):
+                self.calls += 1
+                session.status = "done"
+                if self.calls == 1:
+                    session.screenshot_path = "/tmp/run1.png"
+                    return ComputerUseOutcome.no_result("(no response)", reason_code="no_response")
+                # The rerun must never report the prior run's capture as its
+                # own (Gemini review).
+                outer.assertIsNone(session.screenshot_path)
+                return ComputerUseOutcome.succeeded("clean rerun")
+
+        events: list[tuple[str, dict]] = []
+        computer = FakeComputer()
+        handler = self._handler_with_computer(computer, events)
+        handler._sessions["s1"] = ComputerSession(task="inspect page")
+
+        result = handler._run_session("s1")
+
+        self.assertEqual(result, "clean rerun")
+        self.assertEqual(computer.calls, 2)
 
     def test_handler_browser_no_result_is_typed_no_result_failure(self) -> None:
         import types
@@ -1765,16 +2134,19 @@ class ComputerHandlerSessionArtifactTests(unittest.TestCase):
         class FakeBrowserUse:
             def __init__(self):
                 self.last_artifact_path = None
+                self.last_final_url = None
 
             async def run_task(self, task, **kwargs):
                 self.last_artifact_path = "/tmp/img-A.png"
+                self.last_final_url = "https://end.example/page"
                 return "ok"
 
         handler = ComputerHandler(browser_use=FakeBrowserUse(), config=None)
-        session = types.SimpleNamespace(task="hola", screenshot_path=None)
+        session = types.SimpleNamespace(task="hola", screenshot_path=None, browser_final_url=None)
         result = handler._run_browser_use_task(session)
         self.assertEqual(result, "ok")
         self.assertEqual(session.screenshot_path, "/tmp/img-A.png")
+        self.assertEqual(session.browser_final_url, "https://end.example/page")
 
     def test_browser_use_policy_interrupt_becomes_pending_approval(self) -> None:
         import types

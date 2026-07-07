@@ -301,8 +301,12 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIn("reason_code", ComputerUseOutcome.__dataclass_fields__)
         self.assertIn("retryable", ComputerUseOutcome.__dataclass_fields__)
         self.assertIn("user_safe_summary", ComputerUseOutcome.__dataclass_fields__)
+        self.assertIn("replan_recommended", ComputerUseOutcome.__dataclass_fields__)
+        self.assertIn("replan_reason_code", ComputerUseOutcome.__dataclass_fields__)
 
         handler_source = inspect.getsource(ComputerHandler._run_session)
+        replan_source = inspect.getsource(ComputerHandler._should_attempt_computer_replan)
+        reset_source = inspect.getsource(ComputerHandler._reset_session_for_computer_replan)
         payload_source = inspect.getsource(
             __import__(
                 "claw_v2.computer_handler", fromlist=["_computer_outcome_event_payload"]
@@ -314,6 +318,14 @@ class ArchitectureInvariantTests(unittest.TestCase):
         self.assertIn("outcome.status", handler_source)
         self.assertIn("outcome.reason_code", payload_source)
         self.assertIn("outcome.retryable", payload_source)
+        self.assertIn("outcome.replan_recommended", payload_source)
+        self.assertIn("outcome.replan_reason_code", payload_source)
+        self.assertIn("_should_attempt_computer_replan", handler_source)
+        self.assertIn("_computer_replan_attempted", replan_source)
+        self.assertIn('outcome.status in {"failed", "no_result"}', replan_source)
+        self.assertIn("pending_action", replan_source)
+        self.assertIn("session.iteration = 0", reset_source)
+        self.assertIn("computer_replan_started", inspect.getsource(ComputerHandler))
         self.assertIn("computer_session_failed", handler_source)
 
     def test_runtime_db_self_heal_reconnect_is_lock_only(self) -> None:
@@ -464,6 +476,46 @@ class ArchitectureInvariantTests(unittest.TestCase):
             "AGENTS.md",
         }
         self.assertTrue(required.issubset(set(PROMOTION_SENSITIVE_PATH_PATTERNS)))
+
+    def test_runtime_db_corruption_halts_boot_persistently(self) -> None:
+        # Slice 2a (blind-spot pass 2026-07-06 finding #2): a corrupt runtime
+        # DB used to crash-boot under launchd KeepAlive with no persistent
+        # record of why. Boot must write the halt marker on corruption, the
+        # launcher must hold (not exec) while the marker exists, and restart.sh
+        # must abort before kickstart when the preflight fails.
+        main_source = (REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
+        restart_source = (REPO_ROOT / "scripts" / "restart.sh").read_text(encoding="utf-8")
+        launcher_source = (REPO_ROOT / "ops" / "claw-launcher.sh").read_text(encoding="utf-8")
+        preflight_source = (REPO_ROOT / "scripts" / "runtime_db_preflight.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("_ensure_runtime_db_boot_health(config)", main_source)
+        self.assertIn("write_runtime_db_halt_marker", main_source)
+        self.assertIn("write_runtime_db_halt_marker", preflight_source)
+        self.assertIn("clear_runtime_db_halt_marker", preflight_source)
+        # restart.sh: rc captured and failure aborts before kickstart.
+        self.assertLess(
+            restart_source.index('if [ "$preflight_rc" -ne 0 ]'),
+            restart_source.index("launchctl kickstart"),
+        )
+        # launcher: hold gate on the marker sits before the daemon exec.
+        self.assertLess(
+            launcher_source.index('while [[ -f "$HALT_MARKER" ]]'),
+            launcher_source.index('exec "$REPO_ROOT/.venv/bin/python" -m claw_v2.main'),
+        )
+
+    def test_owner_notification_outbox_stays_wired_into_runtime(self) -> None:
+        # Slice 1b (blind-spot pass 2026-07-06 finding #6): a terminal-task
+        # notification whose Telegram send failed used to be dropped with a
+        # warning-only log. The failure callback must enqueue a durable
+        # owner_notification job and the off-tick drain runner must stay
+        # registered — losing either regresses to silent notification loss.
+        lifecycle_source = (REPO_ROOT / "claw_v2" / "lifecycle.py").read_text(encoding="utf-8")
+        main_source = (REPO_ROOT / "claw_v2" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("enqueue_owner_notification(", lifecycle_source)
+        self.assertIn("OwnerNotificationDrainRunner", main_source)
+        self.assertIn('name="owner_notification_drain"', main_source)
 
     def test_recovery_job_drainer_stays_wired_into_runtime(self) -> None:
         # 2026-06-10 audit C1: recovery_jobs accumulated forever because

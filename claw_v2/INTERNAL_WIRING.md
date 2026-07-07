@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice 1a-approval-reissue (2026-07-06, blind-spot pass finding #1): /reissue rotates a pending approval's token hash atomically and restarts its TTL window, recovering Tier 3 approvals whose request send never reached the owner."
-doc_version: 2.91
-last_verified: 2026-07-06
-verification_method: "Slice 1a local: tests/test_approval.py::ApprovalReissueTests covers pending-only rotation, TTL-window restart with first_created_at audit trail, old-token invalidation, terminal-state refusal, past-TTL expiry instead of rescue, missing-record behavior, event emission without raw token, and required_confirmation preservation; tests/test_approval_gate.py::ApprovalsCommandReissueTests + BotFormatterTests cover the /reissue command surface and the confirmation-branch formatter; tests/test_latency_audit_group3.py::InterruptCommandMatcherTests locks /reissue as an operator interrupt."
+describes_commit: "slice a3.7-computer-use-replan-outcomes (2026-07-07, A3.7): retryable iteration-limit, no-result, scope-drift, and explicitly transient computer/browser outcomes carry typed replan metadata and get at most one safe replan attempt; a browser replan refreshes session.current_url from the browser's verified final URL (thread-local last_final_url bound in-worker) and is declined fail-closed when that URL cannot be verified."
+doc_version: 2.97
+last_verified: 2026-07-07
+verification_method: "A3.7 local: tests/test_computer.py::ComputerUseOutcomeTests covers success, approval, no-result, cancellation, scope-drift, timeout coercion, and retryable iteration-limit typed outcomes with replan metadata; tests/test_computer.py::ComputerHandlerOutcomeTests proves downstream events use typed status/reason/retryable/replan fields, one bounded replan runs for iteration-limit/no-result/scope-drift/explicit transient failure, browser replans refresh current_url from the verified final URL and are skipped (computer_replan_skipped) when it is unverifiable, replan resets clear stale screenshot_path, approvals/destructive waits, cancellations, auth/policy/user denials, and ambiguous actions do not replan, MagicMock legacy fallback and CDP unavailable paths stay typed; tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes locks the typed outcome and bounded-replan chokepoint."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -849,22 +849,59 @@ invariants:
          browser_use session to mutate the shared BrowserUseService/CDP profile
          while an interactive browser agent was active.
 
+  computer_app_launch_is_an_action_not_a_read:
+    rule: A native-app launch instruction on the desktop-control path ("abre la
+          app X", "open the app X", "lanza la app X") classifies as an ACTION
+          via _computer_instruction_requires_actions, so it routes to
+          action_response (codex-desktop loop) and launches the app — not to
+          the screenshot-only read path. Only QUALIFIED app/aplicación/programa
+          phrasings are added; bare verbs are excluded — bare "abre" collides
+          with reads ("abre la pagina actual") and bare "launch " collides with
+          ordinary prompts ("draft a launch plan"), and the classifier also
+          runs on general non-slash messages (bot._maybe_handle_shortcut), not
+          only /computer. Pure reads ("dime qué ves", "revisa la pantalla")
+          stay reads.
+    chokepoints:
+      - bot_helpers._COMPUTER_ACTION_TOKENS  # qualified app-launch phrasings only, bare verbs excluded
+      - bot_helpers._computer_instruction_requires_actions  # also runs on general non-slash messages, not only /computer
+    enforced_by:
+      - tests/test_computer_applaunch_action.py
+    why: "/computer abre la app Calculadora y dime qué ves" was classified as a
+         read (no action token matched), so it only screenshotted and never
+         launched the app (breakage diagnosis 2026-07-06 Turn B). The separate
+         natural-language delegation-to-browser mis-route (§2, "computer-use"
+         token in _BROWSER_OPERATION_SIGNAL_RE) and the absent delegated
+         codex-desktop lane are a deeper follow-up, not this slice.
+
   computer_use_task_outcomes_are_typed:
     rule: Computer/browser task execution returns a typed
           `ComputerUseOutcome` at the service/handler boundary. Downstream
-          handler decisions and observe events use `status`, `reason_code`, and
-          `retryable`; `user_safe_summary` is the only field used to preserve
-          legacy user-facing text. Do not infer completion/failure/approval
-          from summary substrings in `ComputerHandler._run_session`.
+          handler decisions and observe events use `status`, `reason_code`,
+          `retryable`, `replan_recommended`, and `replan_reason_code`;
+          `user_safe_summary` is the only field used to preserve legacy
+          user-facing text. Do not infer completion/failure/approval/replan from
+          summary substrings in `ComputerHandler._run_session`. Retryable
+          iteration-limit, no-result, scope-drift, and explicitly typed
+          transient outcomes may trigger one bounded replan; approvals,
+          destructive/pending approval paths, cancellations, auth/policy/user
+          denials, ambiguous actions, and capability-unavailable paths must not
+          silently replan. A browser_use replan re-evaluates auto-approval, so
+          it must see where the browser actually ended up: `_run_browser_use_task`
+          binds the thread-local `last_final_url` to the session in-worker,
+          `_run_computer_replan` refreshes `session.current_url` from it before
+          the rerun, and declines the replan (`computer_replan_skipped`) when
+          the final URL cannot be verified; replan resets clear the prior run's
+          `screenshot_path` so early-exit reruns never report a stale capture.
     enforced_by:
       - tests/test_computer.py::ComputerUseOutcomeTests
       - tests/test_computer.py::ComputerHandlerOutcomeTests
       - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_computer_handler_uses_typed_computer_use_outcomes
     why: A3.6 closes the ambiguity where iteration limits, no-result browser
          runs, approval waits, exceptions, and success all collapsed into
-         plain strings. That made downstream handling brittle and could mark a
-         failed/no-result automation as completed if the human-readable text
-         did not match an expected phrase.
+         plain strings. A3.7 builds on that typed chokepoint so recoverable
+         automation exhaustion or explicitly classified transient failure can
+         replan once with a changed non-destructive tactic instead of becoming a
+         generic failure or an unbounded retry.
 
   subprocess_bounded_execution:
     rule: Runtime subprocess execution must be time-bounded. New synchronous
@@ -949,6 +986,107 @@ invariants:
          with no recovery path (blind-spot pass 2026-07-06, finding #1).
          Reissue restores delivery without weakening hash-only persistence,
          single-use resolution, or the forged-record signature floor.
+
+  evidence_gate_retained_draft_is_executable:
+    rule: When the evidence gate retains a brain reply (start/completion claim
+          without evidence), the FULL blocked draft is preserved as the
+          session's pending_action — wrapped in an execute-don't-narrate
+          directive — with pending_action_meta {source
+          evidence_gate_retained_draft, ttl_seconds
+          EVIDENCE_GATE_RETAINED_DRAFT_TTL_SECONDS (30min), created_message_id,
+          task_id}, so the EXISTING continuation resolver executes the real
+          plan on «ejecútalo» instead of re-deriving from the canned message.
+          Secret-shaped drafts are never preserved — the whole draft is
+          scanned per-token (a single-token check misses secrets embedded in
+          multi-word text) plus the redaction check (PR 0D parity). The
+          read-path keeps its TTL, message-delta, sensitivity, and
+          destructive-objective guards; topic-cosine coherence for this source
+          scores against the stored original ask (topic), not the boilerplate
+          directive that would dilute the vector, and the message-delta guard
+          (not cosine — the original ask lingers in history) is the drift
+          protection that expires reactivation once the conversation moves on.
+          Both the StateHandler resolver and the Telegram continuation path
+          honor pending_action_meta freshness for this source (the Telegram
+          path does not call the resolver, so it checks freshness inline
+          before using the slot). The retention itself is NOT weakened: the gate
+          still replaces the outgoing reply (F4-B1), and no automatic
+          re-prompt is introduced (that is the separate F4-B2 forced-action
+          follow-up). Expiry degrades honestly to today's re-derive behavior.
+    chokepoints:
+      - bot.BotService._build_retained_draft_directive  # full draft + refusals
+      - bot.BotService._record_evidence_gate_explicit_blocker  # single state write, meta ttl
+      - state_handler.StateHandler._pending_action_still_fresh  # honors meta ttl_seconds
+      - state_handler.StateHandler._pending_action_is_coherent  # scores against original ask topic
+      - bot.BotService._maybe_resolve_telegram_continuation  # inline freshness for the retained-draft slot
+    enforced_by:
+      - tests/test_evidence_gate_retained_draft.py
+    why: «ejecútalo» after a retention re-derived from scratch — the draft was
+         truncated to 500 chars in a ledger artifact nobody read back, and the
+         conversation memory was overwritten with the canned message (breakage
+         diagnosis 2026-07-06, pain #1: the owner repeated "Crea el plan"
+         through two retentions and a frustration deflection until giving up).
+
+  owner_notification_outbox_durable_delivery:
+    rule: A terminal-task notification whose Telegram send fails is never
+          dropped with a warning-only log. The lifecycle send-failure callback
+          enqueues a durable agent_jobs row (kind owner_notification,
+          resume_key owner_notif:<notification_key> for active-window dedup,
+          message text already sanitized by the terminal formatters before it
+          reaches the send path) and the off-tick OwnerNotificationDrainRunner
+          retries delivery via stop_notifier until delivered, attempts are
+          exhausted, or the notice goes stale (24h) — expiry TERMINALIZES the
+          row with an observe event, never deletes it. Delivery is
+          at-least-once by decision (a lost ack double-notifies rather than
+          losing the notice). Scope is tasks-only: approval messages carry
+          raw tokens that are deliberately non-persistable (AH1) and recover
+          via /reissue instead.
+    chokepoints:
+      - lifecycle.enqueue_owner_notification  # the no-silent-drop seam
+      - daemon.OwnerNotificationDrainRunner.run_once  # claim -> send -> complete/fail(retry)
+      - main._setup_scheduler  # register_background_job_runner(name="owner_notification_drain"), gated on Telegram config
+      - jobs.JobService.prune_terminal  # terminal-only reap keeps owed rows prune-safe
+    enforced_by:
+      - tests/test_owner_notification_outbox.py
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_owner_notification_outbox_stays_wired_into_runtime
+    why: The in-memory dedup sets and fire-once send callback meant a Telegram
+         outage during the delivery window lost the notice permanently while
+         the result sat unread in the DB (blind-spot pass 2026-07-06, finding
+         #6; the drain-pass promise in finalize_terminal_notification's
+         docstring had no implementation for succeeded tasks).
+
+  runtime_db_corruption_halts_boot_persistently:
+    rule: Detected runtime-DB corruption leaves a persistent halt marker
+          (runtime_db_halt.json next to the DB, atomic write) and every boot
+          authority honors it. The preflight writes the marker on a corruption
+          verdict and restart.sh aborts before the launchd kickstart on a
+          non-zero preflight exit; build_runtime writes the same marker (and
+          alerts the owner) before re-raising RuntimeDatabaseError; the
+          launcher holds — alive, without exec'ing the daemon — while the
+          marker exists, so launchd KeepAlive cannot crash-loop the boot. The
+          marker is cleared ONLY by the preflight after an EXISTING DB passes
+          the thorough integrity check (auto-clear); a missing/empty DB never
+          clears it (deleting the corrupt file must not unlock a silent
+          fresh-schema boot), and clearing renames for audit — never deletes.
+          Every halt/hold path alerts via Telegram (no_silent_degrade).
+    chokepoints:
+      - sqlite_runtime.write_runtime_db_halt_marker  # single marker writer helper
+      - sqlite_runtime.clear_runtime_db_halt_marker  # verified_healthy tripwire arg
+      - scripts/runtime_db_preflight.py:main  # write on corruption, auto-clear on healthy existing DB
+      - scripts/restart.sh  # preflight_rc check aborts before kickstart + owner alert
+      - ops/claw-launcher.sh  # hold-loop on marker before exec; preflight re-run each cycle
+      - main._ensure_runtime_db_boot_health  # boot-side marker + alert before re-raise
+    enforced_by:
+      - tests/test_runtime_db_halt.py
+      - tests/test_runtime_db_preflight.py::RuntimeDbPreflightTests::test_restart_script_runs_db_preflight_before_launchctl_kickstart
+      - tests/test_architecture_invariants.py::ArchitectureInvariantTests::test_runtime_db_corruption_halts_boot_persistently
+    why: An uncaught RuntimeDatabaseError from the boot health check exits the
+         process and launchd KeepAlive relaunches it (~10s) in a crash-boot
+         loop that bypasses restart.sh and the watchdog entirely, with no
+         persisted record of why (blind-spot pass 2026-07-06, finding #2; the
+         degraded mark was process-local and the preflight exit code was
+         discarded at restart.sh). Complements O1.3, which deliberately
+         excludes corruption from self-heal — this is the manual-recovery
+         side of that same boundary.
 
   recovery_jobs_drained_off_tick:
     rule: recovery_jobs (the brain's "I promised to resume this" queue) must be
@@ -1389,6 +1527,41 @@ invariants:
          content as source_text, so a trigger phrase inside those files could
          authorize the turn. Operator-only surface; fix is passing
          memory_text=<user-typed instruction> in those handlers (C3 hygiene).
+
+  background_monitor_promise_recognizer_covers_ongoing_work_conjugations:
+    rule: _claims_background_monitor recognizes TASK-REFERENCE / left-running /
+          notification-promise phrasings (la que está corriendo / lo
+          dejo|dejé|deje corriendo / te aviso al cerrar|terminar|acabar), not
+          just the original narrow set — the blindness let the guard exit
+          before its evidence check and pass a false ongoing-task claim over an
+          already-FAILED task (breakage diagnosis 2026-07-06, Calculadora
+          re-asked 4×). It must NOT match a BARE running status ("La
+          Calculadora ya está en marcha" / "el script está corriendo") — that
+          collides with a truthful app-launch/process-start confirmation and
+          would nuke it (CodeRabbit #222), nor completion claims (listo / ya
+          quedó / hecho / terminé), which are the evidence gate's class and
+          whose inclusion nuked a legitimate confirm before. The guard's backing-check is unchanged: a promise backed by a
+          genuinely active (queued/running) task is left intact; only an
+          unbacked promise is corrected. When the session's active_task
+          terminalized as failed/blocked, the correction names it and offers a
+          retry (_background_monitor_failed_task_note) instead of a silent strip
+          or a generic template.
+    chokepoints:
+      - bot._BACKGROUND_MONITOR_PROMISE_PATTERNS  # ongoing-work family, not completion
+      - bot.BotService._background_monitor_failed_task_note  # truth correction naming the failed task
+      - bot.BotService._enforce_background_monitor_contract  # backing-check gate unchanged
+    enforced_by:
+      - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_ya_esta_en_marcha_over_failed_task_is_truth_corrected
+      - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_esta_corriendo_with_real_active_task_is_left_intact
+      - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_completion_claim_listo_ya_quedo_is_not_matched
+      - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_bare_app_launch_status_is_not_matched
+      - tests/test_brain_tooluse_ledger.py::BrainToolUseLedgerEdgeCasesTests::test_background_monitor_claim_is_stripped_from_mixed_response
+    why: The recognizer's blindness to common conjugations let the brain claim
+         "ya está en marcha" over a task that had already failed while the owner
+         re-asked into silence (breakage diagnosis 2026-07-06). Widening it is
+         safe because the guard only corrects an UNBACKED promise; the
+         completion-claim exclusion preserves the false-positive fix Hector
+         flagged ("Listo ya quedó" must never be nuked).
 
   coordinator_verifier_echo_not_critical:
     rule: The CRITICAL-worker sentinel (_critical_worker_result) is NOT applied

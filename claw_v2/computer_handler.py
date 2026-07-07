@@ -55,6 +55,17 @@ BROWSER_USE_MAX_FAILURES = 3
 _LOGIN_WALL_CONTENT_PROBE_CHARS = 4096
 _BROWSER_CONTENT_PREVIEW_SOURCE_CHARS = 4096
 _BROWSER_CONTENT_PREVIEW_CHARS = 240
+_COMPUTER_REPLAN_REASON_CODES = {
+    "browser_transient_failure",
+    "computer_transient_failure",
+    "empty_result",
+    "iteration_limit",
+    "no_response",
+    "no_result",
+    "scope_drift",
+    "timeout",
+    "transient_failure",
+}
 _LOGIN_WALL_MARKERS = (
     "accounts/login",
     "iniciar sesión",
@@ -125,6 +136,8 @@ def _computer_outcome_event_payload(outcome: ComputerUseOutcome) -> dict[str, An
         "outcome_status": outcome.status,
         "reason_code": outcome.reason_code,
         "retryable": outcome.retryable,
+        "replan_recommended": outcome.replan_recommended,
+        "replan_reason_code": outcome.replan_reason_code,
     }
 
 
@@ -453,19 +466,19 @@ class ComputerHandler:
         )
         try:
             setattr(session, "session_id", session_id)
-            if self._is_browser_use_session(session):
-                outcome = coerce_computer_use_outcome(self._run_browser_use_session(session))
-            else:
+
+            def run_once() -> ComputerUseOutcome:
+                if backend == "browser_use":
+                    return coerce_computer_use_outcome(self._run_browser_use_session(session))
                 if self.computer is None:
-                    outcome = ComputerUseOutcome.unavailable("computer use unavailable")
-                    return outcome.user_safe_summary
+                    return ComputerUseOutcome.unavailable("computer use unavailable")
                 gate = self._get_gate()
                 client = None if self.computer.codex_backend is not None else self._get_client()
                 run_agent_loop_outcome = _real_callable_attr(
                     self.computer, "run_agent_loop_outcome"
                 )
                 if callable(run_agent_loop_outcome):
-                    outcome = coerce_computer_use_outcome(
+                    return coerce_computer_use_outcome(
                         run_agent_loop_outcome(
                             session=session,
                             client=client,
@@ -477,19 +490,22 @@ class ComputerHandler:
                             ),
                         )
                     )
-                else:
-                    outcome = coerce_computer_use_outcome(
-                        self.computer.run_agent_loop(
-                            session=session,
-                            client=client,
-                            gate=gate,
-                            model=self.computer_model,
-                            system_prompt=self.computer_system_prompt,
-                            current_url_resolver=lambda: self._resolve_current_url(
-                                session_id, getattr(session, "task", "")
-                            ),
-                        )
+                return coerce_computer_use_outcome(
+                    self.computer.run_agent_loop(
+                        session=session,
+                        client=client,
+                        gate=gate,
+                        model=self.computer_model,
+                        system_prompt=self.computer_system_prompt,
+                        current_url_resolver=lambda: self._resolve_current_url(
+                            session_id, getattr(session, "task", "")
+                        ),
                     )
+                )
+
+            outcome = run_once()
+            if self._should_attempt_computer_replan(session, outcome):
+                outcome = self._run_computer_replan(session_id, session, backend, outcome, run_once)
             result = outcome.user_safe_summary
         except Exception as exc:
             self._sessions.pop(session_id, None)
@@ -626,6 +642,105 @@ class ComputerHandler:
             else:
                 self._emit("computer_session_completed", event_payload)
         return result
+
+    def _should_attempt_computer_replan(self, session: Any, outcome: ComputerUseOutcome) -> bool:
+        if getattr(session, "_computer_replan_attempted", False):
+            return False
+        if getattr(session, "_cancelled", False):
+            return False
+        if getattr(session, "status", None) != "done":
+            return False
+        if getattr(session, "pending_action", None) is not None:
+            return False
+        return (
+            outcome.replan_recommended
+            and outcome.retryable
+            and outcome.status in {"failed", "no_result"}
+            and outcome.reason_code in _COMPUTER_REPLAN_REASON_CODES
+        )
+
+    def _run_computer_replan(
+        self,
+        session_id: str,
+        session: Any,
+        backend: str,
+        outcome: ComputerUseOutcome,
+        run_once: Callable[[], ComputerUseOutcome],
+    ) -> ComputerUseOutcome:
+        original_task = str(getattr(session, "task", "") or "")
+        setattr(session, "_computer_replan_attempted", True)
+        setattr(session, "_computer_original_task", original_task)
+        if backend == "browser_use":
+            # A browser replan re-evaluates auto-approval, so it must see where
+            # the browser actually ended up — not the pre-run URL. Without a
+            # verified final URL, a run that drifted onto a sensitive domain
+            # could get a second silent pass; decline fail-closed instead.
+            final_url = str(getattr(session, "browser_final_url", "") or "").strip()
+            if not final_url:
+                self._emit(
+                    "computer_replan_skipped",
+                    {
+                        "session_id": session_id,
+                        "backend": backend,
+                        "skip_reason": "browser_final_url_unverified",
+                        **_computer_outcome_event_payload(outcome),
+                    },
+                )
+                return outcome
+            session.current_url = final_url
+        self._reset_session_for_computer_replan(session, backend, outcome)
+        self._emit(
+            "computer_replan_started",
+            {
+                "session_id": session_id,
+                "backend": backend,
+                "original_instruction_hash": _instruction_hash(original_task),
+                **_computer_outcome_event_payload(outcome),
+            },
+        )
+        replanned = run_once()
+        self._emit(
+            "computer_replan_completed",
+            {
+                "session_id": session_id,
+                "backend": backend,
+                "final_outcome_status": replanned.status,
+                "final_reason_code": replanned.reason_code,
+                "final_retryable": replanned.retryable,
+                "original_reason_code": outcome.reason_code,
+                "original_replan_reason_code": outcome.replan_reason_code,
+            },
+        )
+        return replanned
+
+    def _reset_session_for_computer_replan(
+        self, session: Any, backend: str, outcome: ComputerUseOutcome
+    ) -> None:
+        original_task = str(getattr(session, "_computer_original_task", "") or "")
+        reason = outcome.replan_reason_code or outcome.reason_code
+        session.task = (
+            f"{original_task}\n\n"
+            f"Recovery replan ({reason}): inspect the current state again, choose a different "
+            "non-destructive tactic, and stop with a concise status if the target is still "
+            "not verifiable."
+        )
+        session.messages = []
+        session.status = "running"
+        session.iteration = 0
+        session.previous_response_id = None
+        session.visual_checks = 0
+        session.last_screenshot_hash = None
+        session.last_visual_changed = None
+        session.screenshot_path = None
+        session.browser_final_url = None
+        if backend == "browser_use":
+            session.pending_action = {
+                "action": "browser_use_task",
+                "backend": "browser_use",
+                "task": session.task,
+            }
+        else:
+            session.pending_action = None
 
     def _get_client(self) -> Any:
         if self._client is not None:
@@ -1186,6 +1301,7 @@ class ComputerHandler:
             # the thread-local last_artifact_path was just set — avoids the
             # shared-state race across concurrent sessions.
             session.screenshot_path = getattr(self.browser_use, "last_artifact_path", None)
+            session.browser_final_url = getattr(self.browser_use, "last_final_url", None)
             return result
 
         try:

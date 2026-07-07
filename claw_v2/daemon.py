@@ -1038,6 +1038,113 @@ class RecoveryJobDrainRunner:
         )
 
 
+# Slice 1b (blind-spot pass 2026-07-06 finding #6): durable outbox for
+# terminal-task notifications whose Telegram send failed. The lifecycle send
+# callback enqueues these; this runner retries delivery off-tick.
+OWNER_NOTIFICATION_JOB_KIND = "owner_notification"
+OWNER_NOTIFICATION_RESUME_PREFIX = "owner_notif:"
+OWNER_NOTIFICATION_MAX_ATTEMPTS = 12
+# A "task finished" notice older than a day is noise — the result itself is
+# still in the ledger/DB; the notice is a signal, not the record.
+OWNER_NOTIFICATION_STALE_SECONDS = 86_400.0
+_OWNER_NOTIFICATION_RETRY_CAP_SECONDS = 14_400.0
+
+
+class OwnerNotificationDrainRunner:
+    """Drains queued ``owner_notification`` agent_jobs off-tick.
+
+    Delivery is at-least-once by decision (same trade-off as
+    RecoveryJobDrainRunner: rather double-notify on a lost ack than lose the
+    notice). Rows are never deleted here — expiry and payload problems
+    terminalize the job so the audit trail survives; ``prune_terminal`` reaps
+    terminal rows only, so an owed notification is prune-safe.
+    """
+
+    def __init__(
+        self,
+        *,
+        job_service: Any,
+        send: Callable[[str, str], object],
+        observe: ObserveStream | None = None,
+        should_stop: Callable[[], bool] | None = None,
+        max_per_cycle: int = 10,
+        inter_message_delay_seconds: float = 1.0,
+        stale_after_seconds: float = OWNER_NOTIFICATION_STALE_SECONDS,
+        sleep: Callable[[float], object] = time.sleep,
+        worker_id: str = "owner-notification-drain",
+    ) -> None:
+        self.job_service = job_service
+        self.send = send
+        self.observe = observe
+        self.should_stop = should_stop
+        self.max_per_cycle = max(1, int(max_per_cycle))
+        self.inter_message_delay_seconds = max(0.0, float(inter_message_delay_seconds))
+        self.stale_after_seconds = float(stale_after_seconds)
+        self.sleep = sleep
+        self.worker_id = worker_id
+
+    def run_once(self) -> int:
+        delivered = 0
+        for _ in range(self.max_per_cycle):
+            if self.should_stop is not None and self.should_stop():
+                break
+            job = self.job_service.claim_next(
+                worker_id=self.worker_id,
+                kinds=(OWNER_NOTIFICATION_JOB_KIND,),
+            )
+            if job is None:
+                break
+            payload = job.payload or {}
+            chat_id = str(payload.get("chat_id") or "")
+            message = str(payload.get("message") or "")
+            age_seconds = time.time() - float(job.created_at or 0.0)
+            if age_seconds > self.stale_after_seconds:
+                self.job_service.fail(job.job_id, error="stale_notification", retry=False)
+                self._emit("owner_notification_expired", job, age_seconds=age_seconds)
+                continue
+            if not chat_id or not message:
+                self.job_service.fail(job.job_id, error="invalid_notification_payload", retry=False)
+                self._emit("owner_notification_invalid", job)
+                continue
+            try:
+                self.send(chat_id, message)
+            except Exception as exc:
+                delay = min(
+                    _OWNER_NOTIFICATION_RETRY_CAP_SECONDS,
+                    60.0 * (2 ** max(0, int(job.attempts or 1))),
+                )
+                self.job_service.fail(
+                    job.job_id,
+                    error=f"send_failed: {exc}"[:200],
+                    retry=True,
+                    retry_delay_seconds=delay,
+                )
+                continue
+            self.job_service.complete(job.job_id, result={"delivered": True})
+            self._emit("owner_notification_delivered", job, attempts=job.attempts)
+            delivered += 1
+            # Pace sends so a backlog cannot trip Telegram's per-chat rate
+            # limit (~1 msg/sec).
+            self.sleep(self.inter_message_delay_seconds)
+        return delivered
+
+    def _emit(self, event_type: str, job: Any, **extra: Any) -> None:
+        if self.observe is None:
+            return
+        payload = job.payload or {}
+        event_payload: dict[str, Any] = {
+            "job_id": job.job_id,
+            "session_id": payload.get("session_id"),
+            "notification_key": payload.get("notification_key"),
+            "attempts": job.attempts,
+        }
+        event_payload.update(extra)
+        try:
+            self.observe.emit(event_type, payload=event_payload)
+        except Exception:
+            logger.debug("owner notification observe emit failed", exc_info=True)
+
+
 def _compact_drain_result(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
