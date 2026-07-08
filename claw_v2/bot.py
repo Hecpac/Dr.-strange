@@ -1296,6 +1296,12 @@ class BotService:
         self._pre_state_commands = self._build_pre_state_commands()
         self._post_shortcut_commands = self._build_post_shortcut_commands()
         self._pre_brain_routes: list[Route] = self._build_pre_brain_routes()
+        # B4.5a: per-slot registry bridge. cleanup_status is registry-invoked
+        # but at its ORIGINAL legacy slot (§5.1 row 7) — it cannot join
+        # _pre_brain_routes (the early slot) without reordering behavior.
+        self._cleanup_status_slot: tuple[Route, ...] = (
+            Route(CLEANUP_STATUS_MATCHER.name, self._route_cleanup_status),
+        )
 
     @property
     def terminal_bridge(self) -> object | None:
@@ -4377,27 +4383,22 @@ class BotService:
             )
             self._remember_assistant_turn_state(session_id, stripped, operational_status_response)
             return operational_status_response
-        cleanup_status_response = self._maybe_handle_cleanup_status_query(
-            stripped, session_id=session_id
+        # B4.5a: cleanup_status runs through the route registry (per-slot
+        # bridge) at its original order-locked slot; route_ctx from above is
+        # still current for this turn.
+        cleanup_status_outcome = dispatch_routes(
+            self._cleanup_status_slot,
+            route_ctx,
+            on_decision=self._emit_route_decision,
         )
-        self._emit_dispatch_decision(
-            handler=CLEANUP_STATUS_MATCHER.name,
-            route="intercepted" if cleanup_status_response is not None else "fall_through",
-            reason=(
-                CLEANUP_STATUS_MATCHER.matched_reason
-                if cleanup_status_response is not None
-                else CLEANUP_STATUS_MATCHER.unmatched_reason
-            ),
-            session_id=session_id,
-            text=stripped,
-            captured=cleanup_status_response is not None,
-        )
-        if cleanup_status_response is not None:
-            self._store_memory_turn(
-                session_id, stripped, cleanup_status_response, assistant_limit=2000
+        if cleanup_status_outcome.captured and cleanup_status_outcome.response is not None:
+            self._post_capture_intercepted(
+                session_id,
+                stripped,
+                cleanup_status_outcome.response,
+                assistant_limit=cleanup_status_outcome.store_memory_limit,
             )
-            self._remember_assistant_turn_state(session_id, stripped, cleanup_status_response)
-            return cleanup_status_response
+            return cleanup_status_outcome.response
         owner_delegation_response = self._maybe_handle_owner_delegation_request(
             stripped,
             session_id=session_id,
@@ -5021,6 +5022,15 @@ class BotService:
         if response is None:
             return RouteOutcome.fall_through(reason="operational_alert_no_match")
         return RouteOutcome.intercepted(response, reason="operational_alert_matched")
+
+    def _route_cleanup_status(self, ctx: RouteContext) -> RouteOutcome:
+        # B4.5a: registry adapter over the B4.4b gate+renderer. Reason slugs
+        # come from the declarative matcher so dispatch_decision payloads stay
+        # byte-identical to the pre-registry call site.
+        response = self._maybe_handle_cleanup_status_query(ctx.stripped, session_id=ctx.session_id)
+        if response is None:
+            return RouteOutcome.fall_through(reason=CLEANUP_STATUS_MATCHER.unmatched_reason)
+        return RouteOutcome.intercepted(response, reason=CLEANUP_STATUS_MATCHER.matched_reason)
 
     def _route_boot_context_status(self, ctx: RouteContext) -> RouteOutcome:
         response = self._maybe_handle_boot_context_status(
