@@ -25,7 +25,12 @@ EXPECTED_PRE_BRAIN_ORDER = [
     "_handle_pending_tasks_query",
     "_maybe_handle_operational_failure_summary",
     "_maybe_handle_operational_status",
-    "_maybe_handle_cleanup_status_query",
+    # B4.5a: cleanup_status migrated to the route registry via a per-slot
+    # bridge (dispatch_routes(self._cleanup_status_slot, ...)) that runs at
+    # this exact position — between operational_status and owner_delegation.
+    # The AST extractor only sees _maybe_handle_*/_handle_* names, so the
+    # registry-invoked slot is locked by
+    # tests/test_b45a_cleanup_route_registry.py instead.
     "_maybe_handle_owner_delegation_request",
     "_maybe_handle_telegram_imperative_request",
     "_handle_stateful_brain_shortcut",

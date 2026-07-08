@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice b44c-operational-status-matcher (2026-07-08): B4.4c — third declarative matcher, same shape as B4.4a/B4.4b: the operational-status route's match contract (exact normalized-phrase set + exact compact set + greeting/status-token substring branch) moved from inline lines in BotService._maybe_handle_operational_status to claw_v2/dispatch/matchers.py as frozen data (OPERATIONAL_STATUS_MATCHER); the order-locked call site re-sources its dispatch_decision slugs from the matcher; response rendering (task counting + quality-guard wrap) stays on BotService. Behavior-identical by construction: decisions old-vs-new corpus-locked AND cross-matcher overlap corpus-locked vs change-status/cleanup-status (invariant b44c_operational_status_matcher_is_declarative_data), telemetry slugs byte-identical, EXPECTED_PRE_BRAIN_ORDER untouched. Prior slices: b44b (PR #235, merged be7c6d8) cleanup-status matcher; b44a (PR #234, merged 31d489a) change-status matcher; b41 (PR #232, merged 8df1a6f) B4.1/B4.2 rails (order lock + ratchet baseline 12172 + 150)."
-doc_version: 3.09
+describes_commit: "slice b45a-cleanup-route-registry (2026-07-08): B4.5a — first route-registry migration. cleanup_status is now invoked through registry Route data via a minimal PER-SLOT bridge: dispatch_routes(self._cleanup_status_slot, route_ctx, on_decision=self._emit_route_decision) at the route's ORIGINAL order-locked slot (§5.1 row 7, after operational_status, before owner_delegation). It does NOT join _pre_brain_routes (the early registry slot, rows 2-3) — moving it there would reorder interception and telemetry rows. The Route name and reason slugs come from CLEANUP_STATUS_MATCHER, so dispatch_decision payloads are byte-identical; _post_capture_intercepted reproduces the legacy post-capture calls exactly. EXPECTED_PRE_BRAIN_ORDER deliberately edited (19->18 direct calls) in the same commit as this doc, per botservice_pre_brain_order_is_locked; the bridge position is locked by tests/test_b45a_cleanup_route_registry.py. Invariant b45a_cleanup_status_is_registry_invoked. Prior: b44c (PR #236, cf6acc3) operational-status matcher; b44b (PR #235, be7c6d8) cleanup-status matcher; b44a (PR #234, 31d489a) change-status matcher; b41 (PR #232, 8df1a6f) rails."
+doc_version: 3.10
 last_verified: 2026-07-08
-verification_method: "B4.4c local, isolated worktree: tests/test_b44c_operational_status_matcher_pilot.py (old-vs-new decision corpus w/ legacy inline predicate frozen verbatim, cross-matcher OVERLAP corpus vs change-status/cleanup-status incl. the greeting-branch interception, telemetry-slug lock, single-source wiring lock) + tests/test_b44a_declarative_matcher_pilot.py + tests/test_b44b_cleanup_matcher_pilot.py + tests/test_botservice_migration_rails.py green UNEDITED (order + ratchet) + tests/test_dispatch_route.py + route e2e already covering operational_status (test_dispatch_routing.py, test_telegram_imperative_router.py, test_turn_receipt.py) green unedited."
+verification_method: "B4.5a local, isolated worktree: tests/test_b45a_cleanup_route_registry.py (bridge slot position via AST between legacy neighbors, no direct handler call in _handle_text_body, Route data from matcher, B4.4b live-smoke phrases behavior-identical through the registry path, dispatch_decision kwargs byte-locked) + tests/test_b44b_cleanup_matcher_pilot.py green UNEDITED (corpus + single-source) + tests/test_b44a/b44c pilots + tests/test_botservice_migration_rails.py with the DELIBERATE 18-entry order edit + tests/test_dispatch_route.py + tests/test_dispatch_routing.py."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1194,6 +1194,36 @@ invariants:
          coverage); the corpus lock is this route's first behavioral
          coverage and each migrated matcher grows the enumerable data set
          B4.4 needs.
+
+  b45a_cleanup_status_is_registry_invoked:
+    rule: 'B4.5a. The cleanup_status route is invoked through registry Route
+          data, not a direct BotService call: _handle_text_body runs
+          dispatch_routes(self._cleanup_status_slot, route_ctx,
+          on_decision=self._emit_route_decision) — a one-Route per-slot
+          bridge (Route(CLEANUP_STATUS_MATCHER.name,
+          self._route_cleanup_status)) at the route ORIGINAL slot: after
+          _maybe_handle_operational_status, before
+          _maybe_handle_owner_delegation_request. The route must NOT join
+          _pre_brain_routes (the early registry slot, rows 2-3): that would
+          move interception ahead of pending-tasks/failure-summary/
+          operational-status and reorder consolidated dispatch_decision
+          rows — order is behavior (§5.1). The adapter takes its reason
+          slugs from CLEANUP_STATUS_MATCHER (byte-identical telemetry);
+          capture side-effects go through _post_capture_intercepted (the
+          same two calls the legacy call site made). EXPECTED_PRE_BRAIN_ORDER
+          no longer lists the direct call (deliberate 19->18 edit, same
+          commit as §5.1); the bridge slot is locked by the b45a test via
+          AST position between its legacy neighbors.'
+    chokepoints:
+      - bot.BotService._route_cleanup_status
+      - bot.BotService.__init__  # _cleanup_status_slot construction
+    enforced_by:
+      - tests/test_b45a_cleanup_route_registry.py
+      - tests/test_botservice_migration_rails.py
+    why: B4.5 moves handlers INTO the registry one route at a time; the
+         first migration must prove the per-slot bridge shape — registry
+         invocation without order drift — before any route joins the early
+         slot or the slots consolidate.
 
   b44c_operational_status_matcher_is_declarative_data:
     rule: 'B4.4c. The operational-status route match contract is DATA:
@@ -2906,7 +2936,7 @@ in `_handle_text_body` (verified 2026-06-10):
 | 4 | `_maybe_handle_pending_tasks_query` | "tareas pendientes" / "pendientes" |
 | 5 | `_maybe_handle_operational_failure_summary` | failure summary queries |
 | 6 | `_maybe_handle_operational_status` | operational status questions; matcher = declarative `OPERATIONAL_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4c — invariant `b44c_operational_status_matcher_is_declarative_data`). Greeting branch runs before change-status (row 10): "hola/buen dia + estado\|estatus\|status" intercepts here |
-| 7 | cleanup status / owner delegation / `_maybe_handle_telegram_imperative_request` | explicit operator imperatives; unresolved context → fallthrough_to_brain (never clarifies). Cleanup-status matcher = declarative `CLEANUP_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4b — invariant `b44b_cleanup_matcher_is_declarative_data`) |
+| 7 | cleanup status / owner delegation / `_maybe_handle_telegram_imperative_request` | explicit operator imperatives; unresolved context → fallthrough_to_brain (never clarifies). Cleanup-status matcher = declarative `CLEANUP_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4b — invariant `b44b_cleanup_matcher_is_declarative_data`); since B4.5a the route is REGISTRY-invoked at this same slot via the per-slot bridge `dispatch_routes(self._cleanup_status_slot, ...)` (invariant `b45a_cleanup_status_is_registry_invoked`) — it is NOT in the early `_pre_brain_routes` slot |
 | 8 | `_maybe_handle_actionable_task_request` | runtime=Telegram + state-derived objective; unresolved follow-up → fallthrough |
 | 8b | `_maybe_handle_f4_deterministic_delegation` | **F4-B1**, gated OFF by `CLAW_F4_DETERMINISTIC_DELEGATION` (default); narrow authenticated-X-feed-review intent → enqueues ONE durable `f4b.delegation` delivery job (ledger-row-first dedup on the deterministic `task_id`, else `JobService.reserve(resume_key=delivery_key)`); does NOT call `start_autonomous_task`/start a thread/delete — `F4DelegationJobRunner` claims the job off-tick and runs the idempotent bootstrap. Captures BEFORE the broad router (exactly-once on telegram message_id). See invariant `high_confidence_delegation_intents_do_not_depend_on_model_tool_choice` |
 | 9 | `_maybe_handle_task_intent` | **gated OFF** by `CLAW_DISABLE_TASK_INTENT_ROUTER=1` (default) |
