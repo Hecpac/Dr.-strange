@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice b41-botservice-rails (2026-07-07): B4.1/B4.2 migration rails, tests/docs only — top-level pre-brain dispatch order in _handle_text_body test-locked (19 top-level dispatch/capture calls, AST-extracted) and bot.py size ratcheted (baseline 12172 + 150). Also heals the meta drift from slice a39-transient-learning-taxonomy (PR #231, merged 634a528: transient automation failures gated at LearningLoop.record, telemetry-only via learning_transient_skipped; invariant learning_taxonomy_excludes_generic_transients) whose commit bumped doc_version without refreshing this field. No runtime behavior change in b41."
-doc_version: 3.06
+describes_commit: "slice b44a-declarative-matcher-pilot (2026-07-07): B4.4a pilot — the change-status route's match contract moved from bot.py module level to claw_v2/dispatch/matchers.py as frozen data (RouteMatcher: name + pure literal-text predicate + dispatch reason slugs); the order-locked call site, handler method, and renderer consume it (bot.py net -8 lines, ratchet respected). Behavior-identical by construction: decisions old-vs-new corpus-locked (invariant b44a_route_matcher_is_declarative_data), telemetry slugs byte-identical, EXPECTED_PRE_BRAIN_ORDER untouched. Prior slice b41 (PR #232, merged 8df1a6f): B4.1/B4.2 rails — 19-call top-level dispatch order lock + bot.py size ratchet (baseline 12172 + 150)."
+doc_version: 3.07
 last_verified: 2026-07-07
-verification_method: "CB1 local: tests/test_cb1_routing_honesty.py (recognizer matrix, decline-with-blocker e2e incl. no-task-state + telemetry reason, guard mode/browser-signal scoping, prompt-surface honesty, missing_domain_grant guidance) + flipped tests/test_cb0_routing_matrix.py mis-route lock + hardened tests/test_anthropic_hooks.py nudge split. Focused gate green: 375 passed + 33 subtests (test_computer, test_bot_helpers, test_task_handler, test_brain_core, test_task_deliverables, test_shadow_delegation_gap, test_architecture_invariants) + 40 passed (cb0/cb1/anthropic_hooks)."
+verification_method: "B4.4a local, isolated worktree: tests/test_b44a_declarative_matcher_pilot.py (old-vs-new decision corpus w/ legacy predicate frozen verbatim, telemetry-slug lock, single-source wiring lock) + tests/test_botservice_migration_rails.py green UNEDITED (order + ratchet) + tests/test_dispatch_route.py + change-status e2e in tests/test_bot.py (capture, dispatch_decision payload, renderer semantics)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1133,6 +1133,36 @@ invariants:
     why: The god-module keeps absorbing features (12k+ lines) while its
          migration waits; without a ratchet the migration target grows faster
          than any strangler can drain it.
+
+  b44a_route_matcher_is_declarative_data:
+    rule: 'B4.4a pilot. The change-status route match contract is DATA:
+          dispatch.matchers.CHANGE_STATUS_MATCHER (frozen RouteMatcher — name +
+          pure literal-text predicate + matched/unmatched dispatch reason
+          slugs) is the single source for the gate in
+          BotService._maybe_handle_change_status_question, the renderer filter
+          in _change_status_question_response, and the dispatch_decision slugs
+          at the order-locked call site; bot.py carries no parallel recognizer.
+          Decisions are old-vs-new corpus-locked (the legacy predicate is
+          frozen verbatim in the pilot test as the reference implementation).
+          Matcher extraction NEVER moves the order-locked call —
+          botservice_pre_brain_order_is_locked stays green unedited; migrating
+          a handler INTO the dispatch_routes registry is a SEPARATE deliberate
+          step that edits EXPECTED_PRE_BRAIN_ORDER and §5.1. Per the Routing
+          Contract the predicate reads the literal message text only — no
+          session_state, no ledger. Further matcher migrations follow this
+          exact shape.'
+    chokepoints:
+      - dispatch.matchers.CHANGE_STATUS_MATCHER
+      - bot.BotService._maybe_handle_change_status_question
+    enforced_by:
+      - tests/test_b44a_declarative_matcher_pilot.py
+      - tests/test_botservice_migration_rails.py
+      - tests/test_bot.py  # change-status e2e: capture + event payload + renderer
+    why: B4.4 needs matchers as enumerable data, but the existing registry
+         Route couples a name to an opaque handler callable; the pilot proves
+         the extraction shape (matcher out, call site untouched, telemetry
+         byte-identical, drift corpus-locked) on the lowest-risk route before
+         any broader migration.
 
   learning_taxonomy_excludes_generic_transients:
     rule: 'A transient automation failure never persists as a replayable
@@ -2814,7 +2844,7 @@ in `_handle_text_body` (verified 2026-06-10):
 | 8 | `_maybe_handle_actionable_task_request` | runtime=Telegram + state-derived objective; unresolved follow-up → fallthrough |
 | 8b | `_maybe_handle_f4_deterministic_delegation` | **F4-B1**, gated OFF by `CLAW_F4_DETERMINISTIC_DELEGATION` (default); narrow authenticated-X-feed-review intent → enqueues ONE durable `f4b.delegation` delivery job (ledger-row-first dedup on the deterministic `task_id`, else `JobService.reserve(resume_key=delivery_key)`); does NOT call `start_autonomous_task`/start a thread/delete — `F4DelegationJobRunner` claims the job off-tick and runs the idempotent bootstrap. Captures BEFORE the broad router (exactly-once on telegram message_id). See invariant `high_confidence_delegation_intents_do_not_depend_on_model_tool_choice` |
 | 9 | `_maybe_handle_task_intent` | **gated OFF** by `CLAW_DISABLE_TASK_INTENT_ROUTER=1` (default) |
-| 10 | `_maybe_handle_change_status_question` | change-status questions |
+| 10 | `_maybe_handle_change_status_question` | change-status questions; matcher = declarative `CHANGE_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4a — invariant `b44a_route_matcher_is_declarative_data`) |
 | 11 | meta introspection guard + `_maybe_handle_capability_route` | classify_autonomy_intent → CRITICAL_TASK_KINDS gate |
 | 12 | `_handle_pending_tool_approval_grant_response` | response to pending tool approval |
 | 13 | `_handle_autonomy_grant_response` | "tienes autonomía", "full autonomy" |

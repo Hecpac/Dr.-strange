@@ -22,6 +22,7 @@ from claw_v2.approval_gate import ApprovalPending, approved_tool_invocation
 from claw_v2.brain import BrainService
 from claw_v2.bot_commands import BotCommand, CommandContext, dispatch_commands
 from claw_v2.dispatch import Route, RouteContext, RouteOutcome, dispatch_routes
+from claw_v2.dispatch.matchers import CHANGE_STATUS_MATCHER
 from claw_v2.capability_router import (
     CapabilityRoute,
     RuntimeAliveProbe,
@@ -966,17 +967,6 @@ def _looks_like_task_completion_question(text: str) -> bool:
             "estado",
         )
     )
-
-
-_STATUS_CHANGE_PHRASE_RE = re.compile(
-    r"(?:estatus|status|estado)\s+de\s+(?:los\s+)?(?:fixes|cambios)"
-)
-
-
-def _looks_like_change_status_question(text: str) -> bool:
-    normalized = re.sub(r"[^a-z0-9\s]+", " ", _normalize_command_text(text)).strip()
-    normalized = re.sub(r"\s+", " ", normalized)
-    return _STATUS_CHANGE_PHRASE_RE.fullmatch(normalized) is not None
 
 
 def _is_autonomous_task_start_ack(text: str) -> bool:
@@ -4546,12 +4536,12 @@ class BotService:
             stripped, session_id=session_id
         )
         self._emit_dispatch_decision(
-            handler="change_status_question",
+            handler=CHANGE_STATUS_MATCHER.name,
             route="intercepted" if change_status_response is not None else "fall_through",
             reason=(
-                "change_status_phrase_matched"
+                CHANGE_STATUS_MATCHER.matched_reason
                 if change_status_response is not None
-                else "change_status_phrase_no_match"
+                else CHANGE_STATUS_MATCHER.unmatched_reason
             ),
             session_id=session_id,
             text=stripped,
@@ -8520,7 +8510,9 @@ class BotService:
         return self._task_status_question_response(session_id)
 
     def _maybe_handle_change_status_question(self, text: str, *, session_id: str) -> str | None:
-        if not _looks_like_change_status_question(text):
+        # B4.4a pilot: the match side is declarative data (dispatch/matchers.py);
+        # this order-locked call site and the renderer stay the executor.
+        if not CHANGE_STATUS_MATCHER.match(text):
             return None
         return self._change_status_question_response(session_id)
 
@@ -12010,7 +12002,7 @@ class BotService:
         relevant = [
             record
             for record in records
-            if not _looks_like_change_status_question(str(getattr(record, "objective", "") or ""))
+            if not CHANGE_STATUS_MATCHER.match(str(getattr(record, "objective", "") or ""))
         ]
         terminal = [
             record
