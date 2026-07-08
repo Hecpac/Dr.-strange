@@ -71,22 +71,31 @@ def _isolate_restart_backup_dir_from_production():
     production backups next to an "empty" test DB and refused to boot on
     empty memory.
 
-    The production resolution is correct and stays untouched (locked by
-    test_architecture_invariants); the suite is what must be hermetic. This
-    guard points ``CLAW_RESTART_DB_BACKUP_DIR`` at an empty temp dir so a
-    tmpdir test DB always reads as a legitimate clean first boot, no matter
-    which checkout the suite runs from. Tests that exercise the guard set
-    their own dir via patch.dict and are unaffected.
+    The production resolution stays untouched (its symbols are source-locked
+    by test_architecture_invariants; the halt behavior itself is exercised by
+    test_runtime_db_halt.py::MissingDbBootHaltTests); the suite is what must
+    be hermetic. This guard points ``CLAW_RESTART_DB_BACKUP_DIR`` at an empty
+    temp dir so a tmpdir test DB always reads as a legitimate clean first
+    boot, no matter which checkout the suite runs from.
+
+    Unlike the DB_PATH guard above, an ambient value is OVERWRITTEN (and
+    restored on teardown), not respected: an inherited
+    CLAW_RESTART_DB_BACKUP_DIR is precisely what would make the suite
+    non-hermetic (PR #238 review, codex P1 — e.g. a shell that exported the
+    production dir would re-break every bot fixture), and this var has no
+    legitimate suite-level override use. Tests that exercise the guard set
+    their own dir via patch.dict, which nests and restores cleanly.
     """
-    if os.environ.get("CLAW_RESTART_DB_BACKUP_DIR"):
-        yield
-        return
+    prior = os.environ.get("CLAW_RESTART_DB_BACKUP_DIR")
     with tempfile.TemporaryDirectory(prefix="claw-test-backup-dir-isolation-") as tmpdir:
         os.environ["CLAW_RESTART_DB_BACKUP_DIR"] = str(Path(tmpdir) / "backups")
         try:
             yield
         finally:
-            os.environ.pop("CLAW_RESTART_DB_BACKUP_DIR", None)
+            if prior is None:
+                os.environ.pop("CLAW_RESTART_DB_BACKUP_DIR", None)
+            else:
+                os.environ["CLAW_RESTART_DB_BACKUP_DIR"] = prior
 
 
 @pytest.fixture(autouse=True, scope="session")
