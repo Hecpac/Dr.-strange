@@ -6803,6 +6803,11 @@ class BotTests(unittest.TestCase):
                 "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
                 "OPENAI_API_KEY": "sk-proj-test-key",
+                # clear=True drops the conftest session isolation; re-point the
+                # empty-memory guard at a test-local dir (PR #238 review, P2).
+                "CLAW_RESTART_DB_BACKUP_DIR": os.environ.get(
+                    "CLAW_RESTART_DB_BACKUP_DIR", str(root / "backups")
+                ),
             }
             with patch.dict(os.environ, env, clear=True):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
@@ -6823,6 +6828,11 @@ class BotTests(unittest.TestCase):
                 "APPROVALS_ROOT": str(root / "approvals"),
                 "PIPELINE_STATE_ROOT": str(root / "pipeline"),
                 "TELEGRAM_ALLOWED_USER_ID": "123",
+                # clear=True drops the conftest session isolation; re-point the
+                # empty-memory guard at a test-local dir (PR #238 review, P2).
+                "CLAW_RESTART_DB_BACKUP_DIR": os.environ.get(
+                    "CLAW_RESTART_DB_BACKUP_DIR", str(root / "backups")
+                ),
             }
             with patch.dict(os.environ, env, clear=True):
                 runtime = build_runtime(anthropic_executor=fake_anthropic)
