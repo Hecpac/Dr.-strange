@@ -332,5 +332,42 @@ class MissingDbBootHaltTests(unittest.TestCase):
             self.assertIn("DESAPARECIÓ", sent[0][2])
 
 
+class SuiteBackupDirIsolationTests(unittest.TestCase):
+    """Regression lock for the conftest session guard
+    _isolate_restart_backup_dir_from_production (close cycles B4.4b/c, B4.5a:
+    bot fixtures errored with RuntimeDatabaseError when the suite ran inside
+    the deploy clone because the empty-memory guard found the production
+    backups next to a tmpdir test DB)."""
+
+    def test_suite_points_restart_backup_dir_away_from_production(self) -> None:
+        import os
+
+        from claw_v2 import main as main_module
+
+        value = os.environ.get("CLAW_RESTART_DB_BACKUP_DIR")
+        self.assertTrue(value, "suite must isolate CLAW_RESTART_DB_BACKUP_DIR")
+        resolved = Path(value).resolve()
+        repo_default = Path(main_module.__file__).resolve().parents[1] / "data"
+        self.assertNotEqual(
+            resolved,
+            (repo_default / "backups" / "restart").resolve(),
+            "suite backup dir must not be the repo-root production default",
+        )
+        backups = sorted(resolved.glob("*.db")) if resolved.is_dir() else []
+        self.assertEqual(backups, [], "suite backup dir must hold no verified backups")
+
+    def test_guard_reads_the_isolated_dir_as_clean_first_boot(self) -> None:
+        from claw_v2 import main as main_module
+
+        # With the suite guard active, a missing tmpdir DB must be a clean
+        # first boot (no backups) — the exact condition the deploy clone broke.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "data" / "claw.db"
+            config = SimpleNamespace(
+                db_path=db_path, telegram_bot_token=None, telegram_allowed_user_id=None
+            )
+            main_module._ensure_runtime_db_boot_health(config)  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

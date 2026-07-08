@@ -59,6 +59,37 @@ def _isolate_runtime_db_from_production():
 
 
 @pytest.fixture(autouse=True, scope="session")
+def _isolate_restart_backup_dir_from_production():
+    """Keep the empty-memory boot guard off the production backup dir.
+
+    Observed on the B4.4b/B4.4c/B4.5a close cycles (2026-07-08): running the
+    suite INSIDE the deploy clone errored every bot fixture with
+    RuntimeDatabaseError — the fixture's DB lives in a pytest tmpdir, but
+    ``_restart_backup_dir()`` deliberately resolves the DEFAULT backup dir
+    from the repo root (Codex #225 P1: deriving it from DB_PATH would miss
+    real backups in prod), so the guard found the deploy clone's 15 verified
+    production backups next to an "empty" test DB and refused to boot on
+    empty memory.
+
+    The production resolution is correct and stays untouched (locked by
+    test_architecture_invariants); the suite is what must be hermetic. This
+    guard points ``CLAW_RESTART_DB_BACKUP_DIR`` at an empty temp dir so a
+    tmpdir test DB always reads as a legitimate clean first boot, no matter
+    which checkout the suite runs from. Tests that exercise the guard set
+    their own dir via patch.dict and are unaffected.
+    """
+    if os.environ.get("CLAW_RESTART_DB_BACKUP_DIR"):
+        yield
+        return
+    with tempfile.TemporaryDirectory(prefix="claw-test-backup-dir-isolation-") as tmpdir:
+        os.environ["CLAW_RESTART_DB_BACKUP_DIR"] = str(Path(tmpdir) / "backups")
+        try:
+            yield
+        finally:
+            os.environ.pop("CLAW_RESTART_DB_BACKUP_DIR", None)
+
+
+@pytest.fixture(autouse=True, scope="session")
 def _isolate_telegram_pidfiles_from_production():
     """Keep the suite off the production Telegram process-ownership files.
 
