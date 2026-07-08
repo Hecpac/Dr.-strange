@@ -22,7 +22,11 @@ from claw_v2.approval_gate import ApprovalPending, approved_tool_invocation
 from claw_v2.brain import BrainService
 from claw_v2.bot_commands import BotCommand, CommandContext, dispatch_commands
 from claw_v2.dispatch import Route, RouteContext, RouteOutcome, dispatch_routes
-from claw_v2.dispatch.matchers import CHANGE_STATUS_MATCHER, CLEANUP_STATUS_MATCHER
+from claw_v2.dispatch.matchers import (
+    CHANGE_STATUS_MATCHER,
+    CLEANUP_STATUS_MATCHER,
+    OPERATIONAL_STATUS_MATCHER,
+)
 from claw_v2.capability_router import (
     CapabilityRoute,
     RuntimeAliveProbe,
@@ -4350,12 +4354,12 @@ class BotService:
             stripped, session_id=session_id
         )
         self._emit_dispatch_decision(
-            handler="operational_status",
+            handler=OPERATIONAL_STATUS_MATCHER.name,
             route="intercepted" if operational_status_response is not None else "fall_through",
             reason=(
-                "operational_status_matched"
+                OPERATIONAL_STATUS_MATCHER.matched_reason
                 if operational_status_response is not None
-                else "operational_status_no_match"
+                else OPERATIONAL_STATUS_MATCHER.unmatched_reason
             ),
             session_id=session_id,
             text=stripped,
@@ -11502,43 +11506,9 @@ class BotService:
             logger.debug("failed to emit %s", event_type, exc_info=True)
 
     def _maybe_handle_operational_status(self, text: str, *, session_id: str) -> str | None:
-        normalized = _normalize_command_text(text).strip()
-        compact = re.sub(r"[^a-z0-9]+", "", normalized)
-        status_phrases = {
-            "status",
-            "estado",
-            "estatus",
-            "estas",
-            "estas?",
-            "estas ?",
-            "estas vivo",
-            "estas viva",
-            "estas ahi",
-            "estas ahi?",
-            "estas ahi ?",
-            "ping",
-            "como vamos",
-            "cómo vamos",
-            "que hay pendiente",
-            "qué hay pendiente",
-            "daily status",
-        }
-        greeting_status = any(
-            greeting in normalized
-            for greeting in ("buen dia", "buenos dias", "good morning", "hola")
-        ) and any(token in normalized for token in ("status", "estado", "estatus"))
-        contains_status_request = normalized in status_phrases or compact in {
-            "estas",
-            "estasvivo",
-            "estasviva",
-            "estasahi",
-            "buendiastatus",
-            "buenosdiasstatus",
-            "dailystatus",
-            "comovamos",
-            "quehaypendiente",
-        }
-        if not (contains_status_request or greeting_status):
+        # B4.4c: the match side is declarative data (dispatch/matchers.py);
+        # this order-locked call site and the response stay the executor.
+        if not OPERATIONAL_STATUS_MATCHER.match(text):
             return None
         active_count = 0
         latest_line = "sin tareas recientes"
