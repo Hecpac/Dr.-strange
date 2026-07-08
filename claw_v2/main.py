@@ -2395,7 +2395,13 @@ def _restart_backup_dir(db_path: Path) -> Path:
     repo root the daemon runs from (restart.sh:15 / claw-launcher.sh:69). The
     default is decoupled from DB_PATH — deriving it from db_path.parent would
     diverge from the shell when DB_PATH is customized, missing real backups and
-    silently recreating an empty DB (Codex #225 P1)."""
+    silently recreating an empty DB (Codex #225 P1).
+
+    Parity contract (test-locked by tests/test_restart_backup_dir_parity.py):
+    empty string == unset on both sides (shell `:-`, Python `if env:`); a
+    stored `~` stays literal on both sides; relative values anchor at the repo
+    root because both wrappers cd there. Do NOT "harden" one side alone (e.g.
+    expanduser here) — that silently diverges from the shell."""
     env = os.getenv("CLAW_RESTART_DB_BACKUP_DIR")
     if env:
         return Path(env)
