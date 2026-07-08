@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice b44a-declarative-matcher-pilot (2026-07-07): B4.4a pilot — the change-status route's match contract moved from bot.py module level to claw_v2/dispatch/matchers.py as frozen data (RouteMatcher: name + pure literal-text predicate + dispatch reason slugs); the order-locked call site, handler method, and renderer consume it (bot.py net -8 lines, ratchet respected). Behavior-identical by construction: decisions old-vs-new corpus-locked (invariant b44a_route_matcher_is_declarative_data), telemetry slugs byte-identical, EXPECTED_PRE_BRAIN_ORDER untouched. Prior slice b41 (PR #232, merged 8df1a6f): B4.1/B4.2 rails — 19-call top-level dispatch order lock + bot.py size ratchet (baseline 12172 + 150)."
-doc_version: 3.07
-last_verified: 2026-07-07
-verification_method: "B4.4a local, isolated worktree: tests/test_b44a_declarative_matcher_pilot.py (old-vs-new decision corpus w/ legacy predicate frozen verbatim, telemetry-slug lock, single-source wiring lock) + tests/test_botservice_migration_rails.py green UNEDITED (order + ratchet) + tests/test_dispatch_route.py + change-status e2e in tests/test_bot.py (capture, dispatch_decision payload, renderer semantics)."
+describes_commit: "slice b44b-cleanup-matcher (2026-07-08): B4.4b — second declarative matcher, following the B4.4a shape exactly: the cleanup-status route's match contract moved from inline lines in BotService._maybe_handle_cleanup_status_query to claw_v2/dispatch/matchers.py as frozen data (CLEANUP_STATUS_MATCHER: exact-phrase membership after normalize+compact); the order-locked call site re-sources its dispatch_decision slugs from the matcher; response rendering (session_state + approvals reads) stays on BotService. Behavior-identical by construction: decisions old-vs-new corpus-locked (invariant b44b_cleanup_matcher_is_declarative_data), telemetry slugs byte-identical, EXPECTED_PRE_BRAIN_ORDER untouched. Prior slice b44a (PR #234, merged 31d489a): B4.4a pilot — change-status matcher as declarative data (invariant b44a_route_matcher_is_declarative_data). Prior slice b41 (PR #232, merged 8df1a6f): B4.1/B4.2 rails — 19-call top-level dispatch order lock + bot.py size ratchet (baseline 12172 + 150)."
+doc_version: 3.08
+last_verified: 2026-07-08
+verification_method: "B4.4b local, isolated worktree: tests/test_b44b_cleanup_matcher_pilot.py (old-vs-new decision corpus w/ legacy inline predicate frozen verbatim, telemetry-slug lock, single-source wiring lock) + tests/test_b44a_declarative_matcher_pilot.py + tests/test_botservice_migration_rails.py green UNEDITED (order + ratchet) + tests/test_dispatch_route.py."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1163,6 +1163,37 @@ invariants:
          the extraction shape (matcher out, call site untouched, telemetry
          byte-identical, drift corpus-locked) on the lowest-risk route before
          any broader migration.
+
+  b44b_cleanup_matcher_is_declarative_data:
+    rule: 'B4.4b. The cleanup-status route match contract is DATA:
+          dispatch.matchers.CLEANUP_STATUS_MATCHER (frozen RouteMatcher —
+          exact-phrase membership after normalize+compact, matched/unmatched
+          dispatch reason slugs) is the single source for the gate in
+          BotService._maybe_handle_cleanup_status_query and the
+          dispatch_decision slugs at the order-locked call site; bot.py
+          carries no parallel recognizer (no inline normalize/compact/set
+          lines survive in the handler). Decisions are old-vs-new
+          corpus-locked (the legacy inline predicate is frozen verbatim in
+          the slice test as the reference implementation). Response rendering
+          — the session_state active_object read and the approvals audit —
+          stays on BotService; only the match side moved. Matcher extraction
+          NEVER moves the order-locked call —
+          botservice_pre_brain_order_is_locked stays green unedited;
+          migrating the handler INTO the dispatch_routes registry is a
+          SEPARATE deliberate step that edits EXPECTED_PRE_BRAIN_ORDER and
+          §5.1. Per the Routing Contract the predicate reads the literal
+          message text only — no session_state, no ledger.'
+    chokepoints:
+      - dispatch.matchers.CLEANUP_STATUS_MATCHER
+      - bot.BotService._maybe_handle_cleanup_status_query
+    enforced_by:
+      - tests/test_b44b_cleanup_matcher_pilot.py
+      - tests/test_botservice_migration_rails.py
+    why: Second application of the B4.4a extraction shape on the next
+         lowest-risk route (exact-message predicate, zero prior test
+         coverage); the corpus lock is this route's first behavioral
+         coverage and each migrated matcher grows the enumerable data set
+         B4.4 needs.
 
   learning_taxonomy_excludes_generic_transients:
     rule: 'A transient automation failure never persists as a replayable
@@ -2840,7 +2871,7 @@ in `_handle_text_body` (verified 2026-06-10):
 | 4 | `_maybe_handle_pending_tasks_query` | "tareas pendientes" / "pendientes" |
 | 5 | `_maybe_handle_operational_failure_summary` | failure summary queries |
 | 6 | `_maybe_handle_operational_status` | operational status questions |
-| 7 | cleanup status / owner delegation / `_maybe_handle_telegram_imperative_request` | explicit operator imperatives; unresolved context → fallthrough_to_brain (never clarifies) |
+| 7 | cleanup status / owner delegation / `_maybe_handle_telegram_imperative_request` | explicit operator imperatives; unresolved context → fallthrough_to_brain (never clarifies). Cleanup-status matcher = declarative `CLEANUP_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4b — invariant `b44b_cleanup_matcher_is_declarative_data`) |
 | 8 | `_maybe_handle_actionable_task_request` | runtime=Telegram + state-derived objective; unresolved follow-up → fallthrough |
 | 8b | `_maybe_handle_f4_deterministic_delegation` | **F4-B1**, gated OFF by `CLAW_F4_DETERMINISTIC_DELEGATION` (default); narrow authenticated-X-feed-review intent → enqueues ONE durable `f4b.delegation` delivery job (ledger-row-first dedup on the deterministic `task_id`, else `JobService.reserve(resume_key=delivery_key)`); does NOT call `start_autonomous_task`/start a thread/delete — `F4DelegationJobRunner` claims the job off-tick and runs the idempotent bootstrap. Captures BEFORE the broad router (exactly-once on telegram message_id). See invariant `high_confidence_delegation_intents_do_not_depend_on_model_tool_choice` |
 | 9 | `_maybe_handle_task_intent` | **gated OFF** by `CLAW_DISABLE_TASK_INTENT_ROUTER=1` (default) |
