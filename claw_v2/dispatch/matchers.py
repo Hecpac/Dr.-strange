@@ -1,4 +1,4 @@
-"""Declarative route matchers — B4.4a pilot.
+"""Declarative route matchers — B4.4a pilot + B4.4b.
 
 The match side of a pre-brain route as inspectable DATA: a name (the
 dispatch_decision handler slug), a pure predicate over the literal message
@@ -12,7 +12,8 @@ SEPARATE, deliberate step that edits EXPECTED_PRE_BRAIN_ORDER.
 Per the Routing Contract (AGENTS.md): a matcher decides from the literal
 text alone — no session_state, no reply context, no ledger reads.
 
-One matcher so far (change-status, migrated from bot.py module level).
+Matchers so far: change-status (B4.4a, from bot.py module level) and
+cleanup-status (B4.4b, from inline lines in the handler method).
 """
 
 from __future__ import annotations
@@ -50,4 +51,27 @@ CHANGE_STATUS_MATCHER = RouteMatcher(
     match=looks_like_change_status_question,
     matched_reason="change_status_phrase_matched",
     unmatched_reason="change_status_phrase_no_match",
+)
+
+
+# B4.4b: exact-message cleanup-status recognizer, extracted verbatim from the
+# inline lines of BotService._maybe_handle_cleanup_status_query (bot.py, up to
+# 31d489a). The compact step strips every non-alphanumeric, so the match is an
+# exact-phrase membership test — even stricter than change-status fullmatch.
+_CLEANUP_STATUS_EXACT_PHRASES = frozenset(
+    {"limpiaste", "yalimpiaste", "cleaned", "didyouclean", "didyoucleanup"}
+)
+
+
+def looks_like_cleanup_status_query(text: str) -> bool:
+    normalized = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡")
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    return compact in _CLEANUP_STATUS_EXACT_PHRASES
+
+
+CLEANUP_STATUS_MATCHER = RouteMatcher(
+    name="cleanup_status",
+    match=looks_like_cleanup_status_query,
+    matched_reason="cleanup_status_matched",
+    unmatched_reason="cleanup_status_no_match",
 )

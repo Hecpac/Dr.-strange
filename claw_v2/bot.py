@@ -22,7 +22,7 @@ from claw_v2.approval_gate import ApprovalPending, approved_tool_invocation
 from claw_v2.brain import BrainService
 from claw_v2.bot_commands import BotCommand, CommandContext, dispatch_commands
 from claw_v2.dispatch import Route, RouteContext, RouteOutcome, dispatch_routes
-from claw_v2.dispatch.matchers import CHANGE_STATUS_MATCHER
+from claw_v2.dispatch.matchers import CHANGE_STATUS_MATCHER, CLEANUP_STATUS_MATCHER
 from claw_v2.capability_router import (
     CapabilityRoute,
     RuntimeAliveProbe,
@@ -4377,12 +4377,12 @@ class BotService:
             stripped, session_id=session_id
         )
         self._emit_dispatch_decision(
-            handler="cleanup_status",
+            handler=CLEANUP_STATUS_MATCHER.name,
             route="intercepted" if cleanup_status_response is not None else "fall_through",
             reason=(
-                "cleanup_status_matched"
+                CLEANUP_STATUS_MATCHER.matched_reason
                 if cleanup_status_response is not None
-                else "cleanup_status_no_match"
+                else CLEANUP_STATUS_MATCHER.unmatched_reason
             ),
             session_id=session_id,
             text=stripped,
@@ -9150,9 +9150,9 @@ class BotService:
         return (summary or objective or source)[:220]
 
     def _maybe_handle_cleanup_status_query(self, text: str, *, session_id: str) -> str | None:
-        normalized = _normalize_command_text(text).strip(" \t\n\r.,;:!?¿¡")
-        compact = re.sub(r"[^a-z0-9]+", "", normalized)
-        if compact not in {"limpiaste", "yalimpiaste", "cleaned", "didyouclean", "didyoucleanup"}:
+        # B4.4b: the match side is declarative data (dispatch/matchers.py);
+        # this order-locked call site and the response stay the executor.
+        if not CLEANUP_STATUS_MATCHER.match(text):
             return None
         state = self.brain.memory.get_session_state(session_id)
         active_object = state.get("active_object") or {}
