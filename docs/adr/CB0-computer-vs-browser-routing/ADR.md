@@ -12,6 +12,10 @@
   UX. The lane is revisited only when the telemetry **GO-trigger** below fires;
   that trigger, and the CB2 design spike that must answer the display /
   backend-completion / approval UNKNOWNs, are the ratified path to reconsider.
+- **B4.3 disposition (2026-07-07):** this slice's redacted corpus + privacy
+  invariant **satisfy roadmap item B4.3** (routing corpus for the BotService
+  matcher migration) per audit finding F6's resolution route; no separate
+  real-message corpus is to be built. See the addendum at the end.
 
 ---
 
@@ -207,3 +211,63 @@ Until such a signal exists, the lane is speculative.
 - `cb0_evidence_corpus_is_redacted` — `tests/test_cb0_corpus_privacy.py` (the
   ADR evidence carries only allowlisted structural routing keys; no session/turn/
   approval/task ids, hashes, or message text).
+
+---
+
+## Addendum — B4.3 disposition (2026-07-07): satisfied by this slice; no separate real-message corpus
+
+The remediation roadmap (2026-07-05) lists **B4.3 — "Routing corpus snapshot
+from real anonymized messages"** as a precondition for B4.4 ("Declarative
+matchers per `Route`"). Audit finding **F6** (plan-remediation-audit,
+2026-07-04) had already re-scoped it: "anonimizados" carried no acceptance
+criterion, a corpus of owner messages without a tested redaction step is a
+leak risk, and the named resolution route was *"sub-paso de redacción con
+test, o derivar el corpus de eventos ya redactados en `observe_stream`"*.
+
+**This slice's artifacts implement both halves of that resolution route at
+once, so B4.3 is recorded as satisfied by PR #229:**
+
+- `evidence-corpus.json` IS the routing-corpus snapshot from real traffic:
+  derived read-only from prod `observe_stream` (window 2026-07-06 17:52 →
+  2026-07-07 16:05, 50,205 events; per-event-type counts plus
+  `dispatch_decision` samples carrying `selected_handler` / `selected_route` /
+  `reason` / `captured` / `matched_pattern`).
+- The redaction sub-step exists and is test-locked: the structural-allowlist
+  projection (keys) plus the enum-slug value contract (no spaces, bounded
+  length) enforced by `tests/test_cb0_corpus_privacy.py`
+  (`cb0_evidence_corpus_is_redacted`, INTERNAL_WIRING §1).
+- **Disposition-gate verification (2026-07-07):** a mutation proof ran the
+  privacy suite against poisoned corpus variants — raw owner message text
+  under an allowlisted key, a `tg-…` session id, a 16-hex approval/task id, a
+  regained `text_preview` key, a long API-token-shaped value — and the suite
+  FAILED each variant while passing the checked-in corpus. The invariant
+  blocks leaks; it does not merely describe the current file.
+
+**What this corpus deliberately is NOT — and why literal B4.3 is superseded,
+not deferred:** it contains no message text, so it is not a replayable
+message→route fixture set. Message text may never enter the versioned corpus —
+that is the redaction contract itself, and the project privacy canon (internal
+context ≠ external response). Committing "real anonymized messages" would
+reintroduce exactly the risk F6 flagged. Do not build that corpus.
+
+**What the matcher migration (B4.4/B4.5) rests on instead:**
+
+- **input→route behavior:** the synthetic per-recognizer suites —
+  `tests/test_dispatch_route.py` (13), `tests/test_dispatch_routing.py` (20),
+  `tests/test_owner_delegation_routing.py` (21), plus
+  `tests/test_cb1_routing_honesty.py` (20) — synthetic by design, hence
+  committable and freely extensible during migration;
+- **dispatch order:** `botservice_pre_brain_order_is_locked` (B4.1 rail, 19
+  top-level calls AST-locked, PR #232);
+- **module size:** `botservice_size_is_ratcheted` (B4.2 rail, PR #232);
+- **real-traffic route distribution:** this corpus — which routes live traffic
+  actually exercised in the window (the sampled `dispatch_decision` events all
+  fell through to the brain, `fall_through_all_21`).
+
+**Precondition for B4.4 (a named recon, not an assumption):** before writing
+declarative matchers, inventory synthetic-fixture coverage per handler across
+the 19 order-locked top-level calls — which handlers have a dedicated
+recognizer suite and which are covered only transitively — and, if the
+migration wants to cite current traffic distribution, refresh this corpus's
+window through the same test-locked redaction projection. B4.4 does not start
+from "coverage looks fine".
