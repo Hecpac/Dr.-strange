@@ -30,7 +30,23 @@ from unittest.mock import patch
 # diverging in production.
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SHELL_DEFAULT_EXPR = "${CLAW_RESTART_DB_BACKUP_DIR:-data/backups/restart}"
+SHELL_WRAPPERS = (Path("scripts") / "restart.sh", Path("ops") / "claw-launcher.sh")
+
+
+def _wrapper_expression(rel_path: Path) -> str:
+    """Extract the REAL parameter expansion from a shell wrapper, so the
+    parity run exercises what production executes — a copied literal would
+    let a one-sided wrapper edit (e.g. `:-` -> `-`) go stale silently
+    (PR #239 review, codex P2)."""
+    import re
+
+    text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+    match = re.search(r"\$\{CLAW_RESTART_DB_BACKUP_DIR[^}]*\}", text)
+    assert match is not None, f"no CLAW_RESTART_DB_BACKUP_DIR expansion in {rel_path}"
+    return match.group(0)
+
+
+SHELL_DEFAULT_EXPR = _wrapper_expression(SHELL_WRAPPERS[0])
 
 
 def _python_resolution(value: str | None) -> Path:
@@ -89,6 +105,16 @@ class RestartBackupDirParityTests(unittest.TestCase):
         self.assertEqual(
             _python_resolution(None),
             REPO_ROOT / "data" / "backups" / "restart",
+        )
+
+    def test_both_wrappers_use_the_same_expansion(self) -> None:
+        # The parity run executes the expression extracted from restart.sh;
+        # this keeps claw-launcher.sh from drifting away unnoticed.
+        expressions = {str(p): _wrapper_expression(p) for p in SHELL_WRAPPERS}
+        self.assertEqual(
+            len(set(expressions.values())),
+            1,
+            f"shell wrappers diverged: {expressions}",
         )
 
     def test_tilde_is_literal_on_both_sides(self) -> None:
