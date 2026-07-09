@@ -231,6 +231,8 @@ class ScheduledBackgroundJobRunner:
                 error=error_preview,
                 retry=True,
                 retry_delay_seconds=self.retry_delay_seconds,
+                lease_owner=job.lease_owner,
+                lease_generation=job.lease_generation,
             )
             self._emit_job_event(
                 f"{self.job_name}_job_failed",
@@ -240,7 +242,12 @@ class ScheduledBackgroundJobRunner:
             )
             return True
 
-        self.job_service.complete(job.job_id, result=result)
+        self.job_service.complete(
+            job.job_id,
+            result=result,
+            lease_owner=job.lease_owner,
+            lease_generation=job.lease_generation,
+        )
         duration_seconds = time.monotonic() - started
         self._emit_job_event(
             f"{self.job_name}_job_completed",
