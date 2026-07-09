@@ -306,6 +306,52 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
             self.assertIn("wiki_research_job_started", event_names)
             self.assertIn("wiki_research_job_completed", event_names)
 
+    def test_run_once_closes_jobs_under_formal_leases(self) -> None:
+        # Invariant (lease-guard P1): with formal_leases_enabled, run_once must
+        # propagate the claimed JobRecord's lease credentials to complete()/
+        # fail() so the durable row leaves 'running'. Without propagation the
+        # guard returns None silently and the row stays 'running' while
+        # *_job_completed/_failed events are still emitted.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+            )
+
+            enqueue_scheduled_background_job(
+                job_name="wiki_research",
+                job_kind=WIKI_RESEARCH_JOB_KIND,
+                resume_key=WIKI_RESEARCH_RESUME_KEY,
+                job_service=jobs,
+            )
+            success_runner = ScheduledBackgroundJobRunner(
+                job_name="wiki_research",
+                job_kind=WIKI_RESEARCH_JOB_KIND,
+                job_service=jobs,
+                handler=MagicMock(return_value={"ok": True}),
+            )
+            self.assertTrue(success_runner.run_once())
+            completed = jobs.list(kinds=(WIKI_RESEARCH_JOB_KIND,), limit=10)[0]
+            self.assertEqual(completed.status, "completed")
+            self.assertIsNone(completed.lease_owner)
+
+            enqueue_scheduled_background_job(
+                job_name="wiki_scrape",
+                job_kind=WIKI_SCRAPE_JOB_KIND,
+                resume_key=WIKI_SCRAPE_RESUME_KEY,
+                job_service=jobs,
+            )
+            failure_runner = ScheduledBackgroundJobRunner(
+                job_name="wiki_scrape",
+                job_kind=WIKI_SCRAPE_JOB_KIND,
+                job_service=jobs,
+                handler=MagicMock(side_effect=RuntimeError("boom")),
+            )
+            self.assertTrue(failure_runner.run_once())
+            failed = jobs.list(kinds=(WIKI_SCRAPE_JOB_KIND,), limit=10)[0]
+            self.assertEqual(failed.status, "retrying")
+            self.assertIsNone(failed.lease_owner)
+
     def test_wiki_scrape_result_summary_keeps_bounded_source_diagnostics(self) -> None:
         source_results = [
             {

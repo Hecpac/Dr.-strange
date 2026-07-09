@@ -3263,6 +3263,24 @@ do_not:
          through a different door).
     enforced_by: invariant final_render_brain_path_inside_meta_context
                  (§1) + tests/test_final_render_idempotency.py.
+
+  - change: Call JobService.complete()/fail() from a runner that claimed the
+            job via claim_next/acquire_next_lease without propagating the
+            claimed JobRecord's lease_owner/lease_generation.
+    why: With formal_job_leases_enabled the lease guard in complete()/fail()
+         returns None silently for credential-less calls — the durable row
+         stays 'running' forever while *_job_completed/_failed events are
+         still emitted (telemetry lies, the job never terminalizes; audit
+         P1 lease-guard skip, 2026-07-08). The credentials are already on
+         the claimed record (jobs.py _update_row_to_running_with_lease);
+         propagating them preserves the guard's protection against a
+         zombie runner closing a job re-claimed by another worker. Do NOT
+         "fix" a blocked close by exposing require_lease=False on the
+         public API — that perforates the same invariant the guard exists
+         to enforce.
+    enforced_by: tests/test_scheduled_background_jobs.py::
+                 ScheduledBackgroundJobTests::
+                 test_run_once_closes_jobs_under_formal_leases
 ```
 
 ---
