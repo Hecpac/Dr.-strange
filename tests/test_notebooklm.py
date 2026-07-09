@@ -813,6 +813,87 @@ class NotebookLMOrchestrationTests(unittest.TestCase):
             notify.assert_called_once()
             self.assertIn("NotebookLM terminó", notify.call_args.args[0])
 
+    def test_orchestration_closes_jobs_under_formal_leases(self) -> None:
+        # Invariant (S2, analog of PR #240): with formal_leases_enabled the
+        # orchestration flow must propagate the claimed JobRecord's lease
+        # credentials to checkpoint()/complete()/fail()/reschedule() so the
+        # durable row leaves 'running' on every outcome path.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job_service = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+            )
+            svc = NotebookLMService(job_service=job_service)
+            svc._cdp_download_fn = lambda nb, kind: None
+            svc._cdp_report_blocks_fn = lambda nb: None
+
+            def fake_step(
+                notebook_id: str, checkpoint: dict[str, object], outputs: tuple[str, ...]
+            ) -> dict[str, object]:
+                if notebook_id == "nb-completed":
+                    return {"status": "completed", "stage": "outputs_ready"}
+                if notebook_id == "nb-failed":
+                    return {"status": "failed", "error": "boom", "retry": False}
+                return {"status": "pending", "stage": "waiting", "next_delay_seconds": 5}
+
+            svc._cdp_orchestrate_step_fn = fake_step
+            svc.start_orchestration("nb-completed", session_id="tg-test")
+            svc.start_orchestration("nb-failed", session_id="tg-test")
+            svc.start_orchestration("nb-pending", session_id="tg-test")
+
+            self.assertEqual(svc.poll_orchestrations(limit=3), 3)
+
+            by_notebook = {job.payload["notebook_id"]: job for job in job_service.list(limit=10)}
+            self.assertEqual(by_notebook["nb-completed"].status, "completed")
+            self.assertEqual(by_notebook["nb-failed"].status, "failed")
+            self.assertEqual(by_notebook["nb-pending"].status, "retrying")
+            for job in by_notebook.values():
+                self.assertIsNone(job.lease_owner)
+
+    def test_orchestration_emits_lease_lost_when_close_does_not_land(self) -> None:
+        # Invariant (D2, runner-side): when the close returns None (lease
+        # stolen mid-step), emit nlm_orchestration_lease_lost instead of the
+        # lying completed event, skip the completion notify, and leave the
+        # thief's claim untouched.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            notify = MagicMock()
+            observe = MagicMock()
+            job_service = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+            )
+            svc = NotebookLMService(notify=notify, observe=observe, job_service=job_service)
+            svc._cdp_download_fn = lambda nb, kind: None
+            svc._cdp_report_blocks_fn = lambda nb: None
+
+            def stealing_step(
+                notebook_id: str, checkpoint: dict[str, object], outputs: tuple[str, ...]
+            ) -> dict[str, object]:
+                job_service.reclaim_expired_leases(
+                    kinds=("notebooklm.orchestrate",),
+                    now=time.time() + 100_000,
+                )
+                stolen = job_service.claim_next(
+                    worker_id="thief",
+                    kinds=("notebooklm.orchestrate",),
+                    now=time.time() + 100_001,
+                )
+                assert stolen is not None
+                return {"status": "completed", "stage": "outputs_ready"}
+
+            svc._cdp_orchestrate_step_fn = stealing_step
+            svc.start_orchestration("nb-full-id", session_id="tg-test")
+
+            self.assertEqual(svc.poll_orchestrations(limit=1), 1)
+
+            event_names = [call.args[0] for call in observe.emit.call_args_list]
+            self.assertIn("nlm_orchestration_lease_lost", event_names)
+            self.assertNotIn("nlm_orchestration_completed", event_names)
+            notify.assert_not_called()
+            job = job_service.list(limit=10)[0]
+            self.assertEqual(job.status, "running")
+            self.assertEqual(job.lease_owner, "thief")
+
     def test_orchestration_retrying_job_resumes_after_new_service_instance(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "claw.db"

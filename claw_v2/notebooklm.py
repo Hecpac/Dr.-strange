@@ -9,6 +9,7 @@ import time
 from typing import TYPE_CHECKING, Any, Callable
 
 from claw_v2 import notebooklm_cdp
+from claw_v2.jobs import close_landed as _close_landed
 
 if TYPE_CHECKING:
     from claw_v2.jobs import JobService
@@ -391,6 +392,18 @@ class NotebookLMService:
     def _emit(self, event_type: str, **payload: Any) -> None:
         if self._observe is not None:
             self._observe.emit(event_type, payload=payload)
+
+    def _emit_lease_lost(self, job: Any, *, phase: str, notebook_id: str | None = None) -> None:
+        # D2 (runner-side pattern, 2026-07-08): a close returned None — the
+        # lease guard rejected it (lease expired and/or re-claimed). Emitting
+        # the normal completed/failed/pending event would lie about a row this
+        # worker no longer owns.
+        self._emit(
+            "nlm_orchestration_lease_lost",
+            job_id=job.job_id,
+            phase=phase,
+            notebook_id=notebook_id,
+        )
 
     # --- Background research & podcast ---
 
@@ -827,14 +840,24 @@ class NotebookLMService:
         assert self._job_service is not None
         payload = dict(getattr(job, "payload", {}) or {})
         checkpoint = dict(getattr(job, "checkpoint", {}) or {})
+        # S2 (2026-07-08): every close below carries the claimed record's lease
+        # credentials — without them the lease guard silently no-ops under
+        # formal leases and the row stays 'running' (see INTERNAL_WIRING §6).
+        lease_kwargs = {
+            "lease_owner": job.lease_owner,
+            "lease_generation": job.lease_generation,
+        }
         notebook_id = str(payload.get("notebook_id") or "").strip()
         if not notebook_id:
-            self._job_service.fail(
+            failed = self._job_service.fail(
                 job.job_id,
                 error="missing_notebook_id",
                 retry=False,
                 checkpoint={**checkpoint, "stage": "failed_missing_notebook_id"},
+                **lease_kwargs,
             )
+            if not _close_landed(failed, job):
+                self._emit_lease_lost(job, phase="fail_missing_notebook_id")
             return
         outputs = tuple(
             str(item).strip().lower() for item in payload.get("outputs", []) if str(item).strip()
@@ -861,13 +884,17 @@ class NotebookLMService:
             result = step_fn(notebook_id, checkpoint, outputs)
         except Exception as exc:
             logger.exception("NotebookLM orchestration step failed for %s", notebook_id)
-            self._job_service.fail(
+            failed = self._job_service.fail(
                 job.job_id,
                 error=str(exc),
                 retry=True,
                 retry_delay_seconds=float(payload.get("poll_interval_seconds") or 60.0),
                 checkpoint={**checkpoint, "stage": "step_error", "error": str(exc)[:300]},
+                **lease_kwargs,
             )
+            if not _close_landed(failed, job):
+                self._emit_lease_lost(job, phase="step_error", notebook_id=notebook_id)
+                return
             self._emit(
                 "nlm_orchestration_step_error",
                 notebook_id=notebook_id,
@@ -888,8 +915,15 @@ class NotebookLMService:
             session_id = payload.get("session_id")
             delivered = self._deliver_outputs(notebook_id, outputs, result, session_id=session_id)
             completion_result = {**dict(result), "deliveries": delivered}
-            self._job_service.checkpoint(job.job_id, merged_checkpoint)
-            self._job_service.complete(job.job_id, result=completion_result)
+            self._job_service.checkpoint(job.job_id, merged_checkpoint, **lease_kwargs)
+            completed = self._job_service.complete(
+                job.job_id, result=completion_result, **lease_kwargs
+            )
+            if not _close_landed(completed, job):
+                # D2: the close did not land (lease stolen mid-step) — do not
+                # claim completion nor notify; the new owner will finish it.
+                self._emit_lease_lost(job, phase="complete", notebook_id=notebook_id)
+                return
             self._emit(
                 "nlm_orchestration_completed",
                 notebook_id=notebook_id,
@@ -910,12 +944,16 @@ class NotebookLMService:
             )
             return
         if status == "failed":
-            self._job_service.fail(
+            failed = self._job_service.fail(
                 job.job_id,
                 error=str(result.get("error") or "orchestration_failed"),
                 retry=bool(result.get("retry", False)),
                 checkpoint=merged_checkpoint,
+                **lease_kwargs,
             )
+            if not _close_landed(failed, job):
+                self._emit_lease_lost(job, phase="fail", notebook_id=notebook_id)
+                return
             self._emit(
                 "nlm_orchestration_failed",
                 notebook_id=notebook_id,
@@ -927,12 +965,16 @@ class NotebookLMService:
         delay = float(
             result.get("next_delay_seconds") or payload.get("poll_interval_seconds") or 60.0
         )
-        self._job_service.reschedule(
+        rescheduled = self._job_service.reschedule(
             job.job_id,
             checkpoint=merged_checkpoint,
             result={"last_status": status, "stage": merged_checkpoint.get("stage")},
             next_run_at=time.time() + max(1.0, delay),
+            **lease_kwargs,
         )
+        if not _close_landed(rescheduled, job):
+            self._emit_lease_lost(job, phase="reschedule", notebook_id=notebook_id)
+            return
         self._emit(
             "nlm_orchestration_pending",
             notebook_id=notebook_id,
