@@ -3299,7 +3299,15 @@ do_not:
                  test_reclaim_stale_running_delegates_to_lease_reclaim_under_formal_leases +
                  tests/test_skill_expand_jobs.py::SkillExpandJobTests::
                  test_run_once_closes_jobs_under_formal_leases +
-                 test_run_once_emits_lease_lost_when_close_does_not_land
+                 test_run_once_emits_lease_lost_when_close_does_not_land +
+                 test_run_once_emits_lease_lost_when_thief_already_terminalized +
+                 tests/test_notebooklm.py::NotebookLMOrchestrationTests::
+                 test_orchestration_closes_jobs_under_formal_leases +
+                 test_orchestration_emits_lease_lost_when_close_does_not_land.
+                 "Own close" detection = jobs.close_landed(record, claimed):
+                 None → guard rejected; lease_generation mismatch → the
+                 idempotent-terminal path (#153) returned another closer's
+                 record. Runners treat both as lease_lost.
 ```
 
 ---
