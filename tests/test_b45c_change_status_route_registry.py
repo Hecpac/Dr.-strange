@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import ast
 import inspect
+import textwrap
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 from claw_v2.bot import BotService
 from claw_v2.dispatch import Route, RouteContext, dispatch_routes
@@ -51,10 +52,13 @@ def _walk_excluding_closures(node: ast.AST):
         yield from _walk_excluding_closures(child)
 
 
-def _ordered_markers() -> list[str]:
-    """Source-order markers inside _handle_text_body: legacy dispatch-call
-    names plus a synthetic marker for the change_status registry bridge (the
-    dispatch_routes call whose routes argument is self._change_status_slot).
+def _marker_sequence() -> list[str]:
+    """Source-order markers inside _handle_text_body, NOT deduplicated:
+    legacy dispatch-call names, a synthetic marker for the change_status
+    registry bridge (the dispatch_routes call whose routes argument is
+    self._change_status_slot), and a META_GUARD marker for the
+    detect_meta_introspection_request call — the bridge must stay strictly
+    before that guard's early return (§5.1 rows 10 vs 11).
     """
     fn = _handle_text_body_ast()
     markers: list[tuple[int, int, str]] = []
@@ -75,9 +79,16 @@ def _ordered_markers() -> list[str]:
                         markers.append((node.lineno, node.col_offset, "CHANGE_STATUS_BRIDGE"))
                     else:
                         markers.append((node.lineno, node.col_offset, "dispatch_routes"))
+                elif name == "detect_meta_introspection_request":
+                    markers.append((node.lineno, node.col_offset, "META_GUARD"))
     markers.sort()
+    return [name for _, _, name in markers]
+
+
+def _ordered_markers() -> list[str]:
+    """First-occurrence order of _marker_sequence()."""
     seen: list[str] = []
-    for _, _, name in markers:
+    for name in _marker_sequence():
         if name not in seen:
             seen.append(name)
     return seen
@@ -89,11 +100,27 @@ class BridgeSlotPositionTests(unittest.TestCase):
         self.assertIn("CHANGE_STATUS_BRIDGE", order, "per-slot registry bridge not found")
         # §5.1 row 10: change_status runs after task_intent (row 9) and
         # before the meta-introspection guard + capability_route (row 11).
+        # The guard has its own early return to the brain — a bridge moved
+        # past it would silently lose interception for guard-matched turns,
+        # so the guard is locked as an explicit neighbor, not just implied.
         task_intent = order.index("_maybe_handle_task_intent")
         bridge = order.index("CHANGE_STATUS_BRIDGE")
+        meta_guard = order.index("META_GUARD")
         capability = order.index("_maybe_handle_capability_route")
         self.assertLess(task_intent, bridge, "bridge must run after task_intent")
-        self.assertLess(bridge, capability, "bridge must run before capability_route")
+        self.assertLess(bridge, meta_guard, "bridge must run before the meta-introspection guard")
+        self.assertLess(meta_guard, capability, "guard must run before capability_route")
+
+    def test_bridge_dispatches_exactly_once(self) -> None:
+        # A duplicated bridge call would double the fall-through decision in
+        # the consolidated dispatch_decision entry; first-occurrence dedup in
+        # _ordered_markers would hide it, so count the raw sequence.
+        sequence = _marker_sequence()
+        self.assertEqual(
+            sequence.count("CHANGE_STATUS_BRIDGE"),
+            1,
+            "the change_status bridge must be dispatched exactly once per turn",
+        )
 
     def test_no_direct_handler_call_remains_in_handle_text_body(self) -> None:
         order = _ordered_markers()
@@ -122,6 +149,69 @@ class RouteDataTests(unittest.TestCase):
         self.assertIn("_change_status_slot", init_src)
         self.assertEqual(len(slot), 1)
         self.assertEqual(slot[0].name, "change_status_question")
+
+    def test_real_slot_assignment_is_a_one_route_tuple(self) -> None:
+        # AST-verify the REAL assignment in __init__ (not a test-local
+        # fixture): self._change_status_slot = (Route(...),) — exactly one
+        # element, and that element is a Route(...) call.
+        init_src = textwrap.dedent(inspect.getsource(BotService.__init__))
+        tree = ast.parse(init_src)
+        assignments = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and any(
+                isinstance(t, ast.Attribute) and t.attr == "_change_status_slot"
+                for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            )
+        ]
+        self.assertEqual(len(assignments), 1, "_change_status_slot must be assigned exactly once")
+        value = assignments[0].value
+        self.assertIsInstance(value, ast.Tuple, "slot must be a tuple")
+        self.assertEqual(len(value.elts), 1, "slot must hold exactly one Route")
+        route_call = value.elts[0]
+        self.assertIsInstance(route_call, ast.Call)
+        self.assertIsInstance(route_call.func, ast.Name)
+        self.assertEqual(route_call.func.id, "Route")
+
+
+class PostCaptureContractTests(unittest.TestCase):
+    # B4.5c is the no-guard variant (B4.5a shape): the legacy call site did
+    # store(2000) then remember, with NO _quality_guard_response. These rails
+    # freeze that contract at both the call site and the helper.
+
+    def _bridge_block(self) -> str:
+        body_src = inspect.getsource(BotService._handle_text_body)
+        start = body_src.index("change_status_outcome = dispatch_routes")
+        end = body_src.index("return change_status_outcome.response")
+        return body_src[start:end]
+
+    def test_call_site_post_captures_via_helper_with_outcome_limit(self) -> None:
+        block = self._bridge_block()
+        self.assertIn("self._post_capture_intercepted(", block)
+        self.assertIn("assistant_limit=change_status_outcome.store_memory_limit", block)
+        self.assertIn("on_decision=self._emit_route_decision", block)
+
+    def test_no_guard_variant_call_site_and_adapter_never_quality_guard(self) -> None:
+        self.assertNotIn("_quality_guard_response", self._bridge_block())
+        adapter_src = inspect.getsource(BotService._route_change_status_question)
+        self.assertNotIn("_quality_guard_response", adapter_src)
+
+    def test_post_capture_helper_stores_then_remembers_with_exact_args(self) -> None:
+        stub = SimpleNamespace()
+        manager = MagicMock()
+        stub._store_memory_turn = manager.store
+        stub._remember_assistant_turn_state = manager.remember
+        BotService._post_capture_intercepted.__get__(stub)(
+            "s1", "estado de los cambios", "respuesta", assistant_limit=2000
+        )
+        self.assertEqual(
+            manager.mock_calls,
+            [
+                call.store("s1", "estado de los cambios", "respuesta", assistant_limit=2000),
+                call.remember("s1", "estado de los cambios", "respuesta"),
+            ],
+        )
 
 
 def _make_stub() -> SimpleNamespace:
@@ -157,7 +247,11 @@ class RegistryPathBehaviorTests(unittest.TestCase):
     # estados-plural widening (live autocorrect incident).
 
     def test_positive_smoke_phrases_intercept_through_registry(self) -> None:
-        for phrase in ("estado de los cambios", "Estatus de los fixes"):
+        for phrase in (
+            "estado de los cambios",
+            "Estatus de los fixes",
+            "estátus de los cámbios",
+        ):
             with self.subTest(phrase=phrase):
                 stub = _make_stub()
                 outcome = dispatch_routes(
@@ -191,27 +285,30 @@ class RegistryPathBehaviorTests(unittest.TestCase):
         self.assertEqual(outcome.route, "intercepted")
         self.assertEqual(outcome.reason, "change_status_phrase_matched")
 
-    def test_negative_smoke_phrase_falls_through_registry(self) -> None:
-        stub = _make_stub()
-        outcome = dispatch_routes(
-            _slot(stub),
-            _ctx("dame el estatus de los cambios"),
-            on_decision=stub._emit_route_decision,
-        )
-        self.assertEqual(outcome.captured, False)
-        self.assertIsNone(outcome.response)
-        kwargs = stub._emit_dispatch_decision.call_args.kwargs
-        self.assertEqual(
-            kwargs,
-            {
-                "handler": "change_status_question",
-                "route": "fall_through",
-                "reason": "change_status_phrase_no_match",
-                "session_id": "s1",
-                "text": "dame el estatus de los cambios",
-                "captured": False,
-            },
-        )
+    def test_negative_smoke_phrases_fall_through_registry(self) -> None:
+        for phrase in (
+            "dame el estatus de los cambios",
+            "Estatus de los fixes\ny de paso reinicia",
+        ):
+            with self.subTest(phrase=phrase):
+                stub = _make_stub()
+                outcome = dispatch_routes(
+                    _slot(stub), _ctx(phrase), on_decision=stub._emit_route_decision
+                )
+                self.assertEqual(outcome.captured, False)
+                self.assertIsNone(outcome.response)
+                kwargs = stub._emit_dispatch_decision.call_args.kwargs
+                self.assertEqual(
+                    kwargs,
+                    {
+                        "handler": "change_status_question",
+                        "route": "fall_through",
+                        "reason": "change_status_phrase_no_match",
+                        "session_id": "s1",
+                        "text": phrase.strip(),
+                        "captured": False,
+                    },
+                )
 
     def test_overlap_phrase_owned_by_operational_status_falls_through(self) -> None:
         # Overlap probe (mirror of the PR #236/B4.5b case): "hola estado de
