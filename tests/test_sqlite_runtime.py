@@ -16,9 +16,11 @@ from claw_v2.sqlite_runtime import (
     RuntimeDb,
     StoreWalHealHandle,
     _registry_key,
+    _WAL_GENERATION_INODES,
     _WAL_HEAL_REGISTRY,
     check_runtime_sqlite_health,
     connect_runtime_sqlite,
+    wal_generation_stamp_missing,
 )
 
 
@@ -296,6 +298,86 @@ class RuntimeDbTests(unittest.TestCase):
             db.close()
             self.assertEqual([h for h in _WAL_HEAL_REGISTRY.get(key, []) if h.alive], [])
             db.close()  # idempotent
+
+
+class RuntimeDbWalGenerationTests(unittest.TestCase):
+    def _runtime_db(self, tmpdir: str, **kwargs) -> RuntimeDb:
+        db = RuntimeDb(Path(tmpdir) / "claw.db", **kwargs)
+        self.addCleanup(db.close)
+        with db.transaction() as cur:
+            cur.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        return db
+
+    def test_write_path_stamps_generation_when_missing(self) -> None:
+        # D1 A-light (fresh-install hole): only the FIRST connect to a
+        # brand-new DB leaves the stamp missing (empirical unlink test,
+        # 2026-07-09); the next successful write must stamp it — mirroring
+        # LEGACY observe.py:389-390 — instead of staying blind until a
+        # reconnect that may never come.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+            _WAL_GENERATION_INODES.pop(_registry_key(db.db_path), None)
+            self.assertTrue(wal_generation_stamp_missing(db.db_path))
+
+            with db.transaction() as cur:
+                cur.execute("INSERT INTO t (v) VALUES ('x')")
+
+            self.assertFalse(wal_generation_stamp_missing(db.db_path))
+
+    def test_write_path_reconnects_on_external_wal_generation_swap(self) -> None:
+        # D1 A-light (the T10 void-write vector): an external process
+        # unlinks+recreates the -wal with a DIFFERENT inode under our live
+        # connection. Our writes keep "succeeding" into the orphaned inode
+        # with no lock errors; the write-path drift check must detect the
+        # swap and reconnect THIS connection (single-conn self-heal, not the
+        # registry-wide cascade F1.3 retired) so subsequent writes land in
+        # the on-disk generation.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            events: list = []
+            db = self._runtime_db(tmpdir, degraded_event_sink=events.append)
+            with db.transaction() as cur:
+                cur.execute("INSERT INTO t (v) VALUES ('before')")
+            wal = Path(f"{db.db_path}-wal")
+            original_inode = wal.stat().st_ino
+
+            # External swap: an on-disk -wal with a DIFFERENT inode appears
+            # under our live connection (same bytes, new file). Our conn
+            # keeps writing "successfully" into the unlinked original.
+            import shutil
+
+            moved = Path(f"{db.db_path}-wal.orig")
+            shutil.copy2(wal, moved)
+            wal.unlink()
+            shutil.copy2(moved, wal)
+            self.assertNotEqual(wal.stat().st_ino, original_inode)
+
+            # This write is the VOID write — its success records the drift
+            # and arms the deferred reconnect (no live cursors at op entry).
+            with db.transaction() as cur:
+                cur.execute("INSERT INTO t (v) VALUES ('during-swap')")
+
+            # The NEXT operation performs the reconnect at entry and its
+            # write lands in the on-disk generation.
+            with db.transaction() as cur:
+                cur.execute("INSERT INTO t (v) VALUES ('after-heal')")
+
+            swap_events = [
+                e
+                for e in events
+                if e.get("event_type") == "runtime_db_wal_generation_swap_self_heal"
+            ]
+            self.assertEqual(len(swap_events), 1)
+            # Stamp refreshed to the on-disk generation our new connection joined.
+            self.assertEqual(
+                _WAL_GENERATION_INODES.get(_registry_key(db.db_path)),
+                Path(f"{db.db_path}-wal").stat().st_ino,
+            )
+            reader = sqlite3.connect(str(db.db_path))
+            try:
+                rows = reader.execute("SELECT v FROM t ORDER BY id").fetchall()
+            finally:
+                reader.close()
+            self.assertIn(("after-heal",), rows)
 
 
 class RuntimeDbDegradedTests(unittest.TestCase):
