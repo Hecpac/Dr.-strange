@@ -3734,15 +3734,24 @@ class TaskHandler:
             },
         )
         if reclaim_running and job.status == "running":
-            retried = self.job_service.fail(
-                job.job_id,
-                error=f"reclaiming interrupted autonomous task: {reason}",
-                retry=True,
-                retry_delay_seconds=0,
-                checkpoint={"task_id": task_id, "session_id": session_id, "reason": reason},
-            )
-            if retried is not None:
-                job = retried
+            # D3.3 (2026-07-09, decision A — eventual SLA): under formal
+            # leases this resume path is NOT the lease owner; a local fail()
+            # could only ever be rejected by the guard (and passing the live
+            # lease's credentials here would STEAL a running job from its
+            # worker). Recovery belongs to the global autonomy lane
+            # (recover_stale_running every 300s -> reclaim_expired_leases
+            # under the flag): the resume re-attaches when the lane requeues
+            # the job. Latency: up to lane interval + lease TTL.
+            if not self.job_service.formal_leases_enabled:
+                retried = self.job_service.fail(
+                    job.job_id,
+                    error=f"reclaiming interrupted autonomous task: {reason}",
+                    retry=True,
+                    retry_delay_seconds=0,
+                    checkpoint={"task_id": task_id, "session_id": session_id, "reason": reason},
+                )
+                if retried is not None:
+                    job = retried
         self._update_task_job_metadata(task_id, job.job_id)
         return job.job_id
 

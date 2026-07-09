@@ -573,6 +573,105 @@ class TaskHandlerTests(unittest.TestCase):
 class ResumeWiringTests(unittest.TestCase):
     """F3.1 — a resumed coordinated task passes the detected start_phase."""
 
+    def test_enqueue_autonomous_job_never_steals_live_lease_under_formal_leases(
+        self,
+    ) -> None:
+        # Invariant (D3.3, decision A 2026-07-09 — eventual SLA): when a
+        # resume finds its job 'running' under formal leases, it must NOT
+        # convert it locally — recovery belongs to the global autonomy lane
+        # (recover_stale_running every 300s -> reclaim_expired_leases).
+        # NOTE: this lock is green-by-design — today the credential-less
+        # fail() is already rejected by the lease guard; the lock exists so
+        # nobody "fixes" that rejection by passing the live lease's
+        # credentials and steals a running job from its worker.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=300,
+            )
+            handler = TaskHandler.__new__(TaskHandler)
+            handler.job_service = jobs
+            with (
+                patch.object(
+                    TaskHandler,
+                    "_provider_model_for_mode",
+                    return_value=("anthropic", "claude-x"),
+                ),
+                patch.object(TaskHandler, "_update_task_job_metadata"),
+            ):
+                first_id = handler._enqueue_autonomous_job(
+                    task_id="task-1",
+                    session_id="tg-1",
+                    objective="obj",
+                    mode="auto",
+                    route={},
+                    reason="initial",
+                )
+                claimed = jobs.claim_next(
+                    worker_id="live-coordinator",
+                    kinds=("coordinator.autonomous_task",),
+                )
+                self.assertIsNotNone(claimed)
+                self.assertEqual(claimed.job_id, first_id)
+
+                resumed_id = handler._enqueue_autonomous_job(
+                    task_id="task-1",
+                    session_id="tg-1",
+                    objective="obj",
+                    mode="auto",
+                    route={},
+                    reason="resume after restart",
+                    reclaim_running=True,
+                )
+
+            self.assertEqual(resumed_id, first_id)
+            row = jobs.get(first_id)
+            self.assertEqual(row.status, "running")
+            self.assertEqual(row.lease_owner, "live-coordinator")
+            self.assertEqual(row.lease_generation, claimed.lease_generation)
+
+    def test_enqueue_autonomous_job_reclaims_running_with_flag_off(self) -> None:
+        # Legacy regression lock: with the flag off the resume path still
+        # converts an interrupted running job back to retrying immediately.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(Path(tmpdir) / "claw.db")
+            handler = TaskHandler.__new__(TaskHandler)
+            handler.job_service = jobs
+            with (
+                patch.object(
+                    TaskHandler,
+                    "_provider_model_for_mode",
+                    return_value=("anthropic", "claude-x"),
+                ),
+                patch.object(TaskHandler, "_update_task_job_metadata"),
+            ):
+                first_id = handler._enqueue_autonomous_job(
+                    task_id="task-1",
+                    session_id="tg-1",
+                    objective="obj",
+                    mode="auto",
+                    route={},
+                    reason="initial",
+                )
+                self.assertIsNotNone(
+                    jobs.claim_next(
+                        worker_id="dead-coordinator",
+                        kinds=("coordinator.autonomous_task",),
+                    )
+                )
+                handler._enqueue_autonomous_job(
+                    task_id="task-1",
+                    session_id="tg-1",
+                    objective="obj",
+                    mode="auto",
+                    route={},
+                    reason="resume after restart",
+                    reclaim_running=True,
+                )
+
+            self.assertEqual(jobs.get(first_id).status, "retrying")
+
     def _handler_with_recording_coordinator(
         self,
         root: Path,
