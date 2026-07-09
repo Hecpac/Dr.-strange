@@ -894,6 +894,62 @@ class NotebookLMOrchestrationTests(unittest.TestCase):
             self.assertEqual(job.status, "running")
             self.assertEqual(job.lease_owner, "thief")
 
+    def test_complete_research_job_carries_credentials_and_detects_lease_loss(
+        self,
+    ) -> None:
+        # D4.1: the thread-path helper threads the claimed record — its close
+        # lands under formal leases, and a thief-terminalized row is detected
+        # (False + nlm_research_lease_lost) instead of claiming completion.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = MagicMock()
+            jobs = JobService(Path(tmpdir) / "claw.db", formal_leases_enabled=True)
+            svc = NotebookLMService(observe=observe, job_service=jobs)
+
+            job = jobs.enqueue(kind="notebooklm.deep_research")
+            claimed = jobs.claim(job.job_id, worker_id="notebooklm")
+            self.assertIsNotNone(claimed)
+            landed = svc._complete_research_job(
+                job_id=job.job_id,
+                notebook_id="nb-1",
+                sources_count=3,
+                claimed=claimed,
+            )
+            self.assertTrue(landed)
+            row = jobs.get(job.job_id)
+            self.assertEqual(row.status, "completed")
+            self.assertIsNone(row.lease_owner)
+
+            # Thief steals + terminalizes a second job before our close.
+            job2 = jobs.enqueue(kind="notebooklm.deep_research")
+            claimed2 = jobs.claim(job2.job_id, worker_id="notebooklm")
+            jobs.reclaim_expired_leases(
+                kinds=("notebooklm.deep_research",), now=time.time() + 100_000
+            )
+            stolen = jobs.claim_next(
+                worker_id="thief",
+                kinds=("notebooklm.deep_research",),
+                now=time.time() + 100_001,
+            )
+            self.assertIsNotNone(stolen)
+            jobs.fail(
+                stolen.job_id,
+                error="thief",
+                retry=False,
+                lease_owner=stolen.lease_owner,
+                lease_generation=stolen.lease_generation,
+            )
+
+            landed2 = svc._complete_research_job(
+                job_id=job2.job_id,
+                notebook_id="nb-1",
+                sources_count=3,
+                claimed=claimed2,
+            )
+            self.assertFalse(landed2)
+            events = [call.args[0] for call in observe.emit.call_args_list]
+            self.assertIn("nlm_research_lease_lost", events)
+            self.assertEqual(jobs.get(job2.job_id).status, "failed")
+
     def test_orchestration_retrying_job_resumes_after_new_service_instance(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "claw.db"

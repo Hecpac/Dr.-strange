@@ -3311,7 +3311,13 @@ do_not:
                  test_run_once_emits_lease_lost_when_close_does_not_land +
                  tests/test_daemon.py::DaemonTickTests::
                  test_reconciliation_run_once_closes_jobs_under_formal_leases +
-                 test_reconciliation_run_once_emits_lease_lost_when_close_does_not_land.
+                 test_reconciliation_run_once_emits_lease_lost_when_close_does_not_land +
+                 tests/test_task_handler.py::ResumeWiringTests::
+                 test_autonomous_close_helpers_carry_lease_credentials +
+                 test_terminalize_unclaimed_job_* (D4.3 MIXTO split:
+                 claimant-close vs claim-then-fail terminalization) +
+                 tests/test_notebooklm.py::
+                 test_complete_research_job_carries_credentials_and_detects_lease_loss.
                  "Own close" detection = jobs.close_landed(record, claimed):
                  None → guard rejected; lease_generation mismatch → the
                  idempotent-terminal path (#153) returned another closer's

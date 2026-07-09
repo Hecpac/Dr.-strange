@@ -631,6 +631,75 @@ class ResumeWiringTests(unittest.TestCase):
             self.assertEqual(row.lease_owner, "live-coordinator")
             self.assertEqual(row.lease_generation, claimed.lease_generation)
 
+    def test_autonomous_close_helpers_carry_lease_credentials(self) -> None:
+        # D4.2: the claimed record threads its credentials into the close —
+        # under formal leases the row must terminalize (lease released).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(Path(tmpdir) / "claw.db", formal_leases_enabled=True)
+            handler = TaskHandler.__new__(TaskHandler)
+            handler.job_service = jobs
+            job = jobs.enqueue(kind="coordinator.autonomous_task")
+            claimed = jobs.claim(job.job_id, worker_id="coordinator")
+            self.assertIsNotNone(claimed)
+
+            handler._complete_autonomous_job(
+                task_id="t1",
+                job_id=job.job_id,
+                result={"ok": True},
+                claimed=claimed,
+            )
+
+            row = jobs.get(job.job_id)
+            self.assertEqual(row.status, "completed")
+            self.assertIsNone(row.lease_owner)
+
+    def test_terminalize_unclaimed_job_claims_then_fails_under_formal_leases(
+        self,
+    ) -> None:
+        # D4.3 (MIXTO split): the claim-blocked path never owned the job — the
+        # sanctioned close under formal leases is claim-then-fail with the
+        # acquired credentials.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(Path(tmpdir) / "claw.db", formal_leases_enabled=True)
+            handler = TaskHandler.__new__(TaskHandler)
+            handler.job_service = jobs
+            handler.observe = None
+            job = jobs.enqueue(kind="coordinator.autonomous_task")
+
+            with patch.object(TaskHandler, "_emit") as emit:
+                handler._terminalize_unclaimed_job(
+                    task_id="t1", job_id=job.job_id, error="job_claim_blocked:test"
+                )
+
+            row = jobs.get(job.job_id)
+            self.assertEqual(row.status, "failed")
+            self.assertIsNone(row.lease_owner)
+            emitted = [call.args[0] for call in emit.call_args_list]
+            self.assertNotIn("autonomous_job_terminalize_deferred", emitted)
+
+    def test_terminalize_unclaimed_job_defers_when_claim_unavailable(self) -> None:
+        # D4.3: if the claim itself is unavailable (e.g. the row is owned by a
+        # live worker), leave the row alone and record the deferral instead of
+        # a silent no-op.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(Path(tmpdir) / "claw.db", formal_leases_enabled=True)
+            handler = TaskHandler.__new__(TaskHandler)
+            handler.job_service = jobs
+            job = jobs.enqueue(kind="coordinator.autonomous_task")
+            live = jobs.claim(job.job_id, worker_id="live-worker")
+            self.assertIsNotNone(live)
+
+            with patch.object(TaskHandler, "_emit") as emit:
+                handler._terminalize_unclaimed_job(
+                    task_id="t1", job_id=job.job_id, error="job_claim_blocked:test"
+                )
+
+            row = jobs.get(job.job_id)
+            self.assertEqual(row.status, "running")
+            self.assertEqual(row.lease_owner, "live-worker")
+            emitted = [call.args[0] for call in emit.call_args_list]
+            self.assertIn("autonomous_job_terminalize_deferred", emitted)
+
     def test_enqueue_autonomous_job_reclaims_running_with_flag_off(self) -> None:
         # Legacy regression lock: with the flag off the resume path still
         # converts an interrupted running job back to retrying immediately.
