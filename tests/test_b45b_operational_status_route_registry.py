@@ -78,9 +78,7 @@ def _ordered_markers() -> list[str]:
                 if name == "dispatch_routes" and node.args:
                     first = node.args[0]
                     if isinstance(first, ast.Attribute) and first.attr in _BRIDGE_MARKERS:
-                        markers.append(
-                            (node.lineno, node.col_offset, _BRIDGE_MARKERS[first.attr])
-                        )
+                        markers.append((node.lineno, node.col_offset, _BRIDGE_MARKERS[first.attr]))
                     else:
                         markers.append((node.lineno, node.col_offset, "dispatch_routes"))
     markers.sort()
