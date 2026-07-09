@@ -380,6 +380,51 @@ class RuntimeDbWalGenerationTests(unittest.TestCase):
             self.assertIn(("after-heal",), rows)
 
 
+class RuntimeDbWalGenerationReviewTests(unittest.TestCase):
+    """Review #251 hardening locks."""
+
+    def _runtime_db(self, tmpdir: str, **kwargs) -> RuntimeDb:
+        db = RuntimeDb(Path(tmpdir) / "claw.db", **kwargs)
+        self.addCleanup(db.close)
+        with db.transaction() as cur:
+            cur.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        return db
+
+    def test_read_only_ops_skip_the_stat_based_drift_check(self) -> None:
+        # total_changes gates the probe: reads must not pay stat() syscalls.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+            with db.transaction() as cur:
+                cur.execute("INSERT INTO t (v) VALUES ('x')")
+            with patch("claw_v2.sqlite_runtime.wal_generation_stamp_missing") as probe:
+                for _ in range(3):
+                    with db.cursor() as cur:
+                        cur.execute("SELECT COUNT(*) FROM t").fetchone()
+                probe.assert_not_called()
+                with db.transaction() as cur:
+                    cur.execute("INSERT INTO t (v) VALUES ('y')")
+                probe.assert_called()
+
+    def test_failed_swap_reconnect_degrades_instead_of_silent_limbo(self) -> None:
+        # If the deferred reconnect cannot open a new connection after the
+        # old one closed, the DB must fail CLOSED via the degraded latch.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self._runtime_db(tmpdir)
+            with db.transaction() as cur:
+                cur.execute("INSERT INTO t (v) VALUES ('before')")
+            db._wal_swap_reconnect_pending = True
+            with patch(
+                "claw_v2.sqlite_runtime.connect_runtime_sqlite",
+                side_effect=sqlite3.OperationalError("unable to open database file"),
+            ):
+                with self.assertRaises(RuntimeDbDegradedError):
+                    with db.cursor() as cur:
+                        cur.execute("SELECT 1").fetchone()
+            with self.assertRaises(RuntimeDbDegradedError):
+                with db.cursor() as cur:
+                    cur.execute("SELECT 1").fetchone()
+
+
 class RuntimeDbDegradedTests(unittest.TestCase):
     def _runtime_db(self, tmpdir: str, **kwargs) -> RuntimeDb:
         db = RuntimeDb(Path(tmpdir) / "claw.db", **kwargs)
