@@ -83,10 +83,15 @@ class BridgeSlotPositionTests(unittest.TestCase):
     def test_bridge_sits_between_its_legacy_neighbors(self) -> None:
         order = _ordered_markers()
         self.assertIn("CLEANUP_BRIDGE", order, "per-slot registry bridge not found")
-        op = order.index("_maybe_handle_operational_status")
+        # B4.5b migrated operational_status to its own per-slot bridge, so the
+        # direct-call anchor moved one row up (operational_failure_summary).
+        # The full bridge chain (failure_summary < OPERATIONAL_BRIDGE <
+        # CLEANUP_BRIDGE < owner) is locked by
+        # tests/test_b45b_operational_status_route_registry.py.
+        op = order.index("_maybe_handle_operational_failure_summary")
         bridge = order.index("CLEANUP_BRIDGE")
         owner = order.index("_maybe_handle_owner_delegation_request")
-        self.assertLess(op, bridge, "bridge must run after operational_status")
+        self.assertLess(op, bridge, "bridge must run after the operational group")
         self.assertLess(bridge, owner, "bridge must run before owner_delegation")
 
     def test_no_direct_handler_call_remains_in_handle_text_body(self) -> None:

@@ -1302,6 +1302,12 @@ class BotService:
         self._cleanup_status_slot: tuple[Route, ...] = (
             Route(CLEANUP_STATUS_MATCHER.name, self._route_cleanup_status),
         )
+        # B4.5b: same per-slot bridge for operational_status (§5.1 row 6,
+        # between operational_failure_summary and the cleanup bridge). Its
+        # quality guard stays at the call site — see _handle_text_body.
+        self._operational_status_slot: tuple[Route, ...] = (
+            Route(OPERATIONAL_STATUS_MATCHER.name, self._route_operational_status),
+        )
 
     @property
     def terminal_bridge(self) -> object | None:
@@ -4356,32 +4362,28 @@ class BotService:
             )
             self._remember_assistant_turn_state(session_id, stripped, failure_summary_response)
             return failure_summary_response
-        operational_status_response = self._maybe_handle_operational_status(
-            stripped, session_id=session_id
+        # B4.5b: operational_status runs through the route registry (per-slot
+        # bridge) at its original order-locked slot. The quality guard stays
+        # HERE, after dispatch, so the legacy event order (dispatch_decision,
+        # then a possible quality_guard_triggered) is preserved exactly.
+        operational_status_outcome = dispatch_routes(
+            self._operational_status_slot,
+            route_ctx,
+            on_decision=self._emit_route_decision,
         )
-        self._emit_dispatch_decision(
-            handler=OPERATIONAL_STATUS_MATCHER.name,
-            route="intercepted" if operational_status_response is not None else "fall_through",
-            reason=(
-                OPERATIONAL_STATUS_MATCHER.matched_reason
-                if operational_status_response is not None
-                else OPERATIONAL_STATUS_MATCHER.unmatched_reason
-            ),
-            session_id=session_id,
-            text=stripped,
-            captured=operational_status_response is not None,
-        )
-        if operational_status_response is not None:
+        if operational_status_outcome.captured and operational_status_outcome.response is not None:
             operational_status_response = self._quality_guard_response(
                 session_id,
                 stripped,
-                operational_status_response,
+                operational_status_outcome.response,
                 source="operational_status",
             )
-            self._store_memory_turn(
-                session_id, stripped, operational_status_response, assistant_limit=2000
+            self._post_capture_intercepted(
+                session_id,
+                stripped,
+                operational_status_response,
+                assistant_limit=operational_status_outcome.store_memory_limit,
             )
-            self._remember_assistant_turn_state(session_id, stripped, operational_status_response)
             return operational_status_response
         # B4.5a: cleanup_status runs through the route registry (per-slot
         # bridge) at its original order-locked slot; route_ctx from above is
@@ -5031,6 +5033,16 @@ class BotService:
         if response is None:
             return RouteOutcome.fall_through(reason=CLEANUP_STATUS_MATCHER.unmatched_reason)
         return RouteOutcome.intercepted(response, reason=CLEANUP_STATUS_MATCHER.matched_reason)
+
+    def _route_operational_status(self, ctx: RouteContext) -> RouteOutcome:
+        # B4.5b: registry adapter over the B4.4c gate+renderer. PURE — the
+        # quality guard runs at the call site to keep legacy event order.
+        # Reason slugs come from the declarative matcher so dispatch_decision
+        # payloads stay byte-identical to the pre-registry call site.
+        response = self._maybe_handle_operational_status(ctx.stripped, session_id=ctx.session_id)
+        if response is None:
+            return RouteOutcome.fall_through(reason=OPERATIONAL_STATUS_MATCHER.unmatched_reason)
+        return RouteOutcome.intercepted(response, reason=OPERATIONAL_STATUS_MATCHER.matched_reason)
 
     def _route_boot_context_status(self, ctx: RouteContext) -> RouteOutcome:
         response = self._maybe_handle_boot_context_status(
