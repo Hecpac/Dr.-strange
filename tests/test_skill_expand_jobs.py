@@ -82,6 +82,78 @@ class SkillExpandJobTests(unittest.TestCase):
             self.assertIn("skill_expand_job_started", event_names)
             self.assertIn("skill_expand_job_completed", event_names)
 
+    def test_run_once_closes_jobs_under_formal_leases(self) -> None:
+        # Invariant (S1, analog of PR #240): with formal_leases_enabled the
+        # runner must propagate the claimed JobRecord's lease credentials to
+        # complete()/fail() so the durable row leaves 'running'.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = MagicMock()
+            jobs = JobService(Path(tmpdir) / "claw.db", formal_leases_enabled=True)
+            skill_registry = MagicMock()
+            skill_registry.auto_expand.return_value = {"gaps_found": 0, "skills_generated": 0}
+            enqueue_skill_expand_job(job_service=jobs, observe=observe, max_new=1)
+            runner = SkillExpandJobRunner(
+                job_service=jobs,
+                skill_registry=skill_registry,
+                observe=observe,
+            )
+
+            self.assertTrue(runner.run_once())
+
+            job = jobs.list(kinds=(SKILL_EXPAND_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "completed")
+            self.assertIsNone(job.lease_owner)
+            event_names = [call.args[0] for call in observe.emit.call_args_list]
+            self.assertIn("skill_expand_job_completed", event_names)
+            self.assertNotIn("skill_expand_job_lease_lost", event_names)
+
+    def test_run_once_emits_lease_lost_when_close_does_not_land(self) -> None:
+        # Invariant (D2, runner-side option): when complete()/fail() returns
+        # None (lease guard blocked the close), the runner must emit
+        # skill_expand_job_lease_lost instead of the lying
+        # *_job_completed/_failed event.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = MagicMock()
+            jobs = JobService(Path(tmpdir) / "claw.db", formal_leases_enabled=True)
+            skill_registry = MagicMock()
+            skill_registry.auto_expand.return_value = {"gaps_found": 0, "skills_generated": 0}
+            enqueue_skill_expand_job(job_service=jobs, observe=observe, max_new=1)
+            runner = SkillExpandJobRunner(
+                job_service=jobs,
+                skill_registry=skill_registry,
+                observe=observe,
+            )
+            # Force the guard to reject the close: the lease is stolen by
+            # another worker mid-execution (expired + re-claimed), so the
+            # original claimant's credentials no longer match.
+            original_execute = runner._execute
+
+            def steal_lease_then_execute(job):
+                result = original_execute(job)
+                jobs.reclaim_expired_leases(
+                    kinds=(SKILL_EXPAND_JOB_KIND,),
+                    now=time.time() + 100_000,
+                )
+                stolen = jobs.claim_next(
+                    worker_id="thief",
+                    kinds=(SKILL_EXPAND_JOB_KIND,),
+                    now=time.time() + 100_001,
+                )
+                assert stolen is not None
+                return result
+
+            runner._execute = steal_lease_then_execute
+
+            self.assertTrue(runner.run_once())
+
+            event_names = [call.args[0] for call in observe.emit.call_args_list]
+            self.assertIn("skill_expand_job_lease_lost", event_names)
+            self.assertNotIn("skill_expand_job_completed", event_names)
+            # The thief's claim stands untouched.
+            job = jobs.list(kinds=(SKILL_EXPAND_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "running")
+            self.assertEqual(job.lease_owner, "thief")
+
     def test_stale_running_skill_expand_job_is_reclaimed_and_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = MagicMock()
