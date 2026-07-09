@@ -3287,7 +3287,10 @@ do_not:
          stay per-runner — no daemon recovery lane covers scheduler.* kinds
          (main.py only wires AUTONOMY kinds + notebooklm.*), so removing it
          would leave expired-lease scheduler rows stuck in running forever
-         (caught live in the A1 smoke, 2026-07-08).
+         (caught live in the A1 smoke, 2026-07-08). Applied to all three
+         age-based reapers (D3.1/D3.2, 2026-07-09):
+         ScheduledBackgroundJobRunner, SkillExpandJobRunner, and
+         PendingVerificationReconciliationJobRunner.
          D2 companion pattern (runner-side, decided 2026-07-08): when
          complete()/fail() returns None to a claimant runner, emit
          `{job_name}_job_lease_lost` instead of the lying
