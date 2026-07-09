@@ -141,6 +141,7 @@ class ScheduledBackgroundJobRunner:
         should_stop: Callable[[], bool] | None = None,
         result_summary: Callable[[object], dict[str, Any]] | None = None,
         timeout_seconds: float | None = None,
+        lease_seconds: float | None = None,
     ) -> None:
         self.job_name = job_name
         self.job_kind = job_kind
@@ -155,7 +156,22 @@ class ScheduledBackgroundJobRunner:
         self.timeout_seconds = (
             max(0.001, float(timeout_seconds)) if timeout_seconds is not None else None
         )
+        # D5 (2026-07-09): explicit per-runner lease TTL. Under formal leases
+        # a handler that outlives the default 900s TTL has its lease stolen
+        # live by reclaim_expired_leases (measured in prod: perf_optimizer up
+        # to 4473s, sub_agent 3787s). Explicit lease_seconds wins; otherwise
+        # derive from timeout_seconds x 1.2; otherwise None (JobService
+        # default). No-op with the flag off (legacy claim ignores TTL).
+        self.lease_seconds = max(1.0, float(lease_seconds)) if lease_seconds is not None else None
         self._timed_handler_future: concurrent.futures.Future[object] | None = None
+
+    @property
+    def effective_lease_seconds(self) -> float | None:
+        if self.lease_seconds is not None:
+            return self.lease_seconds
+        if self.timeout_seconds is not None:
+            return self.timeout_seconds * 1.2
+        return None
 
     def run_available(self, *, limit: int = 1, now: float | None = None) -> int:
         if self._should_stop():
@@ -231,6 +247,7 @@ class ScheduledBackgroundJobRunner:
             worker_id=self.worker_id,
             kinds=(self.job_kind,),
             now=now,
+            lease_seconds=self.effective_lease_seconds,
         )
         if job is None:
             return False

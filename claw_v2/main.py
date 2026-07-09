@@ -1334,6 +1334,10 @@ def _register_sub_agent_jobs(
             ),
             observe=observe,
             worker_id="sub-agent-runner",
+            # D5: measured p99 up to 3787s in prod — under formal leases the
+            # default 900s TTL would get stolen mid-run. No timeout imposed
+            # (a new bound would kill currently-succeeding long runs).
+            lease_seconds=7200.0,
         )
         daemon.register_background_job_runner(
             name="sub_agent",
@@ -1648,6 +1652,9 @@ def _setup_scheduler(
             observe=observe,
             worker_id="kairos-tick-runner",
             result_summary=kairos_tick_result_summary,
+            # D5: measured max 38s; generous bound that also derives the
+            # lease TTL (timeout x 1.2) under formal leases.
+            timeout_seconds=600.0,
         )
         daemon.register_background_job_runner(
             name="kairos_tick",
@@ -1662,6 +1669,8 @@ def _setup_scheduler(
             handler=lambda _payload: kairos.run_health_check(),
             observe=observe,
             worker_id="daemon-health-check-runner",
+            # D5: measured max 12s (LLM judge); see kairos_tick note.
+            timeout_seconds=600.0,
         )
         daemon.register_background_job_runner(
             name="daemon_health_check",
@@ -1679,6 +1688,10 @@ def _setup_scheduler(
             # queued scheduler.self_improve rows (matches the old inline behavior
             # of simply not running self-improve when the flag is off).
             should_stop=lambda: not config.eval_on_self_improve,
+            # D5: measured max 25.5s, but the handler runs
+            # auto_research.run_loop(max_experiments=5) with no bound of its
+            # own — this is the protective ceiling. Derives lease TTL x1.2.
+            timeout_seconds=3600.0,
         )
         daemon.register_background_job_runner(
             name="self_improve",
@@ -2162,6 +2175,8 @@ def _setup_scheduler(
             handler=lambda _payload: _perf_optimizer_handler(),
             observe=observe,
             worker_id="perf-optimizer-runner",
+            # D5: measured p99 up to 4473s in prod (see sub_agent note).
+            lease_seconds=7200.0,
         )
         daemon.register_background_job_runner(
             name="perf_optimizer",

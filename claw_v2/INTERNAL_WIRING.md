@@ -3318,7 +3318,10 @@ do_not:
          stay per-runner — no daemon recovery lane covers scheduler.* kinds
          (main.py only wires AUTONOMY kinds + notebooklm.*), so removing it
          would leave expired-lease scheduler rows stuck in running forever
-         (caught live in the A1 smoke, 2026-07-08).
+         (caught live in the A1 smoke, 2026-07-08). Applied to all three
+         age-based reapers (D3.1/D3.2, 2026-07-09):
+         ScheduledBackgroundJobRunner, SkillExpandJobRunner, and
+         PendingVerificationReconciliationJobRunner.
          D2 companion pattern (runner-side, decided 2026-07-08): when
          complete()/fail() returns None to a claimant runner, emit
          `{job_name}_job_lease_lost` instead of the lying
@@ -3339,7 +3342,32 @@ do_not:
                  test_run_once_emits_lease_lost_when_close_does_not_land +
                  tests/test_daemon.py::DaemonTickTests::
                  test_reconciliation_run_once_closes_jobs_under_formal_leases +
-                 test_reconciliation_run_once_emits_lease_lost_when_close_does_not_land.
+                 test_reconciliation_run_once_emits_lease_lost_when_close_does_not_land +
+                 tests/test_task_handler.py::ResumeWiringTests::
+                 test_autonomous_close_helpers_carry_lease_credentials +
+                 test_terminalize_unclaimed_job_* (D4.3 MIXTO split:
+                 claimant-close vs claim-then-fail terminalization) +
+                 tests/test_notebooklm.py::
+                 test_complete_research_job_carries_credentials_and_detects_lease_loss.
+
+  - change: Blindly re-stamp note_wal_generation on every RuntimeDb write, or
+            remove the write-path WAL generation drift check / its deferred
+            swap reconnect (_record_sqlite_success -> _ensure_operational).
+    why: D1 A-light (2026-07-09). The stamp records the inode OUR connection
+         writes to; a blind per-write re-stamp would record the THIEF's inode
+         after an external sidecar swap and blind the detection (void writes,
+         T10 drill 2026-06-12). Stamp only when MISSING (fresh DB before its
+         first write — empirically the only reachable case, see the unlink
+         test outputs/claw-leases-d/D1-unlink-test.md: checkpoints never
+         unlink nor rotate the -wal inode, and every reboot re-stamps because
+         journal_mode=WAL recreates a 0-byte -wal before the stamp). On a
+         detected swap the reconnect is DEFERRED to the next operation entry
+         so the old connection closes first (releasing its -shm) with no live
+         cursors — this is the single-conn self-heal, NOT the registry-wide
+         WAL-heal cascade F1.3 retired.
+    enforced_by: tests/test_sqlite_runtime.py::RuntimeDbWalGenerationTests::
+                 test_write_path_stamps_generation_when_missing +
+                 test_write_path_reconnects_on_external_wal_generation_swap
                  "Own close" detection = jobs.close_landed(record, claimed):
                  None → guard rejected; lease_generation mismatch → the
                  idempotent-terminal path (#153) returned another closer's

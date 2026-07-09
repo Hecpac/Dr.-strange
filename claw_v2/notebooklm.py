@@ -470,6 +470,10 @@ class NotebookLMService:
             return f"Deep Research encolado para '{query}' en notebook {title}..."
 
         def _worker():
+            # D4.1: claimed must exist before the try — the except path calls
+            # _complete_research_job and a pre-claim exception would otherwise
+            # hit an unbound local.
+            claimed = None
             try:
                 if self._job_service is not None and job_id is not None:
                     claimed = self._job_service.claim(job_id, worker_id="notebooklm")
@@ -511,14 +515,16 @@ class NotebookLMService:
                         reason="no_results",
                         job_id=job_id,
                     )
-                    self._complete_research_job(
+                    if not self._complete_research_job(
                         job_id=job_id,
                         notebook_id=full_id,
                         sources_count=0,
                         degraded=True,
                         failure_kind="no_results",
                         fallback=fallback,
-                    )
+                        claimed=claimed,
+                    ):
+                        return
                     self._emit(
                         "nlm_research_completed",
                         notebook_id=full_id,
@@ -541,11 +547,13 @@ class NotebookLMService:
                         )
                     return
                 if self._job_service is not None and job_id is not None:
-                    self._complete_research_job(
+                    if not self._complete_research_job(
                         job_id=job_id,
                         notebook_id=full_id,
                         sources_count=result,
-                    )
+                        claimed=claimed,
+                    ):
+                        return
                 self._emit("nlm_research_completed", notebook_id=full_id, sources_count=result)
                 self._notify(
                     f"Deep Research completado en notebook {title}\n"
@@ -563,14 +571,16 @@ class NotebookLMService:
                     error=str(exc),
                 )
                 if fallback["used"]:
-                    self._complete_research_job(
+                    if not self._complete_research_job(
                         job_id=job_id,
                         notebook_id=full_id,
                         sources_count=0,
                         degraded=True,
                         failure_kind=failure_kind,
                         fallback=fallback,
-                    )
+                        claimed=claimed,
+                    ):
+                        return
                     self._emit(
                         "nlm_error",
                         notebook_id=full_id,
@@ -590,12 +600,25 @@ class NotebookLMService:
                 else:
                     if self._job_service is not None and job_id is not None:
                         try:
-                            self._job_service.fail(
+                            fail_kwargs: dict[str, Any] = {}
+                            if claimed is not None:
+                                fail_kwargs = {
+                                    "lease_owner": claimed.lease_owner,
+                                    "lease_generation": claimed.lease_generation,
+                                }
+                            failed = self._job_service.fail(
                                 job_id,
                                 error=str(exc),
                                 retry=False,
                                 checkpoint={"operation": "research", "notebook_id": full_id},
+                                **fail_kwargs,
                             )
+                            if claimed is not None and not _close_landed(failed, claimed):
+                                self._emit(
+                                    "nlm_research_lease_lost",
+                                    job_id=job_id,
+                                    notebook_id=full_id,
+                                )
                         except Exception:
                             logger.exception("Job failure persistence failed for %s", job_id)
                     self._emit(
@@ -635,9 +658,17 @@ class NotebookLMService:
         degraded: bool = False,
         failure_kind: str | None = None,
         fallback: dict[str, Any] | None = None,
-    ) -> None:
+        claimed: Any | None = None,
+    ) -> bool:
+        """Close the research job; True when the close was OURS (or no-op).
+
+        D4.1 (2026-07-09): ``claimed`` threads the claimed JobRecord so the
+        close carries lease credentials under formal leases. A False return
+        means the lease was lost (guard-rejected or another worker already
+        terminalized the row) — callers must not emit completed/notify.
+        """
         if self._job_service is None or job_id is None:
-            return
+            return True
         result: dict[str, Any] = {
             "notebook_id": notebook_id,
             "sources_count": sources_count,
@@ -651,10 +682,25 @@ class NotebookLMService:
                     "fallback_summary": str((fallback or {}).get("summary") or "")[:1000],
                 }
             )
+        lease_kwargs: dict[str, Any] = {}
+        if claimed is not None:
+            lease_kwargs = {
+                "lease_owner": claimed.lease_owner,
+                "lease_generation": claimed.lease_generation,
+            }
         try:
-            self._job_service.complete(job_id, result=result)
+            completed = self._job_service.complete(job_id, result=result, **lease_kwargs)
         except Exception:
             logger.exception("Job completion persistence failed for %s", job_id)
+            return True
+        if claimed is not None and not _close_landed(completed, claimed):
+            self._emit(
+                "nlm_research_lease_lost",
+                job_id=job_id,
+                notebook_id=notebook_id,
+            )
+            return False
+        return True
 
     def _try_research_fallback(
         self,
@@ -1127,6 +1173,7 @@ class NotebookLMService:
         self._emit(f"nlm_{normalized_kind}_started", notebook_id=full_id, job_id=job_id)
 
         def _worker():
+            claimed = None  # D4.1: bound before try — the except path closes the job.
             try:
                 if self._job_service is not None and job_id is not None:
                     claimed = self._job_service.claim(job_id, worker_id="notebooklm")
@@ -1162,10 +1209,26 @@ class NotebookLMService:
                     self._run_async(self._async_generate_artifact(full_id, normalized_kind))
                 if self._job_service is not None and job_id is not None:
                     try:
-                        self._job_service.complete(
+                        complete_kwargs: dict[str, Any] = {}
+                        if claimed is not None:
+                            complete_kwargs = {
+                                "lease_owner": claimed.lease_owner,
+                                "lease_generation": claimed.lease_generation,
+                            }
+                        completed = self._job_service.complete(
                             job_id,
                             result={"notebook_id": full_id, "artifact_kind": normalized_kind},
+                            **complete_kwargs,
                         )
+                        if claimed is not None and not _close_landed(completed, claimed):
+                            # D4.1/D2: the close was not ours — do not claim
+                            # the artifact completion nor notify.
+                            self._emit(
+                                f"nlm_{normalized_kind}_lease_lost",
+                                notebook_id=full_id,
+                                job_id=job_id,
+                            )
+                            return
                     except Exception:
                         logger.exception("Job completion persistence failed for %s", job_id)
                 self._emit(f"nlm_{normalized_kind}_completed", notebook_id=full_id)
@@ -1177,12 +1240,25 @@ class NotebookLMService:
                 logger.exception("Background %s failed for %s", normalized_kind, full_id)
                 if self._job_service is not None and job_id is not None:
                     try:
-                        self._job_service.fail(
+                        fail_kwargs: dict[str, Any] = {}
+                        if claimed is not None:
+                            fail_kwargs = {
+                                "lease_owner": claimed.lease_owner,
+                                "lease_generation": claimed.lease_generation,
+                            }
+                        failed = self._job_service.fail(
                             job_id,
                             error=str(exc),
                             retry=False,
                             checkpoint={"operation": normalized_kind, "notebook_id": full_id},
+                            **fail_kwargs,
                         )
+                        if claimed is not None and not _close_landed(failed, claimed):
+                            self._emit(
+                                f"nlm_{normalized_kind}_lease_lost",
+                                notebook_id=full_id,
+                                job_id=job_id,
+                            )
                     except Exception:
                         logger.exception("Job failure persistence failed for %s", job_id)
                 self._emit(
