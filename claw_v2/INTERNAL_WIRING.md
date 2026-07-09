@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "micro-slice change-status-estados-plural (2026-07-09): FIRST deliberate, decision-backed widening of a declarative matcher (decision brief estados-plural, opción B — Hector authorized). CHANGE_STATUS_MATCHER's phrase regex tolerates the plural Telegram autocorrect produces: estados? (optional trailing s on estado ONLY; live incident 2026-07-08, 'Estados de los cambios' fell to the brain during the PR #234 smoke). Fullmatch semantics, the status/estatus tokens, and normalization stay legacy-identical. The legacy predicate stays FROZEN verbatim in the b44a pilot test; the delta is enumerated in DELIBERATE_WIDENING_DECISIONS with scope bounds (STILL_OUT_AFTER_WIDENING) and an executable overlap-matrix lock (operational_status relative behavior unchanged). The anti-widening rail is lifted for this enumerated delta only, not as a general license. Prior: b45b (PR #245, 3e6e133) operational-status route registry; b45a (PR #237, 291af94) cleanup route registry; b44c (PR #236, cf6acc3); b44b (PR #235, be7c6d8); b44a (PR #234, 31d489a); b41 (PR #232, 8df1a6f)."
-doc_version: 3.12
+describes_commit: "slice b45c-change-status-route-registry (2026-07-09): B4.5c — change_status is invoked through registry Route data via a per-slot bridge at its ORIGINAL order-locked slot (§5.1 row 10, between task_intent and the meta-introspection guard + capability_route). Third per-slot migration, no-guard variant (B4.5a shape): the legacy call site never quality-guarded this response, so the bridge call site goes straight to _post_capture_intercepted. Adapter _route_change_status_question is pure and takes its reason slugs from CHANGE_STATUS_MATCHER (byte-identical telemetry, incl. the PR #246 estados-plural widening which lives in the matcher data and is untouched). Prior: change-status-estados-plural (PR #246, 55455e4); b45b (PR #245, 3e6e133) operational-status route registry; b45a (PR #237, 291af94) cleanup route registry; b44c (PR #236, cf6acc3); b44b (PR #235, be7c6d8); b44a (PR #234, 31d489a); b41 (PR #232, 8df1a6f)."
+doc_version: 3.13
 last_verified: 2026-07-09
-verification_method: "estados-plural local, isolated worktree: tests/test_b44a_declarative_matcher_pilot.py (legacy corpus still agreeing where unwidened + DELIBERATE_WIDENING_DECISIONS legacy-vs-new + STILL_OUT_AFTER_WIDENING scope bounds + overlap matrix vs OPERATIONAL_STATUS_MATCHER) + tests/test_b44b/b44c pilots green UNEDITED + tests/test_b45a/b45b route-registry tests + tests/test_botservice_migration_rails.py green UNEDITED (no order/ratchet impact) + live Telegram smoke with the real autocorrect keyboard after merge+deploy (the production daemon runs main; the widened route is only live post-deploy)."
+verification_method: "B4.5c local, isolated worktree: tests/test_b45c_change_status_route_registry.py (bridge AST position between task_intent and capability_route + Route data named from the matcher + B4.4a corpus phrases incl. the estados-plural widening behavior-identical through the registry path + dispatch_decision kwargs byte-identical + overlap probe 'hola estado de los cambios' falls through, ownership stays with operational_status row 6) + tests/test_b44a/b44b/b44c pilots green UNEDITED + tests/test_b45a/b45b route-registry tests green UNEDITED + tests/test_botservice_migration_rails.py with the DELIBERATE 17->16 entry order edit (same commit as this §5.1 update) + tests/test_dispatch_route.py + tests/test_dispatch_routing.py + tests/test_bot.py change-status e2e + live Telegram smoke after merge+deploy (the production daemon runs main; the registry-invoked route is only live post-deploy — Hector decision 2026-07-09: smoke-verify is required for B4.5x closure)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1097,14 +1097,20 @@ invariants:
          test-locked so a future corpus refresh can't regain an identifier.
 
   botservice_pre_brain_order_is_locked:
-    rule: 'B4.1 migration rail. The FULL top-level dispatch/capture order in
-          BotService._handle_text_body (19 calls, AST-extracted in source
-          order with nested helper defs excluded: brain-first →
-          computer-approval → pending-tasks → operational group →
-          owner/imperative → stateful brain shortcut → actionable → F4
-          deterministic → task-intent → change-status → capability-route →
-          tool-approval grant → autonomy grant → stateful followup →
-          shortcut → coordinated-task) is behavior and is locked by test;
+    rule: 'B4.1 migration rail. The top-level dispatch/capture order in
+          BotService._handle_text_body is behavior and is locked by test.
+          The AST rail covers the DIRECT calls still in the legacy chain
+          (16 entries post-B4.5c, AST-extracted in source order with nested
+          helper defs excluded: brain-first → computer-approval →
+          pending-tasks → operational group → owner/imperative → stateful
+          brain shortcut → actionable → F4 deterministic → task-intent →
+          capability-route → tool-approval grant → autonomy grant →
+          stateful followup → shortcut → coordinated-task). Routes migrated
+          to per-slot registry bridges (operational_status B4.5b,
+          cleanup_status B4.5a, change_status B4.5c) are invisible to this
+          AST extractor; each bridge position is order-locked by its own
+          slice test (test_b45a/b45b/b45c_*_route_registry.py) via AST
+          position between its remaining direct-call neighbors.
           NLM/wiki dispatch is delegated to NlmHandler inside the
           _maybe_handle_shortcut subtree and is NOT individually order-locked
           by this rail — only the shortcut call's top-level position is. Reordering, removing, or inserting a top-level
@@ -1201,6 +1207,42 @@ invariants:
          coverage); the corpus lock is this route's first behavioral
          coverage and each migrated matcher grows the enumerable data set
          B4.4 needs.
+
+  b45c_change_status_is_registry_invoked:
+    rule: 'B4.5c. The change_status route is invoked through registry Route
+          data, not a direct BotService call: _handle_text_body runs
+          dispatch_routes(self._change_status_slot, route_ctx,
+          on_decision=self._emit_route_decision) — a one-Route per-slot
+          bridge (Route(CHANGE_STATUS_MATCHER.name,
+          self._route_change_status_question)) at the route ORIGINAL slot:
+          after _maybe_handle_task_intent, before the meta-introspection
+          guard and _maybe_handle_capability_route. The route must NOT join
+          _pre_brain_routes (the early registry slot, rows 2-3): that would
+          move interception ahead of the whole operational group and
+          reorder consolidated dispatch_decision rows — order is behavior
+          (§5.1). Same no-guard variant as B4.5a: the legacy call site
+          never quality-guarded this response, so the bridge call site goes
+          straight to _post_capture_intercepted (the same two calls the
+          legacy call site made, assistant_limit from
+          outcome.store_memory_limit, default 2000). The adapter is pure
+          and takes its reason slugs from CHANGE_STATUS_MATCHER
+          (byte-identical telemetry); the estados-plural widening (PR #246)
+          lives in the matcher data and is untouched by this migration.
+          EXPECTED_PRE_BRAIN_ORDER no longer lists the direct call
+          (deliberate 17->16 edit, same commit as §5.1); the bridge slot is
+          locked by the b45c test via AST position between its legacy
+          neighbors.'
+    chokepoints:
+      - bot.BotService._route_change_status_question
+      - bot.BotService.__init__  # _change_status_slot construction
+    enforced_by:
+      - tests/test_b45c_change_status_route_registry.py
+      - tests/test_botservice_migration_rails.py
+    why: Third application of the per-slot bridge proves the shape scales
+         to the cheapest remaining TRIVIAL route (matcher already
+         declarative since B4.4a, zero unknowns) and leaves the B4.4a
+         gate+renderer untouched — matcher extraction and registry
+         invocation stay two separate, individually-locked steps.
 
   b45b_operational_status_is_registry_invoked:
     rule: 'B4.5b. The operational_status route is invoked through registry
@@ -2978,7 +3020,7 @@ in `_handle_text_body` (verified 2026-06-10):
 | 8 | `_maybe_handle_actionable_task_request` | runtime=Telegram + state-derived objective; unresolved follow-up → fallthrough |
 | 8b | `_maybe_handle_f4_deterministic_delegation` | **F4-B1**, gated OFF by `CLAW_F4_DETERMINISTIC_DELEGATION` (default); narrow authenticated-X-feed-review intent → enqueues ONE durable `f4b.delegation` delivery job (ledger-row-first dedup on the deterministic `task_id`, else `JobService.reserve(resume_key=delivery_key)`); does NOT call `start_autonomous_task`/start a thread/delete — `F4DelegationJobRunner` claims the job off-tick and runs the idempotent bootstrap. Captures BEFORE the broad router (exactly-once on telegram message_id). See invariant `high_confidence_delegation_intents_do_not_depend_on_model_tool_choice` |
 | 9 | `_maybe_handle_task_intent` | **gated OFF** by `CLAW_DISABLE_TASK_INTENT_ROUTER=1` (default) |
-| 10 | `_maybe_handle_change_status_question` | change-status questions; matcher = declarative `CHANGE_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4a — invariant `b44a_route_matcher_is_declarative_data`) |
+| 10 | change status (registry bridge) | change-status questions; matcher = declarative `CHANGE_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4a — invariant `b44a_route_matcher_is_declarative_data`, incl. the PR #246 estados-plural widening). Since B4.5c the route is REGISTRY-invoked at this same slot via the per-slot bridge `dispatch_routes(self._change_status_slot, ...)` (invariant `b45c_change_status_is_registry_invoked`) — NOT in the early `_pre_brain_routes` slot; no quality guard (B4.5a variant): capture goes straight to `_post_capture_intercepted` |
 | 11 | meta introspection guard + `_maybe_handle_capability_route` | classify_autonomy_intent → CRITICAL_TASK_KINDS gate |
 | 12 | `_handle_pending_tool_approval_grant_response` | response to pending tool approval |
 | 13 | `_handle_autonomy_grant_response` | "tienes autonomía", "full autonomy" |
