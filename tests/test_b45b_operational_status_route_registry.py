@@ -174,6 +174,9 @@ class RegistryPathBehaviorTests(unittest.TestCase):
                 self.assertIsInstance(outcome.response, str)
                 self.assertIn("Estoy vivo.", outcome.response)
                 self.assertEqual(outcome.reason, "operational_status_matched")
+                # Locks legacy assistant_limit=2000 parity: the adapter must
+                # not override the RouteOutcome default (minimax P3-1).
+                self.assertEqual(outcome.store_memory_limit, 2000)
                 kwargs = stub._emit_dispatch_decision.call_args.kwargs
                 self.assertEqual(
                     kwargs,
@@ -242,6 +245,20 @@ class QualityGuardPreservationTests(unittest.TestCase):
         self.assertIn("operational_status_outcome.response", body_src)
         adapter_src = inspect.getsource(BotService._route_operational_status)
         self.assertNotIn("_quality_guard_response", adapter_src)
+
+    def test_guard_runs_after_the_bridge_dispatch(self) -> None:
+        # Locks the event ORDER, not just presence (minimax P3-5): the guard
+        # call must sit AFTER the dispatch_routes bridge in source, so
+        # dispatch_decision is always emitted before a possible
+        # quality_guard_triggered — the legacy order.
+        body_src = inspect.getsource(BotService._handle_text_body)
+        bridge_at = body_src.index("self._operational_status_slot")
+        guard_at = body_src.index('source="operational_status"')
+        self.assertLess(
+            bridge_at,
+            guard_at,
+            "quality guard must run after the registry dispatch, never before",
+        )
 
 
 if __name__ == "__main__":
