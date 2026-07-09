@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "micro-slice change-status-estados-plural (2026-07-09): FIRST deliberate, decision-backed widening of a declarative matcher (decision brief estados-plural, opción B — Hector authorized). CHANGE_STATUS_MATCHER's phrase regex tolerates the plural Telegram autocorrect produces: estados? (optional trailing s on estado ONLY; live incident 2026-07-08, 'Estados de los cambios' fell to the brain during the PR #234 smoke). Fullmatch semantics, the status/estatus tokens, and normalization stay legacy-identical. The legacy predicate stays FROZEN verbatim in the b44a pilot test; the delta is enumerated in DELIBERATE_WIDENING_DECISIONS with scope bounds (STILL_OUT_AFTER_WIDENING) and an executable overlap-matrix lock (operational_status relative behavior unchanged). The anti-widening rail is lifted for this enumerated delta only, not as a general license. Prior: b45a (PR #237, 291af94) cleanup route registry; b44c (PR #236, cf6acc3); b44b (PR #235, be7c6d8); b44a (PR #234, 31d489a); b41 (PR #232, 8df1a6f)."
-doc_version: 3.11
+describes_commit: "micro-slice change-status-estados-plural (2026-07-09): FIRST deliberate, decision-backed widening of a declarative matcher (decision brief estados-plural, opción B — Hector authorized). CHANGE_STATUS_MATCHER's phrase regex tolerates the plural Telegram autocorrect produces: estados? (optional trailing s on estado ONLY; live incident 2026-07-08, 'Estados de los cambios' fell to the brain during the PR #234 smoke). Fullmatch semantics, the status/estatus tokens, and normalization stay legacy-identical. The legacy predicate stays FROZEN verbatim in the b44a pilot test; the delta is enumerated in DELIBERATE_WIDENING_DECISIONS with scope bounds (STILL_OUT_AFTER_WIDENING) and an executable overlap-matrix lock (operational_status relative behavior unchanged). The anti-widening rail is lifted for this enumerated delta only, not as a general license. Prior: b45b (PR #245, 3e6e133) operational-status route registry; b45a (PR #237, 291af94) cleanup route registry; b44c (PR #236, cf6acc3); b44b (PR #235, be7c6d8); b44a (PR #234, 31d489a); b41 (PR #232, 8df1a6f)."
+doc_version: 3.12
 last_verified: 2026-07-09
-verification_method: "estados-plural local, isolated worktree: tests/test_b44a_declarative_matcher_pilot.py (legacy corpus still agreeing where unwidened + DELIBERATE_WIDENING_DECISIONS legacy-vs-new + STILL_OUT_AFTER_WIDENING scope bounds + overlap matrix vs OPERATIONAL_STATUS_MATCHER) + tests/test_b44b/b44c pilots green UNEDITED + tests/test_b45a_cleanup_route_registry.py + tests/test_botservice_migration_rails.py green UNEDITED (no order/ratchet impact) + live Telegram smoke with the real autocorrect keyboard (pending at close). NOTE: doc_version may need re-numbering at merge if PR #245 (B4.5b, also 3.11 pending) lands first — reconcile to the higher number."
+verification_method: "estados-plural local, isolated worktree: tests/test_b44a_declarative_matcher_pilot.py (legacy corpus still agreeing where unwidened + DELIBERATE_WIDENING_DECISIONS legacy-vs-new + STILL_OUT_AFTER_WIDENING scope bounds + overlap matrix vs OPERATIONAL_STATUS_MATCHER) + tests/test_b44b/b44c pilots green UNEDITED + tests/test_b45a/b45b route-registry tests + tests/test_botservice_migration_rails.py green UNEDITED (no order/ratchet impact) + live Telegram smoke with the real autocorrect keyboard after merge+deploy (the production daemon runs main; the widened route is only live post-deploy)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1202,6 +1202,36 @@ invariants:
          coverage and each migrated matcher grows the enumerable data set
          B4.4 needs.
 
+  b45b_operational_status_is_registry_invoked:
+    rule: 'B4.5b. The operational_status route is invoked through registry
+          Route data, not a direct BotService call: _handle_text_body runs
+          dispatch_routes(self._operational_status_slot, route_ctx,
+          on_decision=self._emit_route_decision) — a one-Route per-slot
+          bridge (Route(OPERATIONAL_STATUS_MATCHER.name,
+          self._route_operational_status)) at the route ORIGINAL slot:
+          after _maybe_handle_operational_failure_summary, before the
+          B4.5a cleanup bridge. The route must NOT join _pre_brain_routes
+          (the early registry slot, rows 2-3). Delta vs B4.5a: this route
+          quality-guards its response — the guard stays AT THE CALL SITE
+          (dispatch_routes first, then _quality_guard_response with
+          source="operational_status", then _post_capture_intercepted on
+          the GUARDED text) so the legacy event order (dispatch_decision,
+          then a possible quality_guard_triggered) is preserved exactly;
+          the adapter is pure and takes its reason slugs from
+          OPERATIONAL_STATUS_MATCHER (byte-identical telemetry).
+          EXPECTED_PRE_BRAIN_ORDER no longer lists the direct call
+          (deliberate 18->17 edit, same commit as §5.1); the bridge chain
+          is locked by the b45b test via AST position.'
+    chokepoints:
+      - bot.BotService._route_operational_status
+      - bot.BotService.__init__  # _operational_status_slot construction
+    enforced_by:
+      - tests/test_b45b_operational_status_route_registry.py
+      - tests/test_botservice_migration_rails.py
+    why: B4.5 proves the bridge shape generalizes — the second migration
+         adds the guarded-route variant (call-site guard, pure adapter)
+         that later guarded handlers will reuse.
+
   b45a_cleanup_status_is_registry_invoked:
     rule: 'B4.5a. The cleanup_status route is invoked through registry Route
           data, not a direct BotService call: _handle_text_body runs
@@ -1209,7 +1239,8 @@ invariants:
           on_decision=self._emit_route_decision) — a one-Route per-slot
           bridge (Route(CLEANUP_STATUS_MATCHER.name,
           self._route_cleanup_status)) at the route ORIGINAL slot: after
-          _maybe_handle_operational_status, before
+          the operational_status per-slot bridge (a direct
+          _maybe_handle_operational_status call until B4.5b), before
           _maybe_handle_owner_delegation_request. The route must NOT join
           _pre_brain_routes (the early registry slot, rows 2-3): that would
           move interception ahead of pending-tasks/failure-summary/
@@ -2942,7 +2973,7 @@ in `_handle_text_body` (verified 2026-06-10):
 | 3 | `_maybe_handle_boot_context_status` | boot context queries |
 | 4 | `_maybe_handle_pending_tasks_query` | "tareas pendientes" / "pendientes" |
 | 5 | `_maybe_handle_operational_failure_summary` | failure summary queries |
-| 6 | `_maybe_handle_operational_status` | operational status questions; matcher = declarative `OPERATIONAL_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4c — invariant `b44c_operational_status_matcher_is_declarative_data`). Greeting branch runs before change-status (row 10): "hola/buen dia + estado\|estatus\|status" intercepts here |
+| 6 | operational status (registry bridge) | operational status questions; matcher = declarative `OPERATIONAL_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4c — invariant `b44c_operational_status_matcher_is_declarative_data`). Since B4.5b the route is REGISTRY-invoked at this same slot via the per-slot bridge `dispatch_routes(self._operational_status_slot, ...)` (invariant `b45b_operational_status_is_registry_invoked`) — NOT in the early `_pre_brain_routes` slot; the quality guard stays at the call site (dispatch_decision first, then a possible quality_guard_triggered). Greeting branch runs before change-status (row 10): "hola/buen dia + estado\|estatus\|status" intercepts here |
 | 7 | cleanup status / owner delegation / `_maybe_handle_telegram_imperative_request` | explicit operator imperatives; unresolved context → fallthrough_to_brain (never clarifies). Cleanup-status matcher = declarative `CLEANUP_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4b — invariant `b44b_cleanup_matcher_is_declarative_data`); since B4.5a the route is REGISTRY-invoked at this same slot via the per-slot bridge `dispatch_routes(self._cleanup_status_slot, ...)` (invariant `b45a_cleanup_status_is_registry_invoked`) — it is NOT in the early `_pre_brain_routes` slot |
 | 8 | `_maybe_handle_actionable_task_request` | runtime=Telegram + state-derived objective; unresolved follow-up → fallthrough |
 | 8b | `_maybe_handle_f4_deterministic_delegation` | **F4-B1**, gated OFF by `CLAW_F4_DETERMINISTIC_DELEGATION` (default); narrow authenticated-X-feed-review intent → enqueues ONE durable `f4b.delegation` delivery job (ledger-row-first dedup on the deterministic `task_id`, else `JobService.reserve(resume_key=delivery_key)`); does NOT call `start_autonomous_task`/start a thread/delete — `F4DelegationJobRunner` claims the job off-tick and runs the idempotent bootstrap. Captures BEFORE the broad router (exactly-once on telegram message_id). See invariant `high_confidence_delegation_intents_do_not_depend_on_model_tool_choice` |
@@ -3294,7 +3325,10 @@ do_not:
          stay per-runner — no daemon recovery lane covers scheduler.* kinds
          (main.py only wires AUTONOMY kinds + notebooklm.*), so removing it
          would leave expired-lease scheduler rows stuck in running forever
-         (caught live in the A1 smoke, 2026-07-08).
+         (caught live in the A1 smoke, 2026-07-08). Applied to all three
+         age-based reapers (D3.1/D3.2, 2026-07-09):
+         ScheduledBackgroundJobRunner, SkillExpandJobRunner, and
+         PendingVerificationReconciliationJobRunner.
          D2 companion pattern (runner-side, decided 2026-07-08): when
          complete()/fail() returns None to a claimant runner, emit
          `{job_name}_job_lease_lost` instead of the lying
@@ -3315,7 +3349,32 @@ do_not:
                  test_run_once_emits_lease_lost_when_close_does_not_land +
                  tests/test_daemon.py::DaemonTickTests::
                  test_reconciliation_run_once_closes_jobs_under_formal_leases +
-                 test_reconciliation_run_once_emits_lease_lost_when_close_does_not_land.
+                 test_reconciliation_run_once_emits_lease_lost_when_close_does_not_land +
+                 tests/test_task_handler.py::ResumeWiringTests::
+                 test_autonomous_close_helpers_carry_lease_credentials +
+                 test_terminalize_unclaimed_job_* (D4.3 MIXTO split:
+                 claimant-close vs claim-then-fail terminalization) +
+                 tests/test_notebooklm.py::
+                 test_complete_research_job_carries_credentials_and_detects_lease_loss.
+
+  - change: Blindly re-stamp note_wal_generation on every RuntimeDb write, or
+            remove the write-path WAL generation drift check / its deferred
+            swap reconnect (_record_sqlite_success -> _ensure_operational).
+    why: D1 A-light (2026-07-09). The stamp records the inode OUR connection
+         writes to; a blind per-write re-stamp would record the THIEF's inode
+         after an external sidecar swap and blind the detection (void writes,
+         T10 drill 2026-06-12). Stamp only when MISSING (fresh DB before its
+         first write — empirically the only reachable case, see the unlink
+         test outputs/claw-leases-d/D1-unlink-test.md: checkpoints never
+         unlink nor rotate the -wal inode, and every reboot re-stamps because
+         journal_mode=WAL recreates a 0-byte -wal before the stamp). On a
+         detected swap the reconnect is DEFERRED to the next operation entry
+         so the old connection closes first (releasing its -shm) with no live
+         cursors — this is the single-conn self-heal, NOT the registry-wide
+         WAL-heal cascade F1.3 retired.
+    enforced_by: tests/test_sqlite_runtime.py::RuntimeDbWalGenerationTests::
+                 test_write_path_stamps_generation_when_missing +
+                 test_write_path_reconnects_on_external_wal_generation_swap
                  "Own close" detection = jobs.close_landed(record, claimed):
                  None → guard rejected; lease_generation mismatch → the
                  idempotent-terminal path (#153) returned another closer's

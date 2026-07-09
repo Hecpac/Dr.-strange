@@ -206,6 +206,54 @@ class SkillExpandJobTests(unittest.TestCase):
             job = jobs.list(kinds=(SKILL_EXPAND_JOB_KIND,), limit=10)[0]
             self.assertEqual(job.status, "failed")
 
+    def test_reclaim_stale_running_delegates_to_lease_reclaim_under_formal_leases(
+        self,
+    ) -> None:
+        # Invariant (D3.1, copy of #241): under formal leases the age-based
+        # reclaim can never pass the guard (non-owner) — delegate to the
+        # lease-native reclaim. Both sides locked: an unexpired lease is never
+        # stolen; an expired one is recovered.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = MagicMock()
+            jobs = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            enqueue_skill_expand_job(job_service=jobs, observe=observe, max_new=1)
+            claimed_at = time.time() + 1
+            stuck = jobs.claim_next(
+                worker_id="dead-worker",
+                kinds=(SKILL_EXPAND_JOB_KIND,),
+                now=claimed_at,
+            )
+            self.assertIsNotNone(stuck)
+            runner = SkillExpandJobRunner(
+                job_service=jobs,
+                skill_registry=MagicMock(),
+                observe=observe,
+                stale_running_seconds=1,
+            )
+
+            # Side 1: lease valid (age 2s >= stale threshold 1s, TTL 30s not
+            # reached) — must NOT be stolen, no lying stale event.
+            self.assertEqual(runner.reclaim_stale_running(now=claimed_at + 2), 0)
+            held = jobs.get(stuck.job_id)
+            self.assertEqual(held.status, "running")
+            self.assertEqual(held.lease_owner, "dead-worker")
+            stale_events = [
+                call
+                for call in observe.emit.call_args_list
+                if call.args[0] == "skill_expand_job_stale_reclaimed"
+            ]
+            self.assertEqual(stale_events, [])
+
+            # Side 2: lease expired — recovery must happen.
+            self.assertEqual(runner.reclaim_stale_running(now=claimed_at + 60), 1)
+            recovered = jobs.get(stuck.job_id)
+            self.assertEqual(recovered.status, "retrying")
+            self.assertIsNone(recovered.lease_owner)
+
     def test_stale_running_skill_expand_job_is_reclaimed_and_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = MagicMock()

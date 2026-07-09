@@ -248,6 +248,52 @@ class DaemonTickTests(unittest.TestCase):
             self.assertEqual(job.result["drain_result"], {"applied": 0})
             self.assertEqual(job.result["failure_review_result"], {"reconciled_count": 0})
 
+    def test_reconciliation_reclaim_delegates_to_lease_reclaim_under_formal_leases(
+        self,
+    ) -> None:
+        # Invariant (D3.2, copy of #241): the reconciliation reaper is a
+        # non-owner — under formal leases it delegates to the lease-native
+        # reclaim. Unexpired lease never stolen; expired one recovered.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.list.return_value = []
+            observe = MagicMock()
+            jobs = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            jobs.enqueue(kind=PENDING_VERIFICATION_RECONCILIATION_JOB_KIND)
+            claimed_at = time.time() + 1
+            stuck = jobs.claim_next(
+                worker_id="dead-worker",
+                kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,),
+                now=claimed_at,
+            )
+            self.assertIsNotNone(stuck)
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+                stale_running_seconds=1,
+            )
+
+            self.assertEqual(runner.reclaim_stale_running(now=claimed_at + 2), 0)
+            held = jobs.get(stuck.job_id)
+            self.assertEqual(held.status, "running")
+            self.assertEqual(held.lease_owner, "dead-worker")
+            stale_events = [
+                call
+                for call in observe.emit.call_args_list
+                if call.args[0] == "daemon_reconciliation_job_stale_reclaimed"
+            ]
+            self.assertEqual(stale_events, [])
+
+            self.assertEqual(runner.reclaim_stale_running(now=claimed_at + 60), 1)
+            recovered = jobs.get(stuck.job_id)
+            self.assertEqual(recovered.status, "retrying")
+            self.assertIsNone(recovered.lease_owner)
+
     def test_reconciliation_run_once_closes_jobs_under_formal_leases(self) -> None:
         # Invariant (D2 rollout, analog of #240/#242/#243): with
         # formal_leases_enabled the runner must propagate the claimed

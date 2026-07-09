@@ -48,6 +48,7 @@ from claw_v2.coordinator import CoordinatorResult
 from claw_v2.evidence_ledger import EvidenceRef, record_claim
 from claw_v2.f2_recovery import F2RecoveryPlan, F2RecoveryStatus, plan_f2_recovery
 from claw_v2.goal_contract import create_goal
+from claw_v2.jobs import close_landed
 from claw_v2.maintenance import job_claim_block_reason
 from claw_v2.model_registry import model_overrides_from_state
 from claw_v2.subprocess_runner import run_subprocess_bounded
@@ -1627,6 +1628,9 @@ class TaskHandler:
         )
 
         reset_current_tool_contract_results(session_id=session_id, scope_id=task_id)
+        # D4.2: bound before the try — the except path closes the job and a
+        # pre-claim exception would otherwise hit an unbound local.
+        claimed_job = None
         try:
             if self._is_cancelled(task_id):
                 self._mark_cancelled_task_state(
@@ -1651,14 +1655,18 @@ class TaskHandler:
                     claims=[claim_id] if claim_id else [],
                 )
                 return
-            if not self._claim_autonomous_job(
+            claim_outcome = self._claim_autonomous_job(
                 task_id=task_id,
                 session_id=session_id,
                 objective=objective,
                 mode=mode,
                 job_id=job_id,
-            ):
+            )
+            if not claim_outcome:
                 return
+            # D4.2: the claimed record (None when there was no job to claim)
+            # threads its lease credentials into every close below.
+            claimed_job = None if isinstance(claim_outcome, bool) else claim_outcome
             if not resumed:
                 self._precheck_worktree(task_id=task_id, mode=mode)
             if self._telemetry_root is not None:
@@ -1986,6 +1994,7 @@ class TaskHandler:
                         "verification_status": verification_status,
                         "pending_action": pending_action,
                     },
+                    claimed=claimed_job,
                 )
                 if self.task_ledger is not None:
                     artifacts = self._pending_artifacts(
@@ -2063,6 +2072,7 @@ class TaskHandler:
                         "summary": str(completed_checkpoint.get("summary") or objective),
                         "terminal_status": terminal_status,
                     },
+                    claimed=claimed_job,
                 )
             else:
                 self._fail_autonomous_job(
@@ -2075,6 +2085,7 @@ class TaskHandler:
                         "session_id": session_id,
                         "verification_status": verification_status,
                     },
+                    claimed=claimed_job,
                 )
             if self.task_ledger is not None:
                 artifacts = self._completion_artifacts(
@@ -2150,6 +2161,7 @@ class TaskHandler:
                     mode=mode,
                     job_id=job_id,
                     exc=exc,
+                    claimed=claimed_job,
                 )
                 return
             error = f"{type(exc).__name__}: {exc}"
@@ -2162,6 +2174,7 @@ class TaskHandler:
                 job_id=job_id,
                 error=error,
                 checkpoint={"operation": "coordinator", "mode": mode, "session_id": session_id},
+                claimed=claimed_job,
             )
             checkpoint = {
                 "summary": f"Autonomous task failed: {error}",
@@ -3037,7 +3050,9 @@ class TaskHandler:
             ),
             last_checkpoint=checkpoint,
         )
-        self._fail_autonomous_job(
+        # D4.3 (MIXTO split): this caller never claimed the job — use the
+        # unclaimed-terminalization path, not the claimant-close helper.
+        self._terminalize_unclaimed_job(
             task_id=task_id,
             job_id=job_id,
             error=error,
@@ -3734,15 +3749,24 @@ class TaskHandler:
             },
         )
         if reclaim_running and job.status == "running":
-            retried = self.job_service.fail(
-                job.job_id,
-                error=f"reclaiming interrupted autonomous task: {reason}",
-                retry=True,
-                retry_delay_seconds=0,
-                checkpoint={"task_id": task_id, "session_id": session_id, "reason": reason},
-            )
-            if retried is not None:
-                job = retried
+            # D3.3 (2026-07-09, decision A — eventual SLA): under formal
+            # leases this resume path is NOT the lease owner; a local fail()
+            # could only ever be rejected by the guard (and passing the live
+            # lease's credentials here would STEAL a running job from its
+            # worker). Recovery belongs to the global autonomy lane
+            # (recover_stale_running every 300s -> reclaim_expired_leases
+            # under the flag): the resume re-attaches when the lane requeues
+            # the job. Latency: up to lane interval + lease TTL.
+            if not self.job_service.formal_leases_enabled:
+                retried = self.job_service.fail(
+                    job.job_id,
+                    error=f"reclaiming interrupted autonomous task: {reason}",
+                    retry=True,
+                    retry_delay_seconds=0,
+                    checkpoint={"task_id": task_id, "session_id": session_id, "reason": reason},
+                )
+                if retried is not None:
+                    job = retried
         self._update_task_job_metadata(task_id, job.job_id)
         return job.job_id
 
@@ -3754,10 +3778,20 @@ class TaskHandler:
         objective: str,
         mode: str,
         job_id: str | None,
-    ) -> bool:
+    ) -> Any:
+        """Claim the autonomous job.
+
+        D4.2 (2026-07-09): returns the claimed ``JobRecord`` (was ``bool``) so
+        callers can thread its lease credentials into the close helpers.
+        Returns ``True`` when there is nothing to claim (proceed without a
+        job) and a falsy value when the run must not proceed — truthiness is
+        preserved for the single ``if not ...`` caller.
+        """
         if self.job_service is None or job_id is None:
             return True
-        claimed = self.job_service.claim(job_id, worker_id="coordinator")
+        # D5-adjacent: coordinator runs measured up to 755s in prod, close to
+        # the 900s default TTL — give the lease explicit headroom.
+        claimed = self.job_service.claim(job_id, worker_id="coordinator", lease_seconds=3600.0)
         if claimed is not None:
             self.job_service.checkpoint(
                 job_id,
@@ -3768,8 +3802,10 @@ class TaskHandler:
                     "objective": objective,
                     "mode": mode,
                 },
+                lease_owner=claimed.lease_owner,
+                lease_generation=claimed.lease_generation,
             )
-            return True
+            return claimed
         record = self.job_service.get(job_id)
         if record is not None and record.status == "cancelled":
             self._mark_cancelled_task_state(
@@ -3821,14 +3857,41 @@ class TaskHandler:
         reason = getattr(self.job_service, "_safe_mode_reason", None) or job_claim_block_reason()
         return str(reason or "")
 
+    def _lease_kwargs_for(self, claimed: Any | None) -> dict[str, Any]:
+        if claimed is None:
+            return {}
+        return {
+            "lease_owner": claimed.lease_owner,
+            "lease_generation": claimed.lease_generation,
+        }
+
+    def _emit_autonomous_lease_lost(self, *, task_id: str, job_id: str, phase: str) -> None:
+        # D2/D4 (2026-07-09): the close was not ours — guard-rejected or
+        # another worker already terminalized the row (see jobs.close_landed).
+        self._emit(
+            "autonomous_job_lease_lost",
+            {"task_id": task_id, "job_id": job_id, "phase": phase},
+        )
+
     def _complete_autonomous_job(
-        self, *, task_id: str, job_id: str | None, result: dict[str, Any]
+        self,
+        *,
+        task_id: str,
+        job_id: str | None,
+        result: dict[str, Any],
+        claimed: Any | None = None,
     ) -> None:
         if self.job_service is None:
             return
         record_id = job_id or self._active_job_id_for_task(task_id)
         if record_id is not None:
-            self.job_service.complete(record_id, result=result)
+            completed = self.job_service.complete(
+                record_id, result=result, **self._lease_kwargs_for(claimed)
+            )
+            if claimed is not None and not close_landed(completed, claimed):
+                self._emit_autonomous_lease_lost(
+                    task_id=task_id, job_id=record_id, phase="complete"
+                )
 
     def _fail_autonomous_job(
         self,
@@ -3837,12 +3900,64 @@ class TaskHandler:
         job_id: str | None,
         error: str,
         checkpoint: dict[str, Any] | None = None,
+        claimed: Any | None = None,
     ) -> None:
+        """Claimant-side failure close (D4.3 split — see
+        _terminalize_unclaimed_job for the claim-blocked path)."""
         if self.job_service is None:
             return
         record_id = job_id or self._active_job_id_for_task(task_id)
         if record_id is not None:
+            failed = self.job_service.fail(
+                record_id,
+                error=error,
+                retry=False,
+                checkpoint=checkpoint,
+                **self._lease_kwargs_for(claimed),
+            )
+            if claimed is not None and not close_landed(failed, claimed):
+                self._emit_autonomous_lease_lost(task_id=task_id, job_id=record_id, phase="fail")
+
+    def _terminalize_unclaimed_job(
+        self,
+        *,
+        task_id: str,
+        job_id: str | None,
+        error: str,
+        checkpoint: dict[str, Any] | None = None,
+    ) -> None:
+        """Terminalize a job this handler never claimed (D4.3 split).
+
+        Legacy (flag off): direct fail(), as before. Under formal leases a
+        credential-less fail() on an unclaimed row is guard-rejected — the
+        sanctioned close is claim-then-fail WITH the acquired credentials.
+        If the claim itself is unavailable (safe mode / already owned), the
+        row is deliberately LEFT for the recovery lanes and an explicit
+        event records the deferral instead of a silent no-op.
+        """
+        if self.job_service is None:
+            return
+        record_id = job_id or self._active_job_id_for_task(task_id)
+        if record_id is None:
+            return
+        if not self.job_service.formal_leases_enabled:
             self.job_service.fail(record_id, error=error, retry=False, checkpoint=checkpoint)
+            return
+        owned = self.job_service.claim(record_id, worker_id="coordinator")
+        if owned is None:
+            self._emit(
+                "autonomous_job_terminalize_deferred",
+                {"task_id": task_id, "job_id": record_id, "error": error},
+            )
+            return
+        self.job_service.fail(
+            record_id,
+            error=error,
+            retry=False,
+            checkpoint=checkpoint,
+            lease_owner=owned.lease_owner,
+            lease_generation=owned.lease_generation,
+        )
 
     def _handle_stream_interrupted(
         self,
@@ -3853,6 +3968,7 @@ class TaskHandler:
         mode: str,
         job_id: str | None,
         exc: Any,
+        claimed: Any | None = None,
     ) -> None:
         goal_id = self._p0_goal_id_for_task(
             task_id, session_id=session_id, objective=objective, mode=mode
@@ -3868,7 +3984,9 @@ class TaskHandler:
             "partial_output": partial,
             "retryable": True,
         }
-        self._defer_autonomous_job(task_id=task_id, job_id=job_id, checkpoint=checkpoint)
+        self._defer_autonomous_job(
+            task_id=task_id, job_id=job_id, checkpoint=checkpoint, claimed=claimed
+        )
         if self.task_ledger is not None:
             artifacts = self._outcome_artifacts(
                 task_id=task_id,
@@ -3951,6 +4069,7 @@ class TaskHandler:
         task_id: str,
         job_id: str | None,
         checkpoint: dict[str, Any] | None = None,
+        claimed: Any | None = None,
     ) -> None:
         if self.job_service is None:
             return
@@ -3962,13 +4081,16 @@ class TaskHandler:
             record = self.job_service.get(record_id)
             if record is not None:
                 attempts = int(record.attempts or 0)
-            self.job_service.fail(
+            deferred = self.job_service.fail(
                 record_id,
                 error="verification pending",
                 retry=True,
                 retry_delay_seconds=min(300.0, 15.0 * (2.0 ** max(0, attempts - 1))),
                 checkpoint=checkpoint,
+                **self._lease_kwargs_for(claimed),
             )
+            if claimed is not None and not close_landed(deferred, claimed):
+                self._emit_autonomous_lease_lost(task_id=task_id, job_id=record_id, phase="defer")
 
     def _maybe_start_redrive(
         self,

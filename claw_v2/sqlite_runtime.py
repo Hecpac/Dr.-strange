@@ -875,6 +875,15 @@ class RuntimeDb:
         self._consecutive_locked_errors = 0
         self._persistent_lock_self_heal_used = False
         self._degraded_event_sink = degraded_event_sink
+        # D1: a detected WAL-generation swap defers its reconnect to the next
+        # operation entry (no live cursors there, and the old connection can
+        # close FIRST so its -shm mapping is released before reconnecting).
+        self._wal_swap_reconnect_pending = False
+        # D1 (review #251): drift checks only after actual writes —
+        # total_changes is a free C-level counter, so read-only ops skip the
+        # stat-based orphan probe entirely (mirrors LEGACY, which checked per
+        # persist; void WRITES are the target).
+        self._last_total_changes = 0
         # Opened through the shared connect/configure path so the durable
         # runtime pragmas (WAL, synchronous=FULL, busy_timeout, foreign_keys)
         # are preserved unchanged.
@@ -930,10 +939,81 @@ class RuntimeDb:
                 operation=operation,
                 sqlite_error_code=None,
             )
+        # D1: perform the deferred WAL-generation-swap reconnect at operation
+        # entry — no live cursors here, and never mid-transaction. The flag
+        # clears only on SUCCESS: a failed reconnect raises the degraded
+        # latch (fail closed), never a silent closed-connection limbo.
+        if (
+            self._wal_swap_reconnect_pending
+            and not self._in_transaction
+            and not self._connection_in_transaction()
+        ):
+            self._reconnect_after_wal_generation_swap(operation)
+            self._wal_swap_reconnect_pending = False
 
     def _record_sqlite_success(self) -> None:
         self._consecutive_locked_errors = 0
         self._persistent_lock_self_heal_used = False
+        # D1 A-light (2026-07-09): generation drift check on the write path,
+        # mirroring LEGACY observe.py:383-393. A victim of an external sidecar
+        # swap keeps writing "successfully" into the orphaned inode with no
+        # lock errors (void writes, live drill T10 2026-06-12), so the
+        # locked-exhaust hook alone is blind. Stamp only when MISSING (fresh
+        # DB before its first write — empirically the only reachable case;
+        # a blind per-write re-stamp would record the THIEF's inode and break
+        # detection). On a detected swap, reconnect THIS single connection
+        # (same mechanism as the persistent-lock self-heal — NOT the
+        # registry-wide WAL-heal cascade F1.3 retired); the fresh connection
+        # joins and re-stamps the on-disk generation. Never mid-transaction.
+        # Read-only ops skip the stat probe: total_changes is unchanged.
+        total_changes = self._conn.total_changes
+        if total_changes == self._last_total_changes:
+            return
+        self._last_total_changes = total_changes
+        if wal_generation_stamp_missing(self.db_path):
+            note_wal_generation(self.db_path)
+        elif wal_sidecars_orphaned(self.db_path):
+            # Success is recorded while the wrapper may still hold a cursor,
+            # so the reconnect is DEFERRED to the next operation entry
+            # (_ensure_operational): there are no live cursors there, and the
+            # old connection can close first so its -shm mapping is released
+            # before the new connection joins the on-disk generation.
+            self._wal_swap_reconnect_pending = True
+
+    def _reconnect_after_wal_generation_swap(self, operation: str) -> None:
+        old_conn = self._conn
+        try:
+            old_conn.close()
+        except Exception:
+            logger.debug(
+                "RuntimeDb old connection close failed before WAL swap reconnect",
+                exc_info=True,
+            )
+        try:
+            self._conn = connect_runtime_sqlite(self.db_path, row_factory=self._row_factory)
+        except Exception as exc:
+            # Old connection already closed and no new one landed — fail
+            # CLOSED via the degraded latch (review #251): a silent
+            # closed-connection limbo would turn every later op into an
+            # unexplained error while the pending flag was already consumed.
+            raise self._mark_degraded(
+                reason_code="wal_generation_swap_reconnect_failed",
+                message=f"WAL generation swap reconnect failed: {exc}",
+                operation=operation,
+                sqlite_error_code=_sqlite_error_code(exc),
+            ) from exc
+        self._last_total_changes = 0
+        logger.warning(
+            "RuntimeDb WAL generation swap self-heal reconnected path=%s",
+            self.db_path,
+        )
+        self._emit_runtime_db_event(
+            "runtime_db_wal_generation_swap_self_heal",
+            {
+                "reason_code": "wal_generation_swap",
+                "database_path": str(self.db_path),
+            },
+        )
 
     def _connection_in_transaction(self) -> bool:
         return bool(getattr(self._conn, "in_transaction", False))
