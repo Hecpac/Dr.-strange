@@ -489,6 +489,64 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
             ]
             self.assertEqual(stale_events[0]["job_id"], stuck.job_id)
 
+    def test_reclaim_stale_running_delegates_to_lease_reclaim_under_formal_leases(
+        self,
+    ) -> None:
+        # Invariant (A1): with formal_leases_enabled the age-based reclaim is
+        # replaced by the lease-native reclaim — this runner is not the lease
+        # owner, so its credential-less fail() could never pass the guard and
+        # would emit lying *_job_stale_reclaimed events. Two sides locked:
+        # an UNEXPIRED lease is never stolen (even past stale_running_seconds),
+        # and an EXPIRED lease IS recovered (no daemon lane covers scheduler.*
+        # kinds, so the runner must own its recovery).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = MagicMock()
+            jobs = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+                default_lease_seconds=30,
+            )
+            enqueue_scheduled_background_job(
+                job_name="perf_optimizer",
+                job_kind=PERF_OPTIMIZER_JOB_KIND,
+                resume_key=PERF_OPTIMIZER_RESUME_KEY,
+                job_service=jobs,
+            )
+            claimed_at = time.time() + 1
+            stuck = jobs.claim_next(
+                worker_id="dead-worker",
+                kinds=(PERF_OPTIMIZER_JOB_KIND,),
+                now=claimed_at,
+            )
+            self.assertIsNotNone(stuck)
+            runner = ScheduledBackgroundJobRunner(
+                job_name="perf_optimizer",
+                job_kind=PERF_OPTIMIZER_JOB_KIND,
+                job_service=jobs,
+                handler=MagicMock(return_value=None),
+                observe=observe,
+                stale_running_seconds=1,
+            )
+
+            # Side 1: lease still valid (age 2s >= stale_running_seconds=1,
+            # but TTL 30s not reached) — must NOT be stolen.
+            self.assertEqual(runner.reclaim_stale_running(now=claimed_at + 2), 0)
+            held = jobs.get(stuck.job_id)
+            self.assertEqual(held.status, "running")
+            self.assertEqual(held.lease_owner, "dead-worker")
+            stale_events = [
+                call
+                for call in observe.emit.call_args_list
+                if call.args[0] == "perf_optimizer_job_stale_reclaimed"
+            ]
+            self.assertEqual(stale_events, [])
+
+            # Side 2: lease expired (past TTL 30s) — recovery must happen.
+            self.assertEqual(runner.reclaim_stale_running(now=claimed_at + 60), 1)
+            recovered = jobs.get(stuck.job_id)
+            self.assertEqual(recovered.status, "retrying")
+            self.assertIsNone(recovered.lease_owner)
+
     def test_stale_running_kairos_tick_job_is_reclaimed_and_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = MagicMock()
