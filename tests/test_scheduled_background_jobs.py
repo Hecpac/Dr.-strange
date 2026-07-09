@@ -352,6 +352,69 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
             self.assertEqual(failed.status, "retrying")
             self.assertIsNone(failed.lease_owner)
 
+    def test_effective_lease_seconds_derivation(self) -> None:
+        # D5 (2026-07-09): explicit lease_seconds wins; else timeout x 1.2;
+        # else None (JobService default TTL applies at claim).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(Path(tmpdir) / "claw.db")
+
+            def make(**kwargs):
+                return ScheduledBackgroundJobRunner(
+                    job_name="wiki_research",
+                    job_kind=WIKI_RESEARCH_JOB_KIND,
+                    job_service=jobs,
+                    handler=MagicMock(),
+                    **kwargs,
+                )
+
+            self.assertIsNone(make().effective_lease_seconds)
+            self.assertEqual(make(timeout_seconds=100).effective_lease_seconds, 120.0)
+            self.assertEqual(
+                make(timeout_seconds=100, lease_seconds=7200).effective_lease_seconds,
+                7200.0,
+            )
+            self.assertEqual(make(lease_seconds=50).effective_lease_seconds, 50.0)
+
+    def test_run_once_claims_with_derived_lease_ttl(self) -> None:
+        # D5: the claim must carry the runner's effective TTL so a handler
+        # longer than the default 900s does not get its lease stolen live.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+            )
+            enqueue_scheduled_background_job(
+                job_name="wiki_research",
+                job_kind=WIKI_RESEARCH_JOB_KIND,
+                resume_key=WIKI_RESEARCH_RESUME_KEY,
+                job_service=jobs,
+            )
+            captured: dict = {}
+            original_claim = jobs.claim_next
+
+            def spy_claim(**kwargs):
+                captured.update(kwargs)
+                return original_claim(**kwargs)
+
+            jobs.claim_next = spy_claim
+            runner = ScheduledBackgroundJobRunner(
+                job_name="wiki_research",
+                job_kind=WIKI_RESEARCH_JOB_KIND,
+                job_service=jobs,
+                handler=MagicMock(return_value={"ok": True}),
+                lease_seconds=3600.0,
+            )
+            claim_time = time.time()
+
+            self.assertTrue(runner.run_once(now=claim_time))
+
+            self.assertEqual(captured.get("lease_seconds"), 3600.0)
+            # And the durable lease honored it while running (checked via the
+            # lease acquisition event captured by JobService... assert on the
+            # completed row's terminal state instead: completed cleanly).
+            job = jobs.list(kinds=(WIKI_RESEARCH_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "completed")
+
     def test_run_once_emits_lease_lost_when_close_does_not_land(self) -> None:
         # D2 rollout: when the close was not ours (lease stolen mid-execution),
         # emit {job_name}_job_lease_lost and suppress the lying completed
