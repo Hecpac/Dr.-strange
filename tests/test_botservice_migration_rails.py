@@ -41,7 +41,11 @@ EXPECTED_PRE_BRAIN_ORDER = [
     "_maybe_handle_actionable_task_request",
     "_maybe_handle_f4_deterministic_delegation",
     "_maybe_handle_task_intent",
-    "_maybe_handle_change_status_question",
+    # B4.5c: change_status migrated to the route registry via a per-slot
+    # bridge (dispatch_routes(self._change_status_slot, ...)) at this exact
+    # position — between task_intent and capability_route. The AST extractor
+    # only sees _maybe_handle_*/_handle_* names, so the registry-invoked slot
+    # is locked by tests/test_b45c_change_status_route_registry.py instead.
     "_maybe_handle_capability_route",
     "_handle_pending_tool_approval_grant_response",
     "_handle_autonomy_grant_response",

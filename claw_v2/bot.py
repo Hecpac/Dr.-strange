@@ -1308,6 +1308,13 @@ class BotService:
         self._operational_status_slot: tuple[Route, ...] = (
             Route(OPERATIONAL_STATUS_MATCHER.name, self._route_operational_status),
         )
+        # B4.5c: same per-slot bridge for change_status (§5.1 row 10, between
+        # task_intent and the meta-introspection guard + capability_route).
+        # No-guard variant (B4.5a shape): the legacy call site never
+        # quality-guarded this response.
+        self._change_status_slot: tuple[Route, ...] = (
+            Route(CHANGE_STATUS_MATCHER.name, self._route_change_status_question),
+        )
 
     @property
     def terminal_bridge(self) -> object | None:
@@ -4539,27 +4546,22 @@ class BotService:
             )
             self._remember_assistant_turn_state(session_id, stripped, task_intent_response)
             return task_intent_response
-        change_status_response = self._maybe_handle_change_status_question(
-            stripped, session_id=session_id
+        # B4.5c: change_status runs through the route registry (per-slot
+        # bridge) at its original order-locked slot; route_ctx from above is
+        # still current for this turn. No-guard variant (B4.5a shape).
+        change_status_outcome = dispatch_routes(
+            self._change_status_slot,
+            route_ctx,
+            on_decision=self._emit_route_decision,
         )
-        self._emit_dispatch_decision(
-            handler=CHANGE_STATUS_MATCHER.name,
-            route="intercepted" if change_status_response is not None else "fall_through",
-            reason=(
-                CHANGE_STATUS_MATCHER.matched_reason
-                if change_status_response is not None
-                else CHANGE_STATUS_MATCHER.unmatched_reason
-            ),
-            session_id=session_id,
-            text=stripped,
-            captured=change_status_response is not None,
-        )
-        if change_status_response is not None:
-            self._store_memory_turn(
-                session_id, stripped, change_status_response, assistant_limit=2000
+        if change_status_outcome.captured and change_status_outcome.response is not None:
+            self._post_capture_intercepted(
+                session_id,
+                stripped,
+                change_status_outcome.response,
+                assistant_limit=change_status_outcome.store_memory_limit,
             )
-            self._remember_assistant_turn_state(session_id, stripped, change_status_response)
-            return change_status_response
+            return change_status_outcome.response
         # PR 0B: meta/introspection guard. Reflective questions, clarification
         # asks, audit requests, and secret-shaped tokens must NOT reach the
         # coordinator/coding pipeline; route them to brain chat instead. An
@@ -5043,6 +5045,17 @@ class BotService:
         if response is None:
             return RouteOutcome.fall_through(reason=OPERATIONAL_STATUS_MATCHER.unmatched_reason)
         return RouteOutcome.intercepted(response, reason=OPERATIONAL_STATUS_MATCHER.matched_reason)
+
+    def _route_change_status_question(self, ctx: RouteContext) -> RouteOutcome:
+        # B4.5c: registry adapter over the B4.4a gate+renderer. Reason slugs
+        # come from the declarative matcher so dispatch_decision payloads stay
+        # byte-identical to the pre-registry call site.
+        response = self._maybe_handle_change_status_question(
+            ctx.stripped, session_id=ctx.session_id
+        )
+        if response is None:
+            return RouteOutcome.fall_through(reason=CHANGE_STATUS_MATCHER.unmatched_reason)
+        return RouteOutcome.intercepted(response, reason=CHANGE_STATUS_MATCHER.matched_reason)
 
     def _route_boot_context_status(self, ctx: RouteContext) -> RouteOutcome:
         response = self._maybe_handle_boot_context_status(
