@@ -171,6 +171,22 @@ class ScheduledBackgroundJobRunner:
         return claimed
 
     def reclaim_stale_running(self, *, now: float | None = None) -> int:
+        # A1 (2026-07-08): under formal leases the age-based path below can
+        # never pass the lease guard — this runner is not the lease owner, so
+        # its credential-less fail() would silently no-op while
+        # *_job_stale_reclaimed events (and the returned count) lie. Delegate
+        # to the lease-native reclaim instead: no daemon lane covers
+        # scheduler.* kinds (main.py only wires AUTONOMY kinds + notebooklm.*),
+        # so each runner keeps owning its recovery here. Latency is governed
+        # by the lease TTL instead of stale_running_seconds; an unexpired
+        # lease is never stolen.
+        if self.job_service.formal_leases_enabled:
+            reclaimed_jobs = self.job_service.reclaim_expired_leases(
+                kinds=(self.job_kind,),
+                now=now,
+                retry_delay_seconds=0.0,
+            )
+            return len(reclaimed_jobs)
         current = time.time() if now is None else now
         reclaimed = 0
         running = self.job_service.list(

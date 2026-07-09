@@ -3277,10 +3277,21 @@ do_not:
          zombie runner closing a job re-claimed by another worker. Do NOT
          "fix" a blocked close by exposing require_lease=False on the
          public API — that perforates the same invariant the guard exists
-         to enforce.
+         to enforce. Corollary (A1, 2026-07-08): a NON-owner recovery path
+         (e.g. ScheduledBackgroundJobRunner.reclaim_stale_running) must not
+         run its age-based fail() under formal leases — it could never pass
+         the guard and would emit lying *_job_stale_reclaimed events. It
+         DELEGATES to JobService.reclaim_expired_leases(kinds=(job_kind,))
+         instead: an unexpired lease is never stolen, and recovery latency
+         is the lease TTL, not stale_running_seconds. The delegation must
+         stay per-runner — no daemon recovery lane covers scheduler.* kinds
+         (main.py only wires AUTONOMY kinds + notebooklm.*), so removing it
+         would leave expired-lease scheduler rows stuck in running forever
+         (caught live in the A1 smoke, 2026-07-08).
     enforced_by: tests/test_scheduled_background_jobs.py::
                  ScheduledBackgroundJobTests::
-                 test_run_once_closes_jobs_under_formal_leases
+                 test_run_once_closes_jobs_under_formal_leases +
+                 test_reclaim_stale_running_delegates_to_lease_reclaim_under_formal_leases
 ```
 
 ---
