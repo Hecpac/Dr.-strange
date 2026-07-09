@@ -352,6 +352,53 @@ class ScheduledBackgroundJobTests(unittest.TestCase):
             self.assertEqual(failed.status, "retrying")
             self.assertIsNone(failed.lease_owner)
 
+    def test_run_once_emits_lease_lost_when_close_does_not_land(self) -> None:
+        # D2 rollout: when the close was not ours (lease stolen mid-execution),
+        # emit {job_name}_job_lease_lost and suppress the lying completed
+        # event (jobs.close_landed; pattern from #242/#243).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = MagicMock()
+            jobs = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+            )
+            enqueue_scheduled_background_job(
+                job_name="wiki_research",
+                job_kind=WIKI_RESEARCH_JOB_KIND,
+                resume_key=WIKI_RESEARCH_RESUME_KEY,
+                job_service=jobs,
+            )
+
+            def steal_lease(payload):
+                jobs.reclaim_expired_leases(
+                    kinds=(WIKI_RESEARCH_JOB_KIND,),
+                    now=time.time() + 100_000,
+                )
+                stolen = jobs.claim_next(
+                    worker_id="thief",
+                    kinds=(WIKI_RESEARCH_JOB_KIND,),
+                    now=time.time() + 100_001,
+                )
+                assert stolen is not None
+                return {"ok": True}
+
+            runner = ScheduledBackgroundJobRunner(
+                job_name="wiki_research",
+                job_kind=WIKI_RESEARCH_JOB_KIND,
+                job_service=jobs,
+                handler=steal_lease,
+                observe=observe,
+            )
+
+            self.assertTrue(runner.run_once())
+
+            emitted = [call.args[0] for call in observe.emit.call_args_list]
+            self.assertIn("wiki_research_job_lease_lost", emitted)
+            self.assertNotIn("wiki_research_job_completed", emitted)
+            job = jobs.list(kinds=(WIKI_RESEARCH_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "running")
+            self.assertEqual(job.lease_owner, "thief")
+
     def test_wiki_scrape_result_summary_keeps_bounded_source_diagnostics(self) -> None:
         source_results = [
             {

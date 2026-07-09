@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import Any, Callable
 
-from claw_v2.jobs import JobService
+from claw_v2.jobs import JobService, close_landed as _close_landed
 from claw_v2.observe import ObserveStream
 
 logger = logging.getLogger(__name__)
@@ -242,7 +242,7 @@ class ScheduledBackgroundJobRunner:
             duration_seconds = time.monotonic() - started
             error_preview = _safe_error_preview(exc)
             logger.exception("%s job failed", self.job_name)
-            self.job_service.fail(
+            failed = self.job_service.fail(
                 job.job_id,
                 error=error_preview,
                 retry=True,
@@ -250,27 +250,47 @@ class ScheduledBackgroundJobRunner:
                 lease_owner=job.lease_owner,
                 lease_generation=job.lease_generation,
             )
-            self._emit_job_event(
-                f"{self.job_name}_job_failed",
-                job,
-                duration_seconds=duration_seconds,
-                exc=exc,
-            )
+            if not _close_landed(failed, job):
+                # D2 rollout (#242/#243): the close was not ours — guard
+                # rejected it or another worker already terminalized the row.
+                # Emitting *_job_failed would lie about a row we do not own.
+                self._emit_job_event(
+                    f"{self.job_name}_job_lease_lost",
+                    job,
+                    duration_seconds=duration_seconds,
+                    extra={"phase": "fail"},
+                )
+            else:
+                self._emit_job_event(
+                    f"{self.job_name}_job_failed",
+                    job,
+                    duration_seconds=duration_seconds,
+                    exc=exc,
+                )
             return True
 
-        self.job_service.complete(
+        completed = self.job_service.complete(
             job.job_id,
             result=result,
             lease_owner=job.lease_owner,
             lease_generation=job.lease_generation,
         )
         duration_seconds = time.monotonic() - started
-        self._emit_job_event(
-            f"{self.job_name}_job_completed",
-            job,
-            duration_seconds=duration_seconds,
-            extra=result,
-        )
+        if not _close_landed(completed, job):
+            # D2 rollout: see above — do not claim a completion that was not ours.
+            self._emit_job_event(
+                f"{self.job_name}_job_lease_lost",
+                job,
+                duration_seconds=duration_seconds,
+                extra={"phase": "complete"},
+            )
+        else:
+            self._emit_job_event(
+                f"{self.job_name}_job_completed",
+                job,
+                duration_seconds=duration_seconds,
+                extra=result,
+            )
         return True
 
     def _execute(self, job: Any) -> dict[str, Any]:

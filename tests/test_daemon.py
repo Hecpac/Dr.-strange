@@ -248,6 +248,92 @@ class DaemonTickTests(unittest.TestCase):
             self.assertEqual(job.result["drain_result"], {"applied": 0})
             self.assertEqual(job.result["failure_review_result"], {"reconciled_count": 0})
 
+    def test_reconciliation_run_once_closes_jobs_under_formal_leases(self) -> None:
+        # Invariant (D2 rollout, analog of #240/#242/#243): with
+        # formal_leases_enabled the runner must propagate the claimed
+        # JobRecord's lease credentials so the durable row leaves 'running'.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            ledger.list.return_value = []
+            jobs = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+            )
+            daemon, observe = self._make_daemon_with_ledger(
+                ledger,
+                job_service=jobs,
+                pending_verification_drain_apply=False,
+            )
+            daemon.tick(now=1_000_000)
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+            )
+
+            self.assertTrue(runner.run_once())
+
+            job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "completed")
+            self.assertIsNone(job.lease_owner)
+            emitted = [call.args[0] for call in observe.emit.call_args_list]
+            self.assertIn("daemon_reconciliation_job_completed", emitted)
+            self.assertNotIn("daemon_reconciliation_job_lease_lost", emitted)
+
+    def test_reconciliation_run_once_emits_lease_lost_when_close_does_not_land(
+        self,
+    ) -> None:
+        # D2 rollout: a close that was not ours (lease stolen mid-execution)
+        # must emit daemon_reconciliation_job_lease_lost and suppress the
+        # completed event (see jobs.close_landed).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger = MagicMock()
+            ledger.mark_stale_running_lost.return_value = 0
+            ledger.list.return_value = []
+            jobs = JobService(
+                Path(tmpdir) / "claw.db",
+                formal_leases_enabled=True,
+            )
+            daemon, observe = self._make_daemon_with_ledger(
+                ledger,
+                job_service=jobs,
+                pending_verification_drain_apply=False,
+            )
+            daemon.tick(now=1_000_000)
+            runner = PendingVerificationReconciliationJobRunner(
+                job_service=jobs,
+                task_ledger=ledger,
+                observe=observe,
+            )
+            original_execute = runner._execute
+
+            def steal_lease_then_execute(job):
+                result = original_execute(job)
+                jobs.reclaim_expired_leases(
+                    kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,),
+                    now=time.time() + 100_000,
+                )
+                stolen = jobs.claim_next(
+                    worker_id="thief",
+                    kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,),
+                    now=time.time() + 100_001,
+                )
+                assert stolen is not None
+                return result
+
+            runner._execute = steal_lease_then_execute
+
+            self.assertTrue(runner.run_once())
+
+            emitted = [call.args[0] for call in observe.emit.call_args_list]
+            self.assertIn("daemon_reconciliation_job_lease_lost", emitted)
+            self.assertNotIn("daemon_reconciliation_job_completed", emitted)
+            self.assertNotIn("pending_verification_reconciliation_job_completed", emitted)
+            job = jobs.list(kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "running")
+            self.assertEqual(job.lease_owner, "thief")
+
     def test_maintenance_mode_blocks_drain_apply_even_when_payload_requests_apply(
         self,
     ) -> None:

@@ -12,6 +12,7 @@ from typing import Any, Callable, Coroutine
 from claw_v2.cron import CronScheduler
 from claw_v2.f4_delegation import F4DelegationJobRunner
 from claw_v2.heartbeat import HeartbeatService, HeartbeatSnapshot
+from claw_v2.jobs import close_landed as _close_landed
 from claw_v2.maintenance import drain_apply_block_reason
 from claw_v2.observe import ObserveStream
 from claw_v2.task_ledger import TaskLedger
@@ -823,21 +824,48 @@ class PendingVerificationReconciliationJobRunner:
         except Exception as exc:
             duration_seconds = time.monotonic() - started
             logger.exception("pending verification reconciliation job failed")
-            self.job_service.fail(
+            failed = self.job_service.fail(
                 job.job_id,
                 error=str(exc),
                 retry=True,
                 retry_delay_seconds=self.retry_delay_seconds,
+                lease_owner=job.lease_owner,
+                lease_generation=job.lease_generation,
             )
+            if not _close_landed(failed, job):
+                # D2 rollout (#242/#243): the close was not ours — the lease
+                # guard rejected it or another worker already terminalized the
+                # row. Do not emit the lying failed event.
+                self._emit_job_event(
+                    "daemon_reconciliation_job_lease_lost",
+                    job,
+                    duration_seconds=duration_seconds,
+                    extra={"phase": "fail"},
+                )
+            else:
+                self._emit_job_event(
+                    "daemon_reconciliation_job_failed",
+                    job,
+                    duration_seconds=duration_seconds,
+                    exc=exc,
+                )
+            return True
+        completed = self.job_service.complete(
+            job.job_id,
+            result=result,
+            lease_owner=job.lease_owner,
+            lease_generation=job.lease_generation,
+        )
+        duration_seconds = time.monotonic() - started
+        if not _close_landed(completed, job):
+            # D2 rollout: do not claim a completion that was not ours.
             self._emit_job_event(
-                "daemon_reconciliation_job_failed",
+                "daemon_reconciliation_job_lease_lost",
                 job,
                 duration_seconds=duration_seconds,
-                exc=exc,
+                extra={"phase": "complete"},
             )
             return True
-        self.job_service.complete(job.job_id, result=result)
-        duration_seconds = time.monotonic() - started
         self._emit_job_event(
             "daemon_reconciliation_job_completed",
             job,
