@@ -2052,6 +2052,24 @@ class JobService:
         )
 
 
+def close_landed(record: "JobRecord | None", claimed: Any) -> bool:
+    """True when a complete()/fail()/reschedule() outcome was the caller's own close.
+
+    ``None`` → the lease guard rejected the close (lease expired and/or
+    re-claimed mid-execution). A record whose ``lease_generation`` differs from
+    the caller's claimed record → the row was already closed by another worker
+    and came back through the idempotent-terminal path (#153), which preserves
+    the CLOSER's generation. Either way the caller must not report that close
+    as its own (D2 runner-side pattern, 2026-07-08). With formal leases off
+    both generations stay 0, so this is always True for a non-None record.
+    """
+    if record is None:
+        return False
+    return int(record.lease_generation or 0) == int(
+        getattr(claimed, "lease_generation", 0) or 0
+    )
+
+
 def _loads_json(value: Any) -> dict[str, Any]:
     if not value:
         return {}

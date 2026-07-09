@@ -154,6 +154,58 @@ class SkillExpandJobTests(unittest.TestCase):
             self.assertEqual(job.status, "running")
             self.assertEqual(job.lease_owner, "thief")
 
+    def test_run_once_emits_lease_lost_when_thief_already_terminalized(self) -> None:
+        # CodeRabbit P2 on #242: a late close on an ALREADY-TERMINAL row does
+        # not return None — _update returns the existing terminal record
+        # (idempotent, #153). The runner must still detect it was not its own
+        # close (the terminal row keeps the closer's lease_generation) and
+        # emit lease_lost instead of claiming the completion.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            observe = MagicMock()
+            jobs = JobService(Path(tmpdir) / "claw.db", formal_leases_enabled=True)
+            skill_registry = MagicMock()
+            skill_registry.auto_expand.return_value = {"gaps_found": 0, "skills_generated": 0}
+            enqueue_skill_expand_job(job_service=jobs, observe=observe, max_new=1)
+            runner = SkillExpandJobRunner(
+                job_service=jobs,
+                skill_registry=skill_registry,
+                observe=observe,
+            )
+            original_execute = runner._execute
+
+            def steal_and_terminalize(job):
+                result = original_execute(job)
+                jobs.reclaim_expired_leases(
+                    kinds=(SKILL_EXPAND_JOB_KIND,),
+                    now=time.time() + 100_000,
+                )
+                stolen = jobs.claim_next(
+                    worker_id="thief",
+                    kinds=(SKILL_EXPAND_JOB_KIND,),
+                    now=time.time() + 100_001,
+                )
+                assert stolen is not None
+                terminal = jobs.fail(
+                    stolen.job_id,
+                    error="thief_failed_it",
+                    retry=False,
+                    lease_owner=stolen.lease_owner,
+                    lease_generation=stolen.lease_generation,
+                )
+                assert terminal is not None and terminal.status == "failed"
+                return result
+
+            runner._execute = steal_and_terminalize
+
+            self.assertTrue(runner.run_once())
+
+            event_names = [call.args[0] for call in observe.emit.call_args_list]
+            self.assertIn("skill_expand_job_lease_lost", event_names)
+            self.assertNotIn("skill_expand_job_completed", event_names)
+            # The thief's terminal close stands: our runner must not re-label it.
+            job = jobs.list(kinds=(SKILL_EXPAND_JOB_KIND,), limit=10)[0]
+            self.assertEqual(job.status, "failed")
+
     def test_stale_running_skill_expand_job_is_reclaimed_and_completed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             observe = MagicMock()

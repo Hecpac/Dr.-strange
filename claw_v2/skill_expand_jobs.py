@@ -5,7 +5,7 @@ import re
 import time
 from typing import Any, Callable
 
-from claw_v2.jobs import JobService
+from claw_v2.jobs import JobService, close_landed as _close_landed
 from claw_v2.observe import ObserveStream
 from claw_v2.skills import SkillRegistry
 
@@ -159,10 +159,13 @@ class SkillExpandJobRunner:
                 lease_owner=job.lease_owner,
                 lease_generation=job.lease_generation,
             )
-            if failed is None:
-                # D2: the lease guard rejected the close (lease expired and/or
-                # re-claimed mid-execution) — emitting *_job_failed here would
-                # lie about a row this runner no longer owns.
+            if not _close_landed(failed, job):
+                # D2: the close was not OURS — either the guard rejected it
+                # (None: lease expired and/or re-claimed mid-execution) or the
+                # row was already terminalized by another worker (idempotent
+                # terminal return keeps the closer's lease_generation, #153).
+                # Emitting *_job_failed here would lie about a row this runner
+                # no longer owns.
                 self._emit_job_event(
                     "skill_expand_job_lease_lost",
                     job,
@@ -185,8 +188,8 @@ class SkillExpandJobRunner:
             lease_generation=job.lease_generation,
         )
         duration_seconds = time.monotonic() - started
-        if completed is None:
-            # D2: see above — the close did not land; do not claim completion.
+        if not _close_landed(completed, job):
+            # D2: see above — the close was not ours; do not claim completion.
             self._emit_job_event(
                 "skill_expand_job_lease_lost",
                 job,
