@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice b45a-cleanup-route-registry (2026-07-08): B4.5a — first route-registry migration. cleanup_status is now invoked through registry Route data via a minimal PER-SLOT bridge: dispatch_routes(self._cleanup_status_slot, route_ctx, on_decision=self._emit_route_decision) at the route's ORIGINAL order-locked slot (§5.1 row 7, after operational_status, before owner_delegation). It does NOT join _pre_brain_routes (the early registry slot, rows 2-3) — moving it there would reorder interception and telemetry rows. The Route name and reason slugs come from CLEANUP_STATUS_MATCHER, so dispatch_decision payloads are byte-identical; _post_capture_intercepted reproduces the legacy post-capture calls exactly. EXPECTED_PRE_BRAIN_ORDER deliberately edited (19->18 direct calls) in the same commit as this doc, per botservice_pre_brain_order_is_locked; the bridge position is locked by tests/test_b45a_cleanup_route_registry.py. Invariant b45a_cleanup_status_is_registry_invoked. Prior: b44c (PR #236, cf6acc3) operational-status matcher; b44b (PR #235, be7c6d8) cleanup-status matcher; b44a (PR #234, 31d489a) change-status matcher; b41 (PR #232, 8df1a6f) rails."
-doc_version: 3.10
-last_verified: 2026-07-08
-verification_method: "B4.5a local, isolated worktree: tests/test_b45a_cleanup_route_registry.py (bridge slot position via AST between legacy neighbors, no direct handler call in _handle_text_body, Route data from matcher, B4.4b live-smoke phrases behavior-identical through the registry path, dispatch_decision kwargs byte-locked) + tests/test_b44b_cleanup_matcher_pilot.py green UNEDITED (corpus + single-source) + tests/test_b44a/b44c pilots + tests/test_botservice_migration_rails.py with the DELIBERATE 18-entry order edit + tests/test_dispatch_route.py + tests/test_dispatch_routing.py."
+describes_commit: "micro-slice change-status-estados-plural (2026-07-09): FIRST deliberate, decision-backed widening of a declarative matcher (decision brief estados-plural, opción B — Hector authorized). CHANGE_STATUS_MATCHER's phrase regex tolerates the plural Telegram autocorrect produces: estados? (optional trailing s on estado ONLY; live incident 2026-07-08, 'Estados de los cambios' fell to the brain during the PR #234 smoke). Fullmatch semantics, the status/estatus tokens, and normalization stay legacy-identical. The legacy predicate stays FROZEN verbatim in the b44a pilot test; the delta is enumerated in DELIBERATE_WIDENING_DECISIONS with scope bounds (STILL_OUT_AFTER_WIDENING) and an executable overlap-matrix lock (operational_status relative behavior unchanged). The anti-widening rail is lifted for this enumerated delta only, not as a general license. Prior: b45a (PR #237, 291af94) cleanup route registry; b44c (PR #236, cf6acc3); b44b (PR #235, be7c6d8); b44a (PR #234, 31d489a); b41 (PR #232, 8df1a6f)."
+doc_version: 3.11
+last_verified: 2026-07-09
+verification_method: "estados-plural local, isolated worktree: tests/test_b44a_declarative_matcher_pilot.py (legacy corpus still agreeing where unwidened + DELIBERATE_WIDENING_DECISIONS legacy-vs-new + STILL_OUT_AFTER_WIDENING scope bounds + overlap matrix vs OPERATIONAL_STATUS_MATCHER) + tests/test_b44b/b44c pilots green UNEDITED + tests/test_b45a_cleanup_route_registry.py + tests/test_botservice_migration_rails.py green UNEDITED (no order/ratchet impact) + live Telegram smoke with the real autocorrect keyboard (pending at close). NOTE: doc_version may need re-numbering at merge if PR #245 (B4.5b, also 3.11 pending) lands first — reconcile to the higher number."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1144,6 +1144,13 @@ invariants:
           at the order-locked call site; bot.py carries no parallel recognizer.
           Decisions are old-vs-new corpus-locked (the legacy predicate is
           frozen verbatim in the pilot test as the reference implementation).
+          ONE deliberate, decision-backed divergence exists (2026-07-09,
+          estados-plural opción B): the live regex tolerates the plural
+          "estados" (estados?) that Telegram autocorrect produces; the delta
+          is enumerated in DELIBERATE_WIDENING_DECISIONS in the pilot test
+          with explicit scope bounds and an overlap-matrix lock, and the
+          legacy reference stays frozen. Any further widening needs its own
+          decision and its own enumerated corpus entry.
           Matcher extraction NEVER moves the order-locked call —
           botservice_pre_brain_order_is_locked stays green unedited; migrating
           a handler INTO the dispatch_routes registry is a SEPARATE deliberate

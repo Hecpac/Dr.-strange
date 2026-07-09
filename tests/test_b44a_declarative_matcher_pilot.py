@@ -8,7 +8,11 @@ from dataclasses import FrozenInstanceError
 import claw_v2.bot as bot_module
 from claw_v2.bot import BotService
 from claw_v2.bot_helpers import _normalize_command_text
-from claw_v2.dispatch.matchers import CHANGE_STATUS_MATCHER, RouteMatcher
+from claw_v2.dispatch.matchers import (
+    CHANGE_STATUS_MATCHER,
+    OPERATIONAL_STATUS_MATCHER,
+    RouteMatcher,
+)
 
 # B4.4a — declarative matcher pilot (invariant
 # b44a_route_matcher_is_declarative_data). The change-status route's match
@@ -24,6 +28,8 @@ from claw_v2.dispatch.matchers import CHANGE_STATUS_MATCHER, RouteMatcher
 # The recognizer EXACTLY as it lived at bot.py:971-979 up to 8df1a6f.
 # If the declarative matcher ever diverges from this behavior, the corpus
 # below fails and the divergence must be a deliberate, reviewed edit.
+# One such divergence exists — see DELIBERATE_WIDENING_DECISIONS below
+# (2026-07-09, estados-plural opción B); this legacy reference stays frozen.
 _LEGACY_STATUS_CHANGE_PHRASE_RE = re.compile(
     r"(?:estatus|status|estado)\s+de\s+(?:los\s+)?(?:fixes|cambios)"
 )
@@ -70,6 +76,69 @@ class ChangeStatusDecisionLockTests(unittest.TestCase):
                     legacy,
                     "declarative matcher diverged from the legacy recognizer",
                 )
+
+
+# 2026-07-09 — the FIRST deliberate, decision-backed divergence from the
+# legacy reference (decision brief: estados-plural, opción B; live autocorrect
+# incident 2026-07-08 during the PR #234 functional smoke). Scope is minimal:
+# "estados?" — an optional trailing s on "estado" ONLY. Everything else
+# (fullmatch semantics, the status/estatus tokens, normalization) stays
+# legacy-identical, which REPRESENTATIVE_DECISIONS above keeps proving.
+# The anti-widening rail is lifted for THIS enumerated delta only.
+DELIBERATE_WIDENING_DECISIONS: list[tuple[str, bool, bool]] = [
+    # (text, legacy decision, widened decision)
+    ("Estados de los cambios", False, True),  # the real autocorrect incident
+    ("estados de los fixes", False, True),
+    ("¿Estados de los cambios?", False, True),
+    ("  estados   de  los   cambios  ", False, True),
+]
+
+# Inputs that must stay OUT even after the widening — they bound its scope.
+STILL_OUT_AFTER_WIDENING: list[str] = [
+    "estados",  # bare plural: no phrase tail, still ambiguous
+    "dame el estados de los cambios",  # fullmatch: leading content falls through
+    "estadoss de los cambios",  # exactly one optional s
+    "statuses de los fixes",  # the optional s is NOT granted to "status"
+    "estatuses de los cambios",  # ...nor to "estatus"
+]
+
+
+class DeliberateWideningLockTests(unittest.TestCase):
+    def test_widened_cases_diverge_exactly_as_decided(self) -> None:
+        for text, legacy, widened in DELIBERATE_WIDENING_DECISIONS:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    _legacy_looks_like_change_status_question(text),
+                    legacy,
+                    "legacy reference must stay frozen",
+                )
+                self.assertEqual(
+                    CHANGE_STATUS_MATCHER.match(text),
+                    widened,
+                    "widened matcher must capture the enumerated plural cases",
+                )
+
+    def test_widening_scope_stays_minimal(self) -> None:
+        for text in STILL_OUT_AFTER_WIDENING:
+            with self.subTest(text=text):
+                self.assertFalse(_legacy_looks_like_change_status_question(text))
+                self.assertFalse(
+                    CHANGE_STATUS_MATCHER.match(text),
+                    "widening leaked beyond the enumerated delta",
+                )
+
+    def test_overlap_matrix_is_unchanged_by_the_widening(self) -> None:
+        # operational_status runs EARLIER in the order-locked chain (§5.1
+        # row 6), so the routes' relative behavior must not move:
+        # - bare plural phrase: operational falls through, change_status (a
+        #   later slot) now intercepts — exactly the decided UX fix;
+        # - greeting + plural phrase: operational still intercepts first via
+        #   its greeting branch ("estado" is a substring of "estados"), so
+        #   change_status never sees it — unchanged from before the widening.
+        self.assertFalse(OPERATIONAL_STATUS_MATCHER.match("estados de los cambios"))
+        self.assertTrue(CHANGE_STATUS_MATCHER.match("estados de los cambios"))
+        self.assertTrue(OPERATIONAL_STATUS_MATCHER.match("hola estados de los cambios"))
+        self.assertFalse(CHANGE_STATUS_MATCHER.match("hola estados de los cambios"))
 
 
 class ChangeStatusMatcherContractTests(unittest.TestCase):

@@ -36,8 +36,17 @@ class RouteMatcher:
     unmatched_reason: str
 
 
+# 2026-07-09 — FIRST deliberate divergence from the legacy predicate
+# (decision: estados-plural, opción B; live incident 2026-07-08: Telegram
+# autocorrect sent "Estados de los cambios" and the deterministic route
+# missed). Minimal scope: an optional trailing s on "estado" ONLY —
+# fullmatch semantics, the other tokens, and normalization stay
+# legacy-identical. The delta is enumerated in
+# tests/test_b44a_declarative_matcher_pilot.py (DELIBERATE_WIDENING_DECISIONS);
+# the legacy reference there stays frozen verbatim. This lifts the
+# anti-widening rail for THIS documented delta only, not as a license.
 _STATUS_CHANGE_PHRASE_RE = re.compile(
-    r"(?:estatus|status|estado)\s+de\s+(?:los\s+)?(?:fixes|cambios)"
+    r"(?:estatus|status|estados?)\s+de\s+(?:los\s+)?(?:fixes|cambios)"
 )
 
 
