@@ -769,6 +769,16 @@ class PendingVerificationReconciliationJobRunner:
         return claimed
 
     def reclaim_stale_running(self, *, now: float | None = None) -> int:
+        # D3.2 (2026-07-09, copy of #241): non-owner reaper — under formal
+        # leases delegate to the lease-native reclaim instead of a
+        # credential-less fail() that the guard would silently reject.
+        if self.job_service.formal_leases_enabled:
+            reclaimed_jobs = self.job_service.reclaim_expired_leases(
+                kinds=(PENDING_VERIFICATION_RECONCILIATION_JOB_KIND,),
+                now=now,
+                retry_delay_seconds=0.0,
+            )
+            return len(reclaimed_jobs)
         current = time.time() if now is None else now
         reclaimed = 0
         running = self.job_service.list(

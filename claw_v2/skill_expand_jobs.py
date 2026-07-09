@@ -96,6 +96,17 @@ class SkillExpandJobRunner:
         return claimed
 
     def reclaim_stale_running(self, *, now: float | None = None) -> int:
+        # D3.1 (2026-07-09, copy of #241): under formal leases this reaper is
+        # not the lease owner — its credential-less fail() could never pass
+        # the guard while events/count lie. Delegate to the lease-native
+        # reclaim (unexpired leases are never stolen; latency = lease TTL).
+        if self.job_service.formal_leases_enabled:
+            reclaimed_jobs = self.job_service.reclaim_expired_leases(
+                kinds=(SKILL_EXPAND_JOB_KIND,),
+                now=now,
+                retry_delay_seconds=0.0,
+            )
+            return len(reclaimed_jobs)
         current = time.time() if now is None else now
         reclaimed = 0
         running = self.job_service.list(
