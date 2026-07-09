@@ -3288,10 +3288,18 @@ do_not:
          (main.py only wires AUTONOMY kinds + notebooklm.*), so removing it
          would leave expired-lease scheduler rows stuck in running forever
          (caught live in the A1 smoke, 2026-07-08).
+         D2 companion pattern (runner-side, decided 2026-07-08): when
+         complete()/fail() returns None to a claimant runner, emit
+         `{job_name}_job_lease_lost` instead of the lying
+         *_job_completed/_failed event — the guard's None stays a plain
+         no-op contract in jobs.py; the honesty lives in each runner.
     enforced_by: tests/test_scheduled_background_jobs.py::
                  ScheduledBackgroundJobTests::
                  test_run_once_closes_jobs_under_formal_leases +
-                 test_reclaim_stale_running_delegates_to_lease_reclaim_under_formal_leases
+                 test_reclaim_stale_running_delegates_to_lease_reclaim_under_formal_leases +
+                 tests/test_skill_expand_jobs.py::SkillExpandJobTests::
+                 test_run_once_closes_jobs_under_formal_leases +
+                 test_run_once_emits_lease_lost_when_close_does_not_land
 ```
 
 ---

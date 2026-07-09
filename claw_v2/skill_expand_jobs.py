@@ -5,7 +5,7 @@ import re
 import time
 from typing import Any, Callable
 
-from claw_v2.jobs import JobService
+from claw_v2.jobs import JobService, close_landed as _close_landed
 from claw_v2.observe import ObserveStream
 from claw_v2.skills import SkillRegistry
 
@@ -151,31 +151,61 @@ class SkillExpandJobRunner:
             duration_seconds = time.monotonic() - started
             error_preview = _safe_error_preview(exc)
             logger.exception("skill_expand job failed")
-            self.job_service.fail(
+            failed = self.job_service.fail(
                 job.job_id,
                 error=error_preview,
                 retry=True,
                 retry_delay_seconds=self.retry_delay_seconds,
+                lease_owner=job.lease_owner,
+                lease_generation=job.lease_generation,
             )
-            self._emit_job_event(
-                "skill_expand_job_failed",
-                job,
-                duration_seconds=duration_seconds,
-                exc=exc,
-            )
+            if not _close_landed(failed, job):
+                # D2: the close was not OURS — either the guard rejected it
+                # (None: lease expired and/or re-claimed mid-execution) or the
+                # row was already terminalized by another worker (idempotent
+                # terminal return keeps the closer's lease_generation, #153).
+                # Emitting *_job_failed here would lie about a row this runner
+                # no longer owns.
+                self._emit_job_event(
+                    "skill_expand_job_lease_lost",
+                    job,
+                    duration_seconds=duration_seconds,
+                    extra={"phase": "fail"},
+                )
+            else:
+                self._emit_job_event(
+                    "skill_expand_job_failed",
+                    job,
+                    duration_seconds=duration_seconds,
+                    exc=exc,
+                )
             return True
 
-        self.job_service.complete(job.job_id, result=result)
-        duration_seconds = time.monotonic() - started
-        self._emit_job_event(
-            "skill_expand_job_completed",
-            job,
-            duration_seconds=duration_seconds,
-            extra={
-                "gaps_found": result.get("gaps_found"),
-                "skills_generated": result.get("skills_generated"),
-            },
+        completed = self.job_service.complete(
+            job.job_id,
+            result=result,
+            lease_owner=job.lease_owner,
+            lease_generation=job.lease_generation,
         )
+        duration_seconds = time.monotonic() - started
+        if not _close_landed(completed, job):
+            # D2: see above — the close was not ours; do not claim completion.
+            self._emit_job_event(
+                "skill_expand_job_lease_lost",
+                job,
+                duration_seconds=duration_seconds,
+                extra={"phase": "complete"},
+            )
+        else:
+            self._emit_job_event(
+                "skill_expand_job_completed",
+                job,
+                duration_seconds=duration_seconds,
+                extra={
+                    "gaps_found": result.get("gaps_found"),
+                    "skills_generated": result.get("skills_generated"),
+                },
+            )
         return True
 
     def _execute(self, job: Any) -> dict[str, Any]:

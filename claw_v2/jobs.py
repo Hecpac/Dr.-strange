@@ -118,9 +118,7 @@ class JobService:
         runtime_db: RuntimeDb | None = None,
         formal_leases_enabled: bool = False,
         default_lease_seconds: float = DEFAULT_JOB_LEASE_SECONDS,
-        admin_cancel_authority_validator: (
-            Callable[[str, str, str, str], bool] | None
-        ) = None,
+        admin_cancel_authority_validator: (Callable[[str, str, str, str], bool] | None) = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1213,9 +1211,7 @@ class JobService:
                         "previous_worker_id": _as_optional_str(row["worker_id"]),
                         "previous_lease_owner": _as_optional_str(row["lease_owner"]),
                         "previous_lease_generation": int(row["lease_generation"] or 0),
-                        "previous_lease_expires_at": _as_optional_float(
-                            row["lease_expires_at"]
-                        ),
+                        "previous_lease_expires_at": _as_optional_float(row["lease_expires_at"]),
                         "correlation_id": correlation_id,
                     }
                     cursor = self._conn.execute(
@@ -2050,6 +2046,22 @@ class JobService:
             job_id=job_id,
             payload=payload,
         )
+
+
+def close_landed(record: "JobRecord | None", claimed: Any) -> bool:
+    """True when a complete()/fail()/reschedule() outcome was the caller's own close.
+
+    ``None`` → the lease guard rejected the close (lease expired and/or
+    re-claimed mid-execution). A record whose ``lease_generation`` differs from
+    the caller's claimed record → the row was already closed by another worker
+    and came back through the idempotent-terminal path (#153), which preserves
+    the CLOSER's generation. Either way the caller must not report that close
+    as its own (D2 runner-side pattern, 2026-07-08). With formal leases off
+    both generations stay 0, so this is always True for a non-None record.
+    """
+    if record is None:
+        return False
+    return int(record.lease_generation or 0) == int(getattr(claimed, "lease_generation", 0) or 0)
 
 
 def _loads_json(value: Any) -> dict[str, Any]:
