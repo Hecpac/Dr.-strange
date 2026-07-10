@@ -16,14 +16,14 @@ from claw_v2.dispatch.matchers import OPERATIONAL_STATUS_MATCHER
 # invoked through registry Route data via a PER-SLOT bridge:
 # dispatch_routes(self._operational_status_slot, route_ctx,
 # on_decision=self._emit_route_decision) at the route's ORIGINAL order-locked
-# slot (§5.1 row 6, between operational_failure_summary and the B4.5a cleanup
+# slot (§5.1 row 6, between the B4.5d failure-summary bridge and B4.5a cleanup
 # bridge). It does NOT join _pre_brain_routes (the early slot, rows 2-3).
 # Delta vs B4.5a: this route has a quality guard. The guard stays AT THE CALL
 # SITE (after dispatch_routes, before _post_capture_intercepted) so the legacy
 # event order — dispatch_decision first, then a possible
 # quality_guard_triggered — is preserved exactly; the adapter itself is pure.
 # These tests lock: (1) the full bridge chain position
-# (failure_summary < OPERATIONAL_BRIDGE < CLEANUP_BRIDGE < owner_delegation);
+# (FAILURE_SUMMARY_BRIDGE < OPERATIONAL_BRIDGE < CLEANUP_BRIDGE < owner);
 # (2) no direct handler call remains in _handle_text_body; (3) the Route data
 # (name from the declarative matcher); (4) the B4.4c live-smoke phrases behave
 # identically through the registry path; (5) dispatch_decision kwargs stay
@@ -53,6 +53,7 @@ def _walk_excluding_closures(node: ast.AST):
 
 
 _BRIDGE_MARKERS = {
+    "_failure_summary_slot": "FAILURE_SUMMARY_BRIDGE",
     "_operational_status_slot": "OPERATIONAL_BRIDGE",
     "_cleanup_status_slot": "CLEANUP_BRIDGE",
 }
@@ -92,13 +93,14 @@ def _ordered_markers() -> list[str]:
 class BridgeSlotPositionTests(unittest.TestCase):
     def test_bridge_chain_sits_between_its_legacy_neighbors(self) -> None:
         order = _ordered_markers()
+        self.assertIn("FAILURE_SUMMARY_BRIDGE", order, "B4.5d bridge disappeared")
         self.assertIn("OPERATIONAL_BRIDGE", order, "per-slot registry bridge not found")
         self.assertIn("CLEANUP_BRIDGE", order, "B4.5a bridge disappeared")
-        failure = order.index("_maybe_handle_operational_failure_summary")
+        failure_bridge = order.index("FAILURE_SUMMARY_BRIDGE")
         op_bridge = order.index("OPERATIONAL_BRIDGE")
         cleanup_bridge = order.index("CLEANUP_BRIDGE")
         owner = order.index("_maybe_handle_owner_delegation_request")
-        self.assertLess(failure, op_bridge, "bridge must run after operational_failure_summary")
+        self.assertLess(failure_bridge, op_bridge, "operational must run after failure-summary")
         self.assertLess(op_bridge, cleanup_bridge, "bridge must run before the cleanup bridge")
         self.assertLess(cleanup_bridge, owner, "cleanup bridge must run before owner_delegation")
 

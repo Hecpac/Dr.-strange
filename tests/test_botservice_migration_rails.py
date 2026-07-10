@@ -23,10 +23,12 @@ EXPECTED_PRE_BRAIN_ORDER = [
     "_maybe_handle_brain_first_new_task",
     "_handle_pending_computer_approval_response",
     "_handle_pending_tasks_query",
-    "_maybe_handle_operational_failure_summary",
+    # B4.5d: failure_summary migrated to a per-slot registry bridge at this
+    # exact position — after pending_tasks and before the B4.5b operational
+    # bridge. Locked by tests/test_b45d_failure_summary_route_registry.py.
     # B4.5b: operational_status migrated to the route registry via a per-slot
     # bridge (dispatch_routes(self._operational_status_slot, ...)) at this
-    # exact position — between operational_failure_summary and the B4.5a
+    # exact position — between the B4.5d failure-summary bridge and the B4.5a
     # cleanup bridge. Locked by
     # tests/test_b45b_operational_status_route_registry.py.
     # B4.5a: cleanup_status migrated to the route registry via a per-slot
@@ -133,11 +135,8 @@ class PreBrainOrderLockTests(unittest.TestCase):
             idx["_handle_pending_computer_approval_response"],
             idx["_maybe_handle_telegram_imperative_request"],
         )
-        # Pending-tasks queries capture before the operational group.
-        self.assertLess(
-            idx["_handle_pending_tasks_query"],
-            idx["_maybe_handle_operational_failure_summary"],
-        )
+        # Pending-tasks-before-operational-group is bridge-locked by B4.5d;
+        # this legacy-call extractor intentionally omits registry slots.
         # F4-B1 deterministic delegation captures BEFORE the broad task-intent
         # router (exactly-once contract on the message id).
         self.assertLess(
