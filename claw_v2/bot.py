@@ -27,6 +27,7 @@ from claw_v2.dispatch.matchers import (
     CLEANUP_STATUS_MATCHER,
     OPERATIONAL_FAILURE_SUMMARY_MATCHER,
     OPERATIONAL_STATUS_MATCHER,
+    OWNER_DELEGATION_MATCHER,
 )
 from claw_v2.capability_router import (
     CapabilityRoute,
@@ -4418,12 +4419,12 @@ class BotService:
             runtime_channel=runtime_channel,
         )
         self._emit_dispatch_decision(
-            handler="owner_delegation",
+            handler=OWNER_DELEGATION_MATCHER.name,
             route="intercepted" if owner_delegation_response is not None else "fall_through",
             reason=(
-                "owner_delegation_matched"
+                OWNER_DELEGATION_MATCHER.matched_reason
                 if owner_delegation_response is not None
-                else "owner_delegation_no_match"
+                else OWNER_DELEGATION_MATCHER.unmatched_reason
             ),
             session_id=session_id,
             text=stripped,
@@ -11121,16 +11122,21 @@ class BotService:
         is just the dispatcher: classify → resolve → branch (safe → start
         delegated task; risky → approval question; unresolved → clarify).
         """
-        intent = detect_owner_delegation(text)
-        if intent is None:
+        if not OWNER_DELEGATION_MATCHER.match(text):
             if self.observe is not None:
                 try:
                     self.observe.emit(
-                        "owner_delegation_no_match",
+                        OWNER_DELEGATION_MATCHER.unmatched_reason,
                         payload={"session_id": session_id},
                     )
                 except Exception:
                     logger.debug("owner_delegation_no_match emit failed", exc_info=True)
+            return None
+        # The matcher owns the boolean route decision. This second classifier
+        # call materializes the rich intent fields needed by the resolver and
+        # kind-derived telemetry; it is not a parallel route recognizer.
+        intent = detect_owner_delegation(text)
+        if intent is None:  # defensive: matcher and classifier share one pure source
             return None
         if self.observe is not None:
             try:
@@ -11149,7 +11155,7 @@ class BotService:
             except Exception:
                 logger.debug("owner_delegation_match emit failed", exc_info=True)
         self._emit_dispatch_decision(
-            handler="owner_delegation",
+            handler=OWNER_DELEGATION_MATCHER.name,
             route="intercepted",
             reason=f"owner_delegation:{intent.kind}",
             session_id=session_id,
