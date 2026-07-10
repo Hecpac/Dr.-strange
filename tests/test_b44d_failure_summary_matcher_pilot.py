@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import re
+import textwrap
 import unittest
 from dataclasses import FrozenInstanceError
 
@@ -31,8 +33,9 @@ from claw_v2.dispatch.matchers import (
 # already-migrated matchers, including the ORDER-RESOLVED COLLISION family
 # with operational_status found by the adversarial verification (greeting +
 # status-token texts that also carry failure+report terms match BOTH — the
-# chain order, §5.1 row 5 before row 6, resolves the winner; that fact is
-# corpus-locked here so it cannot drift silently); (3) the dispatch_decision
+# chain order, §5.1 row 5 before row 6, resolves the winner; full-chain tests
+# in tests/test_telegram_imperative_router.py lock that winner and its A1
+# flip); (3) the dispatch_decision
 # telemetry slugs, byte-identical to pre-slice; (4) single-sourcing — bot.py
 # carries no parallel recognizer and BOTH order-locked call sites (the
 # _handle_text_body chain and handle_multimodal) consume the matcher. The
@@ -177,6 +180,11 @@ REPRESENTATIVE_DECISIONS: list[tuple[str, bool]] = [
     ("no estás completando ninguna tarea", True),
     ("porque no estás completando ninguna tarea", True),
     ("no puede completar ninguna tarea", True),
+    ("no puedes completar ninguna tarea", True),
+    ("no estas completando ninguna tarea", True),
+    ("no completa ninguna tarea", True),
+    ("no estas completando tareas", True),
+    ("no estás completando tareas", True),
     # A5+A6 positives — failure term + explicit report term (word-boundary).
     ("hoy hubo errores", True),
     ("dame el resumen de fallos de hoy", True),
@@ -184,9 +192,21 @@ REPRESENTATIVE_DECISIONS: list[tuple[str, bool]] = [
     ("explica los fallos", True),
     ("summary of errors today", True),
     ("Recuento de problemas de la sesión", True),
+    ("auditoria de problemas", True),
+    ("reporte de errores", True),
     # A2 escape — specific-task question WITH a broad report marker continues
     # into A5+A6 and captures.
     ("porque fallaste la tarea hoy", True),
+    ("porque fallaste la tarea resumen", True),
+    ("porque fallaste la tarea recuento", True),
+    ("porque fallaste la tarea auditoria", True),
+    ("porque fallaste la tarea auditoría", True),
+    ("porque fallaste la tarea fallos", True),
+    ("porque fallaste la tarea errores", True),
+    ("porque fallaste la tarea sesion", True),
+    ("porque fallaste la tarea sesión", True),
+    ("porque fallaste la tarea ninguna tarea", True),
+    ("porque fallaste la tarea tareas", True),
     # A5+A7 positives — failure term + causal + task context (NO explicit
     # report term). Includes the corrected row from the adversarial
     # verification: "fallaste" is simultaneously failure_term and
@@ -194,17 +214,45 @@ REPRESENTATIVE_DECISIONS: list[tuple[str, bool]] = [
     ("porque fallaste", True),
     ("por que hay errores en el daemon", True),
     ("porque el bot tiene problemas", True),
+    ("porque el agente tiene problemas", True),
+    ("porque la tarea tiene problemas", True),
+    ("porque las tareas tienen problemas", True),
+    ("porque el task tiene problemas", True),
+    ("porque completar tuvo problemas", True),
+    ("porque fallo", True),
+    ("porque fallos", True),
+    ("porque error", True),
+    ("porque errores", True),
+    ("porque bloqueo", True),
+    ("porque bloqueos", True),
     # A1 negatives — stop/scope markers kill everything, even with report
     # terms present.
     ("no continuemos", False),
     ("resumen de errores de hoy, pero no continuemos", False),
     ("paremos", False),
+    ("hoy hubo errores; no sigamos", False),
+    ("hoy hubo errores; no avancemos", False),
+    ("hoy hubo errores; detengamos", False),
+    ("hoy hubo errores; dejemos esto", False),
     # A2 negatives — specific single-task questions without broad markers
     # belong to the brain.
     ("porque fallaste la tarea", False),
     ("por que fallo el task", False),
+    ("por que fallo la tarea", False),
+    ("porque fallo la tarea", False),
+    ("porque fallo el task", False),
+    ("por que fallaste la tarea", False),
     # A4 negative — completion meta-question without "ninguna tarea".
     ("por que no completas", False),
+    ("porque no completas", False),
+    # A4 bypass — "ninguna tarea" deliberately continues into A5+A7.
+    ("por que no completas ninguna tarea", True),
+    # A5 missing failure-term literals, each paired with an A6 report term.
+    ("reporte: el agente ha fallado", True),
+    ("reporte del proceso perdido", True),
+    ("reporte de la tarea perdida", True),
+    ("reporte del bloqueo", True),
+    ("reporte: no completado", True),
     # A5 negatives — no failure term at all.
     ("dame el resumen de hoy", False),
     ("status del deploy", False),
@@ -212,9 +260,19 @@ REPRESENTATIVE_DECISIONS: list[tuple[str, bool]] = [
     # A6 word-boundary negative — "resumenes" does not satisfy the
     # word-bounded "resumen", and no other branch rescues it.
     ("fallo en resumenes", False),
+    # A6 left/right word boundaries reject letters, digits and underscores.
+    ("fallo;resumen", True),
+    ("fallo en preresumen", False),
+    ("fallo en 2resumen", False),
+    ("fallo en _resumen", False),
+    ("fallo en resumen2", False),
+    ("fallo en resumen_extra", False),
     # A7 negatives — failure term but neither report term nor causal+context.
     ("hubo un fallo", False),
     ("errores", False),
+    ("porque problemas", False),
+    # Exterior whitespace is stripped before the seven blocks run.
+    (" \t\nhoy hubo errores\r\n ", True),
     ("", False),
 ]
 
@@ -264,8 +322,8 @@ OVERLAP_DECISIONS: list[tuple[str, bool, bool, bool, bool]] = [
 # failure_summary (§5.1 row 5) dispatches BEFORE operational_status (row 6),
 # so when both are True, failure_summary wins. The A1 stop-marker row flips
 # ownership to operational_status because A1 rejects failure_summary before
-# its report branches run. Locked here so any edit that silently changes
-# either predicate — or a reorder that changes the winner — is corpus-visible.
+# its report branches run. This table locks both predicates; full-chain tests
+# in tests/test_telegram_imperative_router.py lock the winner and early returns.
 # (fs, op) per text; winner-by-order is fs whenever fs is True.
 ORDER_RESOLVED_COLLISIONS: list[tuple[str, bool, bool]] = [
     ("hola status hoy errores", True, True),
@@ -343,6 +401,27 @@ class FailureSummaryMatcherContractTests(unittest.TestCase):
         )
 
 
+def _function_ast(owner: object) -> ast.FunctionDef:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(owner)))
+    return next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+
+
+def _call_path(call: ast.Call) -> str | None:
+    parts: list[str] = []
+    node: ast.expr = call.func
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _expression_dump(source: str) -> str:
+    return ast.dump(ast.parse(source, mode="eval").body, include_attributes=False)
+
+
 class BotWiringSingleSourceTests(unittest.TestCase):
     def test_bot_carries_no_parallel_recognizer(self) -> None:
         # The 7-block inline predicate must not survive in the handler — the
@@ -363,18 +442,72 @@ class BotWiringSingleSourceTests(unittest.TestCase):
 
     def test_both_call_sites_take_slugs_from_the_matcher(self) -> None:
         # B4.4d does NOT move either order-locked call — it only re-sources
-        # the dispatch_decision slugs from the matcher data. Both the chain
-        # call site (_handle_text_body) and the multimodal one must consume
-        # the matcher, with no hardcoded slug strings left behind.
-        for owner in (BotService._handle_text_body, BotService.handle_multimodal):
-            src = inspect.getsource(owner)
+        # all six dispatch_decision kwargs from matcher data and the legacy
+        # call-site locals. Compare the real AST so dead references, swapped
+        # branches, positional args or a hardcoded slug cannot satisfy it.
+        common_expected = {
+            "handler": "OPERATIONAL_FAILURE_SUMMARY_MATCHER.name",
+            "route": ('"intercepted" if failure_summary_response is not None else "fall_through"'),
+            "reason": (
+                "OPERATIONAL_FAILURE_SUMMARY_MATCHER.matched_reason "
+                "if failure_summary_response is not None else "
+                "OPERATIONAL_FAILURE_SUMMARY_MATCHER.unmatched_reason"
+            ),
+            "session_id": "session_id",
+            "captured": "failure_summary_response is not None",
+        }
+        captured_dump = _expression_dump(common_expected["captured"])
+        for owner, text_expression in (
+            (BotService._handle_text_body, "stripped"),
+            (BotService.handle_multimodal, "multimodal_text"),
+        ):
+            fn = _function_ast(owner)
+            candidates: list[ast.Call] = []
+            for node in ast.walk(fn):
+                if (
+                    not isinstance(node, ast.Call)
+                    or _call_path(node) != "self._emit_dispatch_decision"
+                ):
+                    continue
+                kwargs = {keyword.arg: keyword.value for keyword in node.keywords}
+                captured = kwargs.get("captured")
+                if (
+                    captured is not None
+                    and ast.dump(captured, include_attributes=False) == captured_dump
+                ):
+                    candidates.append(node)
             with self.subTest(owner=owner.__name__):
-                self.assertIn("OPERATIONAL_FAILURE_SUMMARY_MATCHER.name", src)
-                self.assertIn("OPERATIONAL_FAILURE_SUMMARY_MATCHER.matched_reason", src)
-                self.assertIn("OPERATIONAL_FAILURE_SUMMARY_MATCHER.unmatched_reason", src)
-                self.assertNotIn('"operational_failure_summary_matched"', src)
-                self.assertNotIn('"operational_failure_summary_no_match"', src)
-                self.assertNotIn('handler="operational_failure_summary"', src)
+                self.assertEqual(len(candidates), 1)
+                call = candidates[0]
+                self.assertEqual(call.args, [])
+                actual = {
+                    keyword.arg: ast.dump(keyword.value, include_attributes=False)
+                    for keyword in call.keywords
+                }
+                expected = {
+                    key: _expression_dump(value)
+                    for key, value in {**common_expected, "text": text_expression}.items()
+                }
+                self.assertEqual(actual, expected)
+
+    def test_multimodal_failure_summary_position_is_ast_locked(self) -> None:
+        # Position is behavior: the literal-text gate and its telemetry must
+        # run once, after text extraction and before the multimodal brain fallback.
+        expected = [
+            "self._text_from_multimodal_blocks",
+            "self._maybe_handle_operational_failure_summary",
+            "self._emit_dispatch_decision",
+            "self.brain.handle_message",
+        ]
+        target_paths = set(expected)
+        calls = sorted(
+            (
+                (node.lineno, node.col_offset, path)
+                for node in ast.walk(_function_ast(BotService.handle_multimodal))
+                if isinstance(node, ast.Call) and (path := _call_path(node)) in target_paths
+            )
+        )
+        self.assertEqual([path for _, _, path in calls], expected)
 
 
 if __name__ == "__main__":
