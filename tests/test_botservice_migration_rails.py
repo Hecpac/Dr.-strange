@@ -34,10 +34,12 @@ EXPECTED_PRE_BRAIN_ORDER = [
     # B4.5a: cleanup_status migrated to the route registry via a per-slot
     # bridge (dispatch_routes(self._cleanup_status_slot, ...)) that runs at
     # this exact position — between the operational_status bridge and
-    # owner_delegation. The AST extractor only sees _maybe_handle_*/_handle_*
-    # names, so the registry-invoked slots are locked by
-    # tests/test_b45a_cleanup_route_registry.py and the b45b test instead.
-    "_maybe_handle_owner_delegation_request",
+    # the B4.5e owner bridge. B4.5e likewise migrates owner_delegation through
+    # dispatch_routes(self._owner_delegation_slot, ...) here, immediately
+    # before telegram imperative. The AST extractor only sees
+    # _maybe_handle_*/_handle_* names, so these registry slots are locked by
+    # the B45a/B45b/B45d/B45e route-registry tests instead. Deliberate 15->14
+    # direct-handler edit: owner is no longer called directly in this method.
     "_maybe_handle_telegram_imperative_request",
     "_handle_stateful_brain_shortcut",
     "_maybe_handle_actionable_task_request",

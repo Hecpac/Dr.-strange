@@ -22,9 +22,11 @@ from claw_v2.dispatch.matchers import (
 # B4.4e extracts only the owner-delegation route's boolean contract and base
 # dispatch-decision slugs. The rich OwnerDelegationIntent still comes from the
 # frozen classifier because resolution and dynamic ``owner_delegation:{kind}``
-# telemetry need its fields. Registry ownership is deliberately deferred to
-# B4.5e: this pilot locks the legacy text-chain call site and its 4000-character
-# memory limit, with no quality guard.
+# telemetry need its fields. Since B4.5e the text-chain invocation is registry-
+# owned at the same slot; this pilot keeps locking matcher ownership, the rich
+# legacy gate and dynamic inner telemetry. The B4.5e registry test locks the
+# separate static outer decision, 4000-character limit and no-quality-guard
+# call-site shape.
 
 
 _LEGACY_OWNER_DELEGATION_EXEC_PATTERNS_ES: tuple[str, ...] = (
@@ -394,42 +396,12 @@ class BotWiringSingleSourceTests(unittest.TestCase):
             [ast.dump(arg, include_attributes=False) for arg in event_args],
         )
 
-    def test_text_chain_base_dispatch_kwargs_come_from_matcher_data(self) -> None:
-        captured_dump = _expression_dump("owner_delegation_response is not None")
-        candidates: list[ast.Call] = []
-        for call in _dispatch_calls(BotService._handle_text_body):
-            kwargs = {keyword.arg: keyword.value for keyword in call.keywords}
-            captured = kwargs.get("captured")
-            if (
-                captured is not None
-                and ast.dump(captured, include_attributes=False) == captured_dump
-            ):
-                candidates.append(call)
-        self.assertEqual(len(candidates), 1)
-        call = candidates[0]
-        self.assertEqual(call.args, [])
-        actual = {
-            keyword.arg: ast.dump(keyword.value, include_attributes=False)
-            for keyword in call.keywords
-        }
-        expected = {
-            key: _expression_dump(value)
-            for key, value in {
-                "handler": "OWNER_DELEGATION_MATCHER.name",
-                "route": (
-                    '"intercepted" if owner_delegation_response is not None else "fall_through"'
-                ),
-                "reason": (
-                    "OWNER_DELEGATION_MATCHER.matched_reason "
-                    "if owner_delegation_response is not None else "
-                    "OWNER_DELEGATION_MATCHER.unmatched_reason"
-                ),
-                "session_id": "session_id",
-                "text": "stripped",
-                "captured": "owner_delegation_response is not None",
-            }.items()
-        }
-        self.assertEqual(actual, expected)
+    def test_registry_adapter_base_reason_slugs_come_from_matcher_data(self) -> None:
+        adapter_src = inspect.getsource(BotService._route_owner_delegation)
+        self.assertIn("OWNER_DELEGATION_MATCHER.matched_reason", adapter_src)
+        self.assertIn("OWNER_DELEGATION_MATCHER.unmatched_reason", adapter_src)
+        self.assertNotIn('"owner_delegation_matched"', adapter_src)
+        self.assertNotIn('"owner_delegation_no_match"', adapter_src)
 
     def test_inner_dispatch_keeps_kind_derived_dynamic_telemetry(self) -> None:
         calls = _dispatch_calls(BotService._maybe_handle_owner_delegation_request)
@@ -457,16 +429,23 @@ class BotWiringSingleSourceTests(unittest.TestCase):
 
     def test_text_chain_keeps_memory_limit_and_has_no_quality_guard(self) -> None:
         chain_src = inspect.getsource(BotService._handle_text_body)
-        start = chain_src.index("owner_delegation_response =")
+        start = chain_src.index("owner_delegation_outcome = dispatch_routes")
         end = chain_src.index("telegram_imperative_response", start)
         owner_block = chain_src[start:end]
-        self.assertIn("assistant_limit=4000", owner_block)
+        self.assertIn(
+            "assistant_limit=owner_delegation_outcome.store_memory_limit",
+            owner_block,
+        )
         self.assertNotIn("_quality_guard_response", owner_block)
-        self.assertNotIn("dispatch_routes", owner_block)
+        self.assertIn("dispatch_routes", owner_block)
+        self.assertIn(
+            "store_memory_limit=4000",
+            inspect.getsource(BotService._route_owner_delegation),
+        )
 
-    def test_b45e_registry_artifacts_do_not_exist(self) -> None:
-        self.assertNotIn("_owner_delegation_slot", inspect.getsource(BotService.__init__))
-        self.assertFalse(hasattr(BotService, "_route_owner_delegation"))
+    def test_b45e_registry_artifacts_exist_downstream_of_the_matcher(self) -> None:
+        self.assertIn("_owner_delegation_slot", inspect.getsource(BotService.__init__))
+        self.assertTrue(hasattr(BotService, "_route_owner_delegation"))
 
     def test_direct_detector_consumers_are_explicitly_bounded(self) -> None:
         # The two route-related consumers are the matcher predicate (boolean)
