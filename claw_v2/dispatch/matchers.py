@@ -14,7 +14,9 @@ text alone — no session_state, no reply context, no ledger reads.
 
 Matchers so far: change-status (B4.4a, from bot.py module level),
 cleanup-status (B4.4b) and operational-status (B4.4c), both from inline
-lines in their handler methods.
+lines in their handler methods, and operational-failure-summary (B4.4d,
+from the BotService._matches_operational_failure_summary_request
+staticmethod, ported verbatim).
 """
 
 from __future__ import annotations
@@ -152,4 +154,142 @@ OPERATIONAL_STATUS_MATCHER = RouteMatcher(
     match=looks_like_operational_status_query,
     matched_reason="operational_status_matched",
     unmatched_reason="operational_status_no_match",
+)
+
+
+def looks_like_operational_failure_summary_query(text: str) -> bool:
+    # B4.4d: VERBATIM port of BotService._matches_operational_failure_summary_request
+    # (bot.py up to eef92cf). The handler used to normalize first and pass the
+    # result; the predicate now owns that step (B4.4c precedent). The mix of
+    # substring membership everywhere and the regex word-boundary helper for
+    # single-word explicit report terms is deliberate and preserved unchanged
+    # — NO widening. The corpus + frozen legacy reference live in
+    # tests/test_b44d_failure_summary_matcher_pilot.py.
+    normalized = _normalize_command_text(text).strip()
+    if not normalized:
+        return False
+
+    def _contains_report_term(term: str) -> bool:
+        if " " in term:
+            return term in normalized
+        return (
+            re.search(
+                rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])",
+                normalized,
+            )
+            is not None
+        )
+
+    stop_or_scope_markers = (
+        "no continuemos",
+        "no sigamos",
+        "no avancemos",
+        "paremos",
+        "detengamos",
+        "dejemos esto",
+    )
+    if any(marker in normalized for marker in stop_or_scope_markers):
+        return False
+    specific_task_failure = (
+        "por que fallo la tarea",
+        "porque fallo la tarea",
+        "por que fallo el task",
+        "porque fallo el task",
+        "por que fallaste la tarea",
+        "porque fallaste la tarea",
+    )
+    broad_report_markers = (
+        "resumen",
+        "recuento",
+        "auditoria",
+        "auditoría",
+        "fallos",
+        "errores",
+        "hoy",
+        "sesion",
+        "sesión",
+        "ninguna tarea",
+        "tareas",
+    )
+    if any(phrase in normalized for phrase in specific_task_failure) and not any(
+        marker in normalized for marker in broad_report_markers
+    ):
+        return False
+    direct_complaints = (
+        "no puede completar ninguna tarea",
+        "no puedes completar ninguna tarea",
+        "no estas completando ninguna tarea",
+        "no estás completando ninguna tarea",
+        "no completa ninguna tarea",
+        "no estas completando tareas",
+        "no estás completando tareas",
+    )
+    if any(phrase in normalized for phrase in direct_complaints):
+        return True
+    if "ninguna tarea" not in normalized and (
+        "por que no completas" in normalized
+        or "por qué no completas" in normalized
+        or "porque no completas" in normalized
+    ):
+        return False
+    failure_terms = (
+        "fallo",
+        "fallos",
+        "fallaste",
+        "fallado",
+        "error",
+        "errores",
+        "problema",
+        "problemas",
+        "perdido",
+        "perdida",
+        "bloqueo",
+        "bloqueos",
+        "no complet",
+    )
+    explicit_report_terms = (
+        "resumen",
+        "recuento",
+        "auditoria",
+        "auditoría",
+        "reporte",
+        "explica",
+        "hoy",
+        "sesion",
+        "sesión",
+        "today",
+        "summary",
+    )
+    causal_terms = ("porque", "por que", "por qué")
+    task_context_terms = (
+        "agente",
+        "bot",
+        "daemon",
+        "tarea",
+        "tareas",
+        "task",
+        "complet",
+        "fallaste",
+        "fallo",
+        "fallos",
+        "error",
+        "errores",
+        "bloqueo",
+        "bloqueos",
+    )
+    has_failure_term = any(term in normalized for term in failure_terms)
+    if not has_failure_term:
+        return False
+    if any(_contains_report_term(term) for term in explicit_report_terms):
+        return True
+    return any(term in normalized for term in causal_terms) and any(
+        term in normalized for term in task_context_terms
+    )
+
+
+OPERATIONAL_FAILURE_SUMMARY_MATCHER = RouteMatcher(
+    name="operational_failure_summary",
+    match=looks_like_operational_failure_summary_query,
+    matched_reason="operational_failure_summary_matched",
+    unmatched_reason="operational_failure_summary_no_match",
 )
