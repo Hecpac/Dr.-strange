@@ -1297,6 +1297,15 @@ class BotService:
         self._pre_state_commands = self._build_pre_state_commands()
         self._post_shortcut_commands = self._build_post_shortcut_commands()
         self._pre_brain_routes: list[Route] = self._build_pre_brain_routes()
+        # B4.5d: per-slot bridge for failure_summary at its ORIGINAL text
+        # chain slot (§5.1 row 5). handle_multimodal stays legacy; the text
+        # chain quality guard stays at the call site.
+        self._failure_summary_slot: tuple[Route, ...] = (
+            Route(
+                OPERATIONAL_FAILURE_SUMMARY_MATCHER.name,
+                self._route_operational_failure_summary,
+            ),
+        )
         # B4.5a: per-slot registry bridge. cleanup_status is registry-invoked
         # but at its ORIGINAL legacy slot (§5.1 row 7) — it cannot join
         # _pre_brain_routes (the early slot) without reordering behavior.
@@ -4342,33 +4351,27 @@ class BotService:
                 session_id=session_id,
                 runtime_channel=runtime_channel,
             )
-        failure_summary_response = self._maybe_handle_operational_failure_summary(
-            stripped,
-            session_id=session_id,
+        # B4.5d: failure_summary runs through its one-Route per-slot bridge at
+        # the original chain position. The quality guard stays HERE, after
+        # dispatch, preserving dispatch_decision before quality_guard_triggered.
+        failure_summary_outcome = dispatch_routes(
+            self._failure_summary_slot,
+            route_ctx,
+            on_decision=self._emit_route_decision,
         )
-        self._emit_dispatch_decision(
-            handler=OPERATIONAL_FAILURE_SUMMARY_MATCHER.name,
-            route="intercepted" if failure_summary_response is not None else "fall_through",
-            reason=(
-                OPERATIONAL_FAILURE_SUMMARY_MATCHER.matched_reason
-                if failure_summary_response is not None
-                else OPERATIONAL_FAILURE_SUMMARY_MATCHER.unmatched_reason
-            ),
-            session_id=session_id,
-            text=stripped,
-            captured=failure_summary_response is not None,
-        )
-        if failure_summary_response is not None:
+        if failure_summary_outcome.captured and failure_summary_outcome.response is not None:
             failure_summary_response = self._quality_guard_response(
                 session_id,
                 stripped,
-                failure_summary_response,
+                failure_summary_outcome.response,
                 source="operational_failure_summary",
             )
-            self._store_memory_turn(
-                session_id, stripped, failure_summary_response, assistant_limit=3000
+            self._post_capture_intercepted(
+                session_id,
+                stripped,
+                failure_summary_response,
+                assistant_limit=failure_summary_outcome.store_memory_limit,
             )
-            self._remember_assistant_turn_state(session_id, stripped, failure_summary_response)
             return failure_summary_response
         # B4.5b: operational_status runs through the route registry (per-slot
         # bridge) at its original order-locked slot. The quality guard stays
@@ -5036,6 +5039,22 @@ class BotService:
         if response is None:
             return RouteOutcome.fall_through(reason=CLEANUP_STATUS_MATCHER.unmatched_reason)
         return RouteOutcome.intercepted(response, reason=CLEANUP_STATUS_MATCHER.matched_reason)
+
+    def _route_operational_failure_summary(self, ctx: RouteContext) -> RouteOutcome:
+        # B4.5d: pure registry adapter over the B4.4d gate+renderer. The text
+        # chain quality guard remains at the call site; multimodal stays legacy.
+        response = self._maybe_handle_operational_failure_summary(
+            ctx.stripped, session_id=ctx.session_id
+        )
+        if response is None:
+            return RouteOutcome.fall_through(
+                reason=OPERATIONAL_FAILURE_SUMMARY_MATCHER.unmatched_reason
+            )
+        return RouteOutcome.intercepted(
+            response,
+            reason=OPERATIONAL_FAILURE_SUMMARY_MATCHER.matched_reason,
+            store_memory_limit=3000,
+        )
 
     def _route_operational_status(self, ctx: RouteContext) -> RouteOutcome:
         # B4.5b: registry adapter over the B4.4c gate+renderer. PURE — the

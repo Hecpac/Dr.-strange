@@ -37,13 +37,11 @@ from claw_v2.dispatch.matchers import (
 # in tests/test_telegram_imperative_router.py lock that winner and its A1
 # flip); (3) the dispatch_decision
 # telemetry slugs, byte-identical to pre-slice; (4) single-sourcing — bot.py
-# carries no parallel recognizer and BOTH order-locked call sites (the
-# _handle_text_body chain and handle_multimodal) consume the matcher. The
-# pre-brain call order itself is locked by
-# tests/test_botservice_migration_rails.py, which this slice must never
-# require editing. Response rendering (_format_operational_failure_summary +
-# the call-site quality guard) stays on BotService — only the match side is
-# data.
+# carries no parallel recognizer. Since B4.5d the text chain consumes matcher
+# data through its per-slot Route adapter, while handle_multimodal remains the
+# legacy direct gate+telemetry call site and stays AST-locked here. Response
+# rendering (_format_operational_failure_summary + both call-site quality
+# guards) stays on BotService — only invocation ownership changed downstream.
 
 # The recognizer EXACTLY as it lived inline at bot.py:11594-11714 up to
 # eef92cf (the handler normalized first: _normalize_command_text(text).strip()
@@ -440,11 +438,10 @@ class BotWiringSingleSourceTests(unittest.TestCase):
         gate_src = inspect.getsource(BotService._maybe_handle_operational_failure_summary)
         self.assertIn("OPERATIONAL_FAILURE_SUMMARY_MATCHER.match", gate_src)
 
-    def test_both_call_sites_take_slugs_from_the_matcher(self) -> None:
-        # B4.4d does NOT move either order-locked call — it only re-sources
-        # all six dispatch_decision kwargs from matcher data and the legacy
-        # call-site locals. Compare the real AST so dead references, swapped
-        # branches, positional args or a hardcoded slug cannot satisfy it.
+    def test_legacy_multimodal_call_site_takes_slugs_from_the_matcher(self) -> None:
+        # B4.5d moves only the text-chain invocation into registry Route data.
+        # The multimodal block remains legacy and must keep all six real
+        # dispatch_decision kwargs sourced from the matcher/call-site locals.
         common_expected = {
             "handler": "OPERATIONAL_FAILURE_SUMMARY_MATCHER.name",
             "route": ('"intercepted" if failure_summary_response is not None else "fall_through"'),
@@ -457,38 +454,29 @@ class BotWiringSingleSourceTests(unittest.TestCase):
             "captured": "failure_summary_response is not None",
         }
         captured_dump = _expression_dump(common_expected["captured"])
-        for owner, text_expression in (
-            (BotService._handle_text_body, "stripped"),
-            (BotService.handle_multimodal, "multimodal_text"),
-        ):
-            fn = _function_ast(owner)
-            candidates: list[ast.Call] = []
-            for node in ast.walk(fn):
-                if (
-                    not isinstance(node, ast.Call)
-                    or _call_path(node) != "self._emit_dispatch_decision"
-                ):
-                    continue
-                kwargs = {keyword.arg: keyword.value for keyword in node.keywords}
-                captured = kwargs.get("captured")
-                if (
-                    captured is not None
-                    and ast.dump(captured, include_attributes=False) == captured_dump
-                ):
-                    candidates.append(node)
-            with self.subTest(owner=owner.__name__):
-                self.assertEqual(len(candidates), 1)
-                call = candidates[0]
-                self.assertEqual(call.args, [])
-                actual = {
-                    keyword.arg: ast.dump(keyword.value, include_attributes=False)
-                    for keyword in call.keywords
-                }
-                expected = {
-                    key: _expression_dump(value)
-                    for key, value in {**common_expected, "text": text_expression}.items()
-                }
-                self.assertEqual(actual, expected)
+        candidates: list[ast.Call] = []
+        for node in ast.walk(_function_ast(BotService.handle_multimodal)):
+            if not isinstance(node, ast.Call) or _call_path(node) != "self._emit_dispatch_decision":
+                continue
+            kwargs = {keyword.arg: keyword.value for keyword in node.keywords}
+            captured = kwargs.get("captured")
+            if (
+                captured is not None
+                and ast.dump(captured, include_attributes=False) == captured_dump
+            ):
+                candidates.append(node)
+        self.assertEqual(len(candidates), 1)
+        call = candidates[0]
+        self.assertEqual(call.args, [])
+        actual = {
+            keyword.arg: ast.dump(keyword.value, include_attributes=False)
+            for keyword in call.keywords
+        }
+        expected = {
+            key: _expression_dump(value)
+            for key, value in {**common_expected, "text": "multimodal_text"}.items()
+        }
+        self.assertEqual(actual, expected)
 
     def test_multimodal_failure_summary_position_is_ast_locked(self) -> None:
         # Position is behavior: the literal-text gate and its telemetry must

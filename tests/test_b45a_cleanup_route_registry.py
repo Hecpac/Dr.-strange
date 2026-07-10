@@ -47,11 +47,15 @@ def _walk_excluding_closures(node: ast.AST):
         yield from _walk_excluding_closures(child)
 
 
+_BRIDGE_MARKERS = {
+    "_failure_summary_slot": "FAILURE_SUMMARY_BRIDGE",
+    "_cleanup_status_slot": "CLEANUP_BRIDGE",
+}
+
+
 def _ordered_markers() -> list[str]:
-    """Source-order markers inside _handle_text_body: legacy dispatch-call
-    names plus a synthetic marker for the cleanup registry bridge (the
-    dispatch_routes call whose routes argument is self._cleanup_status_slot).
-    """
+    """Source-order markers inside _handle_text_body, including the
+    failure-summary and cleanup per-slot registry bridges."""
     fn = _handle_text_body_ast()
     markers: list[tuple[int, int, str]] = []
     for stmt in fn.body:
@@ -67,8 +71,8 @@ def _ordered_markers() -> list[str]:
                 name = func.id
                 if name == "dispatch_routes" and node.args:
                     first = node.args[0]
-                    if isinstance(first, ast.Attribute) and first.attr == "_cleanup_status_slot":
-                        markers.append((node.lineno, node.col_offset, "CLEANUP_BRIDGE"))
+                    if isinstance(first, ast.Attribute) and first.attr in _BRIDGE_MARKERS:
+                        markers.append((node.lineno, node.col_offset, _BRIDGE_MARKERS[first.attr]))
                     else:
                         markers.append((node.lineno, node.col_offset, "dispatch_routes"))
     markers.sort()
@@ -82,16 +86,16 @@ def _ordered_markers() -> list[str]:
 class BridgeSlotPositionTests(unittest.TestCase):
     def test_bridge_sits_between_its_legacy_neighbors(self) -> None:
         order = _ordered_markers()
+        self.assertIn("FAILURE_SUMMARY_BRIDGE", order, "B4.5d bridge disappeared")
         self.assertIn("CLEANUP_BRIDGE", order, "per-slot registry bridge not found")
-        # B4.5b migrated operational_status to its own per-slot bridge, so the
-        # direct-call anchor moved one row up (operational_failure_summary).
-        # The full bridge chain (failure_summary < OPERATIONAL_BRIDGE <
+        # B4.5d migrated failure_summary to its own per-slot bridge. The full
+        # chain (FAILURE_SUMMARY_BRIDGE < OPERATIONAL_BRIDGE <
         # CLEANUP_BRIDGE < owner) is locked by
-        # tests/test_b45b_operational_status_route_registry.py.
-        op = order.index("_maybe_handle_operational_failure_summary")
+        # tests/test_b45d_failure_summary_route_registry.py.
+        failure_bridge = order.index("FAILURE_SUMMARY_BRIDGE")
         bridge = order.index("CLEANUP_BRIDGE")
         owner = order.index("_maybe_handle_owner_delegation_request")
-        self.assertLess(op, bridge, "bridge must run after the operational group")
+        self.assertLess(failure_bridge, bridge, "cleanup must run after failure-summary")
         self.assertLess(bridge, owner, "bridge must run before owner_delegation")
 
     def test_no_direct_handler_call_remains_in_handle_text_body(self) -> None:

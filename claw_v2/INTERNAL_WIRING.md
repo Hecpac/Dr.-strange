@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice b44d-failure-summary-matcher (2026-07-09): B4.4d — the operational-failure-summary match contract moved to dispatch/matchers.py as frozen DATA (OPERATIONAL_FAILURE_SUMMARY_MATCHER), VERBATIM port of the deleted 7-block staticmethod _matches_operational_failure_summary_request (substring/regex word-boundary mix preserved, NO widening). Both order-locked call sites (chain row 5 + handle_multimodal) consume the matcher slugs; bot.py carries no parallel recognizer. Exhaustive per-block corpus + frozen legacy reference + cross-matcher overlap corpus incl. the ORDER-RESOLVED COLLISION family vs operational_status (adversarial verification 2026-07-09). Precondition for the authorized failure-summary bridge slice. Prior: b45c (PR #252, eef92cf) change-status route registry, CLOSED with live Telegram smoke 2026-07-09 (real owner message 'status de los cambios' intercepted deterministically, dispatch_decision change_status_question/intercepted/captured=true, daemon boot clean pid 22101); change-status-estados-plural (PR #246, 55455e4); b45b (PR #245, 3e6e133); b45a (PR #237, 291af94); b44c (PR #236, cf6acc3); b44b (PR #235, be7c6d8); b44a (PR #234, 31d489a); b41 (PR #232, 8df1a6f)."
-doc_version: 3.15
-last_verified: 2026-07-09
-verification_method: "B4.4d local, isolated worktree: tests/test_b44d_failure_summary_matcher_pilot.py (exhaustive REPRESENTATIVE_DECISIONS per predicate block + legacy staticmethod frozen verbatim as reference + OVERLAP_DECISIONS exclusivity sum(owners)<=1 vs op/chg/cln + ORDER_RESOLVED_COLLISIONS family locked with operational_status incl. the A1 stop-marker ownership flip + telemetry slugs byte-identical + single-source: staticmethod deleted, gate and BOTH call sites consume the matcher) + tests/test_b44a/b44b/b44c pilots green UNEDITED + tests/test_b45a/b45b/b45c route-registry tests green UNEDITED + tests/test_botservice_migration_rails.py green UNEDITED (matcher extraction moves no call; no order/ratchet impact — bot.py shrinks) + tests/test_dispatch_route.py + tests/test_dispatch_routing.py + tests/test_telegram_imperative_router.py (pre-existing failure-summary corpus behavior-identical + two full-chain winner tests: status-collision winner by order with early-return, and the A1 stop-marker ownership flip observed through _handle_text_body)."
+describes_commit: "slice b45d-failure-summary-route-registry (2026-07-10): B4.5d — operational_failure_summary is registry-invoked ONLY in the _handle_text_body chain via dispatch_routes(self._failure_summary_slot, route_ctx, on_decision=self._emit_route_decision) at its ORIGINAL §5.1 row 5 slot, after pending_tasks and before the B4.5b operational-status bridge. This is the guarded B4.5b variant: the pure _route_operational_failure_summary adapter takes reason slugs from OPERATIONAL_FAILURE_SUMMARY_MATCHER and propagates store_memory_limit=3000; the quality guard stays AT THE TEXT CALL SITE after dispatch and before _post_capture_intercepted, preserving dispatch_decision before quality_guard_triggered. handle_multimodal remains fully LEGACY and unchanged. EXPECTED_PRE_BRAIN_ORDER deliberately removes the direct text-chain call (16->15); B45a/B45b/B44d rails are re-based without weakening the multimodal AST lock. Invariant b45d_failure_summary_is_registry_invoked. Prior: b44d failure-summary matcher/rails; b45c change-status registry; b45b operational-status registry; b45a cleanup registry."
+doc_version: 3.16
+last_verified: 2026-07-10
+verification_method: "B4.5d local, isolated worktree: RED then GREEN in tests/test_b45d_failure_summary_route_registry.py (pending_tasks < FAILURE_SUMMARY_BRIDGE < OPERATIONAL_BRIDGE < CLEANUP_BRIDGE < owner via AST, no direct text-chain call, one-Route slot data, pure adapter with matcher reason slugs, exact dispatch_decision kwargs, store_memory_limit=3000, call-site quality guard order) + B4.4a/b/c/d matcher pilots + B4.5a/b/c registry tests with anchors re-based + tests/test_botservice_migration_rails.py with the deliberate 15-entry direct-call order + tests/test_telegram_imperative_router.py full-chain winners green UNEDITED. Static gates: matchers.py and Telegram full-chain file unedited; handle_multimodal source identical to HEAD; bot.py ratchet <=12322. No live smoke by frozen spec (post-merge human)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1244,6 +1244,41 @@ invariants:
          gate+renderer untouched — matcher extraction and registry
          invocation stay two separate, individually-locked steps.
 
+  b45d_failure_summary_is_registry_invoked:
+    rule: 'B4.5d. operational_failure_summary is invoked through registry
+          Route data ONLY in the _handle_text_body text chain: it runs
+          dispatch_routes(self._failure_summary_slot, route_ctx,
+          on_decision=self._emit_route_decision), a one-Route per-slot bridge
+          (Route(OPERATIONAL_FAILURE_SUMMARY_MATCHER.name,
+          self._route_operational_failure_summary)) at the ORIGINAL §5.1 row
+          5 slot, after pending_tasks and before the B4.5b operational-status
+          bridge. It must NOT join _pre_brain_routes. The adapter is pure:
+          it calls the legacy gate with ctx.stripped + ctx.session_id, takes
+          both reason slugs from OPERATIONAL_FAILURE_SUMMARY_MATCHER, and
+          propagates store_memory_limit=3000. The text-chain quality guard
+          stays AT THE CALL SITE after dispatch and before
+          _post_capture_intercepted (source="operational_failure_summary",
+          assistant_limit=outcome.store_memory_limit), preserving
+          dispatch_decision before a possible quality_guard_triggered.
+          handle_multimodal is explicitly NOT migrated: its direct gate,
+          inline dispatch_decision, quality guard, store/remember and return
+          remain LEGACY and AST-locked by the B4.4d pilot. The full-chain
+          collision winner and A1 ownership flip remain unchanged.'
+    chokepoints:
+      - bot.BotService.__init__  # _failure_summary_slot construction
+      - bot.BotService._route_operational_failure_summary
+      - bot.BotService._handle_text_body
+      - bot.BotService.handle_multimodal  # legacy, must not migrate in B4.5d
+    enforced_by:
+      - tests/test_b45d_failure_summary_route_registry.py
+      - tests/test_b44d_failure_summary_matcher_pilot.py
+      - tests/test_botservice_migration_rails.py
+      - tests/test_telegram_imperative_router.py::test_failure_summary_wins_status_collision_and_early_returns
+      - tests/test_telegram_imperative_router.py::test_stop_marker_flips_status_collision_to_operational_status
+    why: Fourth per-slot migration closes the guarded compound-route case
+         while proving invocation ownership can split by entry point: the
+         text chain moves to Route data without silently migrating multimodal.
+
   b45b_operational_status_is_registry_invoked:
     rule: 'B4.5b. The operational_status route is invoked through registry
           Route data, not a direct BotService call: _handle_text_body runs
@@ -1251,8 +1286,8 @@ invariants:
           on_decision=self._emit_route_decision) — a one-Route per-slot
           bridge (Route(OPERATIONAL_STATUS_MATCHER.name,
           self._route_operational_status)) at the route ORIGINAL slot:
-          after _maybe_handle_operational_failure_summary, before the
-          B4.5a cleanup bridge. The route must NOT join _pre_brain_routes
+          after the B4.5d failure-summary per-slot bridge, before the B4.5a
+          cleanup bridge. The route must NOT join _pre_brain_routes
           (the early registry slot, rows 2-3). Delta vs B4.5a: this route
           quality-guards its response — the guard stays AT THE CALL SITE
           (dispatch_routes first, then _quality_guard_response with
@@ -1351,10 +1386,11 @@ invariants:
           single-word terms -> causal+task-context; the deliberate substring/
           regex mix is preserved unchanged, NO widening) is the single source
           for the gate in
-          BotService._maybe_handle_operational_failure_summary and the
-          dispatch_decision slugs at BOTH order-locked call sites — the
-          _handle_text_body chain row 5 AND handle_multimodal; bot.py carries
-          no parallel recognizer (the staticmethod is deleted). Decisions are
+          BotService._maybe_handle_operational_failure_summary, the Route
+          adapter/slot that owns _handle_text_body since B4.5d, and the
+          inline dispatch_decision slugs in legacy handle_multimodal; bot.py
+          carries no parallel recognizer (the staticmethod is deleted).
+          Decisions are
           old-vs-new corpus-locked (legacy predicate frozen verbatim in the
           slice test, exhaustive per-block corpus) AND cross-matcher overlap
           is corpus-locked vs operational-status, change-status and
@@ -1365,18 +1401,19 @@ invariants:
           ownership to operational_status). Response rendering
           (_format_operational_failure_summary) and the call-site quality
           guard stay on BotService; only the match side moved. Matcher
-          extraction NEVER moves the order-locked calls —
-          botservice_pre_brain_order_is_locked stays green unedited;
-          migrating the handler INTO the dispatch_routes registry is a
-          SEPARATE deliberate step (the authorized follow-up bridge slice)
-          that edits EXPECTED_PRE_BRAIN_ORDER and §5.1. Per the Routing
-          Contract the predicate reads the literal message text only — no
-          session_state, no ledger.'
+          extraction itself never moved calls. B4.5d later migrates ONLY the
+          text-chain invocation into dispatch_routes and deliberately edits
+          EXPECTED_PRE_BRAIN_ORDER + §5.1; handle_multimodal remains legacy.
+          Per the Routing Contract the predicate reads literal message text
+          only — no session_state, no ledger.'
     chokepoints:
       - dispatch.matchers.OPERATIONAL_FAILURE_SUMMARY_MATCHER
       - bot.BotService._maybe_handle_operational_failure_summary
+      - bot.BotService._route_operational_failure_summary
+      - bot.BotService.handle_multimodal
     enforced_by:
       - tests/test_b44d_failure_summary_matcher_pilot.py
+      - tests/test_b45d_failure_summary_route_registry.py
       - tests/test_telegram_imperative_router.py::test_failure_summary_wins_status_collision_and_early_returns
       - tests/test_telegram_imperative_router.py::test_stop_marker_flips_status_collision_to_operational_status
       - tests/test_b45b_operational_status_route_registry.py
@@ -3061,7 +3098,7 @@ in `_handle_text_body` (verified 2026-06-10):
 | 2 | `_maybe_handle_operational_alert` | "alertas operacionales" + parse |
 | 3 | `_maybe_handle_boot_context_status` | boot context queries |
 | 4 | `_maybe_handle_pending_tasks_query` | "tareas pendientes" / "pendientes" |
-| 5 | `_maybe_handle_operational_failure_summary` | failure summary queries; matcher = declarative `OPERATIONAL_FAILURE_SUMMARY_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4d — invariant `b44d_failure_summary_matcher_is_declarative_data`, verbatim 7-block predicate, no widening). TWO order-locked call sites consume the matcher slugs: this chain row and `handle_multimodal`. ORDER-RESOLVED COLLISIONS exist with operational_status (row 6): greeting+status-token texts that also carry failure+report terms match BOTH matchers — this row runs first and wins; corpus-locked in the b44d pilot test |
+| 5 | operational failure summary (registry bridge in text chain; legacy in multimodal) | failure summary queries; matcher = declarative `OPERATIONAL_FAILURE_SUMMARY_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4d, no widening). Since B4.5d ONLY `_handle_text_body` is registry-invoked here via `dispatch_routes(self._failure_summary_slot, ...)` (invariant `b45d_failure_summary_is_registry_invoked`) — after pending_tasks, before operational_status, never in `_pre_brain_routes`; its quality guard remains at the text call site after dispatch with limit 3000. `handle_multimodal` remains the unchanged LEGACY direct gate+telemetry+guard/store block. ORDER-RESOLVED COLLISIONS with row 6 remain: this row wins unless A1 rejects failure-summary, then operational_status owns the turn |
 | 6 | operational status (registry bridge) | operational status questions; matcher = declarative `OPERATIONAL_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4c — invariant `b44c_operational_status_matcher_is_declarative_data`). Since B4.5b the route is REGISTRY-invoked at this same slot via the per-slot bridge `dispatch_routes(self._operational_status_slot, ...)` (invariant `b45b_operational_status_is_registry_invoked`) — NOT in the early `_pre_brain_routes` slot; the quality guard stays at the call site (dispatch_decision first, then a possible quality_guard_triggered). Greeting branch runs before change-status (row 10): "hola/buen dia + estado\|estatus\|status" intercepts here |
 | 7 | cleanup status / owner delegation / `_maybe_handle_telegram_imperative_request` | explicit operator imperatives; unresolved context → fallthrough_to_brain (never clarifies). Cleanup-status matcher = declarative `CLEANUP_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4b — invariant `b44b_cleanup_matcher_is_declarative_data`); since B4.5a the route is REGISTRY-invoked at this same slot via the per-slot bridge `dispatch_routes(self._cleanup_status_slot, ...)` (invariant `b45a_cleanup_status_is_registry_invoked`) — it is NOT in the early `_pre_brain_routes` slot |
 | 8 | `_maybe_handle_actionable_task_request` | runtime=Telegram + state-derived objective; unresolved follow-up → fallthrough |
