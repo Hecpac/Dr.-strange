@@ -46,6 +46,7 @@ _BRIDGE_MARKERS = {
     "_failure_summary_slot": "FAILURE_SUMMARY_BRIDGE",
     "_operational_status_slot": "OPERATIONAL_BRIDGE",
     "_cleanup_status_slot": "CLEANUP_BRIDGE",
+    "_owner_delegation_slot": "OWNER_DELEGATION_BRIDGE",
 }
 
 
@@ -88,15 +89,18 @@ class BridgeSlotPositionTests(unittest.TestCase):
         self.assertIn("FAILURE_SUMMARY_BRIDGE", order, "failure-summary bridge not found")
         self.assertIn("OPERATIONAL_BRIDGE", order, "B4.5b bridge disappeared")
         self.assertIn("CLEANUP_BRIDGE", order, "B4.5a bridge disappeared")
+        self.assertIn("OWNER_DELEGATION_BRIDGE", order, "B4.5e bridge disappeared")
         pending = order.index("_handle_pending_tasks_query")
         failure_bridge = order.index("FAILURE_SUMMARY_BRIDGE")
         op_bridge = order.index("OPERATIONAL_BRIDGE")
         cleanup_bridge = order.index("CLEANUP_BRIDGE")
-        owner = order.index("_maybe_handle_owner_delegation_request")
+        owner_bridge = order.index("OWNER_DELEGATION_BRIDGE")
+        imperative = order.index("_maybe_handle_telegram_imperative_request")
         self.assertLess(pending, failure_bridge, "failure bridge must run after pending_tasks")
         self.assertLess(failure_bridge, op_bridge, "failure bridge must run before operational")
         self.assertLess(op_bridge, cleanup_bridge, "operational must run before cleanup")
-        self.assertLess(cleanup_bridge, owner, "cleanup must run before owner_delegation")
+        self.assertLess(cleanup_bridge, owner_bridge, "cleanup must run before owner_delegation")
+        self.assertLess(owner_bridge, imperative, "owner must run before imperative")
 
     def test_bridge_dispatches_exactly_once(self) -> None:
         self.assertEqual(

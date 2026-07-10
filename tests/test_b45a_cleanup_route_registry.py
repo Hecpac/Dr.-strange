@@ -16,7 +16,7 @@ from claw_v2.dispatch.matchers import CLEANUP_STATUS_MATCHER
 # through registry Route data via a PER-SLOT bridge:
 # dispatch_routes(self._cleanup_status_slot, route_ctx,
 # on_decision=self._emit_route_decision) at the route's ORIGINAL order-locked
-# slot (§5.1 row 7, between operational_status and owner_delegation). It does
+# slot (§5.1 row 7, between operational_status and the B4.5e owner bridge). It does
 # NOT join _pre_brain_routes — that registry runs at the EARLY slot (rows
 # 2-3) and moving cleanup there would reorder interception and telemetry
 # rows. These tests lock: (1) the bridge's source position between its legacy
@@ -50,12 +50,13 @@ def _walk_excluding_closures(node: ast.AST):
 _BRIDGE_MARKERS = {
     "_failure_summary_slot": "FAILURE_SUMMARY_BRIDGE",
     "_cleanup_status_slot": "CLEANUP_BRIDGE",
+    "_owner_delegation_slot": "OWNER_DELEGATION_BRIDGE",
 }
 
 
 def _ordered_markers() -> list[str]:
     """Source-order markers inside _handle_text_body, including the
-    failure-summary and cleanup per-slot registry bridges."""
+    failure-summary, cleanup and owner per-slot registry bridges."""
     fn = _handle_text_body_ast()
     markers: list[tuple[int, int, str]] = []
     for stmt in fn.body:
@@ -88,15 +89,18 @@ class BridgeSlotPositionTests(unittest.TestCase):
         order = _ordered_markers()
         self.assertIn("FAILURE_SUMMARY_BRIDGE", order, "B4.5d bridge disappeared")
         self.assertIn("CLEANUP_BRIDGE", order, "per-slot registry bridge not found")
+        self.assertIn("OWNER_DELEGATION_BRIDGE", order, "B4.5e bridge disappeared")
         # B4.5d migrated failure_summary to its own per-slot bridge. The full
         # chain (FAILURE_SUMMARY_BRIDGE < OPERATIONAL_BRIDGE <
-        # CLEANUP_BRIDGE < owner) is locked by
-        # tests/test_b45d_failure_summary_route_registry.py.
+        # CLEANUP_BRIDGE < OWNER_DELEGATION_BRIDGE < imperative) is locked by
+        # the B4.5d and B4.5e registry tests.
         failure_bridge = order.index("FAILURE_SUMMARY_BRIDGE")
         bridge = order.index("CLEANUP_BRIDGE")
-        owner = order.index("_maybe_handle_owner_delegation_request")
+        owner_bridge = order.index("OWNER_DELEGATION_BRIDGE")
+        imperative = order.index("_maybe_handle_telegram_imperative_request")
         self.assertLess(failure_bridge, bridge, "cleanup must run after failure-summary")
-        self.assertLess(bridge, owner, "bridge must run before owner_delegation")
+        self.assertLess(bridge, owner_bridge, "cleanup must run before owner_delegation")
+        self.assertLess(owner_bridge, imperative, "owner must run before imperative")
 
     def test_no_direct_handler_call_remains_in_handle_text_body(self) -> None:
         order = _ordered_markers()

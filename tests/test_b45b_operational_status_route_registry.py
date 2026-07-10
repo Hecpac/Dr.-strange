@@ -23,7 +23,8 @@ from claw_v2.dispatch.matchers import OPERATIONAL_STATUS_MATCHER
 # event order — dispatch_decision first, then a possible
 # quality_guard_triggered — is preserved exactly; the adapter itself is pure.
 # These tests lock: (1) the full bridge chain position
-# (FAILURE_SUMMARY_BRIDGE < OPERATIONAL_BRIDGE < CLEANUP_BRIDGE < owner);
+# (FAILURE_SUMMARY_BRIDGE < OPERATIONAL_BRIDGE < CLEANUP_BRIDGE <
+# OWNER_DELEGATION_BRIDGE < imperative);
 # (2) no direct handler call remains in _handle_text_body; (3) the Route data
 # (name from the declarative matcher); (4) the B4.4c live-smoke phrases behave
 # identically through the registry path; (5) dispatch_decision kwargs stay
@@ -56,6 +57,7 @@ _BRIDGE_MARKERS = {
     "_failure_summary_slot": "FAILURE_SUMMARY_BRIDGE",
     "_operational_status_slot": "OPERATIONAL_BRIDGE",
     "_cleanup_status_slot": "CLEANUP_BRIDGE",
+    "_owner_delegation_slot": "OWNER_DELEGATION_BRIDGE",
 }
 
 
@@ -96,13 +98,18 @@ class BridgeSlotPositionTests(unittest.TestCase):
         self.assertIn("FAILURE_SUMMARY_BRIDGE", order, "B4.5d bridge disappeared")
         self.assertIn("OPERATIONAL_BRIDGE", order, "per-slot registry bridge not found")
         self.assertIn("CLEANUP_BRIDGE", order, "B4.5a bridge disappeared")
+        self.assertIn("OWNER_DELEGATION_BRIDGE", order, "B4.5e bridge disappeared")
         failure_bridge = order.index("FAILURE_SUMMARY_BRIDGE")
         op_bridge = order.index("OPERATIONAL_BRIDGE")
         cleanup_bridge = order.index("CLEANUP_BRIDGE")
-        owner = order.index("_maybe_handle_owner_delegation_request")
+        owner_bridge = order.index("OWNER_DELEGATION_BRIDGE")
+        imperative = order.index("_maybe_handle_telegram_imperative_request")
         self.assertLess(failure_bridge, op_bridge, "operational must run after failure-summary")
         self.assertLess(op_bridge, cleanup_bridge, "bridge must run before the cleanup bridge")
-        self.assertLess(cleanup_bridge, owner, "cleanup bridge must run before owner_delegation")
+        self.assertLess(
+            cleanup_bridge, owner_bridge, "cleanup bridge must run before owner_delegation"
+        )
+        self.assertLess(owner_bridge, imperative, "owner must run before imperative")
 
     def test_no_direct_handler_call_remains_in_handle_text_body(self) -> None:
         order = _ordered_markers()

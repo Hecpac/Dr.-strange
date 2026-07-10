@@ -1313,6 +1313,13 @@ class BotService:
         self._cleanup_status_slot: tuple[Route, ...] = (
             Route(CLEANUP_STATUS_MATCHER.name, self._route_cleanup_status),
         )
+        # B4.5e: per-slot bridge for owner_delegation at its ORIGINAL text
+        # chain slot, after cleanup and before telegram imperative. The
+        # legacy handler keeps rich-intent resolution and its dynamic inner
+        # dispatch decision; the registry callback emits the static outer one.
+        self._owner_delegation_slot: tuple[Route, ...] = (
+            Route(OWNER_DELEGATION_MATCHER.name, self._route_owner_delegation),
+        )
         # B4.5b: same per-slot bridge for operational_status (§5.1 row 6,
         # between operational_failure_summary and the cleanup bridge). Its
         # quality guard stays at the call site — see _handle_text_body.
@@ -4413,29 +4420,22 @@ class BotService:
                 assistant_limit=cleanup_status_outcome.store_memory_limit,
             )
             return cleanup_status_outcome.response
-        owner_delegation_response = self._maybe_handle_owner_delegation_request(
-            stripped,
-            session_id=session_id,
-            runtime_channel=runtime_channel,
+        # B4.5e: owner_delegation now runs through its one-Route per-slot
+        # bridge at the original chain position. No quality guard: this is the
+        # B4.5a shape, with the legacy 4000-character memory limit preserved.
+        owner_delegation_outcome = dispatch_routes(
+            self._owner_delegation_slot,
+            route_ctx,
+            on_decision=self._emit_route_decision,
         )
-        self._emit_dispatch_decision(
-            handler=OWNER_DELEGATION_MATCHER.name,
-            route="intercepted" if owner_delegation_response is not None else "fall_through",
-            reason=(
-                OWNER_DELEGATION_MATCHER.matched_reason
-                if owner_delegation_response is not None
-                else OWNER_DELEGATION_MATCHER.unmatched_reason
-            ),
-            session_id=session_id,
-            text=stripped,
-            captured=owner_delegation_response is not None,
-        )
-        if owner_delegation_response is not None:
-            self._store_memory_turn(
-                session_id, stripped, owner_delegation_response, assistant_limit=4000
+        if owner_delegation_outcome.captured and owner_delegation_outcome.response is not None:
+            self._post_capture_intercepted(
+                session_id,
+                stripped,
+                owner_delegation_outcome.response,
+                assistant_limit=owner_delegation_outcome.store_memory_limit,
             )
-            self._remember_assistant_turn_state(session_id, stripped, owner_delegation_response)
-            return owner_delegation_response
+            return owner_delegation_outcome.response
         telegram_imperative_response, telegram_imperative_reason, telegram_imperative_pattern = (
             self._maybe_handle_telegram_imperative_request(
                 stripped,
@@ -5040,6 +5040,23 @@ class BotService:
         if response is None:
             return RouteOutcome.fall_through(reason=CLEANUP_STATUS_MATCHER.unmatched_reason)
         return RouteOutcome.intercepted(response, reason=CLEANUP_STATUS_MATCHER.matched_reason)
+
+    def _route_owner_delegation(self, ctx: RouteContext) -> RouteOutcome:
+        # B4.5e: pure adapter over the legacy rich-intent handler. On a match
+        # that handler emits the dynamic owner_delegation:{kind} decision;
+        # dispatch_routes then emits the separate static matcher decision.
+        response = self._maybe_handle_owner_delegation_request(
+            ctx.stripped,
+            session_id=ctx.session_id,
+            runtime_channel=ctx.runtime_channel,
+        )
+        if response is None:
+            return RouteOutcome.fall_through(reason=OWNER_DELEGATION_MATCHER.unmatched_reason)
+        return RouteOutcome.intercepted(
+            response,
+            reason=OWNER_DELEGATION_MATCHER.matched_reason,
+            store_memory_limit=4000,
+        )
 
     def _route_operational_failure_summary(self, ctx: RouteContext) -> RouteOutcome:
         # B4.5d: pure registry adapter over the B4.4d gate+renderer. The text
