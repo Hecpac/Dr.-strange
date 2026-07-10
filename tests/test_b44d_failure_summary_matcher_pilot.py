@@ -314,9 +314,7 @@ class FailureSummaryMatcherContractTests(unittest.TestCase):
     def test_telemetry_slugs_are_byte_identical_to_pre_slice(self) -> None:
         # These three strings ride on every failure-summary dispatch_decision
         # event (both call sites); changing any is a telemetry-visible break.
-        self.assertEqual(
-            OPERATIONAL_FAILURE_SUMMARY_MATCHER.name, "operational_failure_summary"
-        )
+        self.assertEqual(OPERATIONAL_FAILURE_SUMMARY_MATCHER.name, "operational_failure_summary")
         self.assertEqual(
             OPERATIONAL_FAILURE_SUMMARY_MATCHER.matched_reason,
             "operational_failure_summary_matched",
