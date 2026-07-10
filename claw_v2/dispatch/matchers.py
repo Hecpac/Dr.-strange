@@ -1,4 +1,4 @@
-"""Declarative route matchers — B4.4a pilot + B4.4b + B4.4c + B4.4d.
+"""Declarative route matchers — B4.4a pilot + B4.4b + B4.4c + B4.4d + B4.4e.
 
 The match side of a pre-brain route as inspectable DATA: a name (the
 dispatch_decision handler slug), a pure predicate over the literal message
@@ -16,7 +16,8 @@ Matchers so far: change-status (B4.4a, from bot.py module level),
 cleanup-status (B4.4b) and operational-status (B4.4c), both from inline
 lines in their handler methods, and operational-failure-summary (B4.4d,
 from the BotService._matches_operational_failure_summary_request
-staticmethod, ported verbatim).
+staticmethod, ported verbatim), and owner-delegation (B4.4e, the boolean
+projection of the existing rich-intent classifier).
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
-from claw_v2.bot_helpers import _normalize_command_text
+from claw_v2.bot_helpers import _normalize_command_text, detect_owner_delegation
 
 
 @dataclass(frozen=True)
@@ -292,4 +293,19 @@ OPERATIONAL_FAILURE_SUMMARY_MATCHER = RouteMatcher(
     match=looks_like_operational_failure_summary_query,
     matched_reason="operational_failure_summary_matched",
     unmatched_reason="operational_failure_summary_no_match",
+)
+
+
+def looks_like_owner_delegation_request(text: str) -> bool:
+    # B4.4e extracts the legacy boolean gate only. BotService still calls the
+    # same classifier after this match to materialize the rich intent fields
+    # needed by resolution and kind-derived telemetry.
+    return detect_owner_delegation(text) is not None
+
+
+OWNER_DELEGATION_MATCHER = RouteMatcher(
+    name="owner_delegation",
+    match=looks_like_owner_delegation_request,
+    matched_reason="owner_delegation_matched",
+    unmatched_reason="owner_delegation_no_match",
 )

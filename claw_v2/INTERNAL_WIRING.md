@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice b45d-failure-summary-route-registry (2026-07-10): B4.5d — operational_failure_summary is registry-invoked ONLY in the _handle_text_body chain via dispatch_routes(self._failure_summary_slot, route_ctx, on_decision=self._emit_route_decision) at its ORIGINAL §5.1 row 5 slot, after pending_tasks and before the B4.5b operational-status bridge. This is the guarded B4.5b variant: the pure _route_operational_failure_summary adapter takes reason slugs from OPERATIONAL_FAILURE_SUMMARY_MATCHER and propagates store_memory_limit=3000; the quality guard stays AT THE TEXT CALL SITE after dispatch and before _post_capture_intercepted, preserving dispatch_decision before quality_guard_triggered. handle_multimodal remains fully LEGACY and unchanged. EXPECTED_PRE_BRAIN_ORDER deliberately removes the direct text-chain call (16->15); B45a/B45b/B44d rails are re-based without weakening the multimodal AST lock. Invariant b45d_failure_summary_is_registry_invoked. Prior: b44d failure-summary matcher/rails; b45c change-status registry; b45b operational-status registry; b45a cleanup registry."
-doc_version: 3.16
+describes_commit: "slice b44e-owner-delegation-matcher (2026-07-10): B4.4e — owner_delegation's boolean route contract is declarative OWNER_DELEGATION_MATCHER data with byte-identical base slugs; the order-locked _handle_text_body call site remains LEGACY and takes its base dispatch_decision kwargs from matcher data, while the gate asks the matcher first and then materializes the rich OwnerDelegationIntent for resolution and dynamic owner_delegation:{kind} telemetry. The independent frozen-reference corpus copies all six classifier pattern tuples, normalization, the 0.70 threshold/scoring, and the three ordered loops; overlap rails cover operational-status/failure-summary collisions and the A1 winner flip. Direct rich-intent/actionability consumers remain direct, explicitly bounded and documented as non-route recognizers. No B4.5e registry slot/adapter/order edit. Invariant b44e_owner_delegation_matcher_is_declarative_data. Prior: b45d failure-summary registry; b44d failure-summary matcher/rails; b45c change-status registry; b45b operational-status registry; b45a cleanup registry."
+doc_version: 3.17
 last_verified: 2026-07-10
-verification_method: "B4.5d local, isolated worktree: RED then GREEN in tests/test_b45d_failure_summary_route_registry.py (pending_tasks < FAILURE_SUMMARY_BRIDGE < OPERATIONAL_BRIDGE < CLEANUP_BRIDGE < owner via AST, no direct text-chain call, one-Route slot data, pure adapter with matcher reason slugs, exact dispatch_decision kwargs, store_memory_limit=3000, call-site quality guard order) + B4.4a/b/c/d matcher pilots + B4.5a/b/c registry tests with anchors re-based + tests/test_botservice_migration_rails.py with the deliberate 15-entry direct-call order + tests/test_telegram_imperative_router.py full-chain winners green UNEDITED. Static gates: matchers.py and Telegram full-chain file unedited; handle_multimodal source identical to HEAD; bot.py ratchet <=12322. No live smoke by frozen spec (post-merge human)."
+verification_method: "B4.4e local, isolated worktree: RED ImportError then GREEN in tests/test_b44e_owner_delegation_matcher_pilot.py (independent legacy classifier copy, corpus decisions, overlap/collision/A1 flip, immutable matcher/slugs, exact AST kwargs for base and dynamic dispatch decisions, assistant_limit=4000/no-quality-guard, bounded direct-detector consumers, and no B4.5e artifacts) + existing owner-delegation classifier/resolver tests + B4.4a/b/c/d pilots + B4.5a/b/c/d registry tests + migration rails + tests/test_telegram_imperative_router.py UNEDITED. Static gates: EXPECTED_PRE_BRAIN_ORDER unedited, no owner slot/adapter/registry, bot.py <=12322, Ruff and git diff --check. No live smoke by frozen spec."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1423,6 +1423,54 @@ invariants:
          includes REAL order-resolved collisions (found by adversarial
          verification 2026-07-09) — locking them as data is what keeps the
          who-owns-which-phrase table honest instead of exclusivity-only.
+
+  b44e_owner_delegation_matcher_is_declarative_data:
+    rule: 'B4.4e. The owner-delegation boolean route contract is DATA:
+          dispatch.matchers.OWNER_DELEGATION_MATCHER (frozen RouteMatcher —
+          the boolean projection of the existing rich-intent classifier plus
+          byte-identical owner_delegation_matched / owner_delegation_no_match
+          base dispatch reason slugs) is the single source for the gate in
+          BotService._maybe_handle_owner_delegation_request and the base
+          dispatch_decision kwargs at the LEGACY, order-locked
+          _handle_text_body call site. The gate asks matcher.match(text)
+          first, then calls detect_owner_delegation(text) only to materialize
+          OwnerDelegationIntent fields needed by objective resolution and the
+          inner dynamic reason/matched_pattern, both of which remain exactly
+          owner_delegation:{intent.kind}. That second call is not a parallel
+          boolean route recognizer. The other direct detector consumers —
+          bot._looks_like_operator_action_request,
+          bot_helpers.looks_like_actionable_telegram_message, and
+          semantic_turn.classify_semantic_turn — remain direct because they
+          perform actionability/semantic classification or read rich fields;
+          they emit no owner route decision, and the pilot AST-locks this
+          complete bounded consumer set. Decisions are old-vs-new
+          corpus-locked against an independent frozen legacy copy of all six
+          pattern tuples, normalization, 0.70 threshold/scoring, and the three
+          ordered loops. Cross-matcher rails include real collisions with
+          operational-status and failure-summary plus the A1 stop-marker flip.
+          Matcher extraction does NOT move the legacy call, add a registry
+          adapter/slot, edit EXPECTED_PRE_BRAIN_ORDER, add a quality guard, or
+          change assistant_limit=4000. Registry invocation remains a separate
+          B4.5e slice. Per the Routing Contract matcher.match reads literal
+          text only — no session_state, reply context, or ledger.'
+    chokepoints:
+      - dispatch.matchers.OWNER_DELEGATION_MATCHER
+      - bot.BotService._maybe_handle_owner_delegation_request
+      - bot.BotService._handle_text_body
+      - bot._looks_like_operator_action_request  # actionability, not route ownership
+      - bot_helpers.looks_like_actionable_telegram_message  # actionability only
+      - semantic_turn.classify_semantic_turn  # rich semantic consumer
+    enforced_by:
+      - tests/test_b44e_owner_delegation_matcher_pilot.py
+      - tests/test_owner_delegation_routing.py
+      - tests/test_botservice_migration_rails.py
+      - tests/test_telegram_imperative_router.py::test_owner_delegation_never_falls_back
+      - tests/test_telegram_imperative_router.py::test_english_owner_delegation_with_options_never_falls_back
+    why: Fifth application of the declarative matcher shape, and the first
+         backed by a rich classifier whose structured result must remain
+         available after the boolean route decision. The explicit consumer
+         boundary prevents either duplicating classifier logic in bot.py or
+         mislabeling semantic/actionability reads as competing route gates.
 
   learning_taxonomy_excludes_generic_transients:
     rule: 'A transient automation failure never persists as a replayable
@@ -3100,7 +3148,7 @@ in `_handle_text_body` (verified 2026-06-10):
 | 4 | `_maybe_handle_pending_tasks_query` | "tareas pendientes" / "pendientes" |
 | 5 | operational failure summary (registry bridge in text chain; legacy in multimodal) | failure summary queries; matcher = declarative `OPERATIONAL_FAILURE_SUMMARY_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4d, no widening). Since B4.5d ONLY `_handle_text_body` is registry-invoked here via `dispatch_routes(self._failure_summary_slot, ...)` (invariant `b45d_failure_summary_is_registry_invoked`) — after pending_tasks, before operational_status, never in `_pre_brain_routes`; its quality guard remains at the text call site after dispatch with limit 3000. `handle_multimodal` remains the unchanged LEGACY direct gate+telemetry+guard/store block. ORDER-RESOLVED COLLISIONS with row 6 remain: this row wins unless A1 rejects failure-summary, then operational_status owns the turn |
 | 6 | operational status (registry bridge) | operational status questions; matcher = declarative `OPERATIONAL_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4c — invariant `b44c_operational_status_matcher_is_declarative_data`). Since B4.5b the route is REGISTRY-invoked at this same slot via the per-slot bridge `dispatch_routes(self._operational_status_slot, ...)` (invariant `b45b_operational_status_is_registry_invoked`) — NOT in the early `_pre_brain_routes` slot; the quality guard stays at the call site (dispatch_decision first, then a possible quality_guard_triggered). Greeting branch runs before change-status (row 10): "hola/buen dia + estado\|estatus\|status" intercepts here |
-| 7 | cleanup status / owner delegation / `_maybe_handle_telegram_imperative_request` | explicit operator imperatives; unresolved context → fallthrough_to_brain (never clarifies). Cleanup-status matcher = declarative `CLEANUP_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4b — invariant `b44b_cleanup_matcher_is_declarative_data`); since B4.5a the route is REGISTRY-invoked at this same slot via the per-slot bridge `dispatch_routes(self._cleanup_status_slot, ...)` (invariant `b45a_cleanup_status_is_registry_invoked`) — it is NOT in the early `_pre_brain_routes` slot |
+| 7 | cleanup status / owner delegation (LEGACY direct call) / `_maybe_handle_telegram_imperative_request` | explicit operator imperatives; unresolved imperative context → fallthrough_to_brain (never clarifies). Cleanup-status matcher = declarative `CLEANUP_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4b — invariant `b44b_cleanup_matcher_is_declarative_data`); since B4.5a cleanup is REGISTRY-invoked at this same slot via `dispatch_routes(self._cleanup_status_slot, ...)`, never in `_pre_brain_routes`. Owner-delegation matcher = declarative `OWNER_DELEGATION_MATCHER` data (B4.4e — invariant `b44e_owner_delegation_matcher_is_declarative_data`), but invocation remains the LEGACY direct `_maybe_handle_owner_delegation_request` call: its base dispatch slugs come from matcher data, its inner reason/pattern remain dynamic `owner_delegation:{kind}`, capture stores with `assistant_limit=4000`, and there is no quality guard. Moving owner delegation into registry is the separate B4.5e slice and requires its own order rail/edit |
 | 8 | `_maybe_handle_actionable_task_request` | runtime=Telegram + state-derived objective; unresolved follow-up → fallthrough |
 | 8b | `_maybe_handle_f4_deterministic_delegation` | **F4-B1**, gated OFF by `CLAW_F4_DETERMINISTIC_DELEGATION` (default); narrow authenticated-X-feed-review intent → enqueues ONE durable `f4b.delegation` delivery job (ledger-row-first dedup on the deterministic `task_id`, else `JobService.reserve(resume_key=delivery_key)`); does NOT call `start_autonomous_task`/start a thread/delete — `F4DelegationJobRunner` claims the job off-tick and runs the idempotent bootstrap. Captures BEFORE the broad router (exactly-once on telegram message_id). See invariant `high_confidence_delegation_intents_do_not_depend_on_model_tool_choice` |
 | 9 | `_maybe_handle_task_intent` | **gated OFF** by `CLAW_DISABLE_TASK_INTENT_ROUTER=1` (default) |
