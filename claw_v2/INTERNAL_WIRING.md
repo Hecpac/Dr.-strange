@@ -9,7 +9,7 @@
 
 ```yaml
 describes_commit: "slice b44d-failure-summary-matcher (2026-07-09): B4.4d — the operational-failure-summary match contract moved to dispatch/matchers.py as frozen DATA (OPERATIONAL_FAILURE_SUMMARY_MATCHER), VERBATIM port of the deleted 7-block staticmethod _matches_operational_failure_summary_request (substring/regex word-boundary mix preserved, NO widening). Both order-locked call sites (chain row 5 + handle_multimodal) consume the matcher slugs; bot.py carries no parallel recognizer. Exhaustive per-block corpus + frozen legacy reference + cross-matcher overlap corpus incl. the ORDER-RESOLVED COLLISION family vs operational_status (adversarial verification 2026-07-09). Precondition for the authorized failure-summary bridge slice. Prior: b45c (PR #252, eef92cf) change-status route registry, CLOSED with live Telegram smoke 2026-07-09 (real owner message 'status de los cambios' intercepted deterministically, dispatch_decision change_status_question/intercepted/captured=true, daemon boot clean pid 22101); change-status-estados-plural (PR #246, 55455e4); b45b (PR #245, 3e6e133); b45a (PR #237, 291af94); b44c (PR #236, cf6acc3); b44b (PR #235, be7c6d8); b44a (PR #234, 31d489a); b41 (PR #232, 8df1a6f)."
-doc_version: 3.14
+doc_version: 3.15
 last_verified: 2026-07-09
 verification_method: "B4.4d local, isolated worktree: tests/test_b44d_failure_summary_matcher_pilot.py (exhaustive REPRESENTATIVE_DECISIONS per predicate block + legacy staticmethod frozen verbatim as reference + OVERLAP_DECISIONS exclusivity sum(owners)<=1 vs op/chg/cln + ORDER_RESOLVED_COLLISIONS family locked with operational_status incl. the A1 stop-marker ownership flip + telemetry slugs byte-identical + single-source: staticmethod deleted, gate and BOTH call sites consume the matcher) + tests/test_b44a/b44b/b44c pilots green UNEDITED + tests/test_b45a/b45b/b45c route-registry tests green UNEDITED + tests/test_botservice_migration_rails.py green UNEDITED (matcher extraction moves no call; no order/ratchet impact — bot.py shrinks) + tests/test_dispatch_route.py + tests/test_dispatch_routing.py + tests/test_telegram_imperative_router.py (pre-existing failure-summary corpus behavior-identical)."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
@@ -1377,6 +1377,7 @@ invariants:
       - bot.BotService._maybe_handle_operational_failure_summary
     enforced_by:
       - tests/test_b44d_failure_summary_matcher_pilot.py
+      - tests/test_b45b_operational_status_route_registry.py
       - tests/test_botservice_migration_rails.py
     why: Fourth application of the extraction shape; first with a
          compound multi-return predicate and the first whose overlap surface

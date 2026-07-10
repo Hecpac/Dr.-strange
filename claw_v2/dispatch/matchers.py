@@ -1,4 +1,4 @@
-"""Declarative route matchers — B4.4a pilot + B4.4b + B4.4c.
+"""Declarative route matchers — B4.4a pilot + B4.4b + B4.4c + B4.4d.
 
 The match side of a pre-brain route as inspectable DATA: a name (the
 dispatch_decision handler slug), a pure predicate over the literal message

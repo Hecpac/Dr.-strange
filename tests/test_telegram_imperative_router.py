@@ -48,7 +48,11 @@ def bot():
 
 
 def _drive(
-    bot, text: str, *, session_id: str = "tg-test"
+    bot,
+    text: str,
+    *,
+    session_id: str = "tg-test",
+    dispatch_payloads: list[dict] | None = None,
 ) -> tuple[str | None, list[dict], list[str]]:
     decisions: list[dict] = []
     events: list[str] = []
@@ -58,6 +62,8 @@ def _drive(
         events.append(event_type)
         if event_type == "dispatch_decision":
             payload = dict(kwargs.get("payload") or {})
+            if dispatch_payloads is not None:
+                dispatch_payloads.append(payload)
             # F0.3c: a turn emits ONE consolidated dispatch_decision whose
             # tried_handlers[] array holds every per-handler decision. Flatten
             # it back to the per-handler view these routing assertions expect
@@ -209,6 +215,87 @@ def test_failure_summary_routes_to_operational_evidence_not_brain(bot) -> None:
         for ev in decisions
     ), decisions
     assert "evidence_gate_blocked_start_claim" not in events
+    _assert_not_brain_fallback(response, decisions)
+
+
+def test_failure_summary_wins_status_collision_and_early_returns(bot) -> None:
+    dispatch_payloads: list[dict] = []
+    with patch.object(
+        bot._operational_status_slot[0],
+        "handler",
+        side_effect=AssertionError("operational_status must not run"),
+    ) as later_handler:
+        response, decisions, _events = _drive(
+            bot,
+            "hola status hoy errores",
+            dispatch_payloads=dispatch_payloads,
+        )
+
+    assert response
+    assert "Resumen operativo de fallos de hoy" in response
+    assert len(dispatch_payloads) == 1
+    assert dispatch_payloads[0]["selected_handler"] == "operational_failure_summary"
+    assert dispatch_payloads[0]["selected_route"] == "intercepted"
+    assert {
+        "handler": "operational_failure_summary",
+        "route": "intercepted",
+        "reason": "operational_failure_summary_matched",
+        "captured": True,
+        "matched_pattern": "operational_failure_summary",
+    } in decisions
+    assert [entry["handler"] for entry in decisions if entry.get("captured")] == [
+        "operational_failure_summary"
+    ]
+    assert not any(entry.get("handler") == "operational_status" for entry in decisions)
+    later_handler.assert_not_called()
+    _assert_not_brain_fallback(response, decisions)
+
+
+def test_stop_marker_flips_status_collision_to_operational_status(bot) -> None:
+    dispatch_payloads: list[dict] = []
+    with (
+        patch.object(
+            bot,
+            "_format_operational_failure_summary",
+            side_effect=AssertionError("failure-summary renderer must not run"),
+        ) as failure_renderer,
+        patch.object(
+            bot._cleanup_status_slot[0],
+            "handler",
+            side_effect=AssertionError("cleanup_status must not run"),
+        ) as later_handler,
+    ):
+        response, decisions, _events = _drive(
+            bot,
+            "hola status hoy errores; no continuemos",
+            dispatch_payloads=dispatch_payloads,
+        )
+
+    assert response
+    assert "Estoy vivo." in response
+    assert "Resumen operativo de fallos de hoy" not in response
+    assert len(dispatch_payloads) == 1
+    assert dispatch_payloads[0]["selected_handler"] == "operational_status"
+    assert dispatch_payloads[0]["selected_route"] == "intercepted"
+    assert {
+        "handler": "operational_failure_summary",
+        "route": "fall_through",
+        "reason": "operational_failure_summary_no_match",
+        "captured": False,
+        "matched_pattern": None,
+    } in decisions
+    assert {
+        "handler": "operational_status",
+        "route": "intercepted",
+        "reason": "operational_status_matched",
+        "captured": True,
+        "matched_pattern": "operational_status",
+    } in decisions
+    assert [entry["handler"] for entry in decisions if entry.get("captured")] == [
+        "operational_status"
+    ]
+    failure_renderer.assert_not_called()
+    later_handler.assert_not_called()
     _assert_not_brain_fallback(response, decisions)
 
 
