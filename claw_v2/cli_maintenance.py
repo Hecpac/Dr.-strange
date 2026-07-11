@@ -229,9 +229,11 @@ def _run_version_command(
     result = _run_command_capture(runner, args, timeout_s=_VERSION_TIMEOUT_SECONDS)
     if result.returncode != 0:
         missing = result.returncode == _MISSING_CLI_RETURNCODE
-        return None, _compact_output(
-            result.stderr or result.stdout or f"{tool_name} exited non-zero"
-        ), missing
+        return (
+            None,
+            _compact_output(result.stderr or result.stdout or f"{tool_name} exited non-zero"),
+            missing,
+        )
     version = _extract_version(result.stdout or result.stderr)
     if version is None:
         return None, _compact_output(result.stdout or result.stderr or "version not found"), False
