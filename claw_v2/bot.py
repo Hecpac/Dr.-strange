@@ -1321,6 +1321,12 @@ class BotService:
         self._owner_delegation_slot: tuple[Route, ...] = (
             Route(OWNER_DELEGATION_MATCHER.name, self._route_owner_delegation),
         )
+        # B4.5f: per-slot bridge for actionable_task at its ORIGINAL text
+        # chain slot, after telegram imperative and before F4. The legacy
+        # handler keeps every contextual/runtime/execution decision.
+        self._actionable_task_slot: tuple[Route, ...] = (
+            Route(ACTIONABLE_TASK_MATCHER.name, self._route_actionable_task),
+        )
         # B4.5b: same per-slot bridge for operational_status (§5.1 row 6,
         # between operational_failure_summary and the cleanup bridge). Its
         # quality guard stays at the call site — see _handle_text_body.
@@ -4327,6 +4333,7 @@ class BotService:
             text=text,
             stripped=stripped,
             runtime_channel=runtime_channel,
+            metadata={"semantic_turn": semantic_turn},
         )
         route_outcome = dispatch_routes(
             self._pre_brain_routes,
@@ -4481,30 +4488,22 @@ class BotService:
             )
             self._remember_assistant_turn_state(session_id, stripped, telegram_imperative_response)
             return telegram_imperative_response
-        actionable_task_response = self._maybe_handle_actionable_task_request(
-            stripped,
-            session_id=session_id,
-            runtime_channel=runtime_channel,
-            semantic_turn=semantic_turn,
+        actionable_task_outcome = dispatch_routes(
+            self._actionable_task_slot,
+            route_ctx,
+            on_decision=self._emit_route_decision,
         )
-        self._emit_dispatch_decision(
-            handler=ACTIONABLE_TASK_MATCHER.name,
-            route="intercepted" if actionable_task_response is not None else "fall_through",
-            reason=(
-                ACTIONABLE_TASK_MATCHER.matched_reason
-                if actionable_task_response is not None
-                else ACTIONABLE_TASK_MATCHER.unmatched_reason
-            ),
-            session_id=session_id,
-            text=stripped,
-            captured=actionable_task_response is not None,
-        )
-        if actionable_task_response is not None:
+        if actionable_task_outcome.captured and actionable_task_outcome.response is not None:
             self._store_memory_turn(
-                session_id, stripped, actionable_task_response, assistant_limit=2000
+                session_id,
+                stripped,
+                actionable_task_outcome.response,
+                assistant_limit=actionable_task_outcome.store_memory_limit,
             )
-            self._remember_assistant_turn_state(session_id, stripped, actionable_task_response)
-            return actionable_task_response
+            self._remember_assistant_turn_state(
+                session_id, stripped, actionable_task_outcome.response
+            )
+            return actionable_task_outcome.response
         f4_delegation_response = self._maybe_handle_f4_deterministic_delegation(
             stripped, session_id=session_id, context_metadata=context_metadata
         )
@@ -5057,6 +5056,25 @@ class BotService:
             response,
             reason=OWNER_DELEGATION_MATCHER.matched_reason,
             store_memory_limit=4000,
+        )
+
+    def _route_actionable_task(self, ctx: RouteContext) -> RouteOutcome:
+        # B4.5f: pure adapter over the legacy contextual handler. The
+        # semantic classification already computed for the turn travels via
+        # RouteContext.metadata; all runtime/state/execution logic stays in
+        # the handler.
+        response = self._maybe_handle_actionable_task_request(
+            ctx.stripped,
+            session_id=ctx.session_id,
+            runtime_channel=ctx.runtime_channel,
+            semantic_turn=ctx.metadata["semantic_turn"],
+        )
+        if response is None:
+            return RouteOutcome.fall_through(reason=ACTIONABLE_TASK_MATCHER.unmatched_reason)
+        return RouteOutcome.intercepted(
+            response,
+            reason=ACTIONABLE_TASK_MATCHER.matched_reason,
+            store_memory_limit=2000,
         )
 
     def _route_operational_failure_summary(self, ctx: RouteContext) -> RouteOutcome:

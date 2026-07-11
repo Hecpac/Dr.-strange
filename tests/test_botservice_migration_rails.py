@@ -36,13 +36,14 @@ EXPECTED_PRE_BRAIN_ORDER = [
     # this exact position — between the operational_status bridge and
     # the B4.5e owner bridge. B4.5e likewise migrates owner_delegation through
     # dispatch_routes(self._owner_delegation_slot, ...) here, immediately
-    # before telegram imperative. The AST extractor only sees
+    # before telegram imperative. B4.5f similarly migrates actionable_task
+    # through dispatch_routes(self._actionable_task_slot, ...) immediately
+    # after telegram imperative and before F4. The AST extractor only sees
     # _maybe_handle_*/_handle_* names, so these registry slots are locked by
-    # the B45a/B45b/B45d/B45e route-registry tests instead. Deliberate 15->14
-    # direct-handler edit: owner is no longer called directly in this method.
+    # the B45a/B45b/B45d/B45e/B45f route-registry tests instead. Deliberate
+    # 14->13 direct-handler edit: actionable is no longer called directly.
     "_maybe_handle_telegram_imperative_request",
     "_handle_stateful_brain_shortcut",
-    "_maybe_handle_actionable_task_request",
     "_maybe_handle_f4_deterministic_delegation",
     "_maybe_handle_task_intent",
     # B4.5c: change_status migrated to the route registry via a per-slot
