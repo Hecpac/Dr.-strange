@@ -1,4 +1,4 @@
-"""Declarative route matchers — B4.4a pilot + B4.4b + B4.4c + B4.4d + B4.4e.
+"""Declarative route matchers — B4.4a pilot through B4.4f.
 
 The match side of a pre-brain route as inspectable DATA: a name (the
 dispatch_decision handler slug), a pure predicate over the literal message
@@ -17,7 +17,8 @@ cleanup-status (B4.4b) and operational-status (B4.4c), both from inline
 lines in their handler methods, and operational-failure-summary (B4.4d,
 from the BotService._matches_operational_failure_summary_request
 staticmethod, ported verbatim), and owner-delegation (B4.4e, the boolean
-projection of the existing rich-intent classifier).
+projection of the existing rich-intent classifier), and direct actionable-task
+(B4.4f, from BotService._looks_like_direct_actionable_task, ported verbatim).
 """
 
 from __future__ import annotations
@@ -308,4 +309,38 @@ OWNER_DELEGATION_MATCHER = RouteMatcher(
     match=looks_like_owner_delegation_request,
     matched_reason="owner_delegation_matched",
     unmatched_reason="owner_delegation_no_match",
+)
+
+
+def looks_like_direct_actionable_task(text: str) -> bool:
+    # B4.4f: VERBATIM port of
+    # BotService._looks_like_direct_actionable_task (bot.py up to b967f87).
+    # Preserve all five branches, including open substring membership outside
+    # the PR branch and the existing leading-only action-verb word boundary.
+    normalized = _normalize_command_text(text)
+    # "pr" must be a standalone token, not a substring of "pregunta",
+    # "preocupa", "preferir", etc. Same for the action verbs: require a
+    # word-boundary start so "completas" (2nd-person present) does not
+    # trip the PR-completion branch when paired with "pregunta".
+    pr_completion = (
+        re.search(r"\bpr\b", normalized) is not None
+        and re.search(r"\b(termina|completa|finaliza)", normalized) is not None
+    )
+    return (
+        (
+            "actualiza" in normalized
+            and any(token in normalized for token in ("codex", "claude", "codex app"))
+        )
+        or ("regenera" in normalized and "lock" in normalized)
+        or ("poetry.lock" in normalized)
+        or ("pyproject" in normalized and "lock" in normalized)
+        or pr_completion
+    )
+
+
+ACTIONABLE_TASK_MATCHER = RouteMatcher(
+    name="telegram_actionable_task",
+    match=looks_like_direct_actionable_task,
+    matched_reason="telegram_actionable_task_matched",
+    unmatched_reason="telegram_actionable_task_no_match",
 )

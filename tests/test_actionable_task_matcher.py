@@ -1,4 +1,4 @@
-"""Regression: _looks_like_direct_actionable_task must not match
+"""Regression: ACTIONABLE_TASK_MATCHER must not match
 introspective questions whose tokens happen to be substrings of the
 PR-completion vocabulary ("pr" inside "pregunta", "completa" inside
 "completas"). The original substring matcher classified
@@ -10,7 +10,7 @@ which then timed out at 300s in Codex research."""
 
 from __future__ import annotations
 
-from claw_v2.bot import BotService
+from claw_v2.dispatch.matchers import ACTIONABLE_TASK_MATCHER
 
 
 _FALSE_POSITIVES = (
@@ -31,9 +31,9 @@ _TRUE_POSITIVES = (
 
 def test_introspective_questions_do_not_match_pr_completion() -> None:
     for text in _FALSE_POSITIVES:
-        assert BotService._looks_like_direct_actionable_task(text) is False, text
+        assert ACTIONABLE_TASK_MATCHER.match(text) is False, text
 
 
 def test_real_pr_completion_requests_still_match() -> None:
     for text in _TRUE_POSITIVES:
-        assert BotService._looks_like_direct_actionable_task(text) is True, text
+        assert ACTIONABLE_TASK_MATCHER.match(text) is True, text
