@@ -1100,17 +1100,18 @@ invariants:
     rule: 'B4.1 migration rail. The top-level dispatch/capture order in
           BotService._handle_text_body is behavior and is locked by test.
           The AST rail covers the DIRECT calls still in the legacy chain
-          (14 entries post-B4.5e, AST-extracted in source order with nested
+          (13 entries post-B4.5f, AST-extracted in source order with nested
           helper defs excluded: brain-first → computer-approval →
           pending-tasks → imperative → stateful
-          brain shortcut → actionable → F4 deterministic → task-intent →
+          brain shortcut → F4 deterministic → task-intent →
           capability-route → tool-approval grant → autonomy grant →
           stateful followup → shortcut → coordinated-task). Routes migrated
           to per-slot registry bridges (failure_summary B4.5d,
           operational_status B4.5b, cleanup_status B4.5a,
-          owner_delegation B4.5e, change_status B4.5c) are invisible to this
+          owner_delegation B4.5e, actionable_task B4.5f,
+          change_status B4.5c) are invisible to this
           AST extractor; each bridge position is order-locked by its own
-          slice test (test_b45a/b45b/b45c/b45d/b45e route_registry.py) via AST
+          slice test (test_b45a/b45b/b45c/b45d/b45e/b45f route_registry.py) via AST
           position between its remaining direct-call neighbors.
           NLM/wiki dispatch is delegated to NlmHandler inside the
           _maybe_handle_shortcut subtree and is NOT individually order-locked
