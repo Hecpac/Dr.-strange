@@ -23,6 +23,7 @@ from claw_v2.brain import BrainService
 from claw_v2.bot_commands import BotCommand, CommandContext, dispatch_commands
 from claw_v2.dispatch import Route, RouteContext, RouteOutcome, dispatch_routes
 from claw_v2.dispatch.matchers import (
+    ACTIONABLE_TASK_MATCHER,
     CHANGE_STATUS_MATCHER,
     CLEANUP_STATUS_MATCHER,
     OPERATIONAL_FAILURE_SUMMARY_MATCHER,
@@ -4487,12 +4488,12 @@ class BotService:
             semantic_turn=semantic_turn,
         )
         self._emit_dispatch_decision(
-            handler="telegram_actionable_task",
+            handler=ACTIONABLE_TASK_MATCHER.name,
             route="intercepted" if actionable_task_response is not None else "fall_through",
             reason=(
-                "telegram_actionable_task_matched"
+                ACTIONABLE_TASK_MATCHER.matched_reason
                 if actionable_task_response is not None
-                else "telegram_actionable_task_no_match"
+                else ACTIONABLE_TASK_MATCHER.unmatched_reason
             ),
             session_id=session_id,
             text=stripped,
@@ -11302,7 +11303,7 @@ class BotService:
         if (
             semantic_turn is not None
             and semantic_turn.intent in {"continue_active_mission", "approval_response"}
-            and not self._looks_like_direct_actionable_task(text)
+            and not ACTIONABLE_TASK_MATCHER.match(text)
         ):
             self._emit_safe(
                 "actionable_task_router_skipped_semantic_continuation",
@@ -11405,7 +11406,7 @@ class BotService:
         *,
         state: dict[str, Any],
     ) -> tuple[str | None, str]:
-        if self._looks_like_direct_actionable_task(text):
+        if ACTIONABLE_TASK_MATCHER.match(text):
             return text.strip(), "direct_message"
         if not self._looks_like_actionable_followup(text):
             return None, "no_match"
@@ -11483,28 +11484,6 @@ class BotService:
             "hacer ",
         )
         return any(marker in normalized for marker in goal_markers)
-
-    @staticmethod
-    def _looks_like_direct_actionable_task(text: str) -> bool:
-        normalized = _normalize_command_text(text)
-        # "pr" must be a standalone token, not a substring of "pregunta",
-        # "preocupa", "preferir", etc. Same for the action verbs: require a
-        # word-boundary start so "completas" (2nd-person present) does not
-        # trip the PR-completion branch when paired with "pregunta".
-        pr_completion = (
-            re.search(r"\bpr\b", normalized) is not None
-            and re.search(r"\b(termina|completa|finaliza)", normalized) is not None
-        )
-        return (
-            (
-                "actualiza" in normalized
-                and any(token in normalized for token in ("codex", "claude", "codex app"))
-            )
-            or ("regenera" in normalized and "lock" in normalized)
-            or ("poetry.lock" in normalized)
-            or ("pyproject" in normalized and "lock" in normalized)
-            or pr_completion
-        )
 
     @staticmethod
     def _looks_like_actionable_followup(text: str) -> bool:
