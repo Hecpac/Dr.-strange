@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -23,6 +25,7 @@ _MAX_OUTPUT_CHARS = 4_000
 class CliToolSpec:
     name: str
     package: str
+    executable_env: str
     version_command: tuple[str, ...]
 
 
@@ -40,8 +43,13 @@ CliMaintenanceRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 _TOOLS: tuple[CliToolSpec, ...] = (
-    CliToolSpec("codex", "@openai/codex", ("codex", "--version")),
-    CliToolSpec("claude", "@anthropic-ai/claude-code", ("claude", "--version")),
+    CliToolSpec("codex", "@openai/codex", "CODEX_CLI_PATH", ("codex", "--version")),
+    CliToolSpec(
+        "claude",
+        "@anthropic-ai/claude-code",
+        "CLAUDE_CLI_PATH",
+        ("claude", "--version"),
+    ),
 )
 
 
@@ -53,6 +61,13 @@ def run_cli_maintenance_update(
 ) -> CliMaintenanceResult:
     commands_run: list[tuple[str, ...]] = []
     tool_versions: dict[str, dict[str, str]] = {}
+    resolved_executables: dict[str, str | None] = {}
+
+    for spec in _TOOLS:
+        configured_executable = os.getenv(spec.executable_env)
+        resolved_executables[spec.name] = (
+            configured_executable if configured_executable else shutil.which(spec.name)
+        )
 
     def run_command(
         args: Sequence[str],
@@ -72,22 +87,37 @@ def run_cli_maintenance_update(
             observe=observe,
         )
 
-    install_packages: list[str] = []
+    present_specs: list[CliToolSpec] = []
+    absent_specs: list[CliToolSpec] = []
     for spec in _TOOLS:
+        executable = resolved_executables[spec.name]
+        if executable is None:
+            absent_specs.append(spec)
+            continue
+
+        present_specs.append(spec)
         installed_result = _run_version_command(
-            run_command, spec.version_command, tool_name=spec.name
+            run_command,
+            (executable, *spec.version_command[1:]),
+            tool_name=spec.name,
         )
         if installed_result[0] is None:
-            if not installed_result[2]:
-                return _failed_result(
-                    commands_run,
-                    tool_versions,
-                    f"{spec.name} version check failed: {installed_result[1]}",
-                    installed_packages=install_packages,
-                )
-            installed_version = ""
-        else:
-            installed_version = installed_result[0]
+            return _failed_result(
+                commands_run,
+                tool_versions,
+                f"{spec.name} version check failed: {installed_result[1]}",
+                installed_packages=(),
+            )
+        installed_version = installed_result[0]
+        tool_versions[spec.name] = {
+            "installed": installed_version,
+            "latest": "",
+            "verified": "",
+            "action": "needs_update",
+        }
+
+    install_packages: list[str] = []
+    for spec in absent_specs:
         latest_result = _run_latest_version_command(run_command, spec.package, tool_name=spec.name)
         if latest_result[0] is None:
             return _failed_result(
@@ -97,15 +127,50 @@ def run_cli_maintenance_update(
                 installed_packages=install_packages,
             )
         latest_version = latest_result[0]
-        action = "already_current" if installed_version == latest_version else "needs_update"
         tool_versions[spec.name] = {
-            "installed": installed_version,
+            "installed": "",
             "latest": latest_version,
             "verified": "",
-            "action": action,
+            "action": "needs_update",
         }
-        if action == "needs_update":
-            install_packages.append(f"{spec.package}@{latest_version}")
+        install_packages.append(f"{spec.package}@{latest_version}")
+
+    for spec in present_specs:
+        executable = resolved_executables[spec.name]
+        assert executable is not None
+        update_result = _run_command_capture(
+            run_command,
+            (executable, "update"),
+            timeout_s=_NPM_INSTALL_TIMEOUT_SECONDS,
+        )
+        if update_result.returncode != 0:
+            error_output = _compact_output(update_result.stderr or update_result.stdout)
+            return _failed_result(
+                commands_run,
+                tool_versions,
+                f"{spec.name} update failed: {error_output}",
+                installed_packages=install_packages,
+            )
+
+        verified_result = _run_version_command(
+            run_command,
+            (executable, *spec.version_command[1:]),
+            tool_name=spec.name,
+        )
+        if verified_result[0] is None:
+            return _failed_result(
+                commands_run,
+                tool_versions,
+                f"{spec.name} verification failed: {verified_result[1]}",
+                installed_packages=install_packages,
+            )
+        verified_version = verified_result[0]
+        installed_version = tool_versions[spec.name]["installed"]
+        tool_versions[spec.name]["latest"] = verified_version
+        tool_versions[spec.name]["verified"] = verified_version
+        tool_versions[spec.name]["action"] = (
+            "already_current" if verified_version == installed_version else "updated"
+        )
 
     if install_packages:
         install_result = _run_command_capture(
@@ -122,7 +187,7 @@ def run_cli_maintenance_update(
                 installed_packages=install_packages,
             )
 
-    for spec in _TOOLS:
+    for spec in absent_specs:
         expected = tool_versions[spec.name]["latest"]
         verified_result = _run_version_command(
             run_command, spec.version_command, tool_name=spec.name
@@ -143,8 +208,7 @@ def run_cli_maintenance_update(
                 f"{spec.name} verification mismatch: expected {expected}, got {verified_version}",
                 installed_packages=install_packages,
             )
-        if spec.name in tool_versions and tool_versions[spec.name]["action"] == "needs_update":
-            tool_versions[spec.name]["action"] = "updated"
+        tool_versions[spec.name]["action"] = "updated"
 
     summary = _success_summary(tool_versions, install_packages)
     return CliMaintenanceResult(
@@ -245,7 +309,7 @@ def _success_summary(
         verified = versions.get("verified") or versions.get("latest") or "unknown"
         action = versions.get("action") or "unknown"
         details.append(f"{tool.name} {verified} ({action})")
-    if install_packages:
+    if any(versions.get("action") == "updated" for versions in tool_versions.values()):
         return "Updated AI CLIs and verified versions: " + "; ".join(details)
     return "AI CLIs already current and verified: " + "; ".join(details)
 
