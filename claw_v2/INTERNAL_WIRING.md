@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice b45f-actionable-task-registry (2026-07-11): B4.5f — the ACTIONABLE_TASK_MATCHER invocation moves into a one-Route per-slot registry bridge at original row 8. Exact order remains owner < telegram imperative < actionable bridge < F4; the slot never joins _pre_brain_routes. The pure adapter calls the unchanged legacy handler and transports the already-classified semantic_turn through RouteContext.metadata. None maps to fall_through with the matcher unmatched slug; capture maps to intercepted with the matched slug and store_memory_limit=2000. The registry callback preserves one static decision, then capture preserves direct store -> remember -> return, with no quality guard, final render, matched_pattern or dynamic reason. Runtime/channel, slash, session, follow-up, continuation, preflight and execution stay in the legacy handler, and its two literal matcher consumers remain unchanged. Invariant b45f_actionable_task_is_registry_invoked."
-doc_version: 3.20
+describes_commit: "slice P1-CU1 computer fail-closed (2026-07-11): explicit /computer commands use the capability-gated action path unless they match the curated pure-read contract; screenshot analysis carries a read-only tool allowlist across Brain retries; and the brain-lane Bash backstop denies high-confidence AppleScript GUI drive while preserving worker lanes and semantic Mail/Calendar collection. Invariant explicit_computer_command_is_fail_closed."
+doc_version: 3.21
 last_verified: 2026-07-11
-verification_method: "B4.5f local isolated worktree at gate 77b6cf60: dedicated test RED before production edits (11 failed, 1 passed), then GREEN focused B4.5a-f + B4.4f + actionable/owner + migration + dispatch + targeted full-chain/continuation suite (165 passed, 147 subtests). Static gates: exactly five scoped files changed; dispatch/matchers.py and dispatch/route.py untouched; bot.py 12088 <= 12322; Ruff check and format-check passed on touched Python; git diff --check passed. Live daemon smoke not run because the authorized diff is uncommitted in an isolated worktree while the production source is read-only; restarting would not load this change."
+verification_method: "P1-CU1 local isolated worktree: exact Calculator incident routes to action_response; degraded computer_control returns before screenshot, Brain, or session creation; pure reads keep screenshot analysis with allowed_tools=[Read] propagated through normal and retry calls; direct and referenced-script AppleScript GUI drive is denied in brain while worker lanes and non-GUI Mail/Calendar AppleScript remain allowed. Focused tests: 110 passed + 15 subtests, Computer matrix 192 passed + 21 subtests, related routing/adapter matrix 50 passed, Ruff and git diff --check passed. Live daemon smoke pending deployment authorization."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -904,6 +904,43 @@ invariants:
          natural-language delegation-to-browser mis-route (§2, "computer-use"
          token in _BROWSER_OPERATION_SIGNAL_RE) and the absent delegated
          codex-desktop lane are a deeper follow-up, not this slice.
+
+  explicit_computer_command_is_fail_closed:
+    rule: An explicit `/computer <instruction>` may enter the screenshot/Brain
+          read path only when the instruction matches the curated computer-read
+          contract and carries no recognized action. Mixed, actionable, and
+          unknown explicit instructions enter `ComputerHandler.action_response`,
+          whose `computer_control` capability check runs before session creation
+          or desktop effects. Screenshot analysis passes `allowed_tools=["Read"]`
+          through every Brain provider attempt/retry, so Bash, Write, Edit,
+          delegation, and other mutable tools are mechanically unavailable.
+          As defense in depth, brain-lane Bash denies high-confidence AppleScript
+          GUI drive (`osascript` + System Events or app activation), including
+          referenced Python scripts; worker lanes and non-GUI Mail/Calendar data
+          collection remain unchanged.
+    chokepoints:
+      - computer_handler.ComputerHandler.handle_command
+      - computer_handler.ComputerHandler.computer_response
+      - brain.BrainService.handle_message
+      - adapters.anthropic_hooks._inline_browser_drive_reason
+    enforced_by:
+      - tests/test_computer_applaunch_action.py::ExplicitComputerCommandRoutingTests::test_exact_calculator_incident_uses_capability_gated_action_path
+      - tests/test_computer_applaunch_action.py::ExplicitComputerCommandRoutingTests::test_explicit_pure_read_keeps_screenshot_analysis_path
+      - tests/test_computer_applaunch_action.py::ExplicitComputerCommandRoutingTests::test_unavailable_control_fails_before_screenshot_or_brain_tools
+      - tests/test_bot.py::BotTests::test_computer_command_uses_screenshot_and_multimodal_brain
+      - tests/test_brain_core.py::HandleMessageTests::test_handle_message_forwards_read_only_tool_allowlist
+      - tests/test_brain_core.py::HandleMessageTests::test_handle_message_resume_retry_caps_at_75pct_of_budget
+      - tests/test_brain_media_poison_recovery.py::BrokenImageContextNotReusedTests::test_broken_image_context_is_quarantined_and_not_reused
+      - tests/test_anthropic_hooks.py::PreToolUseBackstopTests::test_brain_lane_denies_every_backstop_pattern
+      - tests/test_anthropic_hooks.py::PreToolUseBackstopTests::test_brain_lane_denies_applescript_gui_inside_referenced_script
+      - tests/test_anthropic_hooks.py::PreToolUseBackstopTests::test_plain_applescript_data_collection_is_not_classified_as_gui_drive
+    why: Turn 22e16c9d97350efa sent `/computer Abre Calculator,
+         calcula 17 por 23...` through `computer_response` because the global
+         conversational action classifier intentionally excludes bare `abre`
+         and arithmetic verbs. The screenshot was then handed to a tool-capable
+         Brain turn, whose Bash backstop recognized literal `computer_use` but
+         not `osascript`; Bash and Write drove Calculator, created an artifact,
+         retried without a changed tactic, and timed out after 300 seconds.
 
   computer_use_task_outcomes_are_typed:
     rule: Computer/browser task execution returns a typed

@@ -110,10 +110,12 @@ class BrokenImageContextNotReusedTests(_ImagePoisonHarness):
         prompt = _image_prompt()
         self.router.ask.side_effect = [AdapterError(_IMAGE_ERROR_MESSAGE), _ok_response()]
 
-        result = self.brain.handle_message("s1", prompt)
+        result = self.brain.handle_message("s1", prompt, allowed_tools=["Read"])
 
         self.assertEqual(result.content, "sin imagen, ok")
         self.assertEqual(self.router.ask.call_count, 2)
+        self.assertEqual(self.router.ask.call_args_list[0].kwargs["allowed_tools"], ["Read"])
+        self.assertEqual(self.router.ask.call_args_list[1].kwargs["allowed_tools"], ["Read"])
         retry_prompt = self.router.ask.call_args_list[1].args[0]
         self.assertIsInstance(retry_prompt, list)
         for block in retry_prompt:

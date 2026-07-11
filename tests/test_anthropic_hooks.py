@@ -22,6 +22,8 @@ from unittest.mock import patch
 
 from claw_v2.adapters.anthropic import ClaudeSDKExecutor
 from claw_v2.adapters.anthropic_hooks import (
+    _COMPUTER_USE_DRIVE_REASON,
+    _inline_browser_drive_reason,
     build_can_use_tool,
     build_hooks,
     make_post_tool_use_failure_hook,
@@ -52,6 +54,8 @@ BACKSTOP_COMMANDS = (
     "lsof -i :9250",
     "lsof -i :9222",
     "python3 -m computer_use --demo",
+    "osascript -e 'tell application \"Calculator\" to activate'",
+    'osascript -e \'tell application "System Events" to keystroke "17*23"\'',
 )
 
 
@@ -129,6 +133,7 @@ class PreToolUseBackstopTests(unittest.IsolatedAsyncioTestCase):
         policy = _AllowAllPolicy()
         hook = make_pre_tool_use_hook(_request("brain"), runtime_policy=policy, observe=None)
         for command in BACKSTOP_COMMANDS:
+            drive_reason = _inline_browser_drive_reason("Bash", {"command": command})
             result = await hook(
                 {"tool_name": "Bash", "tool_input": {"command": command}}, "tu-1", None
             )
@@ -141,12 +146,35 @@ class PreToolUseBackstopTests(unittest.IsolatedAsyncioTestCase):
             # ("Delegate it"); computer-use has no delegated lane, so its nudge
             # must NOT tell the brain to delegate the work — it points to the
             # inline computer tools instead.
-            if "computer_use" in command:
+            if drive_reason == _COMPUTER_USE_DRIVE_REASON:
                 self.assertNotIn("Delegate it", reason, command)
                 self.assertIn("inline with the computer tools", reason, command)
             else:
                 self.assertIn("Delegate it", reason, command)
         self.assertEqual(policy.calls, [], "denied calls must never reach runtime policy")
+
+    async def test_brain_lane_denies_applescript_gui_inside_referenced_script(self) -> None:
+        policy = _AllowAllPolicy()
+        hook = make_pre_tool_use_hook(_request("brain"), runtime_policy=policy, observe=None)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script = Path(tmpdir) / "drive_desktop.py"
+            script.write_text(
+                "import subprocess\n"
+                "subprocess.run(['osascript', '-e', "
+                '\'tell application \\"System Events\\" to keystroke \\"17*23\\"\'])\n',
+                encoding="utf-8",
+            )
+
+            result = await hook(
+                {"tool_name": "Bash", "tool_input": {"command": f"python3 {script}"}},
+                "tu-1",
+                None,
+            )
+
+        decision = result["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+        self.assertIn("inline with the computer tools", decision["permissionDecisionReason"])
+        self.assertEqual(policy.calls, [])
 
     async def test_worker_lanes_allow_backstop_patterns(self) -> None:
         for lane in ("worker", "worker_heavy"):
@@ -160,6 +188,17 @@ class PreToolUseBackstopTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(result, {"continue_": True}, f"{lane}: {command}")
             self.assertEqual(len(policy.calls), len(BACKSTOP_COMMANDS))
+
+    def test_plain_applescript_data_collection_is_not_classified_as_gui_drive(self) -> None:
+        for command in (
+            "osascript -e 'id of app \"Codex\"'",
+            "osascript -e 'tell application \"Calendar\" to get summary of every event'",
+            "osascript -e 'tell application \"Mail\" to get subject of every message'",
+        ):
+            self.assertIsNone(
+                _inline_browser_drive_reason("Bash", {"command": command}),
+                command,
+            )
 
     async def test_brain_lane_allows_benign_bash(self) -> None:
         policy = _AllowAllPolicy()

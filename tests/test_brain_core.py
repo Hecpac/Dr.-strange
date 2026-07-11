@@ -173,6 +173,18 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(msgs[1]["role"], "assistant")
         self.assertEqual(msgs[1]["content"], "Hola Hector")
 
+    def test_handle_message_forwards_read_only_tool_allowlist(self) -> None:
+        self.router.ask.return_value = LLMResponse(
+            content="<response>visible</response>",
+            lane="brain",
+            provider="anthropic",
+            model="claude-opus-4-7",
+        )
+
+        self.brain.handle_message("s1", "inspect screenshot", allowed_tools=["Read"])
+
+        self.assertEqual(self.router.ask.call_args.kwargs["allowed_tools"], ["Read"])
+
     def test_passes_system_prompt_to_router(self) -> None:
         self.router.ask.return_value = LLMResponse(
             content="<response>ok</response>",
@@ -277,13 +289,15 @@ class HandleMessageTests(unittest.TestCase):
         ]
         self.router.ask.side_effect = responses
 
-        self.brain.handle_message("s1", "input")
+        self.brain.handle_message("s1", "input", allowed_tools=["Read"])
 
         self.assertEqual(self.router.ask.call_count, 2)
         first_call = self.router.ask.call_args_list[0].kwargs
         retry_call = self.router.ask.call_args_list[1].kwargs
         self.assertEqual(first_call["max_budget"], 1.00)
         self.assertAlmostEqual(retry_call["max_budget"], 0.75)
+        self.assertEqual(first_call["allowed_tools"], ["Read"])
+        self.assertEqual(retry_call["allowed_tools"], ["Read"])
 
     def test_returns_llm_response(self) -> None:
         expected = LLMResponse(

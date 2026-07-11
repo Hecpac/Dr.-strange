@@ -6599,6 +6599,7 @@ class BotTests(unittest.TestCase):
                     kwargs["memory_text"],
                     "[Screenshot de escritorio]\nrevisa la pagina actual y dime que ves",
                 )
+                self.assertEqual(kwargs["allowed_tools"], ["Read"])
 
     def test_computer_action_command_creates_pending_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

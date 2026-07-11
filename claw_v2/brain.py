@@ -531,6 +531,7 @@ class BrainService:
         *,
         memory_text: str | None = None,
         task_type: str | None = None,
+        allowed_tools: list[str] | None = None,
     ) -> LLMResponse:
         stored_user_message = memory_text or _summarize_user_prompt(message)
         trace = new_trace_context(artifact_id=session_id)
@@ -625,6 +626,7 @@ class BrainService:
                 effort=model_override.effort if model_override else None,
                 session_id=provider_session_id,
                 evidence_pack=attach_trace({"app_session_id": session_id}, trace),
+                allowed_tools=allowed_tools,
                 max_budget=_resolve_max_budget(self.router),
                 timeout=300.0,
                 delegation_handler=delegation_handler,
@@ -726,6 +728,7 @@ class BrainService:
                             {"app_session_id": session_id, "media_quarantine": True},
                             trace,
                         ),
+                        allowed_tools=allowed_tools,
                         max_budget=_resolve_max_budget(self.router) * 0.75,
                         timeout=300.0,
                         delegation_handler=delegation_handler,
@@ -821,6 +824,7 @@ class BrainService:
                         effort=model_override.effort if model_override else None,
                         session_id=None,
                         evidence_pack=attach_trace({"app_session_id": session_id}, trace),
+                        allowed_tools=allowed_tools,
                         # Resume retry: cap at 75% of normal budget to limit blast radius
                         # if the original turn already burned cycles before failing.
                         max_budget=_resolve_max_budget(self.router) * 0.75,

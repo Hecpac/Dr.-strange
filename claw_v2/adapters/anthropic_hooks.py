@@ -40,7 +40,20 @@ _INLINE_BROWSER_DRIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"/json/(?:list|version)\b"),
     re.compile(r":9(?:250|222)\b"),  # Chrome CDP debug ports used by the workspace
 )
-_INLINE_COMPUTER_USE_PATTERN = re.compile(r"\bcomputer[-_]use\b", re.IGNORECASE)
+_INLINE_COMPUTER_USE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bcomputer[-_]use\b", re.IGNORECASE),
+    # High-confidence AppleScript GUI drive. Keep plain osascript available for
+    # semantic Mail/Calendar collection; System Events and app activation are
+    # desktop-control operations and must use the dedicated computer path.
+    re.compile(
+        r"\bosascript\b[\s\S]*\btell\s+application\s+[\\]?[\"']System Events[\\]?[\"']",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bosascript\b[\s\S]*\btell\s+application\s+[\\]?[\"'][^\"']+[\\]?[\"']\s+to\s+activate\b",
+        re.IGNORECASE,
+    ),
+)
 _BROWSER_DRIVE_REASON = "inline browser/CDP drive in a chat turn"
 _COMPUTER_USE_DRIVE_REASON = "inline computer-use drive in a chat turn"
 _BROWSER_DRIVE_NUDGE = (
@@ -131,8 +144,9 @@ def _inline_browser_drive_reason(tool_name: str, tool_input: dict[str, Any] | No
     for pattern in _INLINE_BROWSER_DRIVE_PATTERNS:
         if pattern.search(blob):
             return _BROWSER_DRIVE_REASON
-    if _INLINE_COMPUTER_USE_PATTERN.search(blob):
-        return _COMPUTER_USE_DRIVE_REASON
+    for pattern in _INLINE_COMPUTER_USE_PATTERNS:
+        if pattern.search(blob):
+            return _COMPUTER_USE_DRIVE_REASON
     return None
 
 

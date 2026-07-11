@@ -28,6 +28,8 @@ from claw_v2.bot_commands import BotCommand, CommandContext
 from claw_v2.bot_helpers import (
     _computer_instruction_requires_actions,
     _format_computer_pending_summary,
+    _looks_like_computer_read_request,
+    _normalize_command_text,
 )
 from claw_v2.computer import ComputerUseOutcome, coerce_computer_use_outcome
 from claw_v2.redaction import redact_text
@@ -338,7 +340,16 @@ class ComputerHandler:
         parts = stripped.split(maxsplit=1)
         if len(parts) != 2:
             return "usage: /computer <instruction>"
-        return self.computer_response(parts[1], context.session_id)
+        instruction = parts[1]
+        normalized = _normalize_command_text(instruction)
+        if _looks_like_computer_read_request(
+            normalized
+        ) and not _computer_instruction_requires_actions(instruction):
+            return self.computer_response(instruction, context.session_id)
+        # /computer is an explicit desktop-control surface. Unknown or mixed
+        # instructions must enter the capability-gated action path rather than
+        # falling through to a tool-capable brain turn after a screenshot.
+        return self.action_response(instruction, context.session_id)
 
     def _handle_action_command(self, context: CommandContext) -> str:
         stripped = context.stripped
@@ -424,6 +435,7 @@ class ComputerHandler:
             session_id,
             content_blocks,
             memory_text=memory_text,
+            allowed_tools=["Read"],
         ).content
 
     def action_response(self, instruction: str, session_id: str) -> str:

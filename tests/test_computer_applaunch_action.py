@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock
 
 from claw_v2.bot_helpers import (
     _computer_instruction_requires_actions,
     _looks_like_computer_read_request,
     _normalize_command_text,
 )
+from claw_v2.bot_commands import CommandContext
+from claw_v2.computer_handler import ComputerHandler
 
 
 class ComputerAppLaunchActionTests(unittest.TestCase):
@@ -65,6 +68,59 @@ class ComputerAppLaunchActionTests(unittest.TestCase):
         self.assertTrue(
             _computer_instruction_requires_actions("abre la app Calculadora del Mac y dime qué ves")
         )
+
+
+class ExplicitComputerCommandRoutingTests(unittest.TestCase):
+    @staticmethod
+    def _context(text: str) -> CommandContext:
+        return CommandContext(user_id="123", session_id="s1", text=text, stripped=text)
+
+    def test_exact_calculator_incident_uses_capability_gated_action_path(self) -> None:
+        handler = ComputerHandler()
+        handler.action_response = MagicMock(return_value="action")
+        handler.computer_response = MagicMock(return_value="read")
+        text = (
+            "/computer Abre Calculator, calcula 17 por 23, deja el resultado visible y "
+            "toma una captura como evidencia. No cierres otras apps, no guardes archivos, "
+            "no cambies settings y no hagas ninguna otra acción."
+        )
+
+        result = handler.handle_command(self._context(text))
+
+        self.assertEqual(result, "action")
+        handler.action_response.assert_called_once_with(text.split(maxsplit=1)[1], "s1")
+        handler.computer_response.assert_not_called()
+
+    def test_explicit_pure_read_keeps_screenshot_analysis_path(self) -> None:
+        handler = ComputerHandler()
+        handler.action_response = MagicMock(return_value="action")
+        handler.computer_response = MagicMock(return_value="read")
+        text = "/computer revisa la pantalla y dime qué ves"
+
+        result = handler.handle_command(self._context(text))
+
+        self.assertEqual(result, "read")
+        handler.computer_response.assert_called_once_with(text.split(maxsplit=1)[1], "s1")
+        handler.action_response.assert_not_called()
+
+    def test_unavailable_control_fails_before_screenshot_or_brain_tools(self) -> None:
+        computer = MagicMock()
+        brain = MagicMock()
+        handler = ComputerHandler(
+            computer=computer,
+            brain_handle_message=brain,
+            capability_check=lambda name, _fallback: (
+                "computer control unavailable" if name == "computer_control" else None
+            ),
+        )
+        text = "/computer Abre Calculator, calcula 17 por 23"
+
+        result = handler.handle_command(self._context(text))
+
+        self.assertEqual(result, "computer control unavailable")
+        computer.capture_screenshot.assert_not_called()
+        brain.assert_not_called()
+        self.assertEqual(handler._sessions, {})
 
 
 if __name__ == "__main__":
