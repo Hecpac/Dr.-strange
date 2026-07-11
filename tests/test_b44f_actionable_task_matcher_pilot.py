@@ -22,8 +22,8 @@ from claw_v2.dispatch.matchers import (
 # B4.4f extracts ONLY the direct actionable-task literal predicate from
 # BotService into frozen RouteMatcher data. Stateful follow-up resolution,
 # semantic-turn gates, continuation handling, preflight and execution remain
-# on BotService. The legacy _handle_text_body call stays at its order-locked
-# row 8 slot; B4.5f registry invocation is explicitly separate.
+# on BotService. B4.5f later moved only the _handle_text_body invocation into
+# a per-slot registry bridge at the same order-locked row 8 position.
 
 
 def _legacy_normalize_command_text(text: str) -> str:
@@ -219,7 +219,7 @@ class MatcherOverlapTests(unittest.TestCase):
         body_src = inspect.getsource(BotService._handle_text_body)
         owner_at = body_src.index("self._owner_delegation_slot")
         imperative_at = body_src.index("self._maybe_handle_telegram_imperative_request")
-        actionable_at = body_src.index("self._maybe_handle_actionable_task_request")
+        actionable_at = body_src.index("self._actionable_task_slot")
         self.assertLess(owner_at, imperative_at)
         self.assertLess(imperative_at, actionable_at)
 
@@ -234,7 +234,7 @@ class MatcherOverlapTests(unittest.TestCase):
         failure_at = body_src.index("self._failure_summary_slot")
         operational_at = body_src.index("self._operational_status_slot")
         owner_at = body_src.index("self._owner_delegation_slot")
-        actionable_at = body_src.index("self._maybe_handle_actionable_task_request")
+        actionable_at = body_src.index("self._actionable_task_slot")
         self.assertLess(failure_at, operational_at)
         self.assertLess(operational_at, owner_at)
         self.assertLess(owner_at, actionable_at)
@@ -344,82 +344,56 @@ class BotWiringSingleSourceTests(unittest.TestCase):
         self.assertLess(runtime_at, matcher_at)
         self.assertLess(slash_at, matcher_at)
 
-    def test_legacy_call_site_keeps_exact_dispatch_kwargs_and_cardinality(self) -> None:
-        body = _function_ast(BotService._handle_text_body)
-        captured_dump = _expression_dump("actionable_task_response is not None")
-        candidates: list[ast.Call] = []
-        for node in ast.walk(body):
-            if not isinstance(node, ast.Call) or _call_path(node) != "self._emit_dispatch_decision":
-                continue
-            kwargs = {keyword.arg: keyword.value for keyword in node.keywords}
-            captured = kwargs.get("captured")
-            if (
-                captured is not None
-                and ast.dump(captured, include_attributes=False) == captured_dump
-            ):
-                candidates.append(node)
-
-        self.assertEqual(len(candidates), 1)
-        self.assertTrue(
-            any(
-                isinstance(statement, ast.Expr) and statement.value is candidates[0]
-                for statement in body.body
-            ),
-            "the one actionable decision must remain an unconditional top-level call",
+    def test_registry_adapter_keeps_static_matcher_slugs_and_one_outer_decision(self) -> None:
+        adapter_src = inspect.getsource(BotService._route_actionable_task)
+        self.assertIn("ACTIONABLE_TASK_MATCHER.matched_reason", adapter_src)
+        self.assertIn("ACTIONABLE_TASK_MATCHER.unmatched_reason", adapter_src)
+        self.assertNotIn('"telegram_actionable_task_matched"', adapter_src)
+        self.assertNotIn('"telegram_actionable_task_no_match"', adapter_src)
+        self.assertEqual(
+            _dispatch_calls(BotService._route_actionable_task),
+            [],
+            "the registry callback, not the adapter, owns the one decision",
         )
-        actual = {
-            keyword.arg: ast.dump(keyword.value, include_attributes=False)
-            for keyword in candidates[0].keywords
-        }
-        expected = {
-            key: _expression_dump(value)
-            for key, value in {
-                "handler": "ACTIONABLE_TASK_MATCHER.name",
-                "route": (
-                    '"intercepted" if actionable_task_response is not None else "fall_through"'
-                ),
-                "reason": (
-                    "ACTIONABLE_TASK_MATCHER.matched_reason "
-                    "if actionable_task_response is not None "
-                    "else ACTIONABLE_TASK_MATCHER.unmatched_reason"
-                ),
-                "session_id": "session_id",
-                "text": "stripped",
-                "captured": "actionable_task_response is not None",
-            }.items()
-        }
-        self.assertEqual(actual, expected)
-        self.assertNotIn("matched_pattern", actual)
+        self.assertNotIn("matched_pattern", inspect.getsource(BotService._emit_route_decision))
         self.assertFalse(
-            any(isinstance(node, ast.JoinedStr) for node in ast.walk(candidates[0])),
+            any(
+                isinstance(node, ast.JoinedStr)
+                for node in ast.walk(_function_ast(BotService._route_actionable_task))
+            ),
             "actionable dispatch must not gain a dynamic reason",
         )
 
-    def test_call_order_limit_and_no_guard_stay_legacy_exact(self) -> None:
+    def test_call_order_limit_and_no_guard_stay_exact_through_bridge(self) -> None:
         body = _function_ast(BotService._handle_text_body)
         body_src = inspect.getsource(BotService._handle_text_body)
-        handler_at = body_src.index("actionable_task_response =")
-        decision_at = body_src.index("self._emit_dispatch_decision", handler_at)
+        bridge_at = body_src.index("actionable_task_outcome = dispatch_routes")
+        decision_at = body_src.index("on_decision=self._emit_route_decision", bridge_at)
         store_at = body_src.index("self._store_memory_turn", decision_at)
         remember_at = body_src.index("self._remember_assistant_turn_state", store_at)
-        return_at = body_src.index("return actionable_task_response", remember_at)
+        return_at = body_src.index("return actionable_task_outcome.response", remember_at)
         f4_at = body_src.index("f4_delegation_response =", return_at)
-        self.assertLess(handler_at, decision_at)
+        self.assertLess(bridge_at, decision_at)
         self.assertLess(decision_at, store_at)
         self.assertLess(store_at, remember_at)
         self.assertLess(remember_at, return_at)
         self.assertLess(return_at, f4_at)
 
-        actionable_block = body_src[handler_at:f4_at]
-        self.assertIn("assistant_limit=2000", actionable_block)
+        actionable_block = body_src[bridge_at:f4_at]
+        self.assertIn("self._actionable_task_slot", actionable_block)
+        self.assertIn(
+            "assistant_limit=actionable_task_outcome.store_memory_limit",
+            actionable_block,
+        )
         self.assertNotIn("_quality_guard_response", actionable_block)
         self.assertNotIn("_final_render", actionable_block)
         self.assertNotIn("_post_capture_intercepted", actionable_block)
-        self.assertNotIn("dispatch_routes", actionable_block)
-        self.assertNotIn("_actionable_task_slot", actionable_block)
-        self.assertNotIn("_route_actionable", actionable_block)
+        self.assertNotIn("matched_pattern", actionable_block)
+        self.assertNotIn("_maybe_handle_actionable_task_request", actionable_block)
 
-        actionable_test = _expression_dump("actionable_task_response is not None")
+        actionable_test = _expression_dump(
+            "actionable_task_outcome.captured and actionable_task_outcome.response is not None"
+        )
         capture_ifs = [
             statement
             for statement in body.body
@@ -451,7 +425,7 @@ class BotWiringSingleSourceTests(unittest.TestCase):
             [
                 _expression_dump("session_id"),
                 _expression_dump("stripped"),
-                _expression_dump("actionable_task_response"),
+                _expression_dump("actionable_task_outcome.response"),
             ],
         )
         self.assertEqual(
@@ -459,7 +433,7 @@ class BotWiringSingleSourceTests(unittest.TestCase):
                 keyword.arg: ast.dump(keyword.value, include_attributes=False)
                 for keyword in store_call.keywords
             },
-            {"assistant_limit": _expression_dump("2000")},
+            {"assistant_limit": _expression_dump("actionable_task_outcome.store_memory_limit")},
         )
         self.assertEqual(_call_path(remember_call), "self._remember_assistant_turn_state")
         self.assertEqual(
@@ -467,16 +441,16 @@ class BotWiringSingleSourceTests(unittest.TestCase):
             [
                 _expression_dump("session_id"),
                 _expression_dump("stripped"),
-                _expression_dump("actionable_task_response"),
+                _expression_dump("actionable_task_outcome.response"),
             ],
         )
         self.assertEqual(remember_call.keywords, [])
         self.assertEqual(
             ast.dump(return_statement.value, include_attributes=False),
-            _expression_dump("actionable_task_response"),
+            _expression_dump("actionable_task_outcome.response"),
         )
 
-        response_dump = _expression_dump("actionable_task_response")
+        response_dump = _expression_dump("actionable_task_outcome.response")
         response_post_capture_calls = [
             node
             for node in ast.walk(body)
@@ -492,48 +466,32 @@ class BotWiringSingleSourceTests(unittest.TestCase):
                 return None
             return _call_path(statement.value)
 
-        handler_statement = next(
+        bridge_statement = next(
             statement
             for statement in body.body
-            if _assignment_call_path(statement) == "self._maybe_handle_actionable_task_request"
+            if _assignment_call_path(statement) == "dispatch_routes"
+            and isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "actionable_task_outcome"
+                for target in statement.targets
+            )
         )
         f4_statement = next(
             statement
             for statement in body.body
             if _assignment_call_path(statement) == "self._maybe_handle_f4_deterministic_delegation"
         )
-        decision_statement = next(
-            statement
-            for statement in body.body
-            if isinstance(statement, ast.Expr)
-            and isinstance(statement.value, ast.Call)
-            and _call_path(statement.value) == "self._emit_dispatch_decision"
-            and statement.value
-            in [
-                node
-                for node in ast.walk(body)
-                if isinstance(node, ast.Call)
-                and _call_path(node) == "self._emit_dispatch_decision"
-                and any(
-                    keyword.arg == "handler"
-                    and ast.dump(keyword.value, include_attributes=False)
-                    == _expression_dump("ACTIONABLE_TASK_MATCHER.name")
-                    for keyword in node.keywords
-                )
-            ]
-        )
-        handler_index = body.body.index(handler_statement)
-        self.assertEqual(body.body[handler_index + 1], decision_statement)
-        self.assertEqual(body.body[handler_index + 2], capture_if)
-        self.assertEqual(body.body[handler_index + 3], f4_statement)
+        bridge_index = body.body.index(bridge_statement)
+        self.assertEqual(body.body[bridge_index + 1], capture_if)
+        self.assertEqual(body.body[bridge_index + 2], f4_statement)
 
-    def test_b45f_registry_artifacts_do_not_exist(self) -> None:
-        self.assertNotIn("_actionable_task_slot", inspect.getsource(BotService.__init__))
+    def test_b45f_registry_artifacts_exist_only_at_per_slot_bridge(self) -> None:
+        self.assertIn("_actionable_task_slot", inspect.getsource(BotService.__init__))
         self.assertNotIn(
             "actionable_task",
             inspect.getsource(BotService._build_pre_brain_routes),
         )
-        self.assertFalse(hasattr(BotService, "_route_actionable_task"))
+        self.assertTrue(hasattr(BotService, "_route_actionable_task"))
 
 
 if __name__ == "__main__":

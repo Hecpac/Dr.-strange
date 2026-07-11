@@ -8,10 +8,10 @@
 ## meta
 
 ```yaml
-describes_commit: "slice b44f-actionable-task-matcher (2026-07-10): B4.4f — ONLY the five-branch literal predicate BotService._looks_like_direct_actionable_task moves VERBATIM into dispatch.matchers.ACTIONABLE_TASK_MATCHER frozen data. Both direct checks consume matcher.match(text), the deleted BotService staticmethod has no parallel survivor, and the legacy row 8 call site takes byte-identical handler/reason slugs from matcher data. Match and no-match still record exactly ONE actionable dispatch decision; capture remains handler -> decision -> store(assistant_limit=2000) -> remember -> return, with no quality guard, final render, matched_pattern kwarg or dynamic reason. Runtime/channel, slash, semantic-turn, stateful follow-up, continuation resolution, preflight and execution stay on BotService. The call remains direct at its exact slot after owner/telegram imperative and before F4: no Route, adapter, slot, dispatch_routes, _pre_brain_routes or EXPECTED_PRE_BRAIN_ORDER change. Corpus locks all five legacy branches, open-substring/leading-boundary behavior, and real order-resolved collisions including owner winning 'hazlo tú'. Invariant b44f_actionable_task_matcher_is_declarative_data. B4.5f registry invocation remains separate and out of scope."
-doc_version: 3.19
-last_verified: 2026-07-10
-verification_method: "B4.4f local, isolated worktree: RED collection ImportError then GREEN pilot+legacy regression (19 passed, 52 subtests: independent frozen reference, five-branch corpus, normalization/boundaries, exclusive overlaps + order-resolved collisions, frozen matcher/slugs, two exact matcher consumers, zero inner decisions, one legacy dispatch with six exact kwargs, exact capture branch, 2000/no guard/no registry); actionable direct/context/fallthrough (3 passed); relevant full-chain winners (8 passed); B4.4d/e pilots + migration rails + dispatch routing (73 passed, 149 subtests). tests/test_telegram_imperative_router.py remained UNEDITED: full-file run was 67 passed / 3 pre-existing Computer Read failures, and the same three failures reproduced at clean b967f87. Static gates: protected files byte-identical, bot.py 12070 <= 12322, Ruff format/check and git diff --check. No live smoke by frozen spec."
+describes_commit: "slice b45f-actionable-task-registry (2026-07-11): B4.5f — the ACTIONABLE_TASK_MATCHER invocation moves into a one-Route per-slot registry bridge at original row 8. Exact order remains owner < telegram imperative < actionable bridge < F4; the slot never joins _pre_brain_routes. The pure adapter calls the unchanged legacy handler and transports the already-classified semantic_turn through RouteContext.metadata. None maps to fall_through with the matcher unmatched slug; capture maps to intercepted with the matched slug and store_memory_limit=2000. The registry callback preserves one static decision, then capture preserves direct store -> remember -> return, with no quality guard, final render, matched_pattern or dynamic reason. Runtime/channel, slash, session, follow-up, continuation, preflight and execution stay in the legacy handler, and its two literal matcher consumers remain unchanged. Invariant b45f_actionable_task_is_registry_invoked."
+doc_version: 3.20
+last_verified: 2026-07-11
+verification_method: "B4.5f local isolated worktree at gate 77b6cf60: dedicated test RED before production edits (11 failed, 1 passed), then GREEN focused B4.5a-f + B4.4f + actionable/owner + migration + dispatch + targeted full-chain/continuation suite (165 passed, 147 subtests). Static gates: exactly five scoped files changed; dispatch/matchers.py and dispatch/route.py untouched; bot.py 12088 <= 12322; Ruff check and format-check passed on touched Python; git diff --check passed. Live daemon smoke not run because the authorized diff is uncommitted in an isolated worktree while the production source is read-only; restarting would not load this change."
 anchor_strategy: symbol_only  # path:symbol, no line numbers
 audience: claw_v2  # consumed by the agent itself
 ```
@@ -1487,24 +1487,27 @@ invariants:
           behavior preserved, NO widening) is the single source for both direct-literal
           checks in BotService._maybe_handle_actionable_task_request and
           _resolve_actionable_task_objective, and for the static
-          dispatch_decision name/reason slugs at the LEGACY, order-locked
-          _handle_text_body row 8 call site. Matcher extraction does not move
-          that call or move runtime/channel gates, session_state, follow-up,
-          semantic-turn, continuation resolution, preflight or execution.
+          dispatch_decision name/reason slugs at the order-locked
+          _handle_text_body row 8 registry bridge introduced by B4.5f.
+          Matcher extraction itself did not move the call; B4.5f later moved
+          only its invocation without moving runtime/channel gates,
+          session_state, follow-up, semantic-turn, continuation resolution,
+          preflight or execution.
           Match and no-match each record exactly one actionable decision;
           capture keeps handler -> decision -> store(assistant_limit=2000) ->
           remember -> return, with no quality guard, final render,
           matched_pattern kwarg or dynamic reason. "hazlo tú" remains a legacy
           overlap: false for the direct matcher but actionable as a stateful
           follow-up; the earlier owner-delegation bridge at row 7 wins the
-          full-chain collision. No Route, adapter, slot, dispatch_routes,
-          _pre_brain_routes or EXPECTED_PRE_BRAIN_ORDER change; registry
-          invocation remains the separate B4.5f slice.'
+          full-chain collision. The B4.4f extraction added no Route, adapter,
+          slot, dispatch_routes, _pre_brain_routes or order change; registry
+          invocation remained the separate B4.5f slice.'
     chokepoints:
       - dispatch.matchers.ACTIONABLE_TASK_MATCHER
       - bot.BotService._maybe_handle_actionable_task_request
       - bot.BotService._resolve_actionable_task_objective
       - bot.BotService._handle_text_body
+      - bot.BotService._route_actionable_task
     enforced_by:
       - tests/test_b44f_actionable_task_matcher_pilot.py
       - tests/test_actionable_task_matcher.py
@@ -1564,6 +1567,47 @@ invariants:
          addition to the registry static decision. Cardinality, order and
          reason ownership are locked so migration cannot silently collapse or
          duplicate owner-delegation telemetry.
+
+  b45f_actionable_task_is_registry_invoked:
+    rule: 'B4.5f. ACTIONABLE_TASK_MATCHER is invoked through registry Route
+          data ONLY in the _handle_text_body text chain: dispatch_routes(
+          self._actionable_task_slot, route_ctx,
+          on_decision=self._emit_route_decision) runs exactly once at the
+          ORIGINAL §5.1 row 8 slot, after owner delegation and telegram
+          imperative and before F4 deterministic delegation. The single Route
+          is Route(ACTIONABLE_TASK_MATCHER.name,
+          self._route_actionable_task); it must NOT join _pre_brain_routes.
+          The pure adapter passes ctx.stripped, ctx.session_id,
+          ctx.runtime_channel and ctx.metadata["semantic_turn"] to the legacy
+          handler. The existing RouteContext.metadata bag transports the
+          already-classified semantic_turn without changing RouteContext or
+          RouteOutcome. None becomes fall_through with the matcher unmatched
+          slug; capture becomes intercepted with the matcher matched slug and
+          store_memory_limit=2000. The registry callback emits exactly one
+          static decision for match or no-match, without matched_pattern or a
+          dynamic reason. Capture then preserves the direct decision -> store
+          -> remember -> return path using the outcome limit, with no quality
+          guard, final render or _post_capture_intercepted helper. Runtime,
+          slash, session state, stateful follow-up, continuation resolution,
+          preflight and execution remain inside the legacy handler. Both
+          ACTIONABLE_TASK_MATCHER.match(text) consumers remain literal in the
+          handler and objective resolver. EXPECTED_PRE_BRAIN_ORDER deliberately
+          removes the direct actionable call (14->13).'
+    chokepoints:
+      - bot.BotService.__init__  # _actionable_task_slot construction
+      - bot.BotService._route_actionable_task
+      - bot.BotService._handle_text_body
+      - bot.BotService._maybe_handle_actionable_task_request
+      - bot.BotService._resolve_actionable_task_objective
+    enforced_by:
+      - tests/test_b45f_actionable_task_route_registry.py
+      - tests/test_b44f_actionable_task_matcher_pilot.py
+      - tests/test_actionable_task_matcher.py
+      - tests/test_botservice_migration_rails.py
+      - tests/test_telegram_imperative_router.py::test_owner_delegation_never_falls_back
+    why: Sixth per-slot migration carries an already-computed semantic object
+         through the frozen RouteContext metadata bag while leaving every
+         stateful and executable decision in the legacy handler.
 
   learning_taxonomy_excludes_generic_transients:
     rule: 'A transient automation failure never persists as a replayable
@@ -3242,7 +3286,7 @@ in `_handle_text_body` (verified 2026-06-10):
 | 5 | operational failure summary (registry bridge in text chain; legacy in multimodal) | failure summary queries; matcher = declarative `OPERATIONAL_FAILURE_SUMMARY_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4d, no widening). Since B4.5d ONLY `_handle_text_body` is registry-invoked here via `dispatch_routes(self._failure_summary_slot, ...)` (invariant `b45d_failure_summary_is_registry_invoked`) — after pending_tasks, before operational_status, never in `_pre_brain_routes`; its quality guard remains at the text call site after dispatch with limit 3000. `handle_multimodal` remains the unchanged LEGACY direct gate+telemetry+guard/store block. ORDER-RESOLVED COLLISIONS with row 6 remain: this row wins unless A1 rejects failure-summary, then operational_status owns the turn |
 | 6 | operational status (registry bridge) | operational status questions; matcher = declarative `OPERATIONAL_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4c — invariant `b44c_operational_status_matcher_is_declarative_data`). Since B4.5b the route is REGISTRY-invoked at this same slot via the per-slot bridge `dispatch_routes(self._operational_status_slot, ...)` (invariant `b45b_operational_status_is_registry_invoked`) — NOT in the early `_pre_brain_routes` slot; the quality guard stays at the call site (dispatch_decision first, then a possible quality_guard_triggered). Greeting branch runs before change-status (row 10): "hola/buen dia + estado\|estatus\|status" intercepts here |
 | 7 | cleanup status bridge / owner-delegation bridge / `_maybe_handle_telegram_imperative_request` | cleanup and owner run through separate one-Route per-slot registry bridges at this ORIGINAL position, never in `_pre_brain_routes`: `CLEANUP_BRIDGE < OWNER_DELEGATION_BRIDGE < telegram imperative`. Owner uses declarative `OWNER_DELEGATION_MATCHER` data (B4.4e) and the B4.5e pure adapter with `store_memory_limit=4000`; there is no quality guard. A matched owner turn emits exactly two decisions in order—internal dynamic `owner_delegation:{kind}` with `matched_pattern`, then external static `owner_delegation_matched` without it—while no-match emits only external static `owner_delegation_no_match`. The legacy matcher→rich-intent double detector call remains accepted (two on match, one on no-match; adapter adds none). Owner resolution/clarification semantics remain inside the unchanged legacy handler; unresolved telegram-imperative context still falls through to brain |
-| 8 | `_maybe_handle_actionable_task_request` (LEGACY direct call) | runtime=Telegram; direct literal recognizer = declarative `ACTIONABLE_TASK_MATCHER` data (B4.4f, invariant `b44f_actionable_task_matcher_is_declarative_data`) with byte-identical `telegram_actionable_task` slugs. Invocation remains LEGACY at this exact slot, not registry-invoked. Session-state/follow-up/semantic-continuation/preflight/execution remain in the handler; match/no-match each record one decision, capture stores with limit 2000 and no quality guard. Row 7 owner delegation wins the "hazlo tú" overlap. B4.5f is separate |
+| 8 | actionable task (registry bridge) | runtime=Telegram and every slash/session/follow-up/continuation/preflight/execution decision remain in the legacy `_maybe_handle_actionable_task_request`; direct literal recognizer = declarative `ACTIONABLE_TASK_MATCHER` data (B4.4f, invariant `b44f_actionable_task_matcher_is_declarative_data`) with byte-identical `telegram_actionable_task` slugs. Since B4.5f only invocation is registry-backed here via `dispatch_routes(self._actionable_task_slot, route_ctx, on_decision=self._emit_route_decision)` (invariant `b45f_actionable_task_is_registry_invoked`), never in `_pre_brain_routes`. The existing `RouteContext.metadata` transports `semantic_turn`; capture keeps decision → store(limit 2000) → remember → return, with no quality guard/final render/matched_pattern/dynamic reason. Exact order remains owner < telegram imperative < actionable bridge < F4; owner wins the "hazlo tú" overlap |
 | 8b | `_maybe_handle_f4_deterministic_delegation` | **F4-B1**, gated OFF by `CLAW_F4_DETERMINISTIC_DELEGATION` (default); narrow authenticated-X-feed-review intent → enqueues ONE durable `f4b.delegation` delivery job (ledger-row-first dedup on the deterministic `task_id`, else `JobService.reserve(resume_key=delivery_key)`); does NOT call `start_autonomous_task`/start a thread/delete — `F4DelegationJobRunner` claims the job off-tick and runs the idempotent bootstrap. Captures BEFORE the broad router (exactly-once on telegram message_id). See invariant `high_confidence_delegation_intents_do_not_depend_on_model_tool_choice` |
 | 9 | `_maybe_handle_task_intent` | **gated OFF** by `CLAW_DISABLE_TASK_INTENT_ROUTER=1` (default) |
 | 10 | change status (registry bridge) | change-status questions; matcher = declarative `CHANGE_STATUS_MATCHER` data (`claw_v2/dispatch/matchers.py`, B4.4a — invariant `b44a_route_matcher_is_declarative_data`, incl. the PR #246 estados-plural widening). Since B4.5c the route is REGISTRY-invoked at this same slot via the per-slot bridge `dispatch_routes(self._change_status_slot, ...)` (invariant `b45c_change_status_is_registry_invoked`) — NOT in the early `_pre_brain_routes` slot; no quality guard (B4.5a variant): capture goes straight to `_post_capture_intercepted` |
